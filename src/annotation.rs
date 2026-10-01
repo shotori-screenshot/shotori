@@ -1,6 +1,5 @@
 //! Geometry annotations in desktop logical coordinates, shared by all outputs.
 mod chrome;
-mod eraser;
 mod filter;
 mod highlighter;
 mod line;
@@ -187,6 +186,24 @@ struct Draft {
     shape: Shape,
 }
 
+/// An eraser gesture in flight (issue #14). The eraser deletes whole
+/// shapes, so unlike every other tool it carries NO draft shape — the
+/// gesture state is the sweep itself, and its only output is
+/// removals from `shapes`.
+#[derive(Clone, Copy)]
+enum EraserGesture {
+    /// Brush sweep. `last` is the previous sample; the segment to the
+    /// next one is interpolated so a fast flick cannot jump over thin
+    /// ink between two pointer events.
+    Stroke { last: Point<Pixels> },
+    /// Area sweep: the dragged rectangle, committed on release (the
+    /// bounds are only known at the end).
+    Rect {
+        start: Point<Pixels>,
+        end: Point<Pixels>,
+    },
+}
+
 /// One reversible step. Placement history was a plain shape stack, but
 /// in-place edits need both directions recorded: `before` to undo,
 /// `after` to redo. Shape indices are stable because committed shapes
@@ -206,6 +223,15 @@ enum HistoryEntry {
     Remove {
         ix: usize,
         shape: Shape,
+    },
+    /// An eraser gesture's whole-shape deletions (issue #14), one
+    /// entry per gesture so a single undo restores everything the
+    /// sweep took (and redo re-takes it). Recorded LIVE — removals
+    /// hit `shapes` as the brush touches them — so each pair's index
+    /// is the moment it left; undo re-inserts in reverse, redo
+    /// removes in forward order.
+    RemoveMany {
+        removals: Vec<(usize, Shape)>,
     },
     /// Clear-all (issue #15): every placed shape leaves as ONE entry,
     /// so a single undo restores the whole sequence in order. A
@@ -250,6 +276,12 @@ pub(crate) struct Annotations {
     draft: Option<Draft>,
     draft_generation: u64,
     pressed: bool,
+    /// The eraser gesture in flight (no draft exists while Some).
+    eraser: Option<EraserGesture>,
+    /// The history's trailing RemoveMany entry belongs to the live
+    /// gesture and extends with each removal; cleared when the
+    /// gesture ends (see `commit_removals`).
+    eraser_entry_open: bool,
     /// Index into `shapes` of the currently selected annotation, if any.
     /// Editing actions (wheel size stepping, later drags) target it.
     selected: Option<usize>,
@@ -286,6 +318,8 @@ impl Default for Annotations {
             draft: None,
             draft_generation: 0,
             pressed: false,
+            eraser: None,
+            eraser_entry_open: false,
             selected: None,
             text_original: None,
             size_drag_active: false,
@@ -466,6 +500,11 @@ impl Annotations {
         self.draft = None;
         self.pressed = false;
         self.selected = None;
+        // a keyboard shortcut can switch tools mid-gesture; the sweep
+        // must stop with it (a stale gesture would keep erasing under
+        // the next tool's pointer moves)
+        self.eraser = None;
+        self.eraser_entry_open = false;
         self.tool = if self.tool == Some(kind) {
             None
         } else {
@@ -491,10 +530,7 @@ impl Annotations {
             } else {
                 self.color_ix = ix;
             }
-            if !matches!(
-                kind,
-                ShapeKind::Mosaic | ShapeKind::Blur | ShapeKind::Eraser | ShapeKind::EraserRect
-            ) {
+            if !matches!(kind, ShapeKind::Mosaic | ShapeKind::Blur) {
                 let raw_color = crate::ui::theme::c().annotation_colors[ix];
                 let color = if kind == ShapeKind::Highlighter {
                     (raw_color & 0xffffff00) | 96
@@ -563,6 +599,8 @@ impl Annotations {
         self.redo.clear();
         self.draft = None;
         self.pressed = false;
+        self.eraser = None;
+        self.eraser_entry_open = false;
         self.tool = None;
         self.selected = None;
     }
@@ -579,6 +617,19 @@ impl Annotations {
             return;
         }
         self.pressed = true;
+        if matches!(self.tool, Some(ShapeKind::Eraser | ShapeKind::EraserRect)) {
+            // Object eraser (issue #14): no draft, no pixel math —
+            // the press itself already deletes what it lands on
+            self.eraser_entry_open = false; // a new gesture never
+            // merges into the previous one's history entry
+            if self.tool == Some(ShapeKind::EraserRect) {
+                self.eraser = Some(EraserGesture::Rect { start: p, end: p });
+            } else {
+                self.eraser = Some(EraserGesture::Stroke { last: p });
+                self.erase_sample(p);
+            }
+            return;
+        }
         if self.tool == Some(ShapeKind::Polyline) && self.draft.is_some() {
             return;
         }
@@ -606,10 +657,7 @@ impl Annotations {
                     Some(ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Polyline)
                 ) {
                     vec![p, p]
-                } else if matches!(
-                    self.tool,
-                    Some(ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser)
-                ) {
+                } else if matches!(self.tool, Some(ShapeKind::Pencil | ShapeKind::Highlighter)) {
                     vec![p]
                 } else {
                     Vec::new()
@@ -624,13 +672,44 @@ impl Annotations {
         selection: Bounds<Pixels>,
         square: bool,
     ) -> bool {
+        // Copy the gesture out (it is `Copy`) — the sampling below
+        // needs `&mut self` for the removals themselves.
+        if let Some(EraserGesture::Stroke { last }) = self.eraser {
+            // Brush sweep: interpolate along the segment since the
+            // last sample — two pointer events far apart must still
+            // erase every piece of ink between them.
+            let end = line_endpoint(last, p, selection, false);
+            let radius = self.erase_radius();
+            let step = radius.max(2.);
+            let (dx, dy) = (f32::from(end.x - last.x), f32::from(end.y - last.y));
+            let span = dx.hypot(dy);
+            let steps = (span / step).ceil().max(1.) as usize;
+            let mut changed = false;
+            for i in 1..=steps {
+                let t = i as f32 / steps as f32;
+                let sample = point(
+                    px(f32::from(last.x) + dx * t),
+                    px(f32::from(last.y) + dy * t),
+                );
+                changed |= self.erase_sample(sample);
+            }
+            self.eraser = Some(EraserGesture::Stroke { last: end });
+            return changed;
+        }
+        if let Some(EraserGesture::Rect { start, end: cur }) = self.eraser {
+            // Area sweep: track the rect; deletion happens on release.
+            let end = point(
+                p.x.clamp(selection.left(), selection.right()),
+                p.y.clamp(selection.top(), selection.bottom()),
+            );
+            let changed = cur != end;
+            self.eraser = Some(EraserGesture::Rect { start, end });
+            return changed;
+        }
         let Some(draft) = self.draft.as_mut() else {
             return false;
         };
-        if matches!(
-            draft.shape.kind,
-            ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser
-        ) {
+        if matches!(draft.shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
             let end = line_endpoint(draft.start, p, selection, false);
             if draft.shape.points.last() == Some(&end) {
                 return false;
@@ -693,7 +772,24 @@ impl Annotations {
     }
 
     pub(crate) fn end(&mut self) {
-        if !std::mem::take(&mut self.pressed) {
+        let pressed = std::mem::take(&mut self.pressed);
+        // The eraser gesture closes regardless of `pressed` — an
+        // undo mid-sweep already cleared the flag, and a stale
+        // gesture must never leak into the next tool's drags.
+        if let Some(gesture) = self.eraser.take() {
+            self.eraser_entry_open = false;
+            if pressed && let EraserGesture::Rect { start, end } = gesture {
+                // The area eraser deletes on release — the bounds are
+                // only final now
+                let area = Bounds::from_corners(
+                    point(start.x.min(end.x), start.y.min(end.y)),
+                    point(start.x.max(end.x), start.y.max(end.y)),
+                );
+                self.erase_rect(area);
+            }
+            return;
+        }
+        if !pressed {
             return;
         }
         if let Some(draft) = self.draft.as_mut()
@@ -711,10 +807,7 @@ impl Annotations {
         if let Some(draft) = self.draft.take() {
             let valid = if matches!(draft.shape.kind, ShapeKind::Line | ShapeKind::Arrow) {
                 distance(draft.shape.points[0], draft.shape.points[1]) >= 2.
-            } else if matches!(
-                draft.shape.kind,
-                ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser
-            ) {
+            } else if matches!(draft.shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
                 true
             } else {
                 draft.shape.bounds.size.width >= px(2.) && draft.shape.bounds.size.height >= px(2.)
@@ -749,9 +842,13 @@ impl Annotations {
     }
 
     /// Escape cancels a stroke first, then drops the selection, then
-    /// leaves the tool while keeping marks.
+    /// leaves the tool while keeping marks. An interrupted eraser
+    /// gesture merely stops — its deletions were live and history-
+    /// recorded as they happened; one Ctrl+Z reverts the whole sweep.
     pub(crate) fn cancel(&mut self) -> bool {
         self.pressed = false;
+        self.eraser = None;
+        self.eraser_entry_open = false;
         if self.draft.take().is_some() {
             return true;
         }
@@ -776,6 +873,87 @@ impl Annotations {
         self.selected = Some(self.shapes.len() - 1);
     }
 
+    /// The stroke eraser's brush radius — half the eraser tool's
+    /// remembered size; the overlay's ring chrome renders the same
+    /// circle, so what you see is what erases.
+    pub(crate) fn erase_radius(&self) -> f32 {
+        self.size_of(ShapeKind::Eraser) / 2.
+    }
+
+    /// The area eraser's in-flight rect in selection-global
+    /// coordinates (the dashed chrome outline). None outside the
+    /// gesture.
+    pub(crate) fn eraser_rect_bounds(&self) -> Option<Bounds<Pixels>> {
+        match self.eraser {
+            Some(EraserGesture::Rect { start, end }) => Some(Bounds::from_corners(
+                point(start.x.min(end.x), start.y.min(end.y)),
+                point(start.x.max(end.x), start.y.max(end.y)),
+            )),
+            _ => None,
+        }
+    }
+
+    /// One brush sample: delete every shape whose ink the circle at
+    /// `p` touches, topmost first. Removals are live (the canvas
+    /// updates as the brush sweeps) and accumulate into ONE history
+    /// entry per gesture — created on the first removal, extended
+    /// afterwards (the `apply_size` merging pattern), so history
+    /// never diverges from `shapes` even if undo lands mid-gesture.
+    fn erase_sample(&mut self, p: Point<Pixels>) -> bool {
+        let radius = self.erase_radius();
+        let mut removed = Vec::new();
+        // Descending indices stay valid as the list shrinks; each
+        // pair records the index valid at the moment its shape left.
+        let mut ix = self.shapes.len();
+        while ix > 0 {
+            ix -= 1;
+            if select::shape_erased(&self.shapes[ix], p, radius) {
+                removed.push((ix, self.shapes.remove(ix)));
+            }
+        }
+        self.commit_removals(removed)
+    }
+
+    /// The area eraser's release: delete every shape whose bounds
+    /// intersect the dragged rect — deliberately coarse ("clear this
+    /// area"), in contrast with the brush's ink-touching precision.
+    fn erase_rect(&mut self, area: Bounds<Pixels>) -> bool {
+        let hits = |b: &Bounds<Pixels>| {
+            let i = b.intersect(&area);
+            f32::from(i.size.width) > 0. && f32::from(i.size.height) > 0.
+        };
+        let mut removed = Vec::new();
+        let mut ix = self.shapes.len();
+        while ix > 0 {
+            ix -= 1;
+            if hits(&self.shapes[ix].bounds) {
+                removed.push((ix, self.shapes.remove(ix)));
+            }
+        }
+        self.commit_removals(removed)
+    }
+
+    /// Fold a batch of removals into the gesture's trailing history
+    /// entry (or open one). One undo then restores the whole sweep.
+    fn commit_removals(&mut self, removed: Vec<(usize, Shape)>) -> bool {
+        if removed.is_empty() {
+            return false;
+        }
+        self.selected = None; // indices shift below
+        match self.history.last_mut() {
+            Some(HistoryEntry::RemoveMany { removals }) if self.eraser_entry_open => {
+                removals.extend(removed);
+            }
+            _ => {
+                self.history
+                    .push(HistoryEntry::RemoveMany { removals: removed });
+                self.redo.clear();
+                self.eraser_entry_open = true;
+            }
+        }
+        true
+    }
+
     pub(crate) fn undo(&mut self) {
         self.pressed = false;
         self.selected = None;
@@ -794,6 +972,13 @@ impl Annotations {
                 }
                 HistoryEntry::Remove { ix, shape } => {
                     self.shapes.insert(*ix, shape.clone());
+                }
+                HistoryEntry::RemoveMany { removals } => {
+                    // reverse gesture order: each index matches the
+                    // list state at the moment that shape left
+                    for (ix, shape) in removals.iter().rev() {
+                        self.shapes.insert(*ix, shape.clone());
+                    }
                 }
                 HistoryEntry::RemoveAll { shapes } => {
                     self.shapes = shapes.clone();
@@ -817,6 +1002,14 @@ impl Annotations {
                 }
                 HistoryEntry::Remove { ix, .. } => {
                     self.shapes.remove(*ix);
+                }
+                HistoryEntry::RemoveMany { removals } => {
+                    // forward gesture order reproduces the states the
+                    // indices were recorded against
+                    for (ix, _) in removals {
+                        self.shapes.remove(*ix);
+                    }
+                    self.selected = None;
                 }
                 HistoryEntry::RemoveAll { .. } => {
                     self.shapes.clear();
@@ -956,6 +1149,8 @@ impl Annotations {
         self.selected = None;
         self.text_original = None;
         self.size_drag_active = false;
+        self.eraser = None;
+        self.eraser_entry_open = false;
         self.history.push(HistoryEntry::RemoveAll {
             shapes: std::mem::take(&mut self.shapes),
         });
@@ -979,37 +1174,18 @@ impl Annotations {
         origin: Point<Pixels>,
         scale: f32,
     ) {
-        // Erasure restores the frozen capture, including pixels changed by filters.
-        let original = self
-            .visible()
-            .any(|s| matches!(s.kind, ShapeKind::Eraser | ShapeKind::EraserRect))
-            .then(|| rgba.to_vec());
-        Self::rasterize_shapes(
-            self.visible(),
-            rgba,
-            original.as_deref().unwrap_or(&[]),
-            w,
-            h,
-            origin,
-            scale,
-        );
+        Self::rasterize_shapes(self.visible(), rgba, w, h, origin, scale);
     }
 
-    /// Replay only the changed layer; erasers always restore the frozen capture.
     pub(crate) fn rasterize_shapes<'a>(
         shapes: impl Iterator<Item = &'a Shape>,
         rgba: &mut [u8],
-        original: &[u8],
         w: u32,
         h: u32,
         origin: Point<Pixels>,
         scale: f32,
     ) {
         for shape in shapes {
-            if matches!(shape.kind, ShapeKind::Eraser | ShapeKind::EraserRect) {
-                eraser::rasterize(shape, rgba, original, w, h, origin, scale);
-                continue;
-            }
             if shape.kind == ShapeKind::Text {
                 text::rasterize(shape, rgba, w, h, origin, scale);
                 continue;
@@ -1576,6 +1752,150 @@ mod tests {
         a.finish_text_edit(true); // the overlay path after clear
         assert_eq!(a.visible().count(), 0);
         assert_eq!(a.history.len(), history_len + 1); // just the Clear
+    }
+
+    #[test]
+    fn brush_eraser_deletes_whole_shapes_as_one_history_entry() {
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Rectangle);
+        rectangle(&mut a); // (10,10) → (30,40)
+        a.toggle(ShapeKind::Pencil);
+        a.begin(point(px(40.), px(10.)), selection(), false);
+        a.drag_to(point(px(60.), px(40.)), selection(), false);
+        a.end(); // diagonal stroke beside it
+        let before = a.committed().to_vec();
+        assert_eq!(before.len(), 2);
+        a.toggle(ShapeKind::Eraser);
+        a.set_tool_size(24.); // radius 12
+        let history_len = a.history.len();
+        // One sweep crossing BOTH: the press lands on the rectangle's
+        // right band (a drawing tool would park a click-select there),
+        // the drag reaches the diagonal.
+        assert!(!a.parks_click_select());
+        a.begin(point(px(28.), px(25.)), selection(), false);
+        assert_eq!(a.committed().len(), 1, "the press itself erases");
+        a.drag_to(point(px(50.), px(25.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 0);
+        // ONE entry for the whole gesture — not one per shape
+        assert_eq!(a.history.len(), history_len + 1);
+        a.undo(); // a single Ctrl+Z brings both back, in layer order
+        assert_eq!(a.committed(), before.as_slice());
+        a.redo(); // …and redo re-takes them in one step
+        assert_eq!(a.committed().len(), 0);
+    }
+
+    #[test]
+    fn brush_radius_decides_touching_and_interpolation_covers_gaps() {
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Line);
+        a.set_tool_size(2.); // hairline: 1 px half-width
+        a.begin(point(px(10.), px(50.)), selection(), false);
+        a.drag_to(point(px(70.), px(50.)), selection(), false);
+        a.end();
+        a.toggle(ShapeKind::Eraser);
+        a.set_tool_size(16.); // radius 8 → reaches 9 px off the ink
+        // near-miss: beyond radius + half-width
+        a.begin(point(px(40.), px(60.5)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 1, "beyond the brush: untouched");
+        // a fast flick whose ENDPOINTS both miss but whose path
+        // crosses the ink — sampling only the endpoints would leave
+        // the line alive
+        a.begin(point(px(40.), px(30.)), selection(), false);
+        a.drag_to(point(px(40.), px(70.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 0, "the sweep crossed the line");
+    }
+
+    #[test]
+    fn closed_polygon_interior_is_not_erasable_without_touching_ink() {
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Polyline);
+        // vertices must sit INSIDE the selection: begin() guards on
+        // it, and an outside click places no vertex
+        for (x, y) in [(10., 10.), (70., 10.), (70., 60.), (10., 60.), (10., 10.)] {
+            let p = point(px(x), px(y));
+            a.begin(p, selection(), false);
+            a.drag_to(p, selection(), false);
+            a.end();
+        }
+        a.finish_polyline();
+        a.toggle(ShapeKind::Eraser);
+        a.set_tool_size(16.); // radius 8, well inside the ring
+        // Scrub the middle: the interior SELECTS (issue #16) but holds
+        // no ink — a brush there must leave the ring alone, or nothing
+        // inside it could ever be erased individually.
+        a.begin(point(px(40.), px(35.)), selection(), false);
+        a.drag_to(point(px(30.), px(35.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 1);
+        // touching the outline erases the whole polygon as one object
+        a.begin(point(px(40.), px(10.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 0);
+    }
+
+    #[test]
+    fn rect_eraser_deletes_intersecting_bounds_on_release_only() {
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Rectangle);
+        rectangle(&mut a); // (10,10) → (30,40)
+        a.toggle(ShapeKind::Text);
+        a.add_text(
+            Bounds::new(point(px(50.), px(50.)), size(px(100.), px(20.))),
+            "far".into(),
+        );
+        let history_len = a.history.len();
+        a.toggle(ShapeKind::EraserRect);
+        // drag an area covering the rectangle but not the far text
+        a.begin(point(px(5.), px(5.)), selection(), false);
+        a.drag_to(point(px(35.), px(45.)), selection(), false);
+        // in-flight: nothing is deleted yet — the bounds are only
+        // final on release, so the dashed rect is honest feedback
+        assert_eq!(a.committed().len(), 2);
+        a.end();
+        assert_eq!(a.committed().len(), 1);
+        assert_eq!(a.committed()[0].text.as_deref(), Some("far"));
+        assert_eq!(a.history.len(), history_len + 1); // one entry
+        // a stray click (zero-area rect) deletes nothing and records
+        // nothing — even ON a shape's bounds
+        let h = a.history.len();
+        a.begin(point(px(50.), px(50.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 1);
+        assert_eq!(a.history.len(), h);
+        a.undo();
+        assert_eq!(a.committed().len(), 2);
+        a.redo();
+        assert_eq!(a.committed().len(), 1);
+    }
+
+    #[test]
+    fn mid_gesture_undo_reverts_removal_so_far_and_diverges_redo() {
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Pencil);
+        a.begin(point(px(10.), px(10.)), selection(), false);
+        a.drag_to(point(px(10.), px(40.)), selection(), false);
+        a.end();
+        a.toggle(ShapeKind::Rectangle);
+        rectangle(&mut a);
+        let before = a.committed().to_vec();
+        a.toggle(ShapeKind::Eraser);
+        a.set_tool_size(24.);
+        // the press erases the rectangle; the gesture stays open
+        a.begin(point(px(28.), px(25.)), selection(), false);
+        assert_eq!(a.committed().len(), 1);
+        assert_eq!(a.history.len(), 3); // pencil, rect, RemoveMany
+        // Ctrl+Z mid-sweep: removals are history-recorded as they
+        // happen, so the undo cleanly reverts the sweep so far
+        a.undo();
+        assert_eq!(a.committed(), before.as_slice());
+        // the sweep continues: a NEW entry; the redo stack is gone
+        a.drag_to(point(px(10.), px(25.)), selection(), false);
+        a.end();
+        assert_eq!(a.committed().len(), 0);
+        assert_eq!(a.history.len(), 3);
     }
 
     #[test]

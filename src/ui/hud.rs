@@ -7,6 +7,7 @@ use gpui_kit::*;
 
 use crate::model::placement::label_anchor;
 use crate::model::selection::{HANDLE_VIS, Handle};
+use crate::model::session::EraserChrome;
 use crate::ui::theme;
 
 /// Paint the dim layer and border together. Separate positioned divs snap
@@ -288,6 +289,58 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
             // as the same control the selection border wears.
             for p in shape.handle_points() {
                 paint_handle_dot(window, p + viewport.origin);
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// The eraser's pointer chrome (issue #14): a double-stroke ring
+/// tracing the brush footprint — dark on the outside, white just
+/// inside, readable over any capture — or the area eraser's dashed
+/// rect while its gesture is in flight. Pure rendering of
+/// [`crate::model::session::EraserChrome`]; the erase criterion and
+/// this circle share one radius (`Annotations::erase_radius`).
+pub(crate) fn eraser_chrome(chrome: EraserChrome) -> impl IntoElement {
+    canvas(
+        move |_, _, _| (),
+        move |viewport, (), window, _| match chrome {
+            EraserChrome::Ring { center, radius } => {
+                let center = center + viewport.origin;
+                let mut ring = |r: f32, color| {
+                    let mut builder = PathBuilder::stroke(px(1.));
+                    for i in 0..32 {
+                        let a0 = i as f32 * std::f32::consts::TAU / 32.;
+                        let (s, c) = a0.sin_cos();
+                        builder.line_to(center + point(px(c * r), px(s * r)));
+                    }
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                };
+                ring(radius, rgba(0xcc202020));
+                ring((radius - 1.).max(0.5), rgba(0xffffffff));
+            }
+            EraserChrome::Rect(b) => {
+                let mut b = b;
+                b.origin += viewport.origin;
+                let mut builder = PathBuilder::stroke(px(1.)).dash_array(&[px(4.), px(3.)]);
+                builder.add_polygon(
+                    &[
+                        point(b.left(), b.top()),
+                        point(b.right(), b.top()),
+                        point(b.right(), b.bottom()),
+                        point(b.left(), b.bottom()),
+                    ],
+                    true,
+                );
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, rgba(0xffffffff));
+                }
             }
         },
     )

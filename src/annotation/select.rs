@@ -37,8 +37,13 @@ impl Annotations {
     /// topmost hit decides — the same shape a press would act on
     /// (`pointer_down` parks its click on the topmost hit, selected
     /// or not) — so a selected shape buried under a newer one still
-    /// reads as Pick at the overlap.
+    /// reads as Pick at the overlap. Tools that never park a click
+    /// (polyline, the erasers) advertise no shape affordance at all:
+    /// their press means something else.
     pub(crate) fn shape_hover(&self, p: Point<Pixels>) -> Option<ShapeHover> {
+        if !self.parks_click_select() {
+            return None;
+        }
         let ix = self.hit_test(p)?;
         Some(if self.selected_index() == Some(ix) {
             ShapeHover::Move
@@ -255,9 +260,14 @@ impl Annotations {
     /// resolution (release = select, drag past the slop = draw
     /// through). Polyline never parks: its clicks PLACE VERTICES, and
     /// an intercepting hit would break polygons mid-drawing — its
-    /// shapes stay selectable from any other tool.
+    /// shapes stay selectable from any other tool. The eraser never
+    /// parks either: its press on a shape must erase it (issue #14),
+    /// not promise a selection.
     pub(crate) fn parks_click_select(&self) -> bool {
-        self.tool != Some(ShapeKind::Polyline)
+        !matches!(
+            self.tool,
+            Some(ShapeKind::Polyline | ShapeKind::Eraser | ShapeKind::EraserRect)
+        )
     }
 
     /// Step the selected shape's size through its OWN preset ladder —
@@ -367,6 +377,106 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether an eraser brush circle of `radius` centered at `p` touches
+/// the shape's VISIBLE INK (issue #14). Deliberately narrower than
+/// [`shape_hit`]'s region: a closed polygon's interior is clickable
+/// (issue #16) but not erasable — a brush sweeping inside an
+/// enclosing ring must leave the ring alone, or nothing inside it
+/// could ever be erased individually. Hollow rectangle/ellipse
+/// outlines likewise erase only from their stroke band.
+pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
+    match shape.kind {
+        // Stroke families: the exact visual polygons (capsules,
+        // arrowheads — the same geometry `shape_hit` trusts), each
+        // dilated by the brush radius.
+        ShapeKind::Line
+        | ShapeKind::Arrow
+        | ShapeKind::Polyline
+        | ShapeKind::Pencil
+        | ShapeKind::Highlighter => {
+            line::geometry(&shape.points, shape.width, shape.kind == ShapeKind::Arrow)
+                .iter()
+                .any(|poly| polygon_touched(p, poly, radius))
+        }
+        ShapeKind::Rectangle => shape
+            .strokes()
+            .iter()
+            .any(|s| inflate(s, px(radius)).contains(&p)),
+        ShapeKind::Ellipse => ellipse_ring_touched(shape, p, radius),
+        // The badge is solid ink: its inscribed circle plus the brush.
+        ShapeKind::Number => {
+            let r = f32::from(shape.bounds.size.width) / 2.;
+            r > 0. && {
+                let c = shape.bounds.origin + point(px(r), px(r));
+                (f32::from(p.x - c.x)).hypot(f32::from(p.y - c.y)) <= r + radius
+            }
+        }
+        // Solid regions: the whole bounds is ink.
+        ShapeKind::Text | ShapeKind::Mosaic | ShapeKind::Blur => {
+            inflate(&shape.bounds, px(radius)).contains(&p)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `p` lies inside the polygon or within `radius` of its
+/// outline — the polygon "dilated" by the brush, without building
+/// the dilated polygon.
+fn polygon_touched(p: Point<Pixels>, poly: &[Point<Pixels>], radius: f32) -> bool {
+    point_in_polygon(p, poly)
+        || poly
+            .iter()
+            .zip(poly.iter().cycle().skip(1))
+            .any(|(a, b)| point_segment_distance(p, *a, *b) <= radius)
+}
+
+/// Euclidean distance from `p` to the segment `ab`.
+fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) -> f32 {
+    let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
+    let length_sq = dx * dx + dy * dy;
+    if length_sq <= f32::EPSILON {
+        return (f32::from(p.x - a.x)).hypot(f32::from(p.y - a.y));
+    }
+    let t = ((f32::from(p.x - a.x) * dx + f32::from(p.y - a.y) * dy) / length_sq).clamp(0., 1.);
+    let (qx, qy) = (f32::from(a.x) + t * dx, f32::from(a.y) + t * dy);
+    (f32::from(p.x) - qx).hypot(f32::from(p.y) - qy)
+}
+
+/// Ring-band touch test for ellipse outlines. Exact point-to-ellipse
+/// distance has no closed form; sampling both contours (the hole is
+/// the inner ring, matching the export path) into chords is within
+/// half a chord of the truth — far below eraser tolerances at 64
+/// samples per contour.
+fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
+    let rx = f32::from(shape.bounds.size.width) / 2.;
+    let ry = f32::from(shape.bounds.size.height) / 2.;
+    if rx <= 0. || ry <= 0. {
+        return false;
+    }
+    let cx = f32::from(shape.bounds.origin.x) + rx;
+    let cy = f32::from(shape.bounds.origin.y) + ry;
+    let point_at =
+        |rx: f32, ry: f32, theta: f32| point(px(cx + rx * theta.cos()), px(cy + ry * theta.sin()));
+    let inner_rx = rx - shape.width;
+    let inner_ry = ry - shape.width;
+    for contour in [(rx, ry, 0.), (inner_rx, inner_ry, std::f32::consts::PI)] {
+        if contour.0 <= 0. || contour.1 <= 0. {
+            continue; // band thinner than the stroke: no hole
+        }
+        let steps = 64;
+        let mut prev = point_at(contour.0, contour.1, contour.2);
+        for i in 1..=steps {
+            let theta = contour.2 + i as f32 * std::f32::consts::TAU / steps as f32;
+            let next = point_at(contour.0, contour.1, theta);
+            if point_segment_distance(p, prev, next) <= radius {
+                return true;
+            }
+            prev = next;
+        }
+    }
+    false
 }
 
 /// Even-odd ray casting: is the point inside the polygon?
@@ -540,7 +650,11 @@ mod tests {
         // Integration of #16 + #17: the interior hit (#16) feeds the
         // hover classifier (#17), so a closed ring advertises Pick
         // inside before selection and Move on the selected body —
-        // the cursor never lags behind what a press would do.
+        // the cursor never lags behind what a press would do. While
+        // the polyline tool is still active the hover advertises
+        // NOTHING: its press places a vertex, so no shape affordance
+        // may promise otherwise (the eraser's gate, issue #14, is the
+        // same rule).
         let selection = Bounds::new(point(px(-20.), px(0.)), size(px(100.), px(100.)));
         let mut a = Annotations::default();
         a.toggle(ShapeKind::Polyline);
@@ -551,14 +665,10 @@ mod tests {
             a.end();
         }
         a.finish_polyline();
-        // Freshly placed shapes auto-select (`record_add`), so the
-        // interior reads as the move affordance right away…
-        assert_eq!(
-            a.shape_hover(point(px(35.), px(35.))),
-            Some(ShapeHover::Move)
-        );
-        // …and as the pick affordance once nothing is selected.
-        a.deselect();
+        // Freshly placed shapes auto-select (`record_add`), but the
+        // owning tool keeps the clicks — no affordance while it runs.
+        assert_eq!(a.shape_hover(point(px(35.), px(35.))), None);
+        a.toggle(ShapeKind::Polyline); // off (also drops the selection)
         assert_eq!(
             a.shape_hover(point(px(35.), px(35.))),
             Some(ShapeHover::Pick)

@@ -299,7 +299,6 @@ impl StrokePreview {
         &mut self,
         shape: &super::Shape,
         base: &[u8],
-        original: &[u8],
         dimensions: (u32, u32),
         origin: Point<Pixels>,
         scale: f32,
@@ -408,14 +407,7 @@ impl StrokePreview {
             for (i, coverage) in coverage.iter().enumerate() {
                 let offset = (row * w as usize + left + i) * 4;
                 let coverage = coverage.min(1.);
-                if shape.kind == super::ShapeKind::Eraser {
-                    for channel in 0..4 {
-                        self.pixels[offset + channel] = (base[offset + channel] as f32
-                            * (1. - coverage)
-                            + original[offset + channel] as f32 * coverage)
-                            .round() as u8;
-                    }
-                } else if base[offset + 3] != 0 {
+                if base[offset + 3] != 0 {
                     let alpha = coverage * color[3] as f32 / 255.;
                     for channel in 0..3 {
                         self.pixels[offset + channel] = (base[offset + channel] as f32
@@ -439,7 +431,7 @@ mod tests {
     fn incremental_strokes_match_full_coverage_at_crossings_and_after_edits() {
         use crate::annotation::{Shape, ShapeKind};
         for scale in [1., 1.25, 1.73, 2.] {
-            for kind in [ShapeKind::Pencil, ShapeKind::Highlighter, ShapeKind::Eraser] {
+            for kind in [ShapeKind::Pencil, ShapeKind::Highlighter] {
                 let origin = point(px(-10.), px(20.));
                 let original: Vec<_> = (0..96 * 96)
                     .flat_map(|i| [(i % 251) as u8, 90, 170, if i % 31 == 0 { 0 } else { 255 }])
@@ -478,21 +470,9 @@ mod tests {
                     } else if i == 63 {
                         shape.points.reverse();
                     }
-                    let actual = cache.render(&shape, &base, &original, (96, 96), origin, scale);
+                    let actual = cache.render(&shape, &base, (96, 96), origin, scale);
                     let mut expected = base.clone();
-                    if kind == ShapeKind::Eraser {
-                        super::super::eraser::rasterize(
-                            &shape,
-                            &mut expected,
-                            &original,
-                            96,
-                            96,
-                            origin,
-                            scale,
-                        );
-                    } else {
-                        rasterize(&shape, &mut expected, 96, 96, origin, scale);
-                    }
+                    rasterize(&shape, &mut expected, 96, 96, origin, scale);
                     assert_eq!(actual, expected, "{kind:?} scale {scale}, update {i}");
                 }
             }

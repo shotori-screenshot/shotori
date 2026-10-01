@@ -352,6 +352,47 @@ window so another output can finish displaying the shared image.
 
 ## Design decisions
 
+### The eraser deletes objects, and touches ink only (2026-10-01)
+
+Issue #14: the pixel-restore eraser (rasterize coverage, blend back to
+the capture) is GONE, replaced by an object eraser. The whole
+subsystem it needed — `annotation/eraser.rs`, the `original` buffer
+threaded through `rasterize`/`rasterize_shapes`/`StrokePreview`, the
+eraser arms of `uses_raster_preview` — died with it. What replaced it:
+
+- **Touch criterion is the visible INK, not the selectable region.**
+  `shape_erased` (annotation/select.rs) dilates each kind's stroke
+  geometry by the brush radius — deliberately narrower than
+  `shape_hit`, because a closed polygon's interior is CLICKABLE
+  (issue #16) but not erasable: a brush sweeping inside an enclosing
+  ring must leave the ring alone, or nothing inside it could ever be
+  erased individually. Hollow rect/ellipse outlines likewise erase
+  only from their band.
+- **One `RemoveMany` history entry per gesture, recorded LIVE.**
+  Removals hit `shapes` as the brush touches them (the canvas updates
+  mid-sweep) and extend a single trailing entry — the `apply_size`
+  merge pattern — so an undo arriving mid-gesture cleanly reverts the
+  sweep so far instead of corrupting history. Undo re-inserts in
+  reverse recording order, redo removes forward; both reproduce the
+  exact states the indices were recorded against (descending indices
+  within one sample batch stay valid as the list shrinks).
+- **Escape stops a sweep but does not revert it.** Unlike move/handle
+  drags (whose snapshots are uncommitted preview state), eraser
+  removals are committed as they happen — Escape just ends the
+  gesture; Ctrl+Z is the revert.
+- **The area eraser is bounds-intersection, deliberately coarse.**
+  Brush = ink-touching precision; rect = "clear this area" (any shape
+  whose bounds intersect the dragged rect, deleted on release when
+  the rect is final). Two tools, two semantics, no ambiguity.
+- **`parks_click_select` now excludes the erasers.** A press ON a
+  shape must erase it, not park a click-select — the same exception
+  polyline already had; `shape_hover` returns None for non-parking
+  tools so the cursor never promises a selection the press won't
+  deliver.
+- **Fast flicks interpolate.** `drag_to` samples the segment between
+  consecutive pointer positions every `radius` px — endpoint-only
+  sampling lets a quick flick jump clean over thin ink.
+
 ### Loupe magnifies by composition, not by buffer (2026-09-29)
 
 Issue #19: pixel-precise corner placement gets a floating 3× inset of

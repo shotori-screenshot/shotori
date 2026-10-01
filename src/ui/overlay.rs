@@ -25,8 +25,8 @@ use crate::model::placement::round_px;
 use crate::model::selection::{PressTarget, Selection};
 use crate::platform::capture::Capture;
 use crate::ui::hud::{
-    annotation_chrome, handle_cursor, hover_outline, magnifier_loupe, selection_backdrop,
-    selection_handles, selection_label,
+    annotation_chrome, eraser_chrome, handle_cursor, hover_outline, magnifier_loupe,
+    selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::image_util;
 use crate::ui::toolbar::selection_toolbar;
@@ -1061,6 +1061,7 @@ impl Render for Overlay {
         let drawing_polyline = shared.annotations().is_drawing_polyline();
         let active = shared.active_on(&self.capture.output_name);
         let loupe = shared.local_loupe(&self.capture.output_name);
+        let eraser = shared.eraser_chrome(&self.capture.output_name);
         let input_view = cx.entity().downgrade();
         let ws = window.bounds().size; // window logical size (= output logical size)
 
@@ -1438,6 +1439,9 @@ impl Render for Overlay {
             // ①½ Annotation selection chrome (stroke + handles),
             // above the marks, below the selection border.
             .child(annotation_chrome(selected_shape))
+            // ①¾ Eraser chrome (issue #14): the brush ring / the area
+            // rect — pointer affordances, above the marks they erase.
+            .children(eraser.map(eraser_chrome))
             // Paint the border above the export-backed preview as well as vector marks.
             .child(selection_backdrop(backdrop))
             // ②¼ Resize handles (above the border; the toolbar paints later
@@ -1633,7 +1637,9 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             event.modifiers.shift,
                         );
                         let hovered = s.hover_at(&this.capture.output_name, event.position);
-                        if changed || hovered {
+                        // the eraser ring follows the pointer: moves
+                        // repaint even when no state changed
+                        if changed || hovered || s.eraser_ring_follows_pointer() {
                             cx.notify();
                         }
                     });
@@ -1698,8 +1704,6 @@ mod multi_output_tests {
             ShapeKind::Highlighter,
             ShapeKind::Mosaic,
             ShapeKind::Blur,
-            ShapeKind::Eraser,
-            ShapeKind::EraserRect,
             ShapeKind::Number,
             ShapeKind::Text,
             ShapeKind::Polyline,
@@ -2922,7 +2926,154 @@ mod multi_output_tests {
 
     #[gpui_kit::test]
     fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
-        stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Eraser);
+        use crate::annotation::ShapeKind;
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            cx.bind_keys([gpui_kit::KeyBinding::new(
+                "escape",
+                super::QuitOverlay,
+                Some("ShotoriOverlay"),
+            )]);
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 500;
+        capture.height = 500;
+        capture.rgba = vec![255; 500 * 500 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(500.), px(500.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // A selection, then one pencil stroke as erase fodder.
+        cx.simulate_mouse_down(
+            point(px(20.), px(20.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(350.), px(300.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let pencil = cx.debug_bounds("tb-pencil").unwrap();
+        cx.simulate_click(pencil.center(), Default::default());
+        cx.simulate_mouse_down(
+            point(px(50.), px(50.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(180.), px(50.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(180.), px(50.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+
+        // The eraser's toolbar: no color palette; the size slider
+        // drives the brush ring's radius.
+        let eraser = cx.debug_bounds("tb-eraser").unwrap();
+        cx.simulate_click(eraser.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tb-color-0").is_none());
+        cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(48.))));
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().width(), 48.));
+
+        // Brush press ON the stroke (it would park a click-select for
+        // drawing tools) erases the whole shape at once — no zombie
+        // half-erased pixels, one history entry.
+        cx.simulate_mouse_down(
+            point(px(100.), px(50.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 0));
+        cx.simulate_mouse_up(
+            point(px(100.), px(50.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+        cx.simulate_keystrokes("ctrl-y");
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 0));
+
+        // Rectangle-eraser mode: no size UI; deletion lands on RELEASE
+        // (the dragged area's bounds are only final then).
+        let rect = cx.debug_bounds("tb-eraser-rect").unwrap();
+        cx.simulate_click(rect.center(), Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().tool(),
+                Some(ShapeKind::EraserRect)
+            )
+        });
+        cx.simulate_keystrokes("b"); // pencil: draw another stroke
+        cx.simulate_mouse_down(
+            point(px(60.), px(60.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(200.), px(80.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(200.), px(80.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+        cx.simulate_keystrokes("d"); // back to the eraser (brush)
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().tool(),
+                Some(ShapeKind::Eraser)
+            )
+        });
+        cx.simulate_mouse_down(
+            point(px(40.), px(30.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| {
+            // in-flight area: deletion only on release
+            assert_eq!(session.read(cx).annotations().committed().len(), 1)
+        });
+        cx.simulate_mouse_move(
+            point(px(220.), px(110.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(220.), px(110.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 0));
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+        // "d" toggles the ACTIVE eraser variant — brush, not rect
+        cx.simulate_keystrokes("d");
+        cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
+        cx.simulate_keystrokes("d");
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().tool(),
+                Some(ShapeKind::Eraser)
+            )
+        });
+        let _ = view;
     }
 
     fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotation::ShapeKind) {

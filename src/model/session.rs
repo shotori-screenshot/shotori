@@ -58,6 +58,19 @@ pub(crate) struct Loupe {
     pub(crate) outward: (f32, f32),
 }
 
+/// The eraser's pointer chrome (issue #14), already mapped into the
+/// asking window's local coordinates. The ring shows exactly the
+/// circle deletion tests against ("what you see is what erases");
+/// the rect is the in-flight area sweep, dashed as a promise rather
+/// than a selection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum EraserChrome {
+    /// Brush footprint: center + radius, logical px.
+    Ring { center: Point<Pixels>, radius: f32 },
+    /// The area eraser's dragged rectangle.
+    Rect(Bounds<Pixels>),
+}
+
 impl Screen {
     fn bounds(&self) -> Bounds<Pixels> {
         Bounds {
@@ -999,6 +1012,55 @@ impl ScreenshotSession {
             .and_then(|p| self.annotations.shape_hover(p))
     }
 
+    /// Whether pointer moves must repaint for the eraser's ring
+    /// chrome even when nothing else changed: the ring follows the
+    /// cursor while the brush tool is live (issue #14).
+    pub(crate) fn eraser_ring_follows_pointer(&self) -> bool {
+        !self.blocked
+            && self.selection.bounds().is_some()
+            && self.annotations.tool() == Some(crate::annotation::ShapeKind::Eraser)
+    }
+
+    /// The eraser's pointer chrome for one output (issue #14): the
+    /// brush ring while the tool is live (center in this window's
+    /// local coordinates), or the dragged area rect while an area
+    /// gesture is in flight. None when the eraser is inactive or
+    /// blocked, when the ring's pointer sits outside the selection
+    /// (idle — no erase can start there), or when a rect does not
+    /// reach this output.
+    pub(crate) fn eraser_chrome(&self, name: &str) -> Option<EraserChrome> {
+        use crate::annotation::ShapeKind;
+        if self.blocked {
+            return None;
+        }
+        let selection = self.selection.bounds()?;
+        let origin = self.screen(name).bounds().origin;
+        if let Some(area) = self.annotations.eraser_rect_bounds() {
+            let mut b = area.intersect(&selection);
+            b.origin -= origin;
+            return (f32::from(b.size.width) > 0. && f32::from(b.size.height) > 0.)
+                .then_some(EraserChrome::Rect(b));
+        }
+        if self.annotations.tool() != Some(ShapeKind::Eraser) {
+            return None;
+        }
+        let center = self.pointer_in(name)?;
+        // Only the output whose window actually contains the pointer
+        // rings — the unclamped mapping lies outside every other
+        // window, and a cross-screen drag (implicit grab) must move
+        // the ring to the output the pointer is now over.
+        let size = self.overlay_size(name)?;
+        let (x, y) = (f32::from(center.x), f32::from(center.y));
+        let over_window =
+            x >= 0. && x <= f32::from(size.width) && y >= 0. && y <= f32::from(size.height);
+        let active = self.pointer_global.is_some_and(|p| selection.contains(&p))
+            || self.annotations.is_pressed();
+        (over_window && active).then(|| EraserChrome::Ring {
+            center,
+            radius: self.annotations.erase_radius(),
+        })
+    }
+
     pub(crate) fn crop(&self, output: &str) -> Option<(u32, u32, Vec<u8>)> {
         self.crop_impl(output, true)
             .map(|r| (r.width, r.height, r.rgba))
@@ -1141,8 +1203,6 @@ impl ScreenshotSession {
                         | ShapeKind::Mosaic
                         | ShapeKind::Blur
                         | ShapeKind::Text
-                        | ShapeKind::Eraser
-                        | ShapeKind::EraserRect
                 )
             })
     }
@@ -1197,10 +1257,7 @@ impl ScreenshotSession {
                 && committed.starts_with(&cached.committed)
                 && cached.stroke.is_some()
                 && committed.last().is_some_and(|shape| {
-                    matches!(
-                        shape.kind,
-                        ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser
-                    )
+                    matches!(shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter)
                 });
             if appended_stroke {
                 // Promote the final incremental draft, including a new release
@@ -1212,7 +1269,6 @@ impl ScreenshotSession {
                     .render(
                         committed.last().unwrap(),
                         &cached.pixels,
-                        &original.rgba,
                         (original.width, original.height),
                         original.bounds.origin,
                         original.scale,
@@ -1226,7 +1282,6 @@ impl ScreenshotSession {
                 crate::annotation::Annotations::rasterize_shapes(
                     committed[cached.committed.len()..].iter(),
                     &mut cached.pixels,
-                    &original.rgba,
                     original.width,
                     original.height,
                     original.bounds.origin,
@@ -1239,19 +1294,15 @@ impl ScreenshotSession {
             if cached.committed != committed {
                 cached.committed = committed.to_vec();
             }
-            let pixels = if let Some(shape) = draft.filter(|s| {
-                matches!(
-                    s.kind,
-                    ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser
-                )
-            }) {
+            let pixels = if let Some(shape) =
+                draft.filter(|s| matches!(s.kind, ShapeKind::Pencil | ShapeKind::Highlighter))
+            {
                 cached
                     .stroke
                     .get_or_insert_with(Default::default)
                     .render(
                         shape,
                         &cached.pixels,
-                        &original.rgba,
                         (original.width, original.height),
                         original.bounds.origin,
                         original.scale,
@@ -1263,7 +1314,6 @@ impl ScreenshotSession {
                 crate::annotation::Annotations::rasterize_shapes(
                     draft.into_iter(),
                     &mut pixels,
-                    &original.rgba,
                     original.width,
                     original.height,
                     original.bounds.origin,
@@ -2329,16 +2379,22 @@ mod tests {
 
     fn assert_preview_matches_export(s: &ScreenshotSession) {
         let pixels = s.crop("left").unwrap().2;
-        let (_, preview) = s.filtered_preview("left").unwrap();
-        let expected: Vec<_> = pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|p| [p[2], p[1], p[0], p[3]])
-            .collect();
-        assert_eq!(preview.as_bytes(0).unwrap(), expected);
-        let (_, other) = s.filtered_preview("right").unwrap();
-        assert!(Arc::ptr_eq(&preview, &other));
+        match s.filtered_preview("left") {
+            Some((_, preview)) => {
+                let expected: Vec<_> = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                    .collect();
+                assert_eq!(preview.as_bytes(0).unwrap(), expected);
+                let (_, other) = s.filtered_preview("right").unwrap();
+                assert!(Arc::ptr_eq(&preview, &other));
+            }
+            // No raster shapes left (the object eraser may delete them
+            // all): the vector path renders instead, on every output.
+            None => assert!(s.filtered_preview("right").is_none()),
+        }
     }
 
     #[test]
@@ -2608,8 +2664,10 @@ mod tests {
             ShapeKind::Highlighter,
         ] {
             s.edit_annotations(|a| a.toggle(kind));
-            // begin past the pointer layer: hit-priority selection would
-            // grab the earlier rectangle instead of starting this stroke
+            // begin past the pointer layer so the gesture starts ON the
+            // earlier shapes: drawing tools would park a click-select
+            // there, the eraser instead DELETES what the sweep touches
+            // (mid-gesture the preview flips as raster shapes vanish)
             s.edit_annotations(|a| a.begin(point(px(-30.), px(45.)), sel, false));
             for x in [5., 15., 30.] {
                 s.pointer_move("right", point(px(x), px(60.)), false);
@@ -2755,7 +2813,41 @@ mod tests {
     }
 
     #[test]
-    fn eraser_crosses_outputs_and_preview_matches_export() {
+    fn eraser_chrome_rings_only_on_the_pointed_output_and_rect_spans() {
+        use crate::annotation::ShapeKind;
+        let mut s = session();
+        s.select_all();
+        let sel = s.selection.bounds().unwrap();
+        s.set_size("left", size(px(100.), px(60.)));
+        s.set_size("right", size(px(96.), px(60.)));
+        s.edit_annotations(|a| a.toggle(ShapeKind::Eraser));
+        // idle pointer over the LEFT output: only its window rings —
+        // every other output's unclamped mapping falls outside its
+        // own window and must stay silent
+        s.pointer_move("left", point(px(50.), px(30.)), false);
+        assert!(matches!(
+            s.eraser_chrome("left"),
+            Some(super::EraserChrome::Ring { .. })
+        ));
+        assert_eq!(s.eraser_chrome("right"), None);
+        // the area gesture is global: each output shows its slice
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::EraserRect);
+            a.begin(point(px(-40.), px(40.)), sel, false);
+            a.drag_to(point(px(30.), px(50.)), sel, false);
+        });
+        for name in ["left", "right"] {
+            assert!(
+                matches!(s.eraser_chrome(name), Some(super::EraserChrome::Rect(_))),
+                "{name}"
+            );
+        }
+        s.edit_annotations(|a| a.end());
+        assert_eq!(s.eraser_chrome("left"), None);
+    }
+
+    #[test]
+    fn eraser_deletes_whole_shapes_across_outputs_and_undo_restores() {
         use crate::annotation::ShapeKind;
         for kind in [ShapeKind::Eraser, ShapeKind::EraserRect] {
             let mut s = session();
@@ -2765,32 +2857,31 @@ mod tests {
             s.pointer_down("left", point(px(82.), px(25.)), false);
             s.pointer_up("right", point(px(38.), px(60.)), false);
             let marked = s.crop("left").unwrap().2;
+            let pristine_left = s.crop_original("left").unwrap().2;
+            let pristine_right = s.crop_original("right").unwrap().2;
+            assert_ne!(marked, pristine_left);
             s.edit_annotations(|a| a.toggle(kind));
-            // begin past the pointer layer: this stroke starts on the
-            // rectangle's edge band, which selects on press now
+            // The stroke starts ON the rectangle's edge band: with the
+            // object eraser that press must erase (issue #14), not
+            // park a click-select like drawing tools do.
+            assert!(!s.annotations().parks_click_select());
             let sel = s.selection.bounds().unwrap();
             s.edit_annotations(|a| {
                 a.begin(point(px(-19.), px(42.)), sel, false);
                 a.drag_to(point(px(39.), px(70.)), sel, false);
                 a.end();
             });
-            let pixels = s.crop("left").unwrap().2;
-            assert_ne!(pixels, marked);
-            let (_, left) = s.filtered_preview("left").unwrap();
-            let (_, right) = s.filtered_preview("right").unwrap();
-            assert!(Arc::ptr_eq(&left, &right));
-            let bgra: Vec<_> = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|p| [p[2], p[1], p[0], p[3]])
-                .collect();
-            assert_eq!(left.as_bytes(0).unwrap(), bgra);
+            // Whole-shape deletion: the committed sequence is empty
+            // and both sides of the seam show the frozen capture.
+            assert_eq!(s.annotations().committed().len(), 0);
+            assert_eq!(s.crop("left").unwrap().2, pristine_left);
+            assert_eq!(s.crop("right").unwrap().2, pristine_right);
+            // nothing raster remains — no preview cache at all
+            assert!(s.filtered_preview("left").is_none());
             s.edit_annotations(|a| a.undo());
             assert_eq!(s.crop("left").unwrap().2, marked);
-            assert!(s.filtered_preview("left").is_none());
             s.edit_annotations(|a| a.redo());
-            assert_eq!(s.crop("right").unwrap().2, pixels);
+            assert_eq!(s.crop("right").unwrap().2, pristine_right);
         }
     }
 
