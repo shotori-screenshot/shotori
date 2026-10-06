@@ -57,6 +57,7 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
             || a == "ocr"
             || a == "ocrsetup"
             || a == "clear"
+            || a == "scroll"
     }) else {
         return;
     };
@@ -85,6 +86,7 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
                 "pin" => Box::new(crate::actions::PinSelection),
                 "ocr" => Box::new(OcrSelection),
                 "clear" => Box::new(ClearAnnotations),
+                "scroll" => Box::new(crate::actions::ScrollSelection),
                 _ => Box::new(QuitOverlay),
             };
             window.dispatch_action(action, cx);

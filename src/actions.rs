@@ -16,7 +16,8 @@ gpui_kit::actions!([
     SaveSelection,
     PinSelection,
     OcrSelection,
-    SelectScreen
+    SelectScreen,
+    ScrollSelection
 ]);
 
 // In-canvas annotation actions (shared by the overlay's keybindings and
@@ -53,6 +54,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-s", SaveSelection, Some("ShotoriOverlay")),
         KeyBinding::new("ctrl-p", PinSelection, Some("ShotoriOverlay")),
         KeyBinding::new("ctrl-o", OcrSelection, Some("ShotoriOverlay")),
+        // the fifth exit: auto-scroll the selection into a long
+        // screenshot (l = long; plain keys are all annotation tools)
+        KeyBinding::new("ctrl-l", ScrollSelection, Some("ShotoriOverlay")),
+        // the scroll control bar is its own context (the overlays are
+        // gone while it lives)
+        KeyBinding::new(
+            "enter",
+            crate::ui::scroll_bar::ScrollFinish,
+            Some("ShotoriScroll"),
+        ),
+        KeyBinding::new(
+            "escape",
+            crate::ui::scroll_bar::ScrollCancel,
+            Some("ShotoriScroll"),
+        ),
+        KeyBinding::new(
+            "ctrl-s",
+            crate::ui::scroll_bar::ScrollSave,
+            Some("ShotoriScroll"),
+        ),
         // pins are their own windows with their own context
         KeyBinding::new("shift-f10", crate::ui::pin::OpenPinMenu, Some("ShotoriPin")),
         // Esc in the menu only dismisses it; with no menu it closes the

@@ -18,8 +18,9 @@ use crate::ui::theme;
 
 use crate::actions::{
     ClearAnnotations, CopySelection, OcrSelection, PinSelection, QuitOverlay, SaveSelection,
-    ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic,
-    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText,
+    ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
+    ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect,
+    ToggleText,
 };
 use crate::model::placement::{GRIP_W, ROW_H};
 
@@ -343,6 +344,19 @@ pub(crate) fn selection_toolbar(
                         },
                     )
                     .child(own_icon("icons/pin.svg")),
+                )
+                .child(
+                    // own icon: no long-screenshot glyph in the Lucide
+                    // whitelist either (document + down arrow)
+                    control(
+                        "tb-scroll".into(),
+                        "Long screenshot (scroll) · Ctrl+L".into(),
+                        focus.clone(),
+                        |window, cx| {
+                            window.dispatch_action(Box::new(ScrollSelection), cx);
+                        },
+                    )
+                    .child(own_icon("icons/scroll.svg")),
                 )
                 .child(separator())
                 .child(icon_button(

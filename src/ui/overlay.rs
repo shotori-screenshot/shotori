@@ -17,9 +17,10 @@ use gpui_kit::*;
 
 use crate::actions::{
     CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, FinishPolyline, OcrSelection,
-    PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, SelectScreen, ToggleArrow,
-    ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic, ToggleNumber,
-    TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText, UndoAnnotation,
+    PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, ScrollSelection, SelectScreen,
+    ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic,
+    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText,
+    UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::model::selection::{PressTarget, Selection};
@@ -616,6 +617,69 @@ impl Overlay {
             cx.update(|cx| cx.quit());
         })
         .detach();
+    }
+
+    /// Ctrl+L / toolbar [Scroll]: the fifth exit — a long screenshot.
+    /// The overlays show frozen pixels, so they must unmap for the live
+    /// content to scroll; the slim control bar (`ui::scroll_bar`) is
+    /// opened FIRST (never zero windows — the loop must survive the
+    /// overlay teardown) and then drives the scroll engine. The bar owns
+    /// the exits from here (Enter copies, Ctrl+S saves, Esc cancels).
+    fn scroll_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.session.update(cx, |s, cx| {
+            s.edit_annotations(|a| a.finish_polyline());
+            cx.notify();
+        });
+        let session = self.session.read(cx);
+        let Some(rect) = session.scroll_region(&self.capture.output_name) else {
+            println!("[shotori] scroll: the selection must sit fully inside one screen");
+            crate::notify::send(
+                "Can’t start a long screenshot",
+                "The selection must sit fully inside a single screen.",
+            );
+            return;
+        };
+        // The bar lives on the output that hosts the selection (mixed-DPI
+        // placement is a lottery otherwise — AGENTS "the 240Hz case").
+        let (lw, lh) = self.capture.logical_size_f32();
+        let center = point(
+            px(self.capture.logical_pos.0 as f32 + lw / 2.),
+            px(self.capture.logical_pos.1 as f32 + lh / 2.),
+        );
+        let display_id = crate::ui::pin::display_containing(center);
+        let spec = crate::platform::scroll_capture::ScrollSpec {
+            output: self.capture.output_name.clone(),
+            rect,
+            // Auto-scroll is shelved behind an env flag until the
+            // injection story works on niri (see inject_step); the
+            // shipped UX is manual scrolling. The e2e backdoor needs
+            // the self-contained auto mode (a headless run has no hands
+            // to scroll with).
+            mode: if std::env::var_os("SHOTORI_SCROLL_AUTO").is_some()
+                || std::env::var_os("SHOTORI_DEBUG_ACTION").is_some()
+            {
+                crate::platform::scroll_capture::ScrollMode::Auto
+            } else {
+                crate::platform::scroll_capture::ScrollMode::Manual
+            },
+        };
+        let chrome = crate::ui::scroll_bar::ScrollChrome {
+            display_id,
+            output_width: lw,
+            output_height: lh,
+        };
+        if let Err(e) = crate::ui::scroll_bar::launch(spec, chrome, cx) {
+            eprintln!("[shotori] scroll: could not open the control bar: {e:#}");
+            crate::notify::send(
+                "Can’t start a long screenshot",
+                "The control bar failed to open.",
+            );
+            return;
+        }
+        // Overlay teardown LAST: the bar is up, the loop has a window.
+        // Same flush caveat as the save flow — close_overlays removes
+        // this window through its own reference.
+        crate::save_dialog::close_overlays(window, cx);
     }
 
     /// Ctrl+P / toolbar [Pin]: crop → floating pinned layer surfaces →
@@ -1238,6 +1302,13 @@ impl Render for Overlay {
                     return; // setup dialog is modal
                 }
                 this.pin_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ScrollSelection, window, cx| {
+                this.finish_text(true, window, cx);
+                if this.session.read(cx).blocked() {
+                    return; // setup dialog is modal
+                }
+                this.scroll_selection(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OcrSelection, window, cx| {
                 this.finish_text(true, window, cx);
@@ -2587,27 +2658,29 @@ mod multi_output_tests {
             Default::default(),
         );
         vcx.run_until_parked();
+        // The press was on row TWO's body (not a grip): the toolbar must
+        // be UNMOVED. Relative comparison — a one-row width wider than
+        // the two-row TB_W (the scroll button made it so) legitimately
+        // changes the persisted origin, so no hardcoded point here.
+        let pre_drag_origin =
+            vcx.update(|_, cx| session.read(cx).toolbar_bounds("main").unwrap().origin);
         vcx.update(|_, cx| {
             assert!(!session.read(cx).toolbar_drag_active());
             assert_eq!(
                 session.read(cx).toolbar_bounds("main").unwrap().origin,
-                point(px(160.), px(81.)) // unmoved
+                pre_drag_origin
             );
         });
 
         // row ONE's strip still grabs with two rows on screen
-        vcx.simulate_mouse_move(
-            point(px(171.), px(100.)),
-            MouseButton::Left,
-            Default::default(),
-        );
+        // (relative: the grip rides the toolbar's clamped position,
+        // which the row-one width now determines)
+        let row1_grip =
+            vcx.update(|_, cx| session.read(cx).toolbar_grips("main").unwrap().0.center());
+        vcx.simulate_mouse_move(row1_grip, MouseButton::Left, Default::default());
         vcx.run_until_parked();
         vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
-        vcx.simulate_mouse_down(
-            point(px(171.), px(100.)),
-            MouseButton::Left,
-            Default::default(),
-        );
+        vcx.simulate_mouse_down(row1_grip, MouseButton::Left, Default::default());
         vcx.simulate_mouse_move(
             point(px(200.), px(300.)),
             MouseButton::Left,
@@ -2625,7 +2698,7 @@ mod multi_output_tests {
             // right margin on this narrow test window
             assert_eq!(
                 session.read(cx).toolbar_bounds("main").unwrap().origin,
-                point(px(160.), px(281.))
+                point(px(800. - crate::model::placement::TB_W - 8.), px(281.))
             );
         });
     }

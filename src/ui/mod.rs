@@ -9,6 +9,8 @@
 //!   consume
 //! - [`ocr_setup`]: first-run model-download dialog
 //! - [`pin`]: the selection as a floating pinned window (贴图)
+//! - [`scroll_bar`]: the long-screenshot control strip (the only
+//!   surface while the scroll engine runs)
 //! - [`e2e`]: runtime debug backdoors driving headless tests
 //!   (`SHOTORI_DEBUG_*`)
 //! - [`theme`]: visual constants
@@ -20,6 +22,7 @@ pub mod image_util;
 pub mod ocr_setup;
 pub mod overlay;
 pub mod pin;
+pub mod scroll_bar;
 pub mod theme;
 pub mod toolbar;
 

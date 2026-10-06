@@ -164,7 +164,7 @@ fn main() {
                 _ => None,
             },
         ),
-        "down" | "up" | "scroll" => (0, 0, 1, 1, None),
+        "down" | "up" | "scroll" | "scrollloop" => (0, 0, 1, 1, None),
         _ => usage_and_exit(),
     };
 
@@ -180,6 +180,18 @@ fn main() {
     queue.roundtrip(&mut app).expect("roundtrip");
 
     match mode.as_str() {
+        "scrollloop" => {
+            // Diagnosis mode: N lines, M times, 250ms apart — one client,
+            // repeated gestures. If only the first lands, the compositor
+            // accumulates axis events per client connection.
+            let times = (num(1) as i64).clamp(1, 50) as u32;
+            for k in 0..times {
+                ptr.axis(2000 + k * 250, Axis::VerticalScroll, num(0) * -15.0);
+                ptr.frame();
+                queue.roundtrip(&mut app).expect("roundtrip");
+                sleep(Duration::from_millis(250));
+            }
+        }
         "down" => {
             ptr.button(1000, BTN_LEFT, ButtonState::Pressed);
             ptr.frame();

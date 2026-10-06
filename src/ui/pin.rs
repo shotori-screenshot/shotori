@@ -56,6 +56,16 @@ fn outputs() -> Vec<PinOutput> {
         .unwrap_or_default()
 }
 
+/// The display whose output rect contains `p` (global logical coords) —
+/// how the scroll bar finds the right screen to live on without
+/// reaching into the overlay's window internals.
+pub(crate) fn display_containing(p: Point<Pixels>) -> Option<DisplayId> {
+    outputs()
+        .into_iter()
+        .find(|o| o.bounds.contains(&p))
+        .and_then(|o| o.display_id)
+}
+
 /// Scroll lines (pixel deltas pre-normalized by the caller) → the next
 /// zoom factor, clamped to the range.
 fn next_zoom(zoom: f32, lines: f32) -> f32 {

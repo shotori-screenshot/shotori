@@ -91,6 +91,17 @@ pub(crate) struct RasterSelection {
     pub(crate) bounds: Bounds<Pixels>,
 }
 
+/// A long-screenshot capture region: output-local logical integer px,
+/// the coordinate contract of `capture_output_region` (see
+/// [`ScreenshotSession::scroll_region`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 struct FilterPreview {
     selection: Option<Bounds<Pixels>>,
     committed: Vec<crate::annotation::Shape>,
@@ -1076,6 +1087,37 @@ impl ScreenshotSession {
         self.crop_impl(output, true)
             .map(|r| (r.width, r.height, r.rgba))
     }
+
+    /// The selection as a long-screenshot capture region, when it sits
+    /// entirely inside ONE output (the scroll engine watches a single
+    /// screen; a selection straddling outputs has no coherent scroll
+    /// target). Output-local LOGICAL integer coordinates — exactly what
+    /// `zwlr_screencopy_manager_v1.capture_output_region` expects (the
+    /// protocol speaks logical px; the buffer it returns is physical).
+    pub(crate) fn scroll_region(&self, output: &str) -> Option<ScrollRect> {
+        let screen = self
+            .screens
+            .iter()
+            .find(|s| s.capture.output_name == output)?;
+        let selection = self.selection.bounds()?;
+        let local = selection.origin - screen.bounds().origin;
+        // Inside-on-this-output ⇔ the intersection equals the selection
+        // itself (a selection reaching past this screen's edge would
+        // scroll content from the neighbor — refuse instead of guessing).
+        if selection.intersect(&screen.bounds()) != selection {
+            return None;
+        }
+        let (w, h) = (
+            f32::from(selection.size.width).round() as i32,
+            f32::from(selection.size.height).round() as i32,
+        );
+        (w >= 16 && h >= 16).then_some(ScrollRect {
+            x: f32::from(local.x).round() as i32,
+            y: f32::from(local.y).round() as i32,
+            width: w,
+            height: h,
+        })
+    }
     /// Preserve the exact logical bounds of the rasterized crop for pin placement.
     pub(crate) fn crop_for_pin(&self, output: &str) -> Option<RasterSelection> {
         self.crop_impl(output, true)
@@ -1472,6 +1514,7 @@ impl ScreenshotSession {
 mod tests {
     use super::ScreenshotSession;
     use crate::model::selection::Selection;
+    use crate::model::session::ScrollRect;
     use crate::platform::capture::Capture;
     use gpui_kit::{Bounds, point, px, size};
     use std::sync::Arc;
@@ -1723,6 +1766,43 @@ mod tests {
         assert_eq!(s.selection().bounds(), Some(s.screens[0].bounds()));
         // and anchors the active output
         assert_eq!(s.active_output.as_deref(), Some("left"));
+    }
+
+    #[test]
+    fn scroll_region_maps_local_logical_and_refuses_cross_output() {
+        let mut s = session();
+        // fully inside "right" (global (0,0)..(100,100), logical)
+        s.selection = Selection::Selected {
+            bounds: Bounds {
+                origin: point(px(10.), px(20.)),
+                size: size(px(50.), px(40.)),
+            },
+        };
+        assert_eq!(
+            s.scroll_region("right"),
+            Some(ScrollRect {
+                x: 10,
+                y: 20,
+                width: 50,
+                height: 40
+            })
+        );
+        // the same selection is not "right"+'s to capture from another
+        // output's perspective, and a selection hanging off the screen
+        // edge is refused outright (no partial clamping — the scroll
+        // target would be ambiguous)
+        assert_eq!(s.scroll_region("left"), None);
+        s.selection = Selection::Selected {
+            bounds: Bounds {
+                origin: point(px(-30.), px(10.)),
+                size: size(px(100.), px(30.)),
+            },
+        };
+        assert_eq!(s.scroll_region("left"), None);
+        assert_eq!(s.scroll_region("right"), None);
+        // degenerate (no selection): nothing to scroll
+        s.selection = Selection::Idle;
+        assert_eq!(s.scroll_region("right"), None);
     }
 
     #[test]

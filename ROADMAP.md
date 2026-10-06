@@ -1187,3 +1187,93 @@ overlay's main thread.
   select/move/resize existing annotations.
 - **Deferred at the user's request** (2026-09-27): spotlight, watermark,
   magnifier — not in the implementation queue.
+
+### Scroll stitching: viewport state machine + column-sampled MAD (2026-10-06)
+
+First milestone of the long-screenshot feature: the pure model half
+(`model/scroll_stitch.rs`) — viewport state machine, column-band signal
+matching, rejection taxonomy. Architecture borrowed with attribution:
+the monotonic `viewport_height + max_position` canvas and the
+Append/Prepend/Contained branch set are Snow Shot's `snow-stitch-images`
+design (Apache-2.0, not vendored — reimplemented simpler: no ORB, we
+control the scroll so a MAD scan over three grayscale column bands
+suffices, per wayscrollshot's algorithm shootout). Traps found while
+testing, all three of which a "reasonable" implementation gets wrong:
+
+- **The offset sign convention is a minefield.** Define once, in one
+  place: `dy` = viewport movement, positive = down = append, and the
+  comparison is `cur[j] ≈ prev[j + dy]` — scrolling DOWN aligns the
+  current frame's row j with the anchor's row j+dy (content that sat
+  lower slides up). I initially wrote the cost window with the shifts
+  swapped (prev/cur offsets exchanged), which silently inverts every
+  estimate: appends become prepends. The random-walk reconstruction
+  test is what catches this class of bug — outcome enums alone don't.
+- **Overlap windows are asymmetric: up-scroll candidates exclude the
+  current frame's TOP rows.** A frame whose only distinguishing rows
+  sit at its top (or a flat frame — pure PDF margin) "matches
+  perfectly" at every negative offset because the changed rows never
+  enter the comparison window. d=0 then loses the min to d<0 and a
+  flat+caret-blink frame reports Ambiguous instead of NoMotion. Fix:
+  a low-information guard (anchor band spread ≤ 1 ⇒ NoMotion) — flat
+  content cannot be aligned by ANY translation; guessing is worse.
+- **A pure period with an exact-period offset is indistinguishable
+  from no motion.** If rows repeat with period p and the frame moved
+  by exactly p, the two frames' signals are identical at d=0 (and at
+  every multiple) — no margin test can rescue that; the matcher
+  correctly reports NoMotion and the scroll loop retries. Genuine
+  ambiguity ("two list items look alike") needs *similar-but-not-
+  identical* repeats: cost 0 at the true offset, cost ~1 at d=0,
+  margin < threshold ⇒ Ambiguous. The unit test builds exactly that.
+
+Also decided: rejected frames STILL become the comparison anchor
+(riding through a mid-animation tear — otherwise you difference
+against a stale frame forever and never recover), at the known cost
+that the band only the rejected frames showed is lost when the next
+accepted frame overwrites the seam. And the exact-duplicate fast path
+(byte memcmp) must NOT update the anchor — a duplicate poll frame is
+not evidence about anything.
+
+### Scroll capture e2e: five compositor traps in one feature (2026-10-06)
+
+The engine's first live runs dead-aired where grim succeeded. Five
+distinct causes, each caught by an isolated repro (`tools/scrollprobe`,
+kept as a workspace member for the next time):
+
+- **The screencopy wait loop must flush AFTER dispatching.** Handlers
+  queue the `copy` request; a `poll()` that blocks before the next
+  flush deadlocks against a server waiting for a request still in the
+  client's out-buffer. The startup capture never saw this because it
+  drives everything through `roundtrip()` (flush-first). Symptom: a
+  clean 2 s timeout with zero protocol errors.
+- **wlr-screencopy v3 gates `copy` on `buffer_done`.** Compositors
+  announce several buffers (shm + dmabuf) and the request is only
+  legal after the batch completes. Sending it early is *silently
+  dropped* on niri — no `failed`, no disconnect. The startup capture
+  survives its early copy by lucky batch timing (events + queued
+  flush serialize correctly); the engine hit the race every time.
+- **niri routes wheel events to the KEYBOARD-FOCUSED surface**, not
+  the hovered one (two-kitty experiment: hovered-and-unfocused does
+  not scroll). Any keyboard grab on the control bar — Exclusive or
+  OnDemand, both take keys on map — swallows every injected scroll.
+  The scroll chrome is therefore mouse-only
+  (`KeyboardInteractivity::None`).
+- **niri coalesces virtual-pointer axis events per client connection**
+  (vptr `scrollloop` experiment: six events from one client all die;
+  six separate invocations all scroll; per-injection pointer OBJECTS
+  do not help; axis_source/axis_stop make it worse). Working injector
+  semantics = connection-per-step (`inject_step`). This is why
+  auto-scroll stays shelved: the cost is fine, but the pattern is
+  fragile enough to ship manual scrolling first.
+- **A pointer parked on a dying overlay poisons the seat.** Parking
+  the virtual pointer while the frozen overlays are still mapped
+  leaves pointer focus on a destroyed surface that niri never
+  recovers from — no wheel works afterwards, even from other clients.
+  The engine now parks the pointer only after the teardown grace.
+
+Also: the winit backend of nested niri advertises `Flipped180` with
+upright buffers — the engine refuses only 90°-family transforms and
+lets the direction calibration absorb flips. And the row-MEAN matcher
+(a wayscrollshortcut) is defeated by real text — every line's glyph
+mix converges to the same mean, so a whole-line-height shift leaves
+the signal unchanged; matching switched to full-row pixel MAD on a
+step-spaced grid (`RowProfile`).

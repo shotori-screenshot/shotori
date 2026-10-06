@@ -6474,6 +6474,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scrollprobe"
+version = "0.1.0"
+dependencies = [
+ "memmap2",
+ "rustix",
+ "shotori",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

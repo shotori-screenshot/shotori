@@ -8,8 +8,11 @@
 //! - [`export`]: logical bounds → physical crop → PNG
 //! - [`placement`]: the two-zone chrome layout contract (label on top,
 //!   toolbar at the bottom — disjoint by construction)
+//! - [`scroll_stitch`]: the long-screenshot assembler (viewport state
+//!   machine + column-sampled frame matching)
 
 pub mod export;
 pub mod placement;
+pub mod scroll_stitch;
 pub mod selection;
 pub mod session;

@@ -1,7 +1,7 @@
 [workspace]
 # `cargo build` / `cargo test` at the root still mean the root package
 # only; the tools build via `cargo build --workspace` / `-p vptr`.
-members = ["tools/vptr"]
+members = ["tools/vptr", "tools/scrollprobe"]
 
 [features]
 # Developer-only E2E perf harness (`shotori --perf`): not part of
