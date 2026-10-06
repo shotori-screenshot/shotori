@@ -8,6 +8,7 @@
 [![Crates.io](https://img.shields.io/crates/v/shotori.svg)](https://crates.io/crates/shotori)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-8892bf)
+[![Built with gpui-kit](https://img.shields.io/badge/built_with-gpui--kit-8892bf)](https://gpui-kit.com)
 ![Status](https://img.shields.io/badge/status-beta-yellow)
 
 A Wayland-native screenshot tool — select, annotate, pin, long-capture
@@ -120,11 +121,6 @@ release.
 |                    | content, stitched live (Enter copy, Ctrl+S save, Esc      |
 |                    | cancel)                                                   |
 | `Esc`              | abandon the current drag / exit                          |
-
-Annotation keys (`V` select, `R` rectangle, `E` ellipse, `L` line,
-`A` arrow, `M` mosaic, `H` highlighter, `B` pencil, `N` numbered step,
-`P` polyline, `T` text, `D` eraser) switch tools; undo/redo and
-`Ctrl+Shift+Del` clear-all work as usual.
 
 ## FAQ
 

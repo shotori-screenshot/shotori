@@ -4,10 +4,12 @@
   <img src="assets/app/shotori-128.png" alt="Shotori">
 </p>
 
+[![CI](https://github.com/shotori-screenshot/shotori/actions/workflows/ci.yml/badge.svg)](https://github.com/shotori-screenshot/shotori/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/shotori.svg)](https://crates.io/crates/shotori)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-8892bf)
-![Status](https://img.shields.io/badge/status-early%20development-orange)
+[![Built with gpui-kit](https://img.shields.io/badge/built_with-gpui--kit-8892bf)](https://gpui-kit.com)
+![Status](https://img.shields.io/badge/status-beta-yellow)
 
 Wayland 原生截图工具——选区、标注、贴图、长截图，需要文字时本地 OCR——
 整套 UI 用 [gpui-kit](https://crates.io/crates/gpui-kit) 手绘。
