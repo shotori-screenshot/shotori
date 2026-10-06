@@ -57,10 +57,15 @@ pub fn bind_keys(cx: &mut App) {
         // the fifth exit: auto-scroll the selection into a long
         // screenshot (l = long; plain keys are all annotation tools)
         KeyBinding::new("ctrl-l", ScrollSelection, Some("ShotoriOverlay")),
-        // the scroll control bar is its own context (the overlays are
-        // gone while it lives)
+        // the scroll preview panel is its own context (the overlays are
+        // gone while it lives); shortcuts mirror the selection flow
         KeyBinding::new(
             "enter",
+            crate::ui::scroll_bar::ScrollFinish,
+            Some("ShotoriScroll"),
+        ),
+        KeyBinding::new(
+            "ctrl-c",
             crate::ui::scroll_bar::ScrollFinish,
             Some("ShotoriScroll"),
         ),

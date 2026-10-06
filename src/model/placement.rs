@@ -14,6 +14,8 @@
 
 use gpui_kit::*;
 
+use crate::model::session::ScrollRect;
+
 /// Rough label width covering the widest "3072 × 1920" + padding; the
 /// height matches the rendered chip.
 const LABEL_W: f32 = 110.;
@@ -46,6 +48,11 @@ pub(crate) const TB_W: f32 = 632.;
 pub(crate) const TB_W_ROW1: f32 = 660.;
 /// Width of one drag-grip strip at the toolbar's left/right edge.
 pub(crate) const GRIP_W: f32 = 12.;
+/// Visual stroke of the scroll-capture region frame (logical px).
+pub(crate) const FRAME_STROKE: f32 = 2.;
+/// How fat the scroll frame's GRAB bands are (logical px) — the input
+/// region covers them, generous on purpose: 2px targets are miserable.
+pub(crate) const FRAME_GRAB: f32 = 10.;
 /// The bar rows' horizontal padding. The grip elements sit INSIDE that
 /// padding on row one — `session::toolbar_grips` uses the same constant
 /// so the cursor strip and the element rect stay identical.
@@ -141,13 +148,121 @@ pub(crate) fn round_px(b: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
+/// The four visual strokes as output-local rects.
+pub(crate) fn frame_strokes(rect: ScrollRect) -> [Bounds<Pixels>; 4] {
+    let (x, y) = (rect.x as f32, rect.y as f32);
+    let (w, h) = (rect.width as f32, rect.height as f32);
+    [
+        Bounds {
+            origin: point(px(x - FRAME_STROKE), px(y - FRAME_STROKE)),
+            size: size(px(w + 2. * FRAME_STROKE), px(FRAME_STROKE)),
+        },
+        Bounds {
+            origin: point(px(x - FRAME_STROKE), px(y + h)),
+            size: size(px(w + 2. * FRAME_STROKE), px(FRAME_STROKE)),
+        },
+        Bounds {
+            origin: point(px(x - FRAME_STROKE), px(y)),
+            size: size(px(FRAME_STROKE), px(h)),
+        },
+        Bounds {
+            origin: point(px(x + w), px(y)),
+            size: size(px(FRAME_STROKE), px(h)),
+        },
+    ]
+}
+
+/// The (thicker) grab bands the input region covers, derived from the
+/// SAME rect as the strokes (one geometry source per concept — the
+/// grip/cursor alignment trap).
+pub(crate) fn frame_grab_bands(rect: ScrollRect) -> [Bounds<Pixels>; 4] {
+    let (x, y) = (rect.x as f32, rect.y as f32);
+    let (w, h) = (rect.width as f32, rect.height as f32);
+    [
+        Bounds {
+            origin: point(px(x - FRAME_GRAB), px(y - FRAME_GRAB)),
+            size: size(px(w + 2. * FRAME_GRAB), px(FRAME_GRAB)),
+        },
+        Bounds {
+            origin: point(px(x - FRAME_GRAB), px(y + h)),
+            size: size(px(w + 2. * FRAME_GRAB), px(FRAME_GRAB)),
+        },
+        Bounds {
+            origin: point(px(x - FRAME_GRAB), px(y)),
+            size: size(px(FRAME_GRAB), px(h)),
+        },
+        Bounds {
+            origin: point(px(x + w), px(y)),
+            size: size(px(FRAME_GRAB), px(h)),
+        },
+    ]
+}
+
+/// The frame's toolbar size (logical px): [⇕] | [Copy][Save][✕].
+pub(crate) const FRAME_TB_W: f32 = 198.;
+pub(crate) const FRAME_TB_H: f32 = 32.;
+/// Gap between the frame edge and its toolbar.
+pub(crate) const FRAME_TB_GAP: f32 = 10.;
+
+/// Where the frame's toolbar sits: centered below the frame's bottom
+/// edge, flipping ABOVE the frame when the bottom would push it off
+/// the output (a frame parked at the screen bottom), and clamped
+/// horizontally into the output. Same geometry feeds the render and
+/// the input region (one source per concept).
+pub(crate) fn frame_toolbar(rect: ScrollRect, out_w: f32, out_h: f32) -> Bounds<Pixels> {
+    let (x, y, w, h) = (
+        rect.x as f32,
+        rect.y as f32,
+        rect.width as f32,
+        rect.height as f32,
+    );
+    let below = y + h + FRAME_TB_GAP;
+    let top = if below + FRAME_TB_H > out_h {
+        (y - FRAME_TB_GAP - FRAME_TB_H).max(0.)
+    } else {
+        below
+    };
+    let left = (x + w / 2. - FRAME_TB_W / 2.).clamp(0., (out_w - FRAME_TB_W).max(0.));
+    Bounds {
+        origin: point(px(left), px(top)),
+        size: size(px(FRAME_TB_W), px(FRAME_TB_H)),
+    }
+}
+
+/// Move `rect` by `(dx, dy)`, clamped inside the output. Pure — the
+/// unit tests drive drags through here.
+pub(crate) fn clamp_moved_rect(
+    rect: ScrollRect,
+    dx: f32,
+    dy: f32,
+    out_w: f32,
+    out_h: f32,
+) -> ScrollRect {
+    let clamp = |v: f32, extent: f32, size: i32| {
+        // degenerate-output posture: never panic on inverted bounds
+        if extent < size as f32 {
+            0.
+        } else {
+            v.clamp(0., extent - size as f32)
+        }
+    };
+    ScrollRect {
+        x: clamp(rect.x as f32 + dx, out_w, rect.width) as i32,
+        y: clamp(rect.y as f32 + dy, out_h, rect.height) as i32,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Explicit imports (same reason as selection.rs: avoid gpui's test
     // macro shadowing the built-in #[test])
     use super::{
-        LABEL_H, ROW_H, TB_H, TB_W, TB_W_ROW1, label_anchor, toolbar_anchor, toolbar_size,
+        FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H, TB_H, TB_W, TB_W_ROW1, clamp_moved_rect,
+        frame_grab_bands, frame_strokes, frame_toolbar, label_anchor, toolbar_anchor, toolbar_size,
     };
+    use crate::model::session::ScrollRect;
     use gpui_kit::{Bounds, Pixels, point, px, size};
 
     fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
@@ -242,5 +357,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn rect(x: i32, y: i32) -> ScrollRect {
+        ScrollRect {
+            x,
+            y,
+            width: 400,
+            height: 300,
+        }
+    }
+
+    #[test]
+    fn drag_moves_and_clamps_inside_the_output() {
+        // free movement both axes
+        let moved = clamp_moved_rect(rect(100, 100), 50., -40., 1920., 1080.);
+        assert_eq!((moved.x, moved.y), (150, 60));
+        // clamped at the top/left edges
+        let clamped = clamp_moved_rect(rect(100, 100), -500., -500., 1920., 1080.);
+        assert_eq!((clamped.x, clamped.y), (0, 0));
+        // clamped at the bottom/right edges (region fully on-screen)
+        let clamped = clamp_moved_rect(rect(1000, 900), 5000., 5000., 1920., 1080.);
+        assert_eq!(
+            (clamped.x, clamped.y),
+            (1920 - 400, 1080 - 300),
+            "the region must stay fully inside the output"
+        );
+        // size never changes — drags move, they do not resize
+        assert_eq!((moved.width, moved.height), (400, 300));
+    }
+
+    #[test]
+    fn grab_bands_surround_the_strokes() {
+        let strokes = frame_strokes(rect(100, 100));
+        let bands = frame_grab_bands(rect(100, 100));
+        for (stroke, band) in strokes.iter().zip(bands.iter()) {
+            let covers_x = band.origin.x <= stroke.origin.x && band.right() >= stroke.right();
+            let covers_y = band.origin.y <= stroke.origin.y && band.bottom() >= stroke.bottom();
+            assert!(
+                covers_x && covers_y,
+                "grab band must contain its stroke: {stroke:?} in {band:?}"
+            );
+        }
+        // the INTERIOR of the region is not a grab target: the center is
+        // outside every band (wheel passes through to the app)
+        let center = point(px(300.), px(250.));
+        let over_center = bands.iter().any(|b| b.contains(&center));
+        assert!(!over_center);
+    }
+
+    #[test]
+    fn frame_toolbar_below_by_default_flips_at_the_bottom_clamps_x() {
+        // centered under the frame's bottom edge, one gap below
+        let below = frame_toolbar(rect(100, 100), 1920., 1080.);
+        assert_eq!(
+            (
+                f32::from(below.origin.x),
+                f32::from(below.origin.y),
+                f32::from(below.size.width),
+                f32::from(below.size.height)
+            ),
+            (
+                100. + 400. / 2. - FRAME_TB_W / 2.,
+                100. + 300. + 10.,
+                FRAME_TB_W,
+                FRAME_TB_H
+            )
+        );
+        // a frame parked at the screen bottom: the toolbar flips ABOVE
+        // the frame's top edge instead of leaving the output
+        let r = ScrollRect {
+            x: 100,
+            y: 760,
+            width: 400,
+            height: 300,
+        };
+        let flipped = frame_toolbar(r, 1920., 1080.);
+        assert_eq!(f32::from(flipped.origin.y), 760. - 10. - FRAME_TB_H);
+        // near the right edge the bar pins into the output
+        let r = ScrollRect {
+            x: 1800,
+            y: 100,
+            width: 100,
+            height: 100,
+        };
+        let pinned = frame_toolbar(r, 1920., 1080.);
+        assert_eq!(f32::from(pinned.origin.x), 1920. - FRAME_TB_W);
     }
 }

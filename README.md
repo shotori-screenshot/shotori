@@ -51,12 +51,14 @@ and feedback are welcome in the
   are rejected rather than storing clipped text
 - Pin: crop a selection into a floating always-on-top image that
   survives the overlay — drag across outputs, scroll to zoom
-- Long screenshot (`Ctrl+L`): frame the scrollable content, scroll it
-  yourself — the engine stitches the frames live (accent frame around
-  the selection, side preview of the growing image, one-click finish
-  into clipboard or the save dialog). Automatic wheel injection is
-  shelved for now (niri coalesces per-client axis events into one
-  gesture — the env-flag auto mode exists for testing)
+- Long screenshot (`Ctrl+L`): frame the scrollable content, then scroll
+  it yourself, or hold the toolbar's ⇕ grab button and drag the frame's
+  vertical position freely. The toolbar also carries Copy / Save /
+  Cancel; a side panel streams the growing image with a highlight
+  marking the current viewport position.
+  Automatic wheel injection is shelved for now (niri coalesces
+  per-client axis events into one gesture — the env-flag auto mode
+  exists for testing)
 - Copy to clipboard, save via the system "save as" dialog, or OCR to text
   (fully offline after a one-time ~31 MB model download)
 - Non-interactive full-screen capture from the CLI
@@ -113,9 +115,9 @@ release.
 | `Ctrl+S`           | save the selection — system "save as" dialog             |
 | `Ctrl+O`           | OCR the selection → text to the clipboard                |
 | `Ctrl+P`           | pin the selection to the screen                          |
-| `Ctrl+L`           | long screenshot — scroll the content yourself, the       |
-|                    | selection is stitched live (frame + side preview;        |
-|                    | Finish copies)                                           |
+| `Ctrl+L`           | long screenshot — scroll, or drag the frame over the      |
+|                    | content; stitched live with a side preview (Enter/Ctrl+C  |
+|                    | copy, Ctrl+S save, Esc cancel — same as selection)       |
 | `Esc`              | abandon the current drag / exit                          |
 
 Non-interactive capture, no overlay:

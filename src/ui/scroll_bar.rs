@@ -1,171 +1,186 @@
-//! # Scroll capture chrome: control bar + region frame + live preview
+//! # Scroll capture chrome: region frame + preview panel
 //!
 //! The overlays show FROZEN pixels — for the live content to scroll they
-//! must unmap, and three surfaces replace them for the duration of a
-//! long screenshot:
+//! must unmap, and two surfaces replace them for the duration of a long
+//! screenshot:
 //!
-//! - the **control bar** — a slim strip at the top edge: progress
-//!   readout, [Finish] / [Cancel] buttons;
-//! - the **region frame** — four 2-px layer-shell strips boxing the
-//!   selection so the user keeps seeing WHAT is being captured (they
-//!   sit strictly OUTSIDE the captured rect — screencopy photographs
-//!   the whole output, chrome included);
-//! - the **preview panel** — a dock on the freer side of the screen
-//!   showing the stitched image growing (a downscaled canvas tail the
-//!   engine streams).
+//! - the **region frame** — ONE full-output transparent layer surface
+//!   drawing four accent strokes around the selection. Its input region
+//!   covers ONLY the strokes (the pin's `set_input_region` trick), so
+//!   wheel events over the captured content pass through to the app —
+//!   manual scrolling keeps working. Dragging a stroke MOVES the region:
+//!   the shared capture rect updates live and the engine follows the
+//!   frame to content that never scrolled into view (for the stitcher,
+//!   "frame moves down" is indistinguishable from "content scrolls up").
+//! - the **preview panel** — docked on the freer side of the screen:
+//!   status, the action buttons and a downscaled stream of the growing
+//!   canvas with a highlight marking WHERE in the long image the
+//!   current viewport sits.
 //!
-//! All three are mouse-only (keyboard_interactivity None): niri (and
-//! sway) deliver wheel events to the KEYBOARD-FOCUSED surface — any
-//! keyboard grab here would swallow the user's manual scrolling, which
-//! is the whole point of the flow.
+//! Keyboard lives on the panel and mirrors the selection flow exactly:
+//! Enter/Ctrl+C finish+copy, Ctrl+S finish+save, Esc cancels.
 
 use std::sync::Arc;
 
-use gpui_kit::base::Button;
 #[cfg(target_os = "linux")]
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::*;
 
+use crate::model::placement::{clamp_moved_rect, frame_grab_bands, frame_strokes, frame_toolbar};
 use crate::model::scroll_stitch::StitchOptions;
+use crate::model::session::ScrollRect;
 use crate::platform::scroll_capture::{self, ScrollControls, ScrollEvent, ScrollSpec};
 use crate::ui::image_util;
 use crate::ui::theme;
 
 actions!(scroll, [ScrollFinish, ScrollCancel, ScrollSave]);
 
-/// Bar height in logical px — a status strip, not a dialog.
-const BAR_H: f32 = 44.;
-/// Region frame stroke (logical px). Drawn OUTSIDE the selection rect.
-const FRAME: f32 = 2.;
 /// Preview panel width (logical px).
 const PANEL_W: f32 = 264.;
+/// Panel padding (p_2) and border (border_1) — the preview image's
+/// display width is derived from these (see [`PREVIEW_IMG_W`]).
+const PANEL_PAD: f32 = 8.;
+const PANEL_BORDER: f32 = 1.;
+/// The preview image's display width: panel minus padding and border.
+/// The img element's height is derived from this and the image's own
+/// aspect — NEVER from the element's intrinsic sizing: gpui leaks the
+/// BITMAP's pixel height into the layout as logical px, so on a 2×
+/// screen the box rendered 2× taller than width × aspect, throwing the
+/// highlight's relative() fractions (fractions of that box) off with
+/// it — the whole "preview doesn't match my frame" saga (measured:
+/// 1164 physical px of box where 590 was correct).
+const PREVIEW_IMG_W: f32 = PANEL_W - 2. * (PANEL_PAD + PANEL_BORDER);
 
-/// Everything `launch` needs about the target output, in logical px
-/// (the strip geometry is computed from the spec's output-local rect).
+/// Everything `launch` needs about the target output, in logical px.
 pub(crate) struct ScrollChrome {
     pub display_id: Option<DisplayId>,
     pub output_width: f32,
     pub output_height: f32,
 }
 
-pub(crate) struct ScrollBar {
-    focus: FocusHandle,
-    controls: Option<ScrollControls>,
-    state: BarState,
-    /// Ctrl+S was pressed: the finished canvas goes to the save flow
-    /// instead of the clipboard.
-    saving: bool,
-    /// Sibling windows this chrome owns (frame strips + preview) —
-    /// closed on every terminal path.
-    siblings: Vec<AnyWindowHandle>,
-    /// The preview panel's entity, for streaming canvas tails.
-    preview: Option<gpui_kit::WeakEntity<PreviewPanel>>,
-}
-
-enum BarState {
-    /// Engine thread is connecting / capturing the first frame.
-    Starting,
-    /// Scrolling; `stitched` rows captured beyond the initial viewport.
-    Running { stitched: u32 },
-    /// Finishing on request; the canvas is on its way.
-    Finishing,
-    /// A terminal event fired; the window is going away.
-    Done,
-}
-
-/// Launch the full scroll-capture chrome and start the engine. Must be
-/// called BEFORE the overlays unmap — closing every window would end
-/// the app loop with the capture half-started.
+/// Launch the scroll-capture chrome and start the engine. Must be called
+/// BEFORE the overlays unmap — closing every window would end the app
+/// loop with the capture half-started. Returns the shared capture rect
+/// (already inside `spec`).
 pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> anyhow::Result<()> {
     let options = StitchOptions::default();
-    let mut siblings = Vec::new();
 
-    // Region frame: four strips boxing the selection (strictly outside
-    // the captured rect). All anchored LEFT|TOP; margins position them.
-    for (i, (x, y, w, h)) in frame_strips(spec.rect).into_iter().enumerate() {
-        let window_options = strip_options(
-            &chrome,
-            x,
-            y,
-            size(px(w), px(h)),
-            &format!("shotori-scroll-frame-{i}"),
-        );
-        let handle = cx
-            .open_window(window_options, |_, cx| {
-                cx.new(|_| FrameStrip {
-                    accent: theme::c().accent,
-                })
-            })
-            .map_err(|e| anyhow::anyhow!("frame strip: {e}"))?;
-        siblings.push(handle.into());
-    }
+    // Region frame first: the user must never lose sight of WHAT is
+    // being captured, not even for the frames before the panel maps.
+    let frame_options = WindowOptions {
+        app_id: Some(crate::APP_ID.into()),
+        titlebar: None,
+        window_background: WindowBackgroundAppearance::Transparent,
+        focus: false,
+        display_id: chrome.display_id,
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(chrome.output_width), px(chrome.output_height)),
+        })),
+        #[cfg(target_os = "linux")]
+        kind: WindowKind::LayerShell(LayerShellOptions {
+            namespace: "shotori-scroll-frame".into(),
+            layer: Layer::Overlay,
+            anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            exclusive_zone: Some(px(-1.)),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            ..Default::default()
+        }),
+        #[cfg(not(target_os = "linux"))]
+        kind: WindowKind::PopUp,
+        ..Default::default()
+    };
+    let rect_now = *spec
+        .rect
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let shared_rect = spec.rect.clone();
+    let frame_cell: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::WeakEntity<FrameView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let cell = frame_cell.clone();
+    let frame = cx.open_window(frame_options, |_window, cx| {
+        cx.new(|cx| {
+            let view = FrameView::new(
+                shared_rect,
+                rect_now,
+                chrome.output_width,
+                chrome.output_height,
+            );
+            *cell.borrow_mut() = Some(cx.entity().downgrade());
+            view
+        })
+    });
 
-    // Preview panel on the freer side of the selection.
-    let side = if (spec.rect.x + spec.rect.width / 2) as f32 > chrome.output_width / 2. {
+    // The panel on the freer side of the selection.
+    let side = if (rect_now.x + rect_now.width / 2) as f32 > chrome.output_width / 2. {
         Side::Left
     } else {
         Side::Right
     };
-    // The panel entity is created up front so the bar can hold its
-    // weak handle from birth (the open_window closure just hands the
-    // pre-made entity to the new window).
-    let panel: Entity<PreviewPanel> = cx.new(PreviewPanel::new);
-    let weak_panel = panel.downgrade();
-    let preview_handle = cx.open_window(preview_options(&chrome, side), |_, _| panel.clone());
-
-    let bar_cell: std::rc::Rc<std::cell::RefCell<Option<WeakEntity<ScrollBar>>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let _bar_handle = {
-        let bounds = WindowBounds::Windowed(Bounds {
+    let panel_options = WindowOptions {
+        app_id: Some(crate::APP_ID.into()),
+        titlebar: None,
+        window_background: WindowBackgroundAppearance::Opaque,
+        focus: true,
+        display_id: chrome.display_id,
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
-            size: size(px(chrome.output_width), px(BAR_H)),
-        });
-        let window_options = WindowOptions {
-            app_id: Some(crate::APP_ID.into()),
-            titlebar: None,
-            window_background: WindowBackgroundAppearance::Opaque,
-            focus: true,
-            display_id: chrome.display_id,
-            window_bounds: Some(bounds),
-            #[cfg(target_os = "linux")]
-            kind: WindowKind::LayerShell(LayerShellOptions {
-                namespace: "shotori-scroll-bar".into(),
-                layer: Layer::Overlay,
-                anchor: Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
-                // Overlay that reserves no space: an exclusive zone would
-                // resize the scrolled window mid-capture and wreck the
-                // stitching.
-                exclusive_zone: Some(px(-1.)),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                ..Default::default()
-            }),
-            #[cfg(not(target_os = "linux"))]
-            kind: WindowKind::PopUp,
+            size: size(px(PANEL_W), px((chrome.output_height - 20.).max(120.))),
+        })),
+        #[cfg(target_os = "linux")]
+        kind: WindowKind::LayerShell(LayerShellOptions {
+            namespace: "shotori-scroll-preview".into(),
+            layer: Layer::Overlay,
+            anchor: Anchor::TOP | Anchor::BOTTOM | side_anchor(side),
+            exclusive_zone: Some(px(-1.)),
+            // The panel owns the keyboard so the shortcuts match the
+            // selection flow. NOTE: if the compositor routes wheel by
+            // keyboard focus (niri does for virtual pointers), scrolling
+            // degrades to frame-dragging — deliberately shipped both.
+            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+            margin: Some((px(10.), px(0.), px(10.), px(0.))),
             ..Default::default()
-        };
-        let cell = bar_cell.clone();
-        let weak_panel = weak_panel.clone();
-        cx.open_window(window_options, move |window, cx| {
-            cx.new(|cx| {
-                let bar = ScrollBar::new(spec, options, Some(weak_panel), window, cx);
-                *cell.borrow_mut() = Some(cx.entity().downgrade());
-                bar
-            })
+        }),
+        #[cfg(not(target_os = "linux"))]
+        kind: WindowKind::PopUp,
+        ..Default::default()
+    };
+    let panel_cell: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::WeakEntity<PreviewPanel>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let pcell = panel_cell.clone();
+    let panel = cx.open_window(panel_options, |window, cx| {
+        cx.new(|cx| {
+            let panel = PreviewPanel::new(spec, options, chrome.output_height, window, cx);
+            *pcell.borrow_mut() = Some(cx.entity().downgrade());
+            panel
         })
-    }?;
+    });
 
-    if let Ok(handle) = &preview_handle {
-        siblings.push((*handle).into());
-    }
-    if let Some(weak) = bar_cell.borrow().as_ref()
-        && let Some(bar) = weak.upgrade()
-    {
-        // the bar closes the siblings on its terminal paths
-        bar.update(cx, |bar, _| {
-            bar.siblings = siblings;
+    // The panel closes the frame on its terminal paths …
+    if let Ok(panel) = &panel {
+        let sibling = frame.as_ref().ok().map(|f| (*f).into());
+        let _ = panel.update(cx, |p, _, _| {
+            p.sibling = sibling;
         });
+    }
+    // … and the frame toolbar gets the engine + panel handles so its
+    // buttons work without cross-window action dispatch.
+    if let Some(frame) = frame_cell.borrow().as_ref().and_then(|w| w.upgrade())
+        && let Some(panel) = panel_cell.borrow().as_ref().and_then(|w| w.upgrade())
+    {
+        let controls = panel.read(cx).controls();
+        let weak_panel = panel.downgrade();
+        frame.update(cx, |f, _| f.bind(controls, weak_panel));
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn side_anchor(side: Side) -> Anchor {
+    match side {
+        Side::Left => Anchor::LEFT,
+        Side::Right => Anchor::RIGHT,
+    }
 }
 
 /// Which screen edge the preview panel docks to.
@@ -175,171 +190,292 @@ enum Side {
     Right,
 }
 
-/// The four frame strips as (x, y, w, h) in output-local logical px,
-/// each strictly outside the captured rect.
-fn frame_strips(rect: crate::model::session::ScrollRect) -> Vec<(f32, f32, f32, f32)> {
-    let (x, y) = (rect.x as f32, rect.y as f32);
-    let (w, h) = (rect.width as f32, rect.height as f32);
-    vec![
-        (x - FRAME, y - FRAME, w + 2. * FRAME, FRAME), // top
-        (x - FRAME, y + h, w + 2. * FRAME, FRAME),     // bottom
-        (x - FRAME, y, FRAME, h),                      // left
-        (x + w, y, FRAME, h),                          // right
-    ]
+// ── the region frame ─────────────────────────────────────────────────
+
+/// One full-output transparent surface drawing the region frame and
+/// owning its drag interaction.
+pub(crate) struct FrameView {
+    rect: ScrollRect,
+    shared: Arc<std::sync::Mutex<ScrollRect>>,
+    output: Size<Pixels>,
+    /// (press point, rect at press, vertical-only?) — the flag marks
+    /// drags started from the toolbar's grab button (the user drags
+    /// the frame's VERTICAL position through it).
+    drag: Option<(Point<Pixels>, ScrollRect, bool)>,
+    /// Late-bound by `launch` (the panel starts the engine after the
+    /// frame exists): toolbar exits without cross-window dispatch.
+    controls: Option<ScrollControls>,
+    panel: Option<gpui_kit::WeakEntity<PreviewPanel>>,
 }
 
-#[cfg(target_os = "linux")]
-fn strip_options(
-    chrome: &ScrollChrome,
-    x: f32,
-    y: f32,
-    size: Size<Pixels>,
-    namespace: &str,
-) -> WindowOptions {
-    WindowOptions {
-        app_id: Some(crate::APP_ID.into()),
-        titlebar: None,
-        window_background: WindowBackgroundAppearance::Opaque,
-        focus: false,
-        display_id: chrome.display_id,
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(0.), px(0.)),
-            size,
-        })),
-        kind: WindowKind::LayerShell(LayerShellOptions {
-            namespace: namespace.into(),
-            layer: Layer::Overlay,
-            anchor: Anchor::TOP | Anchor::LEFT,
-            exclusive_zone: Some(px(-1.)),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            margin: Some((
-                px(y),
-                px(chrome.output_width - x - f32::from(size.width)),
-                px(0.),
-                px(x),
-            )),
-            ..Default::default()
-        }),
-        ..Default::default()
+impl FrameView {
+    /// `shared` is the VERY Arc the engine reads per capture — drags
+    /// must write through it, not a lookalike.
+    fn new(
+        shared: Arc<std::sync::Mutex<ScrollRect>>,
+        rect: ScrollRect,
+        output_w: f32,
+        output_h: f32,
+    ) -> Self {
+        Self {
+            rect,
+            shared,
+            output: size(px(output_w), px(output_h)),
+            drag: None,
+            controls: None,
+            panel: None,
+        }
+    }
+
+    /// Late binding (see the field docs).
+    pub(crate) fn bind(
+        &mut self,
+        controls: ScrollControls,
+        panel: gpui_kit::WeakEntity<PreviewPanel>,
+    ) {
+        self.controls = Some(controls);
+        self.panel = Some(panel);
+    }
+
+    /// The chrome painter: four strokes + the toolbar. `&mut self` with
+    /// listeners (buttons need entity access).
+    fn render(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Transparent full-output surface; the strokes and toolbar are
+        // the only painted pixels. The input region (set in Render)
+        // covers only their rects — the captured content stays
+        // interactive for the app beneath.
+        let strokes = frame_strokes(self.rect);
+        let toolbar = frame_toolbar(
+            self.rect,
+            f32::from(self.output.width),
+            f32::from(self.output.height),
+        );
+        // The GRAB button: press-and-hold enters drag mode — the frame
+        // then follows the mouse's vertical position until release
+        // (the existing window-level drag listeners carry the gesture,
+        // implicit grab included). Same machinery as dragging a strip,
+        // flagged vertical-only.
+        let grab = cx.listener(|this, event: &MouseDownEvent, _, _| {
+            this.drag = Some((event.position, this.rect, true));
+        });
+        let copy = cx.listener(|this, _: &MouseDownEvent, _, _| {
+            if let Some(controls) = &this.controls {
+                controls.finish(); // Finish ≡ finish+copy (panel default)
+            }
+        });
+        let save = cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            if let Some(panel) = this.panel.clone()
+                && let Some(panel) = panel.upgrade()
+            {
+                panel.update(cx, |panel, cx| panel.request_save(cx));
+            }
+        });
+        let cancel = cx.listener(|this, _: &MouseDownEvent, _, _| {
+            if let Some(controls) = &this.controls {
+                controls.cancel();
+            }
+        });
+        div()
+            .size_full()
+            // FIRST child: the sink canvas must sit under the toolbar
+            // in paint order so the buttons win the element hit-test.
+            .child(pointer_sink(cx.entity().downgrade(), self.output))
+            .children(strokes.iter().map(|s| {
+                div()
+                    .absolute()
+                    .left(s.origin.x)
+                    .top(s.origin.y)
+                    .w(s.size.width)
+                    .h(s.size.height)
+                    .bg(rgba(theme::c().accent))
+            }))
+            .child(
+                div()
+                    .id("frame-toolbar")
+                    .absolute()
+                    .left(toolbar.origin.x)
+                    .top(toolbar.origin.y)
+                    .w(toolbar.size.width)
+                    .h(toolbar.size.height)
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .rounded(px(8.))
+                    .bg(rgba(theme::c().toolbar_bg))
+                    .border_1()
+                    .border_color(rgba(theme::c().pin_border))
+                    .child(hold_button("frame-tb-grab", "⇕", 34., grab))
+                    .child(hold_button("frame-tb-copy", "Copy", 52., copy))
+                    .child(hold_button("frame-tb-save", "Save", 52., save))
+                    .child(hold_button("frame-tb-cancel", "✕", 26., cancel)),
+            )
     }
 }
 
-#[cfg(target_os = "linux")]
-fn preview_options(chrome: &ScrollChrome, side: Side) -> WindowOptions {
-    let top = BAR_H + 10.;
-    let bottom = 10.;
-    let height = (chrome.output_height - top - bottom).max(120.);
-    let (anchor, margin) = match side {
-        Side::Right => (
-            Anchor::TOP | Anchor::BOTTOM | Anchor::RIGHT,
-            (px(top), px(0.), px(bottom), px(0.)),
-        ),
-        Side::Left => (
-            Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT,
-            (px(top), px(0.), px(bottom), px(0.)),
-        ),
-    };
-    WindowOptions {
-        app_id: Some(crate::APP_ID.into()),
-        titlebar: None,
-        window_background: WindowBackgroundAppearance::Opaque,
-        focus: false,
-        display_id: chrome.display_id,
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(0.), px(0.)),
-            size: size(px(PANEL_W), px(height)),
-        })),
-        kind: WindowKind::LayerShell(LayerShellOptions {
-            namespace: "shotori-scroll-preview".into(),
-            layer: Layer::Overlay,
-            anchor,
-            exclusive_zone: Some(px(-1.)),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            margin: Some(margin),
-            ..Default::default()
-        }),
-        ..Default::default()
+/// One toolbar button. Press semantics for every entry: the press
+/// starts the effect (the grab button's drag ends on mouse-up via the
+/// window listeners).
+fn hold_button<F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>(
+    id: &'static str,
+    label: &'static str,
+    w: f32,
+    on_press: F,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(w))
+        .flex_1()
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_around()
+        .rounded(px(6.))
+        .text_size(px(12.))
+        .text_color(rgba(theme::c().btn_text))
+        .hover(|s| s.bg(rgba(theme::c().btn_hover_bg)))
+        .on_mouse_down(MouseButton::Left, on_press)
+        .child(label)
+}
+
+/// The invisible canvas that owns the frame window's pointer listeners.
+///
+/// `window.on_mouse_event` registrations live for ONE frame's event
+/// dispatch — they must be re-attached during every paint (the
+/// overlay's `pointer_event_sink` lesson; the v1.1 frame wired them
+/// once in `new` and every registration was dead by the first event,
+/// so neither strip drags nor the ⇕ button ever moved the frame).
+/// Window-level, not element handlers: the implicit grab delivers the
+/// whole gesture — including out-of-bounds releases — to the press
+/// window, and element hit-testing would drop exactly those.
+fn pointer_sink(weak: gpui_kit::WeakEntity<FrameView>, output: Size<Pixels>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, (), window, _| {
+            let sink = weak.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                let _ = sink.update(cx, |this, _| {
+                    // A press on a grab BAND starts a free drag. The ⇕
+                    // button starts its own vertical-only drag in its
+                    // element handler — its press position is over the
+                    // toolbar, never a band, so the two cannot collide.
+                    if frame_grab_bands(this.rect)
+                        .iter()
+                        .any(|band| band.contains(&event.position))
+                    {
+                        this.drag = Some((event.position, this.rect, false));
+                    }
+                });
+            });
+            let sink = weak.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let _ = sink.update(cx, |this, cx| {
+                    let Some((start, origin, vertical_only)) = this.drag else {
+                        return;
+                    };
+                    let (dx, dy) = if vertical_only {
+                        (0., f32::from(event.position.y - start.y))
+                    } else {
+                        (
+                            f32::from(event.position.x - start.x),
+                            f32::from(event.position.y - start.y),
+                        )
+                    };
+                    let next = clamp_moved_rect(
+                        origin,
+                        dx,
+                        dy,
+                        f32::from(output.width),
+                        f32::from(output.height),
+                    );
+                    this.rect = next;
+                    *this
+                        .shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+                    cx.notify();
+                });
+            });
+            let sink = weak.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                let _ = sink.update(cx, |this, cx| {
+                    if this.drag.take().is_some() {
+                        cx.notify();
+                    }
+                });
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+impl Render for FrameView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The input region must track the moving strokes and toolbar —
+        // re-set every frame (cheap), same-source geometry as the
+        // visuals.
+        let mut hit: Vec<Bounds<Pixels>> = frame_grab_bands(self.rect).into();
+        hit.push(frame_toolbar(
+            self.rect,
+            f32::from(self.output.width),
+            f32::from(self.output.height),
+        ));
+        window.set_input_region(Some(&hit));
+        FrameView::render(self, cx)
     }
 }
 
-/// One solid frame strip.
-struct FrameStrip {
-    accent: u32,
-}
+// ── the preview panel ────────────────────────────────────────────────
 
-impl Render for FrameStrip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().bg(rgba(self.accent))
-    }
-}
-
-/// The live preview: the stitched image's growing edge, streamed by the
-/// engine as downscaled tails.
 pub(crate) struct PreviewPanel {
     focus: FocusHandle,
+    controls: Option<ScrollControls>,
+    state: PanelState,
+    /// Ctrl+S was pressed: the finished canvas goes to the save flow
+    /// instead of the clipboard.
+    saving: bool,
+    /// The region-frame window, closed on every terminal path.
+    sibling: Option<AnyWindowHandle>,
     image: Option<Arc<RenderImage>>,
-    label: String,
+    /// Viewport highlight in PREVIEW-row coordinates (already mapped by
+    /// the engine): (top, height).
+    viewport: (u32, u32),
+    preview_rows: u32,
+    /// The preview bitmap's width in px (for the aspect-derived display
+    /// height — see [`PREVIEW_IMG_W`]).
+    preview_cols: u32,
+    /// The host output's logical height — the preview column's visible
+    /// window derives from it (the panel is anchored TOP|BOTTOM with
+    /// 10 px margins).
+    output_h: f32,
+}
+
+enum PanelState {
+    /// Engine thread is connecting / capturing the first frame.
+    Starting,
+    /// Capturing.
+    Running,
+    /// Finishing on request; the canvas is on its way.
+    Finishing,
+    /// A terminal event fired; the window is going away.
+    Done,
 }
 
 impl PreviewPanel {
-    fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            focus: cx.focus_handle(),
-            image: None,
-            label: "waiting for frames…".into(),
-        }
-    }
-
-    fn on_preview(&mut self, width: u32, height: u32, rgba: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.image = Some(image_util::rgba_to_render_image(
-            (*rgba).clone(),
-            width,
-            height,
-        ));
-        self.label = format!("{width}×{height}");
-        cx.notify();
-    }
-}
-
-impl Render for PreviewPanel {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // Panel chrome: a dark card; the image scales to the panel width
-        // and anchors to the bottom (the growing edge stays put).
-        let mut card = div()
-            .id("shotori-scroll-preview")
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .flex_col()
-            .p_2()
-            .gap_2()
-            .bg(rgba(theme::c().toolbar_bg))
-            .border_1()
-            .border_color(rgba(theme::c().pin_border))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgba(theme::c().btn_text))
-                    .child(format!("Long screenshot · {}", self.label)),
-            )
-            .child(div().flex_1());
-        if let Some(image) = self.image.clone() {
-            card = card.child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .child(img(image).w_full().object_fit(ObjectFit::ScaleDown)),
-            );
-        }
-        card
-    }
-}
-
-impl ScrollBar {
     fn new(
         spec: ScrollSpec,
         options: StitchOptions,
-        preview: Option<WeakEntity<PreviewPanel>>,
+        output_h: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -349,7 +485,7 @@ impl ScrollBar {
 
         // A spawn failure (not a compositor failure — those arrive as
         // Failed events) still yields a live event stream carrying the
-        // error, so the bar's lifecycle code stays single-shaped.
+        // error, so the lifecycle code stays single-shaped.
         let (controls, events) = match scroll_capture::start(spec, options) {
             Ok(pair) => pair,
             Err(e) => {
@@ -365,10 +501,14 @@ impl ScrollBar {
         let this = Self {
             focus: focus_handle,
             controls: Some(controls),
-            state: BarState::Starting,
+            state: PanelState::Starting,
             saving: false,
-            siblings: Vec::new(),
-            preview,
+            sibling: None,
+            image: None,
+            viewport: (0, 0),
+            preview_rows: 0,
+            preview_cols: 1,
+            output_h,
         };
 
         // The event pump: engine → entity updates; ends with the channel
@@ -378,7 +518,7 @@ impl ScrollBar {
         cx.spawn(async move |_, cx| {
             while let Ok(event) = events.recv().await {
                 if weak
-                    .update(cx, |bar, cx| bar.on_event(event, &handle, cx))
+                    .update(cx, |panel, cx| panel.on_event(event, &handle, cx))
                     .is_err()
                 {
                     break; // window gone; nothing left to update
@@ -389,8 +529,24 @@ impl ScrollBar {
         this
     }
 
-    fn close_siblings(&mut self, cx: &mut Context<Self>) {
-        for handle in std::mem::take(&mut self.siblings) {
+    /// The engine handle, for the frame toolbar's late binding.
+    pub(crate) fn controls(&self) -> ScrollControls {
+        self.controls.clone().unwrap_or_else(ScrollControls::dead)
+    }
+
+    /// Finish into the SAVE flow (the frame toolbar's Save button —
+    /// no action dispatch across windows, a direct entity call).
+    pub(crate) fn request_save(&mut self, cx: &mut Context<Self>) {
+        if let Some(controls) = &self.controls {
+            self.saving = true;
+            self.state = PanelState::Finishing;
+            controls.finish();
+            cx.notify();
+        }
+    }
+
+    fn close_sibling(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.sibling.take() {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
@@ -398,35 +554,49 @@ impl ScrollBar {
     fn on_event(&mut self, event: ScrollEvent, window: &AnyWindowHandle, cx: &mut Context<Self>) {
         match event {
             ScrollEvent::Started { .. } => {
-                self.state = BarState::Running { stitched: 0 };
+                self.state = PanelState::Running;
                 cx.notify();
             }
-            ScrollEvent::Progress { stitched } => {
-                if let BarState::Running { stitched: rows } = &mut self.state {
-                    *rows = stitched;
-                    cx.notify();
-                }
+            ScrollEvent::Progress { .. } => {
+                // Row counters were panel status copy once; the panel is
+                // a pure preview now and progress rides the image stream.
+            }
+            ScrollEvent::Viewport { top, height } => {
+                // The pixel-free twin of Preview's viewport fields: the
+                // highlight follows frame drags without image resend.
+                self.viewport = (top, height);
+                cx.notify();
             }
             ScrollEvent::Preview {
                 width,
                 height,
                 rgba,
+                tail_start: _,
+                viewport_top,
+                viewport_height,
             } => {
-                if let Some(preview) = self.preview.clone()
-                    && let Some(panel) = preview.upgrade()
-                {
-                    panel.update(cx, |panel, cx| panel.on_preview(width, height, rgba, cx));
-                }
+                self.image = Some(image_util::rgba_to_render_image(
+                    (*rgba).clone(),
+                    width,
+                    height,
+                ));
+                self.preview_rows = height;
+                self.preview_cols = width.max(1);
+                // The engine already mapped the span into PREVIEW rows
+                // (top clamped inside the tail); the panel only turns
+                // rows into fractions of the preview height.
+                self.viewport = (viewport_top, viewport_height);
+                cx.notify();
             }
             ScrollEvent::Finished {
                 width,
                 height,
                 rgba,
             } => {
-                if matches!(self.state, BarState::Done) {
+                if matches!(self.state, PanelState::Done) {
                     return;
                 }
-                self.state = BarState::Done;
+                self.state = PanelState::Done;
                 cx.notify();
                 self.controls = None;
                 let rgba = rgba.clone();
@@ -449,7 +619,7 @@ impl ScrollBar {
     }
 
     /// The default exit: PNG → clipboard (background, never blocking
-    /// the bar) → notification → the windows close LAST, so the async
+    /// the panel) → notification → the windows close LAST, so the async
     /// copy always completes while the app loop still runs.
     fn copy_and_close(
         &mut self,
@@ -461,7 +631,7 @@ impl ScrollBar {
     ) {
         let rgba = rgba.clone();
         let window = *window;
-        self.close_siblings(cx);
+        self.close_sibling(cx);
         cx.spawn(async move |_, cx| {
             let result = cx
                 .background_executor()
@@ -502,7 +672,7 @@ impl ScrollBar {
     ) {
         crate::save_dialog::stash(width, height, rgba.to_vec());
         cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
-        self.close_siblings(cx);
+        self.close_sibling(cx);
         let _ = window.update(cx, |_, window, _| window.remove_window());
         cx.spawn(async move |_, cx| {
             cx.background_executor()
@@ -514,25 +684,25 @@ impl ScrollBar {
     }
 
     fn close(&mut self, window: &AnyWindowHandle, cx: &mut Context<Self>) {
-        self.state = BarState::Done;
-        self.close_siblings(cx);
+        self.state = PanelState::Done;
+        self.close_sibling(cx);
         let _ = window.update(cx, |_, window, _| window.remove_window());
         cx.notify();
     }
 
-    /// [Finish]: stop the engine now; whatever is stitched is the
-    /// deliverable.
+    /// Enter / Ctrl+C / [Copy]: stop the engine now; whatever is
+    /// stitched is the deliverable.
     fn finish(&mut self, _: &ScrollFinish, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(controls) = &self.controls
-            && !matches!(self.state, BarState::Done)
+            && !matches!(self.state, PanelState::Done)
         {
-            self.state = BarState::Finishing;
+            self.state = PanelState::Finishing;
             controls.finish();
             cx.notify();
         }
     }
 
-    /// [Cancel]: discard everything.
+    /// Esc / [Cancel]: discard everything.
     fn cancel(&mut self, _: &ScrollCancel, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(controls) = self.controls.take() {
             controls.cancel();
@@ -544,87 +714,93 @@ impl ScrollBar {
     fn save(&mut self, _: &ScrollSave, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(controls) = &self.controls {
             self.saving = true;
-            self.state = BarState::Finishing;
+            self.state = PanelState::Finishing;
             controls.finish();
             cx.notify();
         }
     }
 }
 
-impl Render for ScrollBar {
+impl Render for PreviewPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, running) = match &self.state {
-            BarState::Starting => ("Starting scroll capture…".to_string(), false),
-            BarState::Running { stitched } => {
-                (format!("Scroll the content — {stitched} px captured"), true)
-            }
-            BarState::Finishing => ("Finishing…".to_string(), false),
-            BarState::Done => ("Done".to_string(), false),
-        };
+        let _ = &self.state; // Starting/Finishing/Done differ only in logic now
+        // The panel is a PURE PREVIEW (user-designed): the frame's
+        // toolbar carries the buttons, the keyboard shortcuts stay
+        // bound here invisibly. When the long image is TALLER than the
+        // panel, the visible window FOLLOWS the viewport highlight —
+        // a bottom-anchored image let the highlight scroll out of view
+        // (clipped away entirely at v_top = 0: the "no upward sync"
+        // report, where the highlight was pinned to an off-screen
+        // image top). Fitting images still anchor to the bottom (the
+        // growing edge stays put).
+        let mut preview_area = div().flex_1().relative().overflow_hidden();
+        if let Some(image) = self.image.clone() {
+            let rows = self.preview_rows.max(1) as f32;
+            let (v_top, v_h) = self.viewport;
+            // Viewport events reference the CURRENT canvas while this
+            // image is up to one preview-interval stale — v_top can
+            // exceed `rows` mid-scroll. Cap below 1.0 so the height
+            // clamp's min ≤ max always holds (an uncapped pair once
+            // panicked the render pass: the "scrolling crashes" bug).
+            let top_frac = (v_top as f32 / rows).min(0.99);
+            let h_frac = (v_h as f32 / rows).clamp(0.01, 1. - top_frac);
+            // EXPLICIT height from the known aspect — intrinsic sizing
+            // is the HiDPI trap (see PREVIEW_IMG_W). The wrapper then
+            // hugs exactly this box and the fractions below are
+            // fractions of the IMAGE.
+            let img_h = (PREVIEW_IMG_W * self.preview_rows as f32 / self.preview_cols as f32)
+                .clamp(1., 8000.);
+            // The visible column: panel window height (output minus the
+            // 10 px layer-shell margins) minus padding and border.
+            let area_h = (self.output_h - 20. - 2. * (PANEL_PAD + PANEL_BORDER)).max(60.);
+            let y_off = if img_h <= area_h {
+                area_h - img_h // bottom-anchored, as before
+            } else {
+                // Scroll the image so the highlight sits centered in
+                // the visible window, clamped to the image's extent.
+                let hl_center = (top_frac + h_frac / 2.) * img_h;
+                (area_h / 2. - hl_center).clamp(area_h - img_h, 0.)
+            };
+            preview_area = preview_area.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(y_off))
+                    .w_full()
+                    .child(img(image).w_full().h(px(img_h)))
+                    // viewport highlight — where the capture frame sits
+                    // in the long image (accent outline, image-relative)
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .w_full()
+                            .top(relative(top_frac))
+                            .h(relative(h_frac))
+                            .border_1()
+                            .border_color(rgba(theme::c().accent))
+                            .rounded_sm(),
+                    ),
+            );
+        }
 
         div()
-            .id("shotori-scroll-bar")
+            .id("shotori-scroll-panel")
             .key_context("ShotoriScroll")
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .items_center()
-            .justify_between()
-            .px_4()
+            .flex_col()
+            .p_2()
             .bg(rgba(theme::c().toolbar_bg))
-            .border_b_1()
-            .border_color(rgba(theme::c().pin_border))
+            // Deliberately NOT pin_border: that is accent-orange at 60%
+            // alpha and reads as a giant "highlight" around the whole
+            // panel — the user kept mistaking it for the viewport box.
+            .border_1()
+            .border_color(rgba(0xFFFFFF20))
             .on_action(cx.listener(Self::finish))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::save))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().size(px(8.)).rounded_full().bg(rgba(if running {
-                        theme::c().accent
-                    } else {
-                        theme::c().pin_border
-                    })))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgba(theme::c().btn_text))
-                            .child(label),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(bar_button("scroll-finish", "Finish ⏎", ScrollFinish))
-                    .child(bar_button("scroll-cancel", "Cancel Esc", ScrollCancel)),
-            )
+            .child(preview_area)
     }
-}
-
-fn bar_button<A: Action + Clone + 'static>(
-    id: &'static str,
-    label: &'static str,
-    action: A,
-) -> Button {
-    Button::new(id)
-        .accessibility_label(label)
-        .px_3()
-        .py_1()
-        .rounded(px(6.))
-        .text_size(px(13.))
-        .text_color(rgba(theme::c().btn_text))
-        .border_1()
-        .border_color(rgba(theme::c().pin_border))
-        .hover(|s| s.bg(rgba(theme::c().btn_hover_bg)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .on_click(move |_, window, cx| {
-            window.dispatch_action(Box::new(action.clone()), cx);
-        })
-        .child(label)
 }

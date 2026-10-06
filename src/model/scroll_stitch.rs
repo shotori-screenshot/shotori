@@ -38,12 +38,21 @@
 //!   still becomes the comparison anchor. Differencing a mid-animation
 //!   tear against the last *stable* frame forever would never recover;
 //!   riding through the change re-anchors on the settled content.
+//! - **Dual anchor** — the riding anchor above is only the FALLBACK
+//!   base. Matching happens against the last frame ACCEPTED into the
+//!   canvas first: a riding anchor sits at a position the canvas never
+//!   advanced to, so a dy measured from it silently drops the band
+//!   between the last accept and the anchor (the "lost band" that left
+//!   the stitched page shorter than the real one). The stable base
+//!   recovers the full displacement whenever the step fits inside the
+//!   matcher's window — which every real scroll step does.
 //!
 //! Known v1 limitations (deliberate, see ROADMAP): integer offsets only
 //! (sub-pixel smooth scrolling can drop/duplicate one seam row per
-//! step), no sticky-header region classification (a fixed navbar is
-//! duplicated along the seam — users should select below it), single
-//! contiguous canvas (no tiling for multi-hundred-MB captures).
+//! step), sticky chrome taller than the edge trim (~6% of the viewport
+//! top) still poisons matching (a fixed navbar is duplicated along the
+//! seam — select below it), single contiguous canvas (no tiling for
+//! multi-hundred-MB captures).
 
 /// Tuning knobs for [`ScrollStitcher`]. Defaults are tuned for text
 /// content under *our* auto-scroll (small, roughly known steps); manual
@@ -286,6 +295,17 @@ struct OffsetEstimate {
     runner_up: f32,
 }
 
+/// One matcher verdict against a specific comparison base (see
+/// `ScrollStitcher::place` for the dual-anchor selection).
+enum Placement {
+    /// A usable offset (cost and margin pass, dy ≠ 0).
+    Match(OffsetEstimate),
+    /// Cost passes at dy 0 — content changed without moving.
+    NoMotion,
+    /// Unusable, with the taxonomy reason.
+    Reject(StitchReject),
+}
+
 /// Scan all admissible offsets for the best alignment between the anchor
 /// frame's profile (`prev`) and the incoming frame's (`cur`).
 ///
@@ -307,35 +327,59 @@ fn estimate_offset(
         return None;
     }
     let stride = cur.stride;
+    // Sticky-edge trim: fixed chrome inside the selection (site navbars,
+    // toolbar strips) breaks the row-translation assumption — a ~4%
+    // fixed band alone pushes the mean cost past the threshold and
+    // EVERY frame rejects (the "scrolled up past the site header and
+    // the preview stopped syncing" report: log showed one Prepend then
+    // an unbroken run of HighResidual). Edges leave the SCAN only — dy
+    // semantics are unchanged (translation is uniform below the band)
+    // and the canvas still writes whole frames. Small frames (tests,
+    // tiny selections) keep every row: there is no budget to spare.
+    let (trim_top, trim_bot) = if h >= 200 {
+        ((h / 16).min(96), (h / 48).min(32))
+    } else {
+        (0, 0)
+    };
     let max_motion = ((h as f32) * options.max_motion_ratio) as i32;
-    let max_admissible = max_motion.min(h - options.min_overlap as i32);
+    let max_admissible = max_motion.min(h - trim_top - trim_bot - options.min_overlap as i32);
     if max_admissible < 0 {
         return None;
     }
 
     let cost = |d: i32| -> f32 {
-        let overlap_top = h - d.max(0); // exclusive upper bound on cur rows
-        let first = ((-d).max(0) as usize).div_ceil(cur.step) * cur.step;
-        let mut sum = 0u64;
-        let mut compared = 0usize;
+        let overlap_top = h - trim_bot - d.max(0); // exclusive upper bound on cur rows
+        let first = (((-d).max(0) as usize).div_ceil(cur.step) * cur.step).max(trim_top as usize);
+        // Per-row means, then a TRIMMED average: the worst ~1/7 of rows
+        // drops out. Fixed chrome inside the selection (a site navbar,
+        // a toolbar strip) is misaligned under every translation and
+        // would otherwise push the mean past the threshold — one ~4%
+        // band rejected every frame ("scrolled up to the navbar and
+        // the preview stopped syncing", log: unbroken HighResidual).
+        // Real tears (half the frame misplaced) stay far above any
+        // threshold; exact matches are 0 either way.
+        let mut row_sums: Vec<u32> = Vec::with_capacity(16);
         let mut j = first;
         while j < overlap_top as usize {
             let c = &cur.data[j * stride..(j + 1) * stride];
             let pj = (j as i32 + d) as usize;
             let p = &prev.data[pj * stride..(pj + 1) * stride];
-            sum += c
-                .iter()
-                .zip(p.iter())
-                .map(|(a, b)| u64::from(a.abs_diff(*b)))
-                .sum::<u64>();
-            compared += stride;
+            row_sums.push(
+                c.iter()
+                    .zip(p.iter())
+                    .map(|(a, b)| u32::from(a.abs_diff(*b)))
+                    .sum(),
+            );
             j += cur.step;
         }
-        if compared == 0 {
-            f32::INFINITY
-        } else {
-            sum as f32 / compared as f32
+        let n = row_sums.len();
+        if n == 0 {
+            return f32::INFINITY;
         }
+        let keep = n - n / 7;
+        row_sums.select_nth_unstable(keep - 1);
+        let total: u32 = row_sums.iter().take(keep).sum();
+        total as f32 / (keep as f32 * stride as f32)
     };
 
     // Collect every admissible candidate, then pick the best and the best
@@ -384,6 +428,12 @@ pub(crate) struct ScrollStitcher {
     /// duplicate test memcmp's it).
     anchor_raw: Vec<u8>,
     anchor_profile: RowProfile,
+    /// The profile of the last frame ACCEPTED into the canvas. The
+    /// FIRST comparison base in [`ScrollStitcher::place`] — see the
+    /// module docs ("dual anchor"): a clean frame after a tear matches
+    /// it directly and the full displacement lands, where the riding
+    /// anchor would swallow the in-between band.
+    stable_profile: RowProfile,
     /// Diagnostics for the scroll loop's logs / progress UI.
     frames_pushed: usize,
     frames_accepted: usize,
@@ -419,7 +469,8 @@ impl ScrollStitcher {
                 max_position: 0,
             },
             anchor_raw: first_frame.to_vec(),
-            anchor_profile: profile,
+            anchor_profile: profile.clone(),
+            stable_profile: profile,
             frames_pushed: 1,
             frames_accepted: 1,
         })
@@ -446,6 +497,13 @@ impl ScrollStitcher {
     /// the number a progress UI reports as "captured".
     pub(crate) fn captured_extent(&self) -> u32 {
         self.state.max_position as u32
+    }
+
+    /// Where the capture viewport currently sits on the canvas:
+    /// (top row, row count). Feeds the preview's viewport highlight —
+    /// moving the region frame or scrolling both travel through here.
+    pub(crate) fn viewport_span(&self) -> (u32, u32) {
+        (self.state.position.max(0) as u32, self.viewport_height)
     }
 
     /// (frames pushed, frames folded into the canvas) — health signals
@@ -479,6 +537,23 @@ impl ScrollStitcher {
         outcome
     }
 
+    /// One matcher verdict against a specific comparison base.
+    fn classify(&self, base: &RowProfile, cur: &RowProfile) -> Placement {
+        let Some(estimate) = estimate_offset(base, cur, &self.options) else {
+            return Placement::Reject(StitchReject::InsufficientOverlap);
+        };
+        if estimate.cost > self.options.cost_threshold {
+            return Placement::Reject(StitchReject::HighResidual);
+        }
+        if estimate.dy == 0 {
+            return Placement::NoMotion;
+        }
+        if estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
+            return Placement::Reject(StitchReject::Ambiguous);
+        }
+        Placement::Match(estimate)
+    }
+
     fn place(&mut self, frame: &[u8], profile: &RowProfile) -> StitchOutcome {
         // Low-information guard (Snow Shot's "low-information" stage): a
         // near-uniform anchor cannot be aligned by any translation — the
@@ -487,20 +562,26 @@ impl ScrollStitcher {
         if self.anchor_profile.row_mean_spread() <= 1 {
             return StitchOutcome::NoMotion;
         }
-        let Some(estimate) = estimate_offset(&self.anchor_profile, profile, &self.options) else {
-            return StitchOutcome::Rejected(StitchReject::InsufficientOverlap);
+        // Dual-anchor selection. The riding anchor (every non-duplicate
+        // frame, INCLUDING rejects) sits at a position the canvas never
+        // advanced to — accepting a dy measured from it silently drops
+        // the band between the last accept and the anchor (the "lost
+        // band" that left the stitched page shorter than the real one,
+        // user-visible as the preview not matching the frame). The last
+        // ACCEPTED frame is therefore tried FIRST: a clean frame after
+        // a tear matches it directly and the full displacement lands.
+        // The riding anchor remains the fallback for motion beyond the
+        // stable window — a jump no single bridge could cover — where
+        // the band loss is the documented, unavoidable cost.
+        let estimate = match self.classify(&self.stable_profile, profile) {
+            Placement::Match(e) => e,
+            Placement::NoMotion => return StitchOutcome::NoMotion,
+            Placement::Reject(_) => match self.classify(&self.anchor_profile, profile) {
+                Placement::Match(e) => e,
+                Placement::NoMotion => return StitchOutcome::NoMotion,
+                Placement::Reject(reason) => return StitchOutcome::Rejected(reason),
+            },
         };
-        if estimate.cost > self.options.cost_threshold {
-            // Nothing aligns: the frame is torn between two positions
-            // (animation) or the content itself changed (navigation).
-            return StitchOutcome::Rejected(StitchReject::HighResidual);
-        }
-        if estimate.dy == 0 {
-            return StitchOutcome::NoMotion;
-        }
-        if estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
-            return StitchOutcome::Rejected(StitchReject::Ambiguous);
-        }
 
         let (next, branch, growth) = self.state.transition(estimate.dy);
         if self.viewport_height as u64 + next.max_position as u64 > self.options.max_height as u64 {
@@ -528,6 +609,8 @@ impl ScrollStitcher {
         self.canvas[dst..dst + frame_bytes].copy_from_slice(frame);
         self.state = next;
         self.frames_accepted += 1;
+        // The accepted frame is the new stable base (see `place`).
+        self.stable_profile = profile.clone();
         match branch {
             Branch::Append => StitchOutcome::Appended {
                 dy: estimate.dy.unsigned_abs(),
@@ -545,14 +628,16 @@ impl ScrollStitcher {
 /// Box-filter downscale of a canvas TAIL for the live preview panel:
 /// integer factor `k = ceil(width / target_w)` keeps the aspect, and
 /// only the last `max_rows` canvas rows are included (the panel watches
-/// the growing edge). Returns `(width, height, rgba)`.
+/// the growing edge). Returns `(tail_start, width, height, rgba)` —
+/// `tail_start` is the canvas row the preview's first row corresponds
+/// to, so the panel can map the live viewport span onto the preview.
 pub fn preview_tail(
     rgba: &[u8],
     width: u32,
     height: u32,
     target_w: u32,
     max_rows: u32,
-) -> (u32, u32, Vec<u8>) {
+) -> (u32, u32, u32, Vec<u8>) {
     let k = ((width as f32) / target_w.max(1) as f32).ceil().max(1.0) as u32;
     let pw = width.div_ceil(k);
     let src_rows = (height.min(max_rows.saturating_mul(k))).max(1);
@@ -585,7 +670,7 @@ pub fn preview_tail(
             }
         }
     }
-    (pw, ph, out)
+    (y0, pw, ph, out)
 }
 
 #[cfg(test)]
@@ -654,7 +739,8 @@ mod tests {
                 rgba[i..i + 4].copy_from_slice(&color);
             }
         }
-        let (pw, ph, out) = preview_tail(&rgba, w, h, 2, 1); // max_rows=1, k=4 → last 4 rows
+        let (tail_start, pw, ph, out) = preview_tail(&rgba, w, h, 2, 1); // max_rows=1, k=4 → last 4 rows
+        assert_eq!(tail_start, 4);
         assert_eq!((pw, ph), (2, 1));
         assert!(
             out.as_chunks::<4>()
@@ -666,7 +752,8 @@ mod tests {
 
         // Without the tail cap the whole canvas is covered: the first
         // preview row averages the red half, the second the blue half.
-        let (pw2, ph2, out2) = preview_tail(&rgba, w, h, 2, 100);
+        let (tail_start2, pw2, ph2, out2) = preview_tail(&rgba, w, h, 2, 100);
+        assert_eq!(tail_start2, 0);
         assert_eq!((pw2, ph2), (2, 2));
         let blocks = out2.as_chunks::<4>().0;
         assert!(blocks.first().is_some_and(|p| p[0] == 255 && p[2] == 0));
@@ -826,9 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn torn_animation_frames_reject_until_a_clean_pair_recovers() {
+    fn torn_frames_reject_but_the_settled_frame_recovers_the_full_step() {
         // A capture mid-smooth-scroll: the top half still shows the old
-        // position, the bottom half the new one. Nothing aligns.
+        // position, the bottom half the new one. Nothing aligns — and
+        // the frame becomes the riding anchor.
         let old = frame_at(0);
         let settled = frame_at(20);
         let torn: Vec<u8> = [
@@ -841,28 +929,138 @@ mod tests {
             s.push(&torn),
             StitchOutcome::Rejected(StitchReject::HighResidual)
         );
-        // The settled frame still differs from the torn anchor too much
-        // (half of it matched the OTHER position) — also rejected, and
-        // becomes the new anchor.
-        assert_eq!(
-            s.push(&settled),
-            StitchOutcome::Rejected(StitchReject::HighResidual)
+        // The settled frame matches the last ACCEPTED frame directly
+        // (dual anchor), so the FULL 20-row step lands — no band lost.
+        // (The single-anchor design swallowed the 20 rows between the
+        // accept and the riding anchor — the stitched page came out
+        // shorter than the real one.)
+        let out = s.push(&settled);
+        assert!(
+            matches!(out, StitchOutcome::Appended { dy: 20, growth: 20 }),
+            "{out:?}"
         );
-        // The next clean step now matches against the settled anchor:
-        // frame(40) sits 20 rows below frame(20), so the canvas grows by
-        // 20 (not 40 — the rejected frames contributed nothing). Known
-        // cost of riding through a tear: the 20-row band only the
-        // rejected frames showed (page rows 20..40) is lost for good;
-        // the frame-40 write covers the seam with newer content.
         let out = s.push(&frame_at(40));
         assert!(
             matches!(out, StitchOutcome::Appended { dy: 20, growth: 20 }),
             "{out:?}"
         );
-        assert_eq!(s.dimensions(), (W, H + 20));
-        let mut expected = expected_canvas(0, 0)[..20 * W as usize * 4].to_vec();
-        expected.extend_from_slice(&expected_canvas(40, 40));
-        assert_eq!(s.canvas(), expected.as_slice());
+        assert_eq!(s.dimensions(), (W, 40 + H));
+        assert_eq!(s.canvas(), expected_canvas(0, 40).as_slice());
+    }
+
+    #[test]
+    fn sticky_top_chrome_still_matches_through_the_content() {
+        // A fixed site header occupies the top 48 rows of every frame;
+        // the content scrolls beneath it. Under translation the band is
+        // misaligned somewhere in the comparison window for EVERY
+        // candidate — the untrimmed mean rejected every frame (the
+        // "scrolled up to the navbar and sync died" report). The
+        // trimmed row mean must absorb it in all three directions.
+        // H2 clears the edge-trim gate; the header is ~6% of the rows,
+        // well under the 1/7 trim.
+        const H2: u32 = 800;
+        let hdr = 48u32;
+        let header = source_row(999_999).repeat(W as usize);
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            for _ in 0..hdr {
+                v.extend_from_slice(&header);
+            }
+            for row in top..top + H2 - hdr {
+                v.extend_from_slice(&source_row(row).repeat(W as usize));
+            }
+            v
+        };
+
+        // Down, then back up (Contained) — the exact gesture from the
+        // bug report.
+        let mut s = ScrollStitcher::new(W, H2, &frame(0), StitchOptions::default()).unwrap();
+        let out = s.push(&frame(60));
+        assert!(
+            matches!(out, StitchOutcome::Appended { dy: 60, growth: 60 }),
+            "{out:?}"
+        );
+        let out = s.push(&frame(0));
+        assert!(
+            matches!(out, StitchOutcome::Contained { dy: -60 }),
+            "{out:?}"
+        );
+
+        // Up past the start of the canvas (Prepend) through the band.
+        let mut s = ScrollStitcher::new(W, H2, &frame(100), StitchOptions::default()).unwrap();
+        s.push(&frame(160));
+        let out = s.push(&frame(40));
+        assert!(
+            matches!(
+                out,
+                StitchOutcome::Prepended {
+                    dy: 120,
+                    growth: 60
+                }
+            ),
+            "{out:?}"
+        );
+        // The canvas covers source rows 40..160+H2-hdr; the viewport
+        // highlight must be back at the very top.
+        assert_eq!(s.viewport_span().0, 0);
+    }
+
+    #[test]
+    fn jumps_beyond_the_stable_window_fall_back_to_the_riding_anchor() {
+        // A CLEAN frame can be rejected too — here by jumping beyond the
+        // matcher's window from the last accept (0 → 70 > 0.6 × H). It
+        // still becomes the riding anchor. The next frame (100) is also
+        // beyond the stable window but 30 rows from that anchor: the
+        // fallback accepts it with the anchor-relative dy — losing the
+        // 70-row band nothing could bridge (the documented cost).
+        let mut s = stitcher();
+        assert_eq!(
+            s.push(&frame_at(70)),
+            StitchOutcome::Rejected(StitchReject::HighResidual)
+        );
+        let out = s.push(&frame_at(100));
+        assert!(
+            matches!(out, StitchOutcome::Appended { dy: 30, growth: 30 }),
+            "{out:?}"
+        );
+        assert_eq!(s.dimensions(), (W, H + 30));
+    }
+
+    #[test]
+    fn preview_tail_and_viewport_span_agree_on_the_last_accepted_frame() {
+        // The user-facing contract behind the preview highlight: the
+        // preview rows the viewport span covers are EXACTLY the
+        // downscaled rows of the last accepted frame — what the user's
+        // frame shows. Teardown of a tear in between must not shift it.
+        let old = frame_at(0);
+        let settled = frame_at(20);
+        let torn: Vec<u8> = [
+            old[..old.len() / 2].to_vec(),
+            settled[settled.len() / 2..].to_vec(),
+        ]
+        .concat();
+        let mut s = stitcher();
+        s.push(&torn);
+        let out = s.push(&settled);
+        assert!(matches!(out, StitchOutcome::Appended { .. }), "{out:?}");
+
+        let (w, h) = s.dimensions();
+        let (tail_start, pw, ph, rgba) = preview_tail(s.canvas(), w, h, 32, 10_000);
+        let (vt, vh) = s.viewport_span();
+        // The engine's mapping, verbatim (viewport_in_preview).
+        let k = w.div_ceil(pw.max(1));
+        let v_h = (vh / k).clamp(1, ph.max(1));
+        let v_top = (vt.saturating_sub(tail_start) / k).min(ph.saturating_sub(v_h));
+        // The frame's own preview, same filter and factor.
+        let (_, fw, fh, frame_prev) = preview_tail(&settled, W, H, 32, 10_000);
+        assert_eq!((fw, fh), (pw, v_h));
+        let start = (v_top * pw * 4) as usize;
+        let end = ((v_top + v_h) * pw * 4) as usize;
+        assert_eq!(
+            &rgba[start..end],
+            &frame_prev[..v_h as usize * pw as usize * 4],
+            "the highlighted preview rows must show the frame's rows"
+        );
     }
 
     #[test]

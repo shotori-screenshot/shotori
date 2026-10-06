@@ -1277,3 +1277,165 @@ lets the direction calibration absorb flips. And the row-MEAN matcher
 mix converges to the same mean, so a whole-line-height shift leaves
 the signal unchanged; matching switched to full-row pixel MAD on a
 step-spaced grid (`RowProfile`).
+
+### Long-screenshot v1.1: the frame IS the tool (2026-10-06)
+
+First user-driven UX pass on the scroll capture, three lessons:
+
+- **The top control bar is gone; the preview panel absorbed it.** One
+  chrome surface (status + buttons + keyboard + preview) beats two: the
+  bar duplicated the panel's exit actions for no gain, and every extra
+  keyboard-less surface is another thing to tear down. Shortcuts now
+  mirror the selection flow exactly (Enter/Ctrl+C copy, Ctrl+S save,
+  Esc cancel) — consistency was an explicit user requirement.
+- **The region frame is ONE full-output surface with a pinholed input
+  region.** Four separate strip windows (the first cut) cannot move at
+  runtime (no set_margin on a live layer surface) and recreate-on-drag
+  is churn. The pin's `window.set_input_region` trick instead: the
+  surface covers the screen, paints only the four strokes, and its
+  input region covers only the grab bands — wheel over the captured
+  content passes through to the app, drags on the strokes move the
+  frame, and the whole thing redraws with zero protocol traffic.
+- **Dragging the frame is a capture mode, not an annotation.** The
+  engine reads the capture rect through a shared Arc<Mutex> every
+  poll; for the stitcher "frame moves down d rows" is pixel-identical
+  to "content scrolls up d rows", so frame-dragging needed ZERO
+  matcher changes — content that never scrolls into view (canvas
+  viewers, image panes) becomes capturable by sweeping the frame over
+  it. The first cut had the frame own a lookalike Arc instead of the
+  spec's — a compile-clean, totally-dead bug class; the shared handle
+  now passes through `launch` from one source.
+- The preview panel shows WHERE the viewport sits in the long image
+  (accent highlight, mapped to preview rows by the engine — only it
+  knows the downscale factor; the panel divides fractions). Also:
+  rustc SIGSEGVs on `#[test]` bodies inside scroll_bar.rs's macro
+  density (style chains + test macros) — the geometry tests live in
+  model/placement.rs, next to the fns, and compile fine there.
+
+### Long-screenshot v1.2/v1.3: three silent-dead wires behind "it doesn't work" (2026-10-06)
+
+Second and third user-driven passes; v1.3 fixed four user-reported
+bugs whose common theme was **code that compiled, ran, and did
+nothing**:
+
+- **`window.on_mouse_event` registrations live for ONE frame's event
+  dispatch.** The v1.1 frame wired its drag listeners once in `new`
+  and dropped the returned subscriptions — every listener was dead
+  before the first event, so strip-dragging AND the toolbar's ⇕ grab
+  button never moved anything. Two sessions of "dragging is hard to
+  discover" were actually "dragging is broken". The sanctioned pattern
+  is already in the repo twice (overlay's `pointer_event_sink`, pin's
+  canvas): a `canvas` element whose paint closure re-attaches the
+  listeners every paint. Rule: window-level mouse listeners are ONLY
+  legal inside a paint closure; wiring them from `new`/`launch` is a
+  silent no-op.
+- **`f32::clamp(min, max)` panics when min > max — reached via
+  STALE-event mixing.** The panel clamps the viewport highlight as
+  `h_frac.clamp(0.01, 1. - top_frac)`; viewport events reference the
+  CURRENT canvas while the image is up to one preview-interval old,
+  and mid-scroll `v_top` exceeded the old image's rows → `top_frac`
+  clamped to 1.0 → `clamp(0.01, 0.0)` → render-pass panic → app dead
+  ("scrolling crashes"). Fixed at both ends: the engine growth-flushes
+  the image (canvas grew ≥ 2 preview rows ⇒ send now, throttle be
+  damned), and the panel caps `top_frac` at 0.99 so min ≤ max by
+  construction. Corollary: any UI mixing events from two cadences must
+  assume the faster stream outran the slower one.
+- **Manual mode must not create a virtual pointer at all.** The engine
+  "parked" a virtual pointer at the selection center
+  (`motion_absolute`) before branching on the mode — a REAL pointer
+  motion, i.e. starting a long screenshot warped the user's cursor
+  ("why does it move my mouse?"). Parking exists so wheel injection
+  (auto mode) targets the right surface; manual never injects, so the
+  pointer — and the zwlr_virtual_pointer availability REQUIREMENT —
+  are auto-only now (manual works on GNOME/Mutter too).
+- The viewport position streams as its own pixel-free event on every
+  accepted frame (the image stream stays throttled/growth-flushed);
+  previews that only fired on `Appended` froze the highlight for drags
+  (`Contained`) and scroll-ups (`Prepended`).
+
+### Long-screenshot v1.4: the lost band, the mushy preview (2026-10-06)
+
+Fourth pass; two findings behind "the preview content doesn't match":
+
+- **Single-anchor matching LOSES the band between the last accepted
+  frame and a rejected anchor.** The riding anchor sits at a position
+  the canvas never advanced to; a dy measured from it is relative to
+  THAT frame, so accepting it drops everything between the last accept
+  and the anchor — every smooth-scroll tear cycle (niri animates wheel
+  flicks) shortened the stitched page vs the real one, which the user
+  sees as the preview not matching their frame. Fix: DUAL ANCHOR —
+  `place()` matches against the last ACCEPTED frame first (its
+  displacement is authoritative; a clean frame after a tear recovers
+  the FULL step), the riding anchor remains the fallback for motion
+  beyond the matcher's window, where the loss is unavoidable and now
+  documented in a test. Pinned by
+  `preview_tail_and_viewport_span_agree_on_the_last_accepted_frame`:
+  the highlighted preview rows must BE the downscaled last accepted
+  frame — the exact contract the user is checking by eye.
+- **PREVIEW_WIDTH=200 was a 5–10× box filter on wide frames** (a
+  2000px-wide selection at k=10), then upscaled 1.2× by the panel —
+  destructively soft text. 480 (≈2× the panel column) keeps text
+  legible on HiDPI; PREVIEW_MAX_ROWS trimmed 3200→2000 to bound the
+  per-flush read bill, and the growth-flush threshold went 2→4 preview
+  rows to keep flush cadence sane at the higher resolution.
+- The preview panel is a PURE preview now (user-designed): no status
+  line, no buttons — the frame toolbar carries those; the keyboard
+  shortcuts stay bound on the panel invisibly. Manual polling
+  90→60 ms tightens the accepted-frame lag behind a live scroll.
+
+### Long-screenshot v1.5: the img intrinsic-size HiDPI trap (2026-10-06)
+
+Fifth pass; the ACTUAL root of "the preview box doesn't match my
+frame", pinned by pixel forensics on a user screenshot (vision agent
++ PIL measurement of accent-line positions):
+
+- **`img(image).w_full()` renders its box from the BITMAP's pixel
+  height on HiDPI screens** — measured 1164 physical px of element box
+  where width × aspect gives 590. The bitmap's px count leaks into the
+  layout as LOGICAL px, so on a 2× screen the image box is ~2× too
+  tall; the viewport highlight's relative() fractions are fractions of
+  that box, so everything (content AND highlight) sat in the wrong
+  place — including the very first v1.1 report of "the highlight
+  floats where no image is" (the surplus box is empty space). Scale-1
+  screens hide the bug completely (px == logical). Fix: an EXPLICIT
+  img height derived from the panel's inner width and the image's own
+  pw/ph (PREVIEW_IMG_W) — one deterministic geometry source, no
+  intrinsic sizing anywhere in the preview.
+- **The panel's border was pin_border — which is the ACCENT at 60%
+  alpha in the dark theme** (0xFF6A0099): an orange frame around the
+  whole panel that reads exactly like a giant viewport highlight. The
+  user's "two boxes" screenshot was this border + the real (misplaced)
+  highlight. Panel border is a neutral dim white now.
+- Also verified NOT bugs (worth remembering): scroll_region's
+  coordinate conversion is exact (±0.5 px rounding, same pipeline as
+  normal screenshots); a result with sliced left text + a background
+  band on the right was a FAITHFUL capture of a page whose scrollbar
+  auto-hid between the frozen framing and the live capture (the page
+  reflowed ~a scrollbar width), on a 1× screen with a different
+  responsive layout than the user's current window.
+
+### Long-screenshot v1.6: sticky chrome + the invisible highlight (2026-10-06)
+
+Sixth pass; "scrolling up doesn't sync" had two stacked causes, both
+read off a user screenshot (vision agent + the stitcher decision log
+visible in their terminal):
+
+- **A fixed site navbar inside the selection rejected EVERY frame.**
+  Sticky chrome breaks the row-translation assumption; under every
+  candidate offset the band is misaligned somewhere in the comparison
+  window, and a ~4% fixed band pushed the MEAN cost past the threshold
+  (log: one Prepend, then an unbroken run of HighResidual). Fix is
+  robust statistics, not region detection: the matcher now averages
+  per-row costs with a TRIMMED mean (worst ~1/7 of rows dropped), so
+  any fixed band up to ~14% of the viewport is ignored in ALL
+  directions (down, contained, prepend). Real tears (half a frame
+  misplaced) stay far above threshold. Edge trims (top ~6%, bottom
+  ~2%, only for viewports ≥200 rows) keep navbars out of the window
+  entirely in the common down-scroll case.
+- **The highlight scrolled out of existence.** A canvas taller than
+  the panel bottom-anchored the image; scrolling up pinned the
+  highlight to the image top — clipped outside the visible area, i.e.
+  the box simply vanished ("no sync"). The visible window now FOLLOWS
+  the highlight (centered, clamped to the image); fitting images still
+  bottom-anchor. Requires the panel to know the output height (passed
+  through launch).

@@ -47,7 +47,10 @@ use crate::model::session::ScrollRect;
 /// the `capture_output_region` contract).
 pub struct ScrollSpec {
     pub output: String,
-    pub rect: ScrollRect,
+    /// The capture rectangle, SHARED with the UI: dragging the region
+    /// frame rewrites it and the next poll captures the new spot (w/h
+    /// stay fixed — drags move, never resize).
+    pub rect: std::sync::Arc<std::sync::Mutex<ScrollRect>>,
     /// Manual: the user scrolls, the engine only captures + stitches
     /// (works everywhere, no injection). Auto: the engine injects wheel
     /// steps itself — currently niri-hostile (see inject_step).
@@ -68,12 +71,21 @@ pub enum ScrollEvent {
     Started { width: u32, height: u32 },
     /// Rows captured beyond the initial viewport (progress UI).
     Progress { stitched: u32 },
+    /// The viewport moved (preview rows, engine-mapped) — no pixels,
+    /// cheap enough to fire on every accepted frame so the highlight
+    /// tracks the frame drag in real time.
+    Viewport { top: u32, height: u32 },
     /// A downscaled tail of the canvas for the live preview panel
     /// (throttled; RGBA, box-filtered by [`crate::model::scroll_stitch::preview_tail`]).
+    /// `tail_start`/`viewport_*` place the capture viewport on the
+    /// preview so the panel can highlight "what you are looking at".
     Preview {
         width: u32,
         height: u32,
         rgba: Arc<Vec<u8>>,
+        tail_start: u32,
+        viewport_top: u32,
+        viewport_height: u32,
     },
     /// The canvas is complete (bottom reached, cap hit, or user finish).
     Finished {
@@ -168,16 +180,20 @@ const INITIAL_LINES: i32 = 3;
 const TARGET_STEP_RATIO: f32 = 0.45;
 /// Manual-mode polling cadence — fast enough that a brisk user scroll
 /// never skips more than one viewport, slow enough to stay cheap.
-const MANUAL_POLL: Duration = Duration::from_millis(90);
+const MANUAL_POLL: Duration = Duration::from_millis(60);
 /// Manual-mode wall budget (the user pauses to read; this is a
 /// safety valve, not a target).
 const MANUAL_DEADLINE: Duration = Duration::from_secs(600);
 /// Live-preview refresh cadence.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
 /// Live-preview target width (px, before the panel scales it again).
-const PREVIEW_WIDTH: u32 = 200;
-/// Canvas rows included in the preview tail (the growing edge).
-const PREVIEW_MAX_ROWS: u32 = 3200;
+/// ~2× the panel's logical column: the panel upscales to its width, and
+/// a real 2× sample still holds text legible on HiDPI. (200 was a 5–10×
+/// box filter on wide frames — destructively soft, user-reported.)
+const PREVIEW_WIDTH: u32 = 480;
+/// Canvas rows included in the preview tail (the growing edge). Also
+/// the cost bound: the tail spans at most this × k canvas rows.
+const PREVIEW_MAX_ROWS: u32 = 2000;
 
 /// How the wheel is injected. Discrete (axis_discrete) is the modern
 /// form; some compositors only honor the plain axis value — if two
@@ -307,9 +323,13 @@ fn run(
         .screencopy
         .clone()
         .ok_or_else(|| anyhow!("compositor does not support zwlr_screencopy_manager_v1"))?;
-    let pointer_manager = state.pointer_manager.clone().ok_or_else(|| {
-        anyhow!("compositor does not support zwlr_virtual_pointer_v1 (GNOME/Mutter?) — automatic scrolling is unavailable")
-    })?;
+    // Virtual-pointer support is an AUTO-mode requirement only. Manual
+    // mode never injects — and creating a virtual pointer to "park"
+    // would WARP the user's cursor (motion_absolute is a real pointer
+    // motion), which manual mode must never do (the "starting a long
+    // screenshot moves my mouse" bug). GNOME/Mutter lacks the protocol
+    // entirely; manual mode works there regardless.
+    let pointer_manager = state.pointer_manager.clone();
 
     // ── the target output ───────────────────────────────────────────
     let idx = state
@@ -341,21 +361,34 @@ fn run(
             spec.output
         )
     })?;
-    if spec.rect.x < 0
-        || spec.rect.y < 0
-        || spec.rect.width <= 0
-        || spec.rect.height <= 0
-        || spec.rect.x + spec.rect.width > logical_w
-        || spec.rect.y + spec.rect.height > logical_h
+    let initial_rect = *spec
+        .rect
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if initial_rect.x < 0
+        || initial_rect.y < 0
+        || initial_rect.width <= 0
+        || initial_rect.height <= 0
+        || initial_rect.x + initial_rect.width > logical_w
+        || initial_rect.y + initial_rect.height > logical_h
     {
-        bail!("selection region {:?} is outside the output", spec.rect);
+        bail!("selection region {initial_rect:?} is outside the output");
     }
 
     // ── virtual pointer, parked on the region center ────────────────
     // motion_absolute maps FRACTIONS onto the whole desktop (measured:
     // tools/vptr's "coordinate-mapping trap"), so the denominator is the
     // union of all outputs' logical rects, not this output's size.
-    let ptr = pointer_manager.create_virtual_pointer(state.seat.as_ref(), &qh, ());
+    // AUTO only (see the pointer_manager note above): manual mode must
+    // never create a pointer, let alone move it.
+    let ptr = if spec.mode == ScrollMode::Auto {
+        let pointer_manager = pointer_manager.ok_or_else(|| {
+            anyhow!("compositor does not support zwlr_virtual_pointer_v1 (GNOME/Mutter?) — automatic scrolling is unavailable")
+        })?;
+        Some(pointer_manager.create_virtual_pointer(state.seat.as_ref(), &qh, ()))
+    } else {
+        None
+    };
     let (mut union_x0, mut union_y0, mut union_x1, mut union_y1) =
         (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
     for o in &state.outputs {
@@ -373,23 +406,21 @@ fn run(
         None
     };
     let center = (
-        target.logical_pos.0 + spec.rect.x + spec.rect.width / 2 - union_x0,
-        target.logical_pos.1 + spec.rect.y + spec.rect.height / 2 - union_y0,
+        target.logical_pos.0 + initial_rect.x + initial_rect.width / 2 - union_x0,
+        target.logical_pos.1 + initial_rect.y + initial_rect.height / 2 - union_y0,
     );
-    // (A degenerate layout — no output reported logical sizes — leaves
-    // the pointer wherever it is; the wheel still targets the surface
-    // under it, which on a single-screen session is right.)
 
     // ── capture machinery ───────────────────────────────────────────
-    // Grace before the first capture AND the pointer parking: the
-    // overlays unmapped when this engine started, and their destroy
+    // Grace before the first capture AND (auto) the pointer parking:
+    // the overlays unmapped when this engine started, and their destroy
     // requests need a few loop passes to reach the compositor (same
     // flush lag the save flow's 150 ms quit delay exists for). Parking
     // the pointer any earlier aims it at the still-mapped overlay, and
     // a pointer focused on a since-destroyed surface never recovers on
     // niri — every later wheel event dies with it (measured).
     std::thread::sleep(Duration::from_millis(400));
-    if let Some((uw, uh)) = union_size
+    if let Some(ptr) = ptr.as_ref()
+        && let Some((uw, uh)) = union_size
         && center.0 >= 0
         && center.1 >= 0
     {
@@ -408,7 +439,7 @@ fn run(
         state: &mut state,
         screencopy: &screencopy,
         output: target.output.clone(),
-        spec: &spec.rect,
+        rect: &spec.rect,
         frame_size: (0, 0),
     };
     let first = capturer.capture_once()?;
@@ -573,21 +604,59 @@ fn deliver(events: &Sender<ScrollEvent>, stitcher: &ScrollStitcher) -> anyhow::R
     Ok(())
 }
 
-/// Push a throttled downscaled canvas tail for the preview panel.
-fn send_preview(stitcher: &ScrollStitcher, events: &Sender<ScrollEvent>) {
+/// Push a throttled downscaled canvas tail for the preview panel,
+/// including where the capture viewport sits on it. Returns the canvas
+/// height the image was built from (the growth-flush reference).
+fn send_preview(stitcher: &ScrollStitcher, events: &Sender<ScrollEvent>) -> u32 {
     let (w, h) = stitcher.dimensions();
-    let (pw, ph, rgba) = crate::model::scroll_stitch::preview_tail(
+    let (tail_start, pw, ph, rgba) = crate::model::scroll_stitch::preview_tail(
         stitcher.canvas(),
         w,
         h,
         PREVIEW_WIDTH,
         PREVIEW_MAX_ROWS,
     );
+    let (v_top, v_h) = viewport_in_preview(stitcher, w, tail_start, pw, ph);
     let _ = events.try_send(ScrollEvent::Preview {
         width: pw,
         height: ph,
         rgba: Arc::new(rgba),
+        tail_start,
+        viewport_top: v_top,
+        viewport_height: v_h,
     });
+    h
+}
+
+/// The viewport's position in PREVIEW rows (the mapping needs the
+/// downscale factor only the engine knows). Fires as its own cheap
+/// event so frame drags update the highlight without resending pixels.
+fn send_viewport(stitcher: &ScrollStitcher, events: &Sender<ScrollEvent>) {
+    let (w, h) = stitcher.dimensions();
+    // Mirror preview_tail's geometry math for the tail bounds.
+    let k = ((w as f32) / PREVIEW_WIDTH.max(1) as f32).ceil().max(1.0) as u32;
+    let pw = w.div_ceil(k);
+    let tail_start = h.saturating_sub(PREVIEW_MAX_ROWS.saturating_mul(k));
+    let ph = h.saturating_sub(tail_start).div_ceil(k);
+    let (v_top, v_h) = viewport_in_preview(stitcher, w, tail_start, pw, ph);
+    let _ = events.try_send(ScrollEvent::Viewport {
+        top: v_top,
+        height: v_h,
+    });
+}
+
+fn viewport_in_preview(
+    stitcher: &ScrollStitcher,
+    w: u32,
+    tail_start: u32,
+    pw: u32,
+    ph: u32,
+) -> (u32, u32) {
+    let (vt, vh) = stitcher.viewport_span();
+    let k = w.div_ceil(pw.max(1));
+    let v_h = (vh / k).clamp(1, ph.max(1));
+    let v_top = (vt.saturating_sub(tail_start) / k).min(ph.saturating_sub(v_h));
+    (v_top, v_h)
 }
 
 /// Manual mode: the user scrolls, the engine watches. Pure capture +
@@ -608,7 +677,17 @@ fn run_manual(
     let mut last_preview = Instant::now()
         .checked_sub(PREVIEW_INTERVAL)
         .unwrap_or_else(Instant::now);
-    send_preview(stitcher, events);
+    let mut last_image_h = send_preview(stitcher, events);
+    // Image-refresh fidelity floor: once the canvas has grown ~4 preview
+    // rows past the image the panel currently shows, the viewport
+    // highlight maps past that image's rows (clamped at the panel, i.e.
+    // visibly stale content under the highlight) — refresh immediately
+    // instead of waiting out the throttle. Idle stretches (duplicates,
+    // small contained wiggles) still ride the 250 ms cadence.
+    let k = ((stitcher.dimensions().0 as f32) / PREVIEW_WIDTH.max(1) as f32)
+        .ceil()
+        .max(1.0) as u32;
+    let flush_rows = 4 * k;
     loop {
         if Instant::now() > deadline {
             bail!("manual scroll session timed out");
@@ -634,10 +713,6 @@ fn run_manual(
                 let _ = events.try_send(ScrollEvent::Progress {
                     stitched: stitcher.captured_extent(),
                 });
-                if last_preview.elapsed() >= PREVIEW_INTERVAL {
-                    last_preview = Instant::now();
-                    send_preview(stitcher, events);
-                }
             }
             StitchOutcome::Rejected(StitchReject::HeightLimit) => {
                 println!("[shotori] scroll: height cap reached");
@@ -648,6 +723,18 @@ fn run_manual(
                 bail!("stitcher rejected the frame: {outcome:?}");
             }
             _ => {}
+        }
+        // Every accepted (non-duplicate) outcome can move the viewport
+        // OR reshape the canvas (prepends grow the top) — the highlight
+        // follows via the cheap event; the pixel stream refreshes on
+        // throttle OR growth (see `flush_rows`).
+        if !matches!(outcome, StitchOutcome::Duplicate) {
+            send_viewport(stitcher, events);
+            let grew = stitcher.dimensions().1.saturating_sub(last_image_h);
+            if last_preview.elapsed() >= PREVIEW_INTERVAL || grew >= flush_rows {
+                last_preview = Instant::now();
+                last_image_h = send_preview(stitcher, events);
+            }
         }
         *anchor = frame;
         std::thread::sleep(MANUAL_POLL);
@@ -664,7 +751,7 @@ struct Capturer<'a> {
     state: &'a mut EngineState,
     screencopy: &'a zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     output: wl_output::WlOutput,
-    spec: &'a ScrollRect,
+    rect: &'a std::sync::Arc<std::sync::Mutex<ScrollRect>>,
     /// The physical (buffer-space) frame size, filled by the first
     /// capture — the stitcher's viewport geometry.
     frame_size: (u32, u32),
@@ -679,13 +766,22 @@ impl Capturer<'_> {
         self.state.cur = Some(FrameCapture::default());
         // The frame proxy drops (and destroys) at the end of this call —
         // one frame object per capture, per the screencopy lifecycle.
+        // Coordinates are read per capture: the region may have been
+        // dragged since the last poll.
+        let (x, y, w, h) = {
+            let rect = self
+                .rect
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (rect.x, rect.y, rect.width, rect.height)
+        };
         let _frame = self.screencopy.capture_output_region(
             0,
             &self.output,
-            self.spec.x,
-            self.spec.y,
-            self.spec.width,
-            self.spec.height,
+            x,
+            y,
+            w,
+            h,
             &self.queue.handle(),
             (),
         );

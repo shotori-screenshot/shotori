@@ -647,9 +647,10 @@ impl Overlay {
             px(self.capture.logical_pos.1 as f32 + lh / 2.),
         );
         let display_id = crate::ui::pin::display_containing(center);
+        let shared_rect = std::sync::Arc::new(std::sync::Mutex::new(rect));
         let spec = crate::platform::scroll_capture::ScrollSpec {
             output: self.capture.output_name.clone(),
-            rect,
+            rect: shared_rect,
             // Auto-scroll is shelved behind an env flag until the
             // injection story works on niri (see inject_step); the
             // shipped UX is manual scrolling. The e2e backdoor needs
