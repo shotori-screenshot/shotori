@@ -388,6 +388,17 @@ mode you enter.
 - **`parks_click_select` collapsed to `tool == Select`** and
   `shape_hover`'s cursor affordance rides it: crosshair over ink
   under draw tools (the press draws), pointing hand under Select.
+- **Handle dots split by ground: solid accent on dim, white-cored on
+  ink.** The arrow's tip dot landed dead on the red arrowhead —
+  orange-on-orange, invisible (user-reported the day the select-tool
+  flip shipped). Shape handles now paint a white core inside an
+  accent ring (same `HANDLE_VIS` diameter, Figma/PowerPoint
+  treatment; white = the eraser ring's any-background contrast rule),
+  while the region selection keeps its solid accent dots (#18's
+  anti-clutter call — that ground is dim + a solid border, where
+  solid accent reads fine). Two chrome families, each legible on its
+  own ground: region = solid accent, object = accent-and-white. This
+  also un-hides every polyline vertex dot on same-hue strokes.
 - e2e-verified with the vptr + grim + vision loop: draw → no chrome
   and no dots; switch → single row; click the ink → dashed frame +
   endpoint dots + settings row back; drag → the whole frame moves;

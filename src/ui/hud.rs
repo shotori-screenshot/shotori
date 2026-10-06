@@ -78,15 +78,13 @@ pub(crate) fn handle_cursor(h: Handle) -> CursorStyle {
 }
 
 /// Paint one resize-handle dot centered on `p` (window-local): a solid
-/// accent-orange circle, [`HANDLE_VIS`] px across, no outline. The
-/// single owner of the handle look — the selection chrome and the
-/// annotation chrome both call it, so a restyle (or a future corner
-/// loupe) changes exactly one place. A solid circle replaces the white
-/// square + outline chip, which read as clutter against the dim bands
-/// and the border (issue #18), and one quad per handle is also one quad
-/// less per frame during resize drags. The dot is what you SEE — what
-/// you can GRAB stays each context's own, larger band ([`HANDLE_HIT`]
-/// here, `Shape::handle_at` for shapes).
+/// accent-orange circle, [`HANDLE_VIS`] px across, no outline. Owner of
+/// the REGION selection's handle look (the dim backdrop and the solid
+/// border it sits on — issue #18 deliberately kept it solid: a white
+/// chip there read as clutter). The dot is what you SEE — what you can
+/// GRAB stays the larger band ([`HANDLE_HIT`] here,
+/// `Shape::handle_at` for shapes). Annotation handles are the same
+/// SIZE but a two-tone fill — see [`paint_shape_handle_dot`].
 fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
     let half = HANDLE_VIS / 2.;
     let b = Bounds::new(
@@ -95,6 +93,36 @@ fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
     );
     // Corner radius = half the edge turns the quad into a circle.
     window.paint_quad(fill(b, rgba(theme::c().accent)).corner_radii(half));
+}
+
+/// One ANNOTATION handle dot centered on `p` (window-local): a white
+/// core inside an accent ring (same [`HANDLE_VIS`] diameter as the
+/// region's dots). Shape handles sit ON the ink, and a solid accent
+/// dot vanishes on same-hue ink — an arrow's tip dot landed dead on
+/// the red arrowhead, orange-on-red (user-reported right after the
+/// select-tool flip). White guarantees a visible core on any
+/// annotation color — the eraser ring's contrast rule — and the ring
+/// keeps the dot reading as chrome from the accent family. So the two
+/// chrome families stay legible each on their own ground: region =
+/// solid accent on dim, object = accent-and-white on ink.
+fn paint_shape_handle_dot(window: &mut Window, p: Point<Pixels>) {
+    let half = HANDLE_VIS / 2.;
+    let ring = px(1.5);
+    let b = Bounds::new(
+        point(p.x - px(half), p.y - px(half)),
+        size(px(HANDLE_VIS), px(HANDLE_VIS)),
+    );
+    window.paint_quad(fill(b, rgba(theme::c().accent)).corner_radii(half));
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(p.x - px(half) + ring, p.y - px(half) + ring),
+                size(px(HANDLE_VIS) - ring * 2., px(HANDLE_VIS) - ring * 2.),
+            ),
+            rgba(0xffffffff),
+        )
+        .corner_radii(half - f32::from(ring)),
+    );
 }
 
 /// Resize handles over a finalized (or being-edited) selection, plus the
@@ -269,7 +297,8 @@ fn spinner() -> impl IntoElement {
 
 /// The annotation selection chrome: a 1 px dashed accent frame around
 /// the selected shape's ink bounding box ([`Shape::selection_box`]),
-/// plus the shared handle dots ([`paint_handle_dot`]) at its anchor
+/// plus the handle dots ([`paint_shape_handle_dot`] — white-cored, the
+/// ink-readable sibling of the region's solid dots) at its anchor
 /// points (endpoints for lines, vertices for polylines, corners for
 /// rects/ellipses). The dashed frame replaced a 1 px accent stroke
 /// that traced the shape's own outline — that stroke sat ON the ink,
@@ -302,10 +331,11 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
             if let Ok(path) = builder.build() {
                 window.paint_path(path, rgba(theme::c().accent));
             }
-            // One helper, one size: a shape's resize affordance must read
-            // as the same control the selection border wears.
+            // One size, two fills: a shape's resize affordance wears
+            // the same diameter the selection border does, but the
+            // two-tone fill — see [`paint_shape_handle_dot`].
             for p in shape.handle_points() {
-                paint_handle_dot(window, p + viewport.origin);
+                paint_shape_handle_dot(window, p + viewport.origin);
             }
         },
     )
