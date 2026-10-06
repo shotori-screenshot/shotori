@@ -11,8 +11,7 @@
 ![Status](https://img.shields.io/badge/status-beta-yellow)
 
 A Wayland-native screenshot tool — select, annotate, pin, long-capture
-scrolling pages, and read text with on-device OCR. No cloud, no browser
-extensions.
+scrolling pages, and read text with on-device OCR.
 
 Shotori freezes every screen, you drag a selection, and the selection
 flows to wherever it's needed: clipboard, save dialog, text, a pinned

@@ -10,8 +10,7 @@
 ![Status](https://img.shields.io/badge/status-early%20development-orange)
 
 Wayland 原生截图工具——选区、标注、贴图、长截图，需要文字时本地 OCR——
-无云端、无浏览器扩展，整套 UI 用
-[gpui-kit](https://crates.io/crates/gpui-kit) 手绘。
+整套 UI 用 [gpui-kit](https://crates.io/crates/gpui-kit) 手绘。
 
 冻结屏幕、拖框选区，然后复制、保存、标注、贴图，或者把滚动内容拼成一张
 长图——一切都在本机完成。
