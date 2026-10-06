@@ -2,16 +2,15 @@
 //!
 //! Standalone diagnosis for the long-screenshot engine. Modes:
 //! - `region [OUT] [x y w h]` — one capture_output_region, event trace
-//! - `full [OUT]`             — one capture_output, event trace
-//! - `lib`                    — call the production capture_all_outputs
-//! - `ptr [gx gy]`            — engine's exact pointer-mapping math +
-//!                              motion_absolute; verify with `grim -c`
+//! - `full [OUT]` — one capture_output, event trace
+//! - `lib` — call the production capture_all_outputs
+//! - `ptr [gx gy]` — engine's exact pointer-mapping math +
+//!   motion_absolute; verify with `grim -c`
 //!
 //! Born from the e2e chase where the engine timed out where grim
 //! succeeded (the flush-after-dispatch deadlock + the v3 buffer_done
 //! handshake — see ROADMAP "scroll stitching").
 
-use std::fs::File;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
