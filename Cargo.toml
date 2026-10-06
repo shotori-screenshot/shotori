@@ -22,7 +22,7 @@ categories = ["graphics", "multimedia::images", "command-line-utilities"]
 # default-features off: the default pulls the component library, whose
 # Root/WindowState is poison for layer-shell overlays (AGENTS.md "the
 # Root/CSD poisoning case"). We only use the base layer + assets.
-gpui-kit = { version = "0.6", default-features = false, features = ["assets"] }
+gpui-kit = { version = "0.7", default-features = false, features = ["assets"] }
 anyhow = "1.0"
 png = "0.18"
 
@@ -63,7 +63,7 @@ tempfile = "3"
 # JSON over their unix sockets; parsed with serde_json Values (their
 # schemas drift across versions, tolerant field-by-field beats typed)
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
@@ -100,7 +100,7 @@ version = "0.11"
 [dev-dependencies]
 # default-features off here too: feature unification with the main
 # dependency would resurrect component otherwise
-gpui-kit = { version = "0.6", default-features = false, features = ["test-support"] }
+gpui-kit = { version = "0.7", default-features = false, features = ["test-support"] }
 
 # The pin (floating image) feature lives on the `pin` branch (it needs the
 # vendored set_layer_margin patch); once upstream merges it, the branch can
