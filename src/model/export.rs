@@ -56,7 +56,7 @@ pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
 ///
 /// For the clipboard and notification thumbnails: the bytes go through a
 /// pipe or a 256px downscale, not a download — the speedup is worth the
-/// larger size (measured in the v0.10.2 ROADMAP note).
+/// larger size (measured).
 pub fn encode_png_fast(w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<Vec<u8>> {
     encode_png_with(w, h, rgba, png::Compression::Fast)
 }

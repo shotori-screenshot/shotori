@@ -2,9 +2,8 @@
 
 Guidance for coding agents working in this repository. Keep it
 high-signal: the rules below are traps we have actually fallen into, not
-a map of the code — read the code for the map. Most of these come with a
-full forensic write-up in [ROADMAP.md](ROADMAP.md); cite the section if
-you need the reasoning.
+a map of the code — read the code for the map. The reasoning behind each
+rule lives in the code comments next to the logic it guards.
 
 ## Project Overview
 
@@ -19,10 +18,6 @@ e2e tests; a workspace member, not part of the binary).
 ## Read First
 
 - `src/lib.rs` header — the module map and the dependency contract.
-- `ROADMAP.md` — the decision log and pitfall archive, organized by
-  theme. Read the sections touching your task before changing code.
-- `README.md` / `README.zh-CN.md` — the two must stay in sync when
-  user-facing behavior changes.
 
 ## Commands
 
@@ -60,7 +55,7 @@ libwayland-dev` (see CI).
 - **Overlays always use a bare `cx.open_window` with layer-shell
   options — never `base::Root`/component `Root`.** Root's WindowState
   plugin paints a themed background over layer-shell windows and its
-  border calls `set_client_inset(20)`, growing the window (ROADMAP: "the
+  border calls `set_client_inset(20)`, growing the window ("the
   Root/CSD poisoning case").
 - **Pin every layer-shell window to its output via `display_id`.**
   Without it the compositor picks an output and mixed-DPI multi-monitor
@@ -97,8 +92,8 @@ libwayland-dev` (see CI).
   integer — ceil — so size matching is infeasible).
 - **Round each edge independently** (`round_px`); never derive opposite
   edges as `round(l) + round(w)`. Divergent rounding between dim bands,
-  border and toolbar once produced a 1px raw-pixel bleed line (ROADMAP:
-  "the white-line bug").
+  border and toolbar once produced a 1px raw-pixel bleed line ("the
+  white-line bug").
 
 ### Rendering & pixels
 
@@ -107,7 +102,7 @@ libwayland-dev` (see CI).
   owns this contract — don't hand-build image buffers elsewhere.
 - **Never compute a hit-test rect from layout side effects.** The
   element and its hit-test rect must derive from the same constants
-  (ROADMAP: the grip/cursor alignment trap). One geometry source per
+  (the grip/cursor alignment trap). One geometry source per
   concept, e.g. `session.toolbar_bounds()` for render, cursor and drag
   clamp alike.
 
@@ -177,11 +172,12 @@ libwayland-dev` (see CI).
 
 ## Documentation Duties
 
-- `README.md` and `README.zh-CN.md` mirror each other — change both or
-  neither.
-- Add a dated entry to the matching section of `ROADMAP.md` for any
-  change that carries non-obvious findings — decisions, rejected paths
-  and traps; not feature descriptions (future agents depend on it).
+- `README.md` / `README.zh-CN.md` are maintained by the maintainer —
+  agents do not edit them. When a change alters user-facing behavior,
+  say so in the PR/commit message instead.
+- Non-obvious findings (decisions, rejected paths, traps) are documented
+  as English comments next to the code they explain, at the moment the
+  code is written — not in a separate log that drifts out of reach.
 - `docs/theme.example.toml` documents the user-facing theme file format;
   keep it in sync with the loader.
 
@@ -190,5 +186,5 @@ libwayland-dev` (see CI).
 A new rule here must be non-obvious (an agent familiar with Rust would
 still get it wrong), encountered more than once or expensive enough once,
 and actionable. Architectural description does not belong in this file —
-it goes stale; point to `src/lib.rs` instead. Prefer citing the ROADMAP
-section over inlining the full story.
+it goes stale; point to `src/lib.rs` instead. Keep the story with the
+code (a comment), not duplicated here.

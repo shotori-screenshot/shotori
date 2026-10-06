@@ -1,8 +1,8 @@
 //! # Window snapping: hover-highlight + click-to-select a whole window
 //!
 //! Wayland isolation means no client can ask "what window is under my
-//! cursor" — no standard protocol exposes other clients' geometry (see
-//! ROADMAP). The practical path is per-compositor IPC. Each backend
+//! cursor" — no standard protocol exposes other clients' geometry. The
+//! practical path is per-compositor IPC. Each backend
 //! reports rects in its compositor's **global logical space**, which is
 //! the same space [`crate::model::session`]'s selection state machine already
 //! uses (verified against niri: output logical positions match the

@@ -3,8 +3,8 @@
 //! `shotori --bench [name]` — dispatched in `main.rs` on `argv[1]` BEFORE
 //! clap runs (same convention as the `--notify` / `--clipboard-daemon`
 //! child entry points). Zero new dependencies; release build only — debug
-//! timings of the pure-Rust pixel code are meaningless (10–100× slower,
-//! see ROADMAP, testing methodology: benchmark with the release install).
+//! timings of the pure-Rust pixel code are meaningless (10–100× slower;
+//! benchmark with the release install).
 //!
 //! Inputs are generated ONCE per benchmark (fixed-seed LCG noise, so A/B
 //! runs are bit-identical) and only the measured function runs inside the

@@ -9,7 +9,7 @@
 //!
 //! Born from the e2e chase where the engine timed out where grim
 //! succeeded (the flush-after-dispatch deadlock + the v3 buffer_done
-//! handshake — see ROADMAP "scroll stitching").
+//! handshake).
 
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};

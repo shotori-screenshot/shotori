@@ -566,7 +566,7 @@ impl Overlay {
     /// clipboard (resident daemon) → exit. The primary exit of daily use.
     /// The encode + clipboard handoff run on the background executor so the
     /// overlay never blocks on compression (the balanced-tier 4K encode cost
-    /// ~1.4 s; the fast tier is ~45 ms — ROADMAP perf pass).
+    /// ~1.4 s; the fast tier is ~45 ms).
     fn copy_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.session.update(cx, |s, cx| {
             s.edit_annotations(|a| a.finish_polyline());
@@ -906,7 +906,7 @@ impl Overlay {
 /// Enter/Ctrl+C exit path: PNG-encode (fast tier) + clipboard handoff run
 /// on the background executor so the frozen overlay never blocks on
 /// compression (the balanced-tier 4K encode cost ~1.4 s; the fast tier is
-/// ~45 ms — ROADMAP perf pass). The daemon spawn (Linux) is blocking I/O
+/// ~45 ms). The daemon spawn (Linux) is blocking I/O
 /// and rides the same background task.
 async fn copy_to_clipboard(
     w: u32,
@@ -1132,8 +1132,7 @@ impl Render for Overlay {
 
         // Bind the base chain, then attach feature-gated handlers via
         // shadowing — cfg attributes are illegal in the middle of a method
-        // chain (see ROADMAP, gpui pitfalls: "#[cfg] cannot hang
-        // mid-method-chain")
+        // chain ("#[cfg] cannot hang mid-method-chain")
         let base = div()
             .id("shotori-overlay")
             .key_context(if self.ocr_setup.is_some() {

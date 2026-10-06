@@ -4,28 +4,52 @@
   <img src="assets/app/shotori-128.png" alt="Shotori">
 </p>
 
+[![CI](https://github.com/mengh04/shotori/actions/workflows/ci.yml/badge.svg)](https://github.com/mengh04/shotori/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/shotori.svg)](https://crates.io/crates/shotori)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-8892bf)
-![Status](https://img.shields.io/badge/status-early%20development-orange)
+![Status](https://img.shields.io/badge/status-beta-yellow)
 
-A Wayland-native screenshot tool with built-in, on-device OCR — the entire UI
-hand-drawn with [gpui-kit](https://crates.io/crates/gpui-kit).
+A Wayland-native screenshot tool with built-in, on-device OCR — annotate,
+pin, and stitch long pages without a browser extension, without a cloud
+service, and without leaving the keyboard.
 
-Freeze the screen, drag a selection, then copy, save, annotate, or OCR it —
-without leaving the keyboard.
+Shotori freezes every screen, you drag a selection, and the selection
+flows to wherever it's needed: clipboard, save dialog, text (OCR), a
+pinned floating copy — or a long screenshot that stitches itself while
+you scroll. The entire UI is hand-drawn with
+[gpui-kit](https://crates.io/crates/gpui-kit), and everything runs
+locally on your machine.
 
 **[简体中文](README.zh-CN.md)**
 
+## Highlights
+
+- **Wayland-native** — built on `wlr-screencopy` and layer-shell; at
+  home on niri, sway, Hyprland and other wlroots-adjacent compositors.
+  Multi-monitor setups with mixed scales and rotated outputs are
+  handled, selections may span screens
+- **Private OCR** — text recognition runs on-device; after a one-time
+  ~31 MB model download, nothing ever leaves your machine
+- **Long screenshots** — frame the scrolling region, scroll it
+  yourself, and watch the stitched page grow in a live side preview.
+  If part of the selection doesn't scroll along (fixed bars, video),
+  the session stops safely and keeps what it captured
+- **Pin (贴图)** — crop a selection into an always-on-top floating
+  image that outlives the screenshot UI; drag it across screens,
+  scroll to zoom
+- **A full annotation kit** — shapes, arrows, numbered steps, freehand,
+  highlighter, mosaic/blur and text, all editable after the fact
+- **Keyboard-first** — every exit is one keystroke: copy, save, OCR,
+  pin, long screenshot
+
 ## Status
 
-Shotori is in **early development** (pre-1.0). The core flows — capture,
-annotate, copy, save, OCR, pin — are in daily use, but expect rough edges:
-features may change or be removed between releases without notice, and the
-CLI, keybindings, and theme format are not stable yet. Tested on niri, sway
-and Hyprland; other Wayland compositors may behave differently. Bug reports
-and feedback are welcome in the
-[issue tracker](https://github.com/mengh04/shotori/issues).
+Shotori is in active, pre-1.0 development. The core flows — capture,
+annotate, copy, save, OCR, pin, long screenshots — are in daily use,
+but the CLI, keybindings and theme format may still change between
+releases. Tested on niri, sway and Hyprland. Bug reports and feedback
+are welcome in the [issue tracker](https://github.com/mengh04/shotori/issues).
 
 ## Features
 
@@ -56,17 +80,12 @@ and feedback are welcome in the
   vertical position freely. The toolbar also carries Copy / Save /
   Cancel; a side panel streams the growing image with a highlight
   marking the current viewport position. Controls never overlap the
-  capture region (wlr-screencopy would capture them): with a
-  full-screen selection the panel moves to another monitor, or the
-  session runs keyboard-only (shortcuts announced in a notification).
-  If part of your selection doesn't scroll with the rest (fixed bars,
-  sidebars, video), the session stops early and keeps the partial
-  capture instead of silently discarding it.
-  Automatic wheel injection is shelved for now (niri coalesces
-  per-client axis events into one gesture — the env-flag auto mode
-  exists for testing)
+  capture region — with a full-screen selection the panel moves to
+  another monitor, or the session runs keyboard-only (shortcuts
+  announced in a notification). If part of your selection doesn't
+  scroll with the rest (fixed bars, sidebars, video), the session stops
+  early and keeps the partial capture instead of silently discarding it
 - Copy to clipboard, save via the system "save as" dialog, or OCR to text
-  (fully offline after a one-time ~31 MB model download)
 - Non-interactive full-screen capture from the CLI
 - Optional tray icon; themes following the system light/dark appearance
 
@@ -128,6 +147,12 @@ release.
 |                    | keyboard-only, shortcuts announced at start               |
 | `Esc`              | abandon the current drag / exit                          |
 
+Annotation keys (`V` select, `R` rectangle, `E` ellipse, `L` line,
+`A` arrow, `M` mosaic, `H` highlighter, `B` pencil, `N` numbered step,
+`P` polyline, `T` text, `D` eraser) switch tools; undo/redo and
+`Ctrl+Shift+Del` clear-all work as usual. Run `shotori --help` for the
+full CLI surface.
+
 Non-interactive capture, no overlay:
 
 ```sh
@@ -141,7 +166,33 @@ the system). For a custom palette, copy
 [`docs/theme.example.toml`](docs/theme.example.toml) to
 `~/.config/shotori/theme.toml`.
 
-Run `shotori --help` for the full CLI surface.
+## FAQ
+
+**Which compositors are supported?**
+Anything implementing `zwlr-screencopy` — niri, sway, Hyprland, KWin,
+labwc, river, Wayfire, COSMIC and more. GNOME (Mutter) does not
+implement it and is not supported; X11 is not supported.
+
+**Where do the OCR models come from? Is my text uploaded anywhere?**
+Models (PP-OCR) are downloaded once, on first use, and inference runs
+entirely on your device. No telemetry, no network use afterwards.
+
+**Why do I scroll myself in long screenshots?**
+Compositors coalesce injected wheel events per client, which makes
+reliable auto-scroll impossible to promise across apps. Manual scrolling
+works everywhere, today; you can also drag the frame itself over
+content that never scrolls (canvas viewers, image panes).
+
+**A long screenshot stopped early with a notice.**
+Part of the selection most likely doesn't scroll with the rest (a fixed
+header, sidebar or video breaks the stitching assumption). The partial
+capture is kept — re-select only the scrolling area for a clean result.
+
+## Contributing
+
+Bug reports, compositor-compatibility feedback and patches are all
+welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for build setup,
+conventions and the PR checklist.
 
 ## Development
 
@@ -152,13 +203,14 @@ cargo build --release
 cargo test    # unit tests, no compositor needed
 ```
 
-CI enforces `cargo fmt --all --check` and
-`cargo clippy --all-targets -- -D warnings` — run both before pushing.
+Fresh machines need `pkg-config libfontconfig1-dev libfreetype-dev
+libxkbcommon-dev libwayland-dev` (what CI installs). CI enforces
+`cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`
+(plus the same with `--features perf`) — run all four before pushing.
 
 - App icon: [SVG and multi-size PNG/ICO assets](assets/app/README.md); regenerate with
   `python3 tools/generate-icons.py` (requires `rsvg-convert`)
 - Module map: the header of [`src/lib.rs`](src/lib.rs)
-- Decisions & pitfall archive: [ROADMAP.md](ROADMAP.md)
 
 ## License
 

@@ -136,7 +136,6 @@ CI 强制 `cargo fmt --all --check` 和
 - 应用图标：[SVG 和多尺寸 PNG/ICO 资源](assets/app/README.md)；修改后运行
   `python3 tools/generate-icons.py` 重新生成（需要 `rsvg-convert`）
 - 模块结构：[`src/lib.rs`](src/lib.rs) 文件头
-- 决策与踩坑记录：[ROADMAP.md](ROADMAP.md)
 
 ## License
 

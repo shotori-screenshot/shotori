@@ -7,7 +7,7 @@
 //! path moved from `/tmp/hypr` to `$XDG_RUNTIME_DIR/hypr` across
 //! versions — both are tried.
 //!
-//! Caveat (ROADMAP): written from Hyprland's IPC docs, not tested on a
+//! Caveat: written from Hyprland's IPC docs, not tested on a
 //! live session; the `at`/`size` fields have had scaled-monitor
 //! physical-vs-logical quirks historically. Reports welcome.
 

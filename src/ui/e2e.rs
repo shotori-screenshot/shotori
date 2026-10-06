@@ -8,8 +8,8 @@
 //! - `SHOTORI_DEBUG_SELECTION=x,y,w,h` — inject a ready-made selection
 //! - `SHOTORI_DEBUG_ACTION=copy|save|pin|quit|ocr|ocrsetup|clear` —
 //!   fire the action(s) automatically after 1.5s; the only entry point
-//!   for headless e2e (the virtual pointer is dead on niri, see
-//!   ROADMAP). quit/ocr go through the real dispatch_action pipeline;
+//!   for headless e2e (the virtual pointer is dead on niri). quit/ocr
+//!   go through the real dispatch_action pipeline;
 //!   "ocrsetup" drives the full first-run flow: OcrSelection at 1.5s
 //!   (opens the dialog since models are missing), then
 //!   OcrSetupConfirm at 6s (starts the download); "clear" fires the

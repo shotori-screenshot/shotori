@@ -47,7 +47,7 @@
 //!   recovers the full displacement whenever the step fits inside the
 //!   matcher's window — which every real scroll step does.
 //!
-//! Known v1 limitations (deliberate, see ROADMAP): integer offsets only
+//! Known v1 limitations (deliberate): integer offsets only
 //! (sub-pixel smooth scrolling can drop/duplicate one seam row per
 //! step), sticky chrome taller than the edge trim (~6% of the viewport
 //! top) still poisons matching (a fixed navbar is duplicated along the

@@ -13,7 +13,7 @@
 //! conscious exception to the "ui → model → platform" arrows: the
 //! stitcher imports nothing platform-side, and keeping the engine next
 //! to the other compositor clients beats inventing a trait seam for
-//! exactly one consumer (ROADMAP: scroll stitching).
+//! exactly one consumer.
 //!
 //! Compositor requirements: `zwlr_screencopy` (as the rest of shotori)
 //! plus `zwlr_virtual_pointer_v1` — broadly implemented (sway, Hyprland,
@@ -1013,7 +1013,7 @@ fn wait_frame(
         // (the screencopy `copy`!) must reach the wire before poll()
         // blocks — without it the loop deadlocks against a server
         // waiting for a request still sitting in the out-buffer
-        // (measured on niri; see ROADMAP).
+        // (measured on niri).
         conn.flush()?;
         if state.cur.as_ref().is_some_and(|c| c.ready || c.failed) {
             return Ok(());
