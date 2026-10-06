@@ -20,37 +20,22 @@ Wayland 原生截图工具——选区、标注、贴图、长截图，需要文
 ## 状态
 
 Shotori 处于**早期开发阶段**（pre-1.0）。截图、标注、复制、保存、OCR、
-贴图这些核心流程已可日常使用，但仍会有毛边：功能可能在版本之间无预警地
-调整或移除，命令行参数、键位与主题格式尚未稳定。已在 niri、sway、
-Hyprland 上测试，其他 Wayland 合成器表现可能不同。欢迎到
-[issue 区](https://github.com/mengh04/shotori/issues)报告问题与反馈。
+贴图、长截图这些核心流程已可日常使用，但仍会有毛边：功能可能在版本之间
+无预警地调整或移除，命令行参数、键位与主题格式尚未稳定。目前只在
+niri 和 Hyprland 上测试过，其他 Wayland 合成器欢迎大家试用并通过
+[issue](https://github.com/shotori-screenshot/shotori/issues) 反馈结果——
+bug、不顺手的地方、想要的功能都欢迎提。
 
 ## 功能
 
-- 区域选择，画完可再调整；多屏感知，混合缩放与旋转输出、跨屏选区都能正确处理
-- 标注：矩形、椭圆、直线、折线、箭头、序号、画笔、荧光笔、马赛克/模糊、橡皮、文字
-- 选择工具（`V`）：绘制永远不会顺带选中——拾取、移动、缩放、微调已放置的标注，
-  以及双击编辑文字/序号徽标的值，都在这个模式下进行
-- 对象橡皮擦：笔刷（圆圈实时显示实际作用范围）或矩形框选，整条删除触碰到的
-  标注——不会出现擦了一半的像素；一次撤销即可恢复整次擦除
-- 一键清除全部标注（`Ctrl+Shift+Del` 或工具栏垃圾桶按钮）；选区保持不变，
-  一次撤销即可全部恢复
-- 拖动角点（或形状手柄）时出现放大镜：3 倍冻结画面悬浮在落点旁，
-  十字线标记精确像素，不遮挡落点本身
-- 双击已有文字可原位编辑，实时换行，可调整字号和颜色，整次编辑可一步撤销；
-  文本框与选区四边保留 2px，超出底部的输入、粘贴或字号调整不会生效，避免保存被截断的内容
-- 贴图：把选区裁剪成置顶浮动小窗，截图界面关闭后依然保留——可跨屏拖动、滚轮缩放
-- 长截图：框选后 `Ctrl+L`，自己滚动内容（终端、网页均可），或按住框上工具栏
-  的 ⇕ 按钮进入拖动模式、自由拖动框的垂直位置——引擎实时拼接；工具栏还有
-  复制 / 保存 / 取消；侧边面板同步显示长图增长并高亮当前视口位置。
-  控件绝不遮挡采集区域（wlr-screencopy 会把它们拍进去）：全屏框选时面板
-  自动挪到另一台显示器，单显示器则进入纯键盘模式（快捷键以通知告知）。
-  若框选区域内有静止不动的部分（固定栏、侧边栏、视频），会提前安全停止
-  并保留已拼接的部分长图，而不是静默丢弃。
-  （自动滚轮注入在 niri 上暂不可用，自动模式经 `SHOTORI_SCROLL_AUTO=1` 供测试）
-- 复制到剪贴板、系统"另存为"对话框保存，或 OCR 成文字（首次下载 ~31MB 模型后完全离线）
-- CLI 全屏静默截图
-- 可选托盘图标；主题跟随系统深浅色
+- 区域选择：多显示器感知，混合缩放、旋转输出、跨屏选区都能正确处理；画完可再调整
+- 标注：矩形、椭圆、箭头、序号、画笔、荧光笔、马赛克、文字等，画完可继续编辑与撤销
+- 贴图：把选区钉成置顶浮动小窗，截图界面关闭后依然保留——可跨屏拖动、滚轮缩放
+- 长截图：滚动内容实时拼接，侧边面板同步预览
+- OCR：本地离线识别选区中的文字（首次使用需下载模型）
+- 复制到剪贴板，或经系统"另存为"对话框保存
+- CLI 非交互全屏截图
+- 可选托盘图标
 
 ## 环境要求
 
@@ -65,7 +50,7 @@ cargo install shotori        # crates.io
 paru -S shotori              # AUR（预编译二进制）
 ```
 
-也可以从 [GitHub Releases](https://github.com/mengh04/shotori/releases)
+也可以从 [GitHub Releases](https://github.com/shotori-screenshot/shotori/releases)
 直接下载二进制。
 
 需要应用启动器入口和桌面图标时，先确保桌面环境的 PATH 中能找到 `shotori`，
@@ -101,41 +86,27 @@ GNOME appindicator 扩展均可用）。
 | `Ctrl+O`           | OCR 选区 → 文字进剪贴板                  |
 | `Ctrl+P`           | 把选区钉成贴图                           |
 | `Ctrl+L`           | 长截图——滚动内容或拖动边框，实时拼接；     |
-|                    | Enter/Ctrl+C 复制、Ctrl+S 保存、Esc 取消。  |
-|                    | 单显示器全屏框选为纯键盘模式，快捷键开     |
-|                    | 始时以通知告知                            |
+|                    | 会话内 Enter 复制、Ctrl+S 保存、Esc 取消   |
 | `Esc`              | 放弃当前拖动 / 退出                      |
 
-非交互截图（不出现浮层）：
+## 贡献
 
-```sh
-shotori full                 # 全部屏幕 → 剪贴板
-shotori full -p ~/Pictures   # → 目录下带时间戳的 PNG
-shotori full -d 2            # 先等 2 秒
-```
-
-主题：`shotori --theme light`（也支持 `dark`、`high_contrast`；`auto`
-跟随系统）。自定义配色：把
-[`docs/theme.example.toml`](docs/theme.example.toml) 复制到
-`~/.config/shotori/theme.toml`。
-
-完整命令行参数见 `shotori --help`。
+**提 issue 和写代码同样有价值**——bug、用着不合理的地方、想要的功能，
+都欢迎到 [issue 区](https://github.com/shotori-screenshot/shotori/issues)
+提出来（中文即可）。想提交代码的话，构建步骤、代码规约和 PR 检查清单
+都在 [CONTRIBUTING.md](CONTRIBUTING.md)（英文）。
 
 ## 开发
 
 ```bash
-git clone https://github.com/mengh04/shotori
+git clone https://github.com/shotori-screenshot/shotori
 cd shotori
 cargo build --release
 cargo test    # 单元测试，无需合成器
 ```
 
-CI 强制 `cargo fmt --all --check` 和
-`cargo clippy --all-targets -- -D warnings`，推送前请先本地跑一遍。
-
-- 应用图标：[SVG 和多尺寸 PNG/ICO 资源](assets/app/README.md)；修改后运行
-  `python3 tools/generate-icons.py` 重新生成（需要 `rsvg-convert`）
-- 模块结构：[`src/lib.rs`](src/lib.rs) 文件头
+构建依赖、CI 检查项、代码规约与 PR 清单见
+[CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 

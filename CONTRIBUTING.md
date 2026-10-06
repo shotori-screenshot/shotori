@@ -6,14 +6,14 @@ feedback and patches are all welcome.
 ## Ways to help
 
 - **Bug reports** — open an
-  [issue](https://github.com/mengh04/shotori/issues) with your
+  [issue](https://github.com/shotori-screenshot/shotori/issues) with your
   compositor + version, output layout (monitors, scales, rotation) and
   steps to reproduce. A screenshot or the terminal output of the run
   helps a lot.
-- **Compositor reports** — Shotori is tested on niri, sway and
-  Hyprland. Reports from other wlroots-adjacent compositors (KWin,
-  labwc, river, Wayfire, COSMIC, …) are valuable even when everything
-  works.
+- **Compositor reports** — Shotori is currently tested on niri and
+  Hyprland only. Reports from other wlroots-adjacent compositors
+  (sway, KWin, labwc, river, Wayfire, COSMIC, …) are valuable even
+  when everything works.
 - **Patches** — the checklist below applies.
 
 ## Getting set up
@@ -30,7 +30,7 @@ sudo dnf install pkgconf fontconfig-devel freetype-devel \
 ```
 
 ```sh
-git clone https://github.com/mengh04/shotori
+git clone https://github.com/shotori-screenshot/shotori
 cd shotori
 cargo build            # the app (root package only)
 cargo test             # unit tests — no compositor needed
@@ -76,3 +76,6 @@ change per commit.
 - Failure paths (offline, corrupt files, missing protocols) are
   mandatory testing for lazy-loading designs; a success-path test
   alone is not enough.
+- App icon assets live in `assets/app/`; after changing the SVG,
+  regenerate the PNG/ICO set with `python3 tools/generate-icons.py`
+  (requires `rsvg-convert`).
