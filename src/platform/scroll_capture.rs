@@ -94,7 +94,17 @@ pub enum ScrollEvent {
         rgba: Arc<Vec<u8>>,
     },
     /// Unrecoverable (missing protocol, unsupported output, no alignment).
-    Failed { reason: String },
+    /// `partial` carries whatever was stitched before the failure — a
+    /// session that captured something must never silently discard it;
+    /// the UI copies/saves it and says so in the notification.
+    Failed {
+        reason: String,
+        /// (width, height, rgba) of the canvas so far, when one exists.
+        partial: Option<(u32, u32, Arc<Vec<u8>>)>,
+    },
+    /// Nothing has been accepted for a while (engine-sent once): the UI
+    /// hints the user to scroll. Informational, never terminal.
+    Idle,
     /// User cancelled; nothing is delivered.
     Cancelled,
 }
@@ -145,9 +155,12 @@ pub fn start(
             let result = run(&spec, &options, &ev_tx, &cmd_rx);
             if let Err(e) = result {
                 // The UI is gone too (window closed)? Then nobody reads;
-                // try_send failing is fine.
+                // try_send failing is fine. Pre-canvas failures only —
+                // once a stitcher exists, the loops report through
+                // `fail_with_partial` so the capture so far survives.
                 let _ = ev_tx.try_send(ScrollEvent::Failed {
                     reason: format!("{e:#}"),
+                    partial: None,
                 });
             }
         })
@@ -184,6 +197,40 @@ const MANUAL_POLL: Duration = Duration::from_millis(60);
 /// Manual-mode wall budget (the user pauses to read; this is a
 /// safety valve, not a target).
 const MANUAL_DEADLINE: Duration = Duration::from_secs(600);
+/// A full-height static band inside the selection rejects EVERY frame
+/// (the trimmed-mean matcher absorbs ≤ ~14% of rows; anything taller
+/// never aligns). Rather than stitching silence forever, the session
+/// stops — with the partial canvas and an actionable message — once
+/// rejections have piled up for this long with no accepted frame in
+/// between. Torn smooth-scroll frames reject for a couple of polls and
+/// then accept; only genuinely unmatchable content streaks.
+const STATIC_REGION_ABORT: Duration = Duration::from_secs(4);
+/// Minimum rejects before STATIC_REGION_ABORT may fire — separates
+/// "content that never aligns" from "user is reading" (idle sessions
+/// produce duplicates, not rejects).
+const STATIC_REGION_MIN_REJECTS: u32 = 8;
+/// Nothing accepted for this long (and nothing rejecting either — pure
+/// idle): the UI gets a one-shot hint to scroll. The session keeps
+/// running; a reader pausing mid-capture is normal.
+const IDLE_HINT: Duration = Duration::from_secs(15);
+
+/// Terminal failure that PRESERVES the capture so far: send exactly one
+/// `Failed` carrying the partial canvas, then end the loop cleanly
+/// (returning `Ok` — the thread wrapper only reports `Err` for
+/// failures that predate the stitcher, where nothing exists to keep).
+fn fail_with_partial(
+    events: &Sender<ScrollEvent>,
+    stitcher: &ScrollStitcher,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let (w, h) = stitcher.dimensions();
+    eprintln!("[shotori] scroll: failing with partial canvas: {reason}");
+    let _ = events.try_send(ScrollEvent::Failed {
+        reason: reason.to_owned(),
+        partial: Some((w, h, Arc::new(stitcher.canvas().to_vec()))),
+    });
+    Ok(())
+}
 /// Live-preview refresh cadence.
 const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
 /// Live-preview target width (px, before the panel scales it again).
@@ -474,7 +521,11 @@ fn run(
 
     loop {
         if Instant::now() > session_deadline {
-            bail!("scroll session timed out");
+            return fail_with_partial(
+                events,
+                &stitcher,
+                "The scroll session timed out before reaching the bottom.",
+            );
         }
         match cmds.try_recv() {
             Ok(Cmd::Finish) => return deliver(events, &stitcher),
@@ -485,9 +536,24 @@ fn run(
             Err(_) => {}
         }
 
-        inject_step(lines, sign, style)?;
+        if let Err(e) = inject_step(lines, sign, style) {
+            return fail_with_partial(
+                events,
+                &stitcher,
+                &format!("Scrolling the selection failed: {e:#}"),
+            );
+        }
 
-        let frame = capturer.settle(&mut anchor)?;
+        let frame = match capturer.settle(&mut anchor) {
+            Ok(frame) => frame,
+            Err(e) => {
+                return fail_with_partial(
+                    events,
+                    &stitcher,
+                    &format!("The compositor stopped delivering frames: {e:#}"),
+                );
+            }
+        };
         let outcome = stitcher.push(&frame);
         println!(
             "[shotori] scroll: frame #{} → {:?} (lines={lines}, sign={sign}, style={style:?})",
@@ -528,7 +594,11 @@ fn run(
                 // flip once, fail if direction never stabilizes.
                 flips += 1;
                 if flips > 2 {
-                    bail!("cannot establish a scroll direction over the selection");
+                    return fail_with_partial(
+                        events,
+                        &stitcher,
+                        "The content scrolled both ways and never settled on a direction.",
+                    );
                 }
                 sign = -sign;
                 no_motion = 0;
@@ -564,7 +634,11 @@ fn run(
                         "[shotori] scroll: no response yet, flipping direction (sign now {sign})"
                     );
                     if flips > 4 {
-                        bail!("the selection does not respond to scrolling");
+                        return fail_with_partial(
+                            events,
+                            &stitcher,
+                            "The selection does not respond to scrolling.",
+                        );
                     }
                 }
                 if no_motion >= BOTTOM_NO_MOTION {
@@ -577,7 +651,12 @@ fn run(
             | StitchOutcome::Rejected(StitchReject::HighResidual) => {
                 rejects += 1;
                 if rejects > MAX_REJECTS {
-                    bail!("could not align the scrolled frames (content changes or repeats)");
+                    return fail_with_partial(
+                        events,
+                        &stitcher,
+                        "The scrolled frames never aligned — part of the selection may not \
+                         scroll with the rest (fixed bars, sidebars or video).",
+                    );
                 }
             }
             StitchOutcome::Rejected(StitchReject::HeightLimit) => {
@@ -585,7 +664,11 @@ fn run(
                 return deliver(events, &stitcher);
             }
             StitchOutcome::Rejected(other) => {
-                bail!("stitcher rejected the frame: {other:?}");
+                return fail_with_partial(
+                    events,
+                    &stitcher,
+                    &format!("The capture region changed mid-session ({other:?})."),
+                );
             }
         }
     }
@@ -660,11 +743,21 @@ fn viewport_in_preview(
 }
 
 /// Manual mode: the user scrolls, the engine watches. Pure capture +
-/// stitch polling — no injection, no direction logic; every outcome
-/// except the hard failures simply rides (duplicates = user idle,
-/// rejects = mid-scroll tears the anchor refresh absorbs). Termination
-/// is the user's Finish/Cancel, the height cap, or the (generous)
-/// manual deadline.
+/// stitch polling — no injection, no direction logic; duplicates ride
+/// (user idle) and transient rejects ride (mid-scroll tears the anchor
+/// refresh absorbs). Termination is the user's Finish/Cancel, the
+/// height cap, the manual deadline — or one of the two diagnostic
+/// exits, which keep the partial canvas:
+///
+/// - **Static-region abort** — frames keep CHANGING but never ALIGN
+///   for [`STATIC_REGION_ABORT`] with no accept in between: a fixed
+///   band taller than the matcher's trim budget lives inside the
+///   selection (site header, sidebar, video). Nothing new can ever be
+///   stitched; the user gets told to re-select, not left staring at a
+///   frozen preview.
+/// - **Idle hint** — nothing accepted and nothing rejecting for
+///   [`IDLE_HINT`]: one nudge to scroll (the wheel may simply be going
+///   to another surface). Non-terminal.
 fn run_manual(
     stitcher: &mut ScrollStitcher,
     capturer: &mut Capturer<'_>,
@@ -688,9 +781,21 @@ fn run_manual(
         .ceil()
         .max(1.0) as u32;
     let flush_rows = 4 * k;
+    // Diagnostics: any accept resets the reject clock; rejects
+    // accumulate only between accepts (idle ≠ broken). The idle hint
+    // is strictly for sessions where NOTHING was ever captured — a
+    // user reading mid-scroll must not be nagged.
+    let mut last_accept = Instant::now();
+    let mut rejects_since_accept = 0u32;
+    let mut accepted_any = false;
+    let mut idle_hinted = false;
     loop {
         if Instant::now() > deadline {
-            bail!("manual scroll session timed out");
+            return fail_with_partial(
+                events,
+                stitcher,
+                "Nothing new was captured for ten minutes — the session timed out.",
+            );
         }
         match cmds.try_recv() {
             Ok(Cmd::Finish) => return deliver(events, stitcher),
@@ -700,7 +805,16 @@ fn run_manual(
             }
             Err(_) => {}
         }
-        let frame = capturer.capture_once()?;
+        let frame = match capturer.capture_once() {
+            Ok(frame) => frame,
+            Err(e) => {
+                return fail_with_partial(
+                    events,
+                    stitcher,
+                    &format!("The compositor stopped delivering frames: {e:#}"),
+                );
+            }
+        };
         let outcome = stitcher.push(&frame);
         if !matches!(outcome, StitchOutcome::Duplicate) {
             println!(
@@ -709,7 +823,12 @@ fn run_manual(
             );
         }
         match outcome {
-            StitchOutcome::Appended { .. } => {
+            StitchOutcome::Appended { .. }
+            | StitchOutcome::Prepended { .. }
+            | StitchOutcome::Contained { .. } => {
+                last_accept = Instant::now();
+                rejects_since_accept = 0;
+                accepted_any = true;
                 let _ = events.try_send(ScrollEvent::Progress {
                     stitched: stitcher.captured_extent(),
                 });
@@ -720,9 +839,39 @@ fn run_manual(
             }
             StitchOutcome::Rejected(StitchReject::TooSmall)
             | StitchOutcome::Rejected(StitchReject::InsufficientOverlap) => {
-                bail!("stitcher rejected the frame: {outcome:?}");
+                return fail_with_partial(
+                    events,
+                    stitcher,
+                    "The capture region changed size mid-session.",
+                );
             }
-            _ => {}
+            StitchOutcome::Rejected(_) => {
+                rejects_since_accept += 1;
+            }
+            StitchOutcome::Duplicate | StitchOutcome::NoMotion => {}
+        }
+        // Frames change but never align: a static region taller than
+        // the matcher's trim budget is inside the selection.
+        if rejects_since_accept >= STATIC_REGION_MIN_REJECTS
+            && last_accept.elapsed() >= STATIC_REGION_ABORT
+        {
+            return fail_with_partial(
+                events,
+                stitcher,
+                "Part of the selection doesn't scroll with the rest — fixed bars, \
+                 sidebars or video break stitching. Select only the scrolling area.",
+            );
+        }
+        // Nothing moving at all: one nudge, then keep waiting (reading
+        // pauses are normal; only rejects, not idling, are fatal).
+        if !idle_hinted
+            && !accepted_any
+            && rejects_since_accept == 0
+            && last_accept.elapsed() >= IDLE_HINT
+        {
+            idle_hinted = true;
+            println!("[shotori] scroll: idle — hinting the user to scroll");
+            let _ = events.try_send(ScrollEvent::Idle);
         }
         // Every accepted (non-duplicate) outcome can move the viewport
         // OR reshape the canvas (prepends grow the top) — the highlight

@@ -66,6 +66,18 @@ pub(crate) fn display_containing(p: Point<Pixels>) -> Option<DisplayId> {
         .and_then(|o| o.display_id)
 }
 
+/// The first output that is NOT `display`: chrome that must leave its
+/// capture output entirely (the scroll preview panel when no side
+/// strip fits — wlr-screencopy would capture it over the region
+/// otherwise) docks there instead. Returns the display and its GLOBAL
+/// logical bounds.
+pub(crate) fn other_output_than(display: Option<DisplayId>) -> Option<(DisplayId, Bounds<Pixels>)> {
+    outputs().into_iter().find_map(|o| match o.display_id {
+        Some(id) if Some(id) != display => Some((id, o.bounds)),
+        _ => None,
+    })
+}
+
 /// Scroll lines (pixel deltas pre-normalized by the caller) → the next
 /// zoom factor, clamped to the range.
 fn next_zoom(zoom: f32, lines: f32) -> f32 {

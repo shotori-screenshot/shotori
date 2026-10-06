@@ -1439,3 +1439,54 @@ visible in their terminal):
   the highlight (centered, clamped to the image); fitting images still
   bottom-anchor. Requires the panel to know the output height (passed
   through launch).
+
+### Long-screenshot v1.7: chrome burns into the capture + robust exits (2026-10-07)
+
+Two user reports, one root cause and one robustness pass:
+
+- **wlr-screencopy captures the COMPOSITED output — our own layer
+  surfaces included.** A full-screen long screenshot burned the preview
+  panel (a 264px opaque strip) down one side and the frame toolbar
+  (198×32) at the top of every frame; anything painted over the capture
+  region is in the screenshot, and the pixels under it are never seen
+  by the camera. The v1.5 "verified NOT bugs" verdict on "a background
+  band on the right = scrollbar auto-hide" was almost certainly this
+  bug misread — the panel docks right for centered rects. Fixes, all
+  derived from one principle (chrome never enters the capture region):
+  - The panel docks only where a FULL side strip (width + margins)
+    fits between rect and output edge (`plan_scroll_panel`); with a
+    second monitor it docks there; single-monitor full-screen goes
+    CHROME-FREE — no panel, no toolbar, the frame window hosts the
+    engine lifecycle (extracted from `PreviewPanel` into shared exit
+    fns + a `FrameHost`) and takes the keyboard (Exclusive + focus +
+    `ShotoriScroll` context; shortcuts announced by notification).
+    Safe for manual mode because niri's keyboard-focus wheel routing
+    only affects VIRTUAL pointers; auto/debug keeps the legacy
+    center-heuristic placement for exactly that reason.
+  - The frame toolbar became a placement LADDER (below → above →
+    panel-free side strip → hidden). The historical bug: the "above"
+    rung clamped to `y=0`, landing the toolbar INSIDE any full-height
+    selection — the tall-column case, burned into the canvas top.
+  - Frame DRAGS are clamped out of the docked panel's strip
+    (`clamp_moved_rect` reserve): the panel cannot re-anchor at
+    runtime, so a drag under it would be permanent burn-in. Reserves
+    lose when they'd make the drag unusable.
+  - The four strokes are drawn strictly OUTSIDE the rect and the grab
+    bands are input-only — those were never a problem.
+- **Robust exits — a broken session must never discard its capture.**
+  `ScrollEvent::Failed` now carries `partial: Option<canvas>`; every
+  failure after the stitcher exists (timeouts, compositor errors,
+  matcher give-ups, region resizes) delivers it, and the UI
+  copies/saves the partial with "Long screenshot stopped early".
+  Manual mode gained two diagnostics with distinct signatures:
+  frames-change-but-never-align for 4s+ = a static band taller than
+  the trim budget inside the selection (site header, sidebar, video) →
+  stop with an actionable re-select message; nothing-accepted-nothing-
+  rejecting for 15s = idle → one-shot "scroll to capture" hint, non-
+  terminal (a reader pausing mid-scroll must not be nagged — the hint
+  only fires before the FIRST accept). Idle vs broken is the
+  Duplicate/NoMotion vs Rejected taxonomy split, straight from the
+  stitcher.
+- Also fixed en passant: `tools/scrollprobe` had an unused import and
+  an overindented doc list item that CI never saw (CI lints the root
+  package only, not `--workspace`).

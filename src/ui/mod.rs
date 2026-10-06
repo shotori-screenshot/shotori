@@ -9,8 +9,9 @@
 //!   consume
 //! - [`ocr_setup`]: first-run model-download dialog
 //! - [`pin`]: the selection as a floating pinned window (贴图)
-//! - [`scroll_bar`]: the long-screenshot control strip (the only
-//!   surface while the scroll engine runs)
+//! - [`scroll_bar`]: the long-screenshot chrome (region frame + preview
+//!   panel; chrome-free on full-screen single-monitor sessions — see
+//!   that module's docs)
 //! - [`e2e`]: runtime debug backdoors driving headless tests
 //!   (`SHOTORI_DEBUG_*`)
 //! - [`theme`]: visual constants

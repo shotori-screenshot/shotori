@@ -55,7 +55,13 @@ and feedback are welcome in the
   it yourself, or hold the toolbar's ⇕ grab button and drag the frame's
   vertical position freely. The toolbar also carries Copy / Save /
   Cancel; a side panel streams the growing image with a highlight
-  marking the current viewport position.
+  marking the current viewport position. Controls never overlap the
+  capture region (wlr-screencopy would capture them): with a
+  full-screen selection the panel moves to another monitor, or the
+  session runs keyboard-only (shortcuts announced in a notification).
+  If part of your selection doesn't scroll with the rest (fixed bars,
+  sidebars, video), the session stops early and keeps the partial
+  capture instead of silently discarding it.
   Automatic wheel injection is shelved for now (niri coalesces
   per-client axis events into one gesture — the env-flag auto mode
   exists for testing)
@@ -117,7 +123,9 @@ release.
 | `Ctrl+P`           | pin the selection to the screen                          |
 | `Ctrl+L`           | long screenshot — scroll, or drag the frame over the      |
 |                    | content; stitched live with a side preview (Enter/Ctrl+C  |
-|                    | copy, Ctrl+S save, Esc cancel — same as selection)       |
+|                    | copy, Ctrl+S save, Esc cancel — same as selection).       |
+|                    | Chrome-free on full-screen selections (single monitor):   |
+|                    | keyboard-only, shortcuts announced at start               |
 | `Esc`              | abandon the current drag / exit                          |
 
 Non-interactive capture, no overlay:

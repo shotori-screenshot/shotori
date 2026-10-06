@@ -204,51 +204,169 @@ pub(crate) const FRAME_TB_H: f32 = 32.;
 /// Gap between the frame edge and its toolbar.
 pub(crate) const FRAME_TB_GAP: f32 = 10.;
 
-/// Where the frame's toolbar sits: centered below the frame's bottom
-/// edge, flipping ABOVE the frame when the bottom would push it off
-/// the output (a frame parked at the screen bottom), and clamped
-/// horizontally into the output. Same geometry feeds the render and
-/// the input region (one source per concept).
-pub(crate) fn frame_toolbar(rect: ScrollRect, out_w: f32, out_h: f32) -> Bounds<Pixels> {
+/// The preview panel's logical width (`ui::scroll_bar` renders it).
+pub(crate) const SCROLL_PANEL_W: f32 = 264.;
+/// The panel's layer-shell vertical margins (top and bottom).
+pub(crate) const SCROLL_PANEL_MARGIN: f32 = 10.;
+
+/// Where the preview panel docks for a scroll session.
+///
+/// wlr-screencopy captures the fully-composited output — including our
+/// own layer surfaces — so any chrome painted over the capture rect
+/// burns into every stitched frame. The panel therefore only docks on
+/// a side that leaves [`SCROLL_PANEL_W`] + margins of space between
+/// the rect and the output edge; when no side qualifies it moves to
+/// another output, or (single monitor) the session goes chrome-free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ScrollPanelDock {
+    Left,
+    Right,
+    /// No side of the capture output fits; another output exists — the
+    /// panel lives there (peripheral, but visible and interactive).
+    OtherOutput,
+    /// Single monitor, no side fits: no panel at all. The frame window
+    /// hosts the session alone (strokes stay strictly OUTSIDE the rect,
+    /// exits go through the keyboard).
+    Hidden,
+}
+
+/// The side strip a docked panel occupies: its width plus margins.
+pub(crate) fn scroll_panel_strip() -> f32 {
+    SCROLL_PANEL_W + 2. * SCROLL_PANEL_MARGIN
+}
+
+/// Pick the panel dock for a capture rect. A side qualifies when the
+/// strip between the rect and that output edge fits the panel; among
+/// qualifying sides the wider one wins (ties → Right, the historical
+/// default for centered rects).
+pub(crate) fn plan_scroll_panel(
+    rect: ScrollRect,
+    out_w: f32,
+    other_output: bool,
+) -> ScrollPanelDock {
+    let free_left = rect.x as f32;
+    let free_right = out_w - (rect.x + rect.width) as f32;
+    let strip = scroll_panel_strip();
+    match (free_left >= strip, free_right >= strip) {
+        (true, false) => ScrollPanelDock::Left,
+        (false, true) => ScrollPanelDock::Right,
+        (true, true) if free_left > free_right => ScrollPanelDock::Left,
+        (true, true) => ScrollPanelDock::Right,
+        (false, false) if other_output => ScrollPanelDock::OtherOutput,
+        (false, false) => ScrollPanelDock::Hidden,
+    }
+}
+
+/// The legacy center heuristic (Auto/debug mode keeps it: a chrome-free
+/// frame holding the keyboard eats injected wheel on compositors that
+/// route virtual pointers by keyboard focus — niri, measured).
+pub(crate) fn legacy_scroll_panel(rect: ScrollRect, out_w: f32) -> ScrollPanelDock {
+    if (rect.x + rect.width / 2) as f32 > out_w / 2. {
+        ScrollPanelDock::Left
+    } else {
+        ScrollPanelDock::Right
+    }
+}
+
+/// Where the frame's toolbar sits — a placement ladder that NEVER
+/// paints inside the capture rect (the same screencopy-composites-our
+/// -layers trap as the panel):
+///
+/// 1. centered below the frame's bottom edge;
+/// 2. flipped above the frame's top edge;
+/// 3. docked at the top of a side strip the panel does NOT occupy;
+/// 4. `None` — not rendered (the panel's buttons / the keyboard carry
+///    the exits; the grab bands are input-only and keep working).
+///
+/// The historical behavior clamped rung 2 to `y = 0`, which landed the
+/// toolbar INSIDE any full-height selection — the top of every frame
+/// burned a 198×32 toolbar into the long screenshot. Same geometry
+/// feeds the render and the input region (one source per concept).
+pub(crate) fn frame_toolbar(
+    rect: ScrollRect,
+    out_w: f32,
+    out_h: f32,
+    panel: ScrollPanelDock,
+) -> Option<Bounds<Pixels>> {
     let (x, y, w, h) = (
         rect.x as f32,
         rect.y as f32,
         rect.width as f32,
         rect.height as f32,
     );
-    let below = y + h + FRAME_TB_GAP;
-    let top = if below + FRAME_TB_H > out_h {
-        (y - FRAME_TB_GAP - FRAME_TB_H).max(0.)
-    } else {
-        below
-    };
-    let left = (x + w / 2. - FRAME_TB_W / 2.).clamp(0., (out_w - FRAME_TB_W).max(0.));
-    Bounds {
-        origin: point(px(left), px(top)),
+    let centered = |top: f32| Bounds {
+        origin: point(
+            px((x + w / 2. - FRAME_TB_W / 2.).clamp(0., (out_w - FRAME_TB_W).max(0.))),
+            px(top),
+        ),
         size: size(px(FRAME_TB_W), px(FRAME_TB_H)),
+    };
+    // Rung 1: below (the visual default — next to where the content
+    // grows).
+    if y + h + FRAME_TB_GAP + FRAME_TB_H <= out_h {
+        return Some(centered(y + h + FRAME_TB_GAP));
     }
+    // Rung 2: above. No `.max(0.)` clamp: a rung that does not fit
+    // falls through instead of pushing the bar inside the rect.
+    if y - FRAME_TB_GAP - FRAME_TB_H >= 0. {
+        return Some(centered(y - FRAME_TB_GAP - FRAME_TB_H));
+    }
+    // Rung 3: a side strip, panel-free (the panel anchors top-to-bottom
+    // of its strip — nothing else may live there). Prefer the wider
+    // strip; both free (panel elsewhere/hidden) → Right, matching the
+    // panel's default side.
+    let free_left = x;
+    let free_right = out_w - (x + w);
+    let need = FRAME_TB_W + SCROLL_PANEL_MARGIN;
+    let left_ok = panel != ScrollPanelDock::Left && free_left >= need;
+    let right_ok = panel != ScrollPanelDock::Right && free_right >= need;
+    let side = match (left_ok, right_ok) {
+        (true, true) if free_left > free_right => Some(true),
+        (_, true) => Some(false),
+        (true, false) => Some(true),
+        (false, false) => None,
+    };
+    side.map(|is_left| Bounds {
+        origin: point(
+            px(if is_left {
+                SCROLL_PANEL_MARGIN
+            } else {
+                out_w - FRAME_TB_W - SCROLL_PANEL_MARGIN
+            }),
+            px(SCROLL_PANEL_MARGIN),
+        ),
+        size: size(px(FRAME_TB_W), px(FRAME_TB_H)),
+    })
 }
 
 /// Move `rect` by `(dx, dy)`, clamped inside the output. Pure — the
 /// unit tests drive drags through here.
+///
+/// `reserve` is the (left, right) width of side strips the rect must
+/// stay out of — the docked preview panel's strip: the panel cannot
+/// re-anchor at runtime (no `set_margin` on a live layer surface), so a
+/// drag that slid the capture region under it would burn the panel
+/// into every subsequent frame (wlr-screencopy composites our layers).
 pub(crate) fn clamp_moved_rect(
     rect: ScrollRect,
     dx: f32,
     dy: f32,
     out_w: f32,
     out_h: f32,
+    reserve: (f32, f32),
 ) -> ScrollRect {
-    let clamp = |v: f32, extent: f32, size: i32| {
-        // degenerate-output posture: never panic on inverted bounds
-        if extent < size as f32 {
-            0.
-        } else {
-            v.clamp(0., extent - size as f32)
-        }
-    };
+    let (mut lo, mut hi) = (reserve.0, out_w - rect.width as f32 - reserve.1);
+    if lo > hi {
+        // The reserved strips leave less room than the rect needs — the
+        // drag must stay usable, so the reserves lose.
+        lo = 0.;
+        hi = out_w - rect.width as f32;
+    }
+    // Degenerate-output posture: never panic on inverted bounds.
+    let clamp = |v: f32, lo: f32, hi: f32| if hi < lo { lo } else { v.clamp(lo, hi) };
     ScrollRect {
-        x: clamp(rect.x as f32 + dx, out_w, rect.width) as i32,
-        y: clamp(rect.y as f32 + dy, out_h, rect.height) as i32,
+        x: clamp(rect.x as f32 + dx, lo, hi) as i32,
+        y: clamp(rect.y as f32 + dy, 0., (out_h - rect.height as f32).max(0.)) as i32,
         width: rect.width,
         height: rect.height,
     }
@@ -259,8 +377,9 @@ mod tests {
     // Explicit imports (same reason as selection.rs: avoid gpui's test
     // macro shadowing the built-in #[test])
     use super::{
-        FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H, TB_H, TB_W, TB_W_ROW1, clamp_moved_rect,
-        frame_grab_bands, frame_strokes, frame_toolbar, label_anchor, toolbar_anchor, toolbar_size,
+        FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H, SCROLL_PANEL_MARGIN, ScrollPanelDock, TB_H, TB_W,
+        TB_W_ROW1, clamp_moved_rect, frame_grab_bands, frame_strokes, frame_toolbar, label_anchor,
+        legacy_scroll_panel, plan_scroll_panel, toolbar_anchor, toolbar_size,
     };
     use crate::model::session::ScrollRect;
     use gpui_kit::{Bounds, Pixels, point, px, size};
@@ -371,13 +490,13 @@ mod tests {
     #[test]
     fn drag_moves_and_clamps_inside_the_output() {
         // free movement both axes
-        let moved = clamp_moved_rect(rect(100, 100), 50., -40., 1920., 1080.);
+        let moved = clamp_moved_rect(rect(100, 100), 50., -40., 1920., 1080., (0., 0.));
         assert_eq!((moved.x, moved.y), (150, 60));
         // clamped at the top/left edges
-        let clamped = clamp_moved_rect(rect(100, 100), -500., -500., 1920., 1080.);
+        let clamped = clamp_moved_rect(rect(100, 100), -500., -500., 1920., 1080., (0., 0.));
         assert_eq!((clamped.x, clamped.y), (0, 0));
         // clamped at the bottom/right edges (region fully on-screen)
-        let clamped = clamp_moved_rect(rect(1000, 900), 5000., 5000., 1920., 1080.);
+        let clamped = clamp_moved_rect(rect(1000, 900), 5000., 5000., 1920., 1080., (0., 0.));
         assert_eq!(
             (clamped.x, clamped.y),
             (1920 - 400, 1080 - 300),
@@ -385,6 +504,23 @@ mod tests {
         );
         // size never changes — drags move, they do not resize
         assert_eq!((moved.width, moved.height), (400, 300));
+    }
+
+    #[test]
+    fn drag_cannot_slide_the_region_under_the_docked_panel() {
+        // A right-docked panel reserves its strip on the right: the
+        // rect's right edge stops 284px short of the output edge (the
+        // panel cannot re-anchor, so the burn-in would be permanent).
+        let strip = super::scroll_panel_strip();
+        let moved = clamp_moved_rect(rect(1000, 100), 5000., 0., 1920., 1080., (0., strip));
+        assert_eq!(moved.x as f32, 1920. - 400. - strip);
+        // A left-docked panel reserves the left strip
+        let moved = clamp_moved_rect(rect(1000, 100), -5000., 0., 1920., 1080., (strip, 0.));
+        assert_eq!(moved.x as f32, strip);
+        // Degenerate: the rect cannot fit between the strips — the
+        // reserves lose, the drag stays usable (full-output clamp).
+        let moved = clamp_moved_rect(rect(1000, 100), 5000., 0., 900., 1080., (strip, strip));
+        assert_eq!(moved.x, 900 - 400);
     }
 
     #[test]
@@ -407,9 +543,10 @@ mod tests {
     }
 
     #[test]
-    fn frame_toolbar_below_by_default_flips_at_the_bottom_clamps_x() {
+    fn frame_toolbar_below_by_default_flips_at_the_top_clamps_x() {
+        let dock = ScrollPanelDock::Right;
         // centered under the frame's bottom edge, one gap below
-        let below = frame_toolbar(rect(100, 100), 1920., 1080.);
+        let below = frame_toolbar(rect(100, 100), 1920., 1080., dock).unwrap();
         assert_eq!(
             (
                 f32::from(below.origin.x),
@@ -424,15 +561,15 @@ mod tests {
                 FRAME_TB_H
             )
         );
-        // a frame parked at the screen bottom: the toolbar flips ABOVE
-        // the frame's top edge instead of leaving the output
+        // a frame near the screen bottom: the toolbar flips ABOVE the
+        // frame's top edge instead of leaving the output
         let r = ScrollRect {
             x: 100,
             y: 760,
             width: 400,
             height: 300,
         };
-        let flipped = frame_toolbar(r, 1920., 1080.);
+        let flipped = frame_toolbar(r, 1920., 1080., dock).unwrap();
         assert_eq!(f32::from(flipped.origin.y), 760. - 10. - FRAME_TB_H);
         // near the right edge the bar pins into the output
         let r = ScrollRect {
@@ -441,7 +578,137 @@ mod tests {
             width: 100,
             height: 100,
         };
-        let pinned = frame_toolbar(r, 1920., 1080.);
+        let pinned = frame_toolbar(r, 1920., 1080., dock).unwrap();
         assert_eq!(f32::from(pinned.origin.x), 1920. - FRAME_TB_W);
+    }
+
+    #[test]
+    fn frame_toolbar_never_sits_inside_a_full_height_rect() {
+        // The historical bug: a full-height selection (the classic
+        // tall-column long screenshot) flipped the toolbar "above" and
+        // clamped it to y = 0 — INSIDE the capture region, so every
+        // stitched frame carried a 198×32 toolbar at its top. The
+        // ladder must find somewhere outside or hide the bar instead.
+        let full_height = ScrollRect {
+            x: 760,
+            y: 0,
+            width: 400,
+            height: 1080,
+        };
+        // sides fit (760 left, 760 right) — the toolbar docks into the
+        // panel-FREE strip's top; with the panel right that is the left
+        // strip (verified in full below), and it must never overlap the
+        // capture region.
+        let docked = frame_toolbar(full_height, 1920., 1080., ScrollPanelDock::Right).unwrap();
+        let region = bounds(
+            full_height.x as f32,
+            full_height.y as f32,
+            full_height.width as f32,
+            full_height.height as f32,
+        );
+        let inter = region.intersect(&docked);
+        assert!(
+            f32::from(inter.size.width) <= 0. || f32::from(inter.size.height) <= 0.,
+            "toolbar must not overlap the capture region: {docked:?} ∩ {region:?}"
+        );
+
+        // the panel occupies the right strip → the toolbar takes the
+        // panel-free LEFT strip
+        let left = frame_toolbar(full_height, 1920., 1080., ScrollPanelDock::Right).unwrap();
+        assert_eq!(
+            (f32::from(left.origin.x), f32::from(left.origin.y)),
+            (SCROLL_PANEL_MARGIN, SCROLL_PANEL_MARGIN)
+        );
+
+        // panel LEFT → toolbar RIGHT
+        let right = frame_toolbar(full_height, 1920., 1080., ScrollPanelDock::Left).unwrap();
+        assert_eq!(
+            (f32::from(right.origin.x), f32::from(right.origin.y)),
+            (
+                1920. - FRAME_TB_W - SCROLL_PANEL_MARGIN,
+                SCROLL_PANEL_MARGIN
+            )
+        );
+
+        // full-screen rect: no strip exists anywhere — hidden, never
+        // inside (whatever the panel does)
+        let full_screen = ScrollRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            frame_toolbar(full_screen, 1920., 1080., ScrollPanelDock::Right),
+            None
+        );
+        assert_eq!(
+            frame_toolbar(full_screen, 1920., 1080., ScrollPanelDock::Hidden),
+            None
+        );
+    }
+
+    #[test]
+    fn scroll_panel_docks_where_it_fits() {
+        let full = |w: i32| ScrollRect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: 1080,
+        };
+        // partial-width rect: the wider free side wins
+        assert_eq!(
+            plan_scroll_panel(full(1000), 1920., false),
+            ScrollPanelDock::Right
+        );
+        assert_eq!(
+            plan_scroll_panel(
+                ScrollRect {
+                    x: 920,
+                    y: 0,
+                    width: 1000,
+                    height: 1080
+                },
+                1920.,
+                false
+            ),
+            ScrollPanelDock::Left
+        );
+        // one-sided fit docks that side (320 ≥ 284 on the right)
+        assert_eq!(
+            plan_scroll_panel(full(1600), 1920., false),
+            ScrollPanelDock::Right
+        );
+        // a 220px remainder fits nothing — the strip threshold is 284
+        assert_eq!(
+            plan_scroll_panel(full(1700), 1920., false),
+            ScrollPanelDock::Hidden
+        );
+        // neither side fits: another output wins over hiding
+        assert_eq!(
+            plan_scroll_panel(full(1920), 1920., true),
+            ScrollPanelDock::OtherOutput
+        );
+        assert_eq!(
+            plan_scroll_panel(full(1920), 1920., false),
+            ScrollPanelDock::Hidden
+        );
+        // legacy center heuristic (auto/debug): center decides, fit ignored
+        assert_eq!(
+            legacy_scroll_panel(full(1000), 1920.),
+            ScrollPanelDock::Right
+        );
+        assert_eq!(
+            legacy_scroll_panel(
+                ScrollRect {
+                    x: 920,
+                    y: 0,
+                    width: 1000,
+                    height: 1080
+                },
+                1920.
+            ),
+            ScrollPanelDock::Left
+        );
     }
 }
