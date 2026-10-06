@@ -1,67 +1,52 @@
-//! Selection chrome geometry: the highlight outline and the handle
+//! Selection chrome geometry: the selection frame and the handle
 //! anchors a selected shape paints. Kept next to the shape data (not
 //! in the overlay) so both preview paths render identical chrome and
 //! future geometry editing (issue #5 phase C) grows on the same
 //! anchors. Pure geometry — no state.
-use gpui_kit::{Bounds, Path, PathBuilder, Pixels, Point, point, px, size};
+use gpui_kit::{Bounds, PathBuilder, Pixels, Point, point, px, size};
 
 use super::{Shape, ShapeKind};
 
+/// Clearance between the ink and the selection frame (logical px).
+/// Keeps the dashes off the colored edge they frame (they must stay
+/// legible against the same palette that hid the old on-ink outline)
+/// and gives degenerate ink — a horizontal line, a single tap — a
+/// frame with visible height/width.
+const FRAME_PAD: f32 = 3.;
+
 impl Shape {
-    /// Selection highlight: a thin stroke tracing the shape's own
-    /// visual outline — capsule rim, ellipse ring, arrowhead, badge
-    /// circle, or the freehand centerline; never a filled blob over
-    /// the content. Corner handles come from [`Shape::handle_points`]
-    /// on the overlay side.
-    pub(crate) fn hilite_paths(&self, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
-        match self.kind {
-            // Freehand strokes (and multi-vertex polylines) are unions of
-            // many overlapping capsules — rim-tracing every capsule
-            // renders the selection as a chain of rings, glaring once
-            // select-on-place auto-selected each fresh stroke. The
-            // centerline is the one path that says "this stroke is
-            // selected" at any point count; a single-point tap has no
-            // centerline, so it keeps its circle rim.
-            ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Polyline
-                if self.points.len() >= 2 =>
-            {
-                let pts: Vec<Point<Pixels>> = self.points.iter().map(|p| *p + offset).collect();
-                let mut builder = PathBuilder::stroke(px(1.));
-                builder.add_polygon(&pts, false);
-                builder.build().ok().into_iter().collect()
-            }
-            ShapeKind::Line
-            | ShapeKind::Arrow
-            | ShapeKind::Polyline
-            | ShapeKind::Pencil
-            | ShapeKind::Highlighter => {
-                super::line::geometry(&self.points, self.width, self.kind == ShapeKind::Arrow)
-                    .iter()
-                    .filter_map(|poly| {
-                        let pts: Vec<Point<Pixels>> = poly.iter().map(|p| *p + offset).collect();
-                        let mut builder = PathBuilder::stroke(px(1.));
-                        builder.add_polygon(&pts, true);
-                        builder.build().ok()
-                    })
-                    .collect()
-            }
-            ShapeKind::Rectangle => self
-                .strokes()
-                .iter()
-                .filter_map(|s| rect_stroke(*s, offset))
-                .collect(),
-            ShapeKind::Ellipse => ellipse_stroke(self.bounds, offset).into_iter().collect(),
-            ShapeKind::Number => {
-                ellipse_stroke(super::select::inflate(&self.bounds, px(2.)), offset)
-                    .into_iter()
-                    .collect()
-            }
-            // solid regions trace their bounds rectangle
-            ShapeKind::Text | ShapeKind::Mosaic | ShapeKind::Blur => {
-                rect_stroke(self.bounds, offset).into_iter().collect()
-            }
-            _ => Vec::new(),
-        }
+    /// Selection frame: the axis-aligned bounding box of the shape's
+    /// VISIBLE ink, inflated by [`FRAME_PAD`] — the universal
+    /// "this object is selected" affordance (Figma/PowerPoint
+    /// language), replacing the 1 px accent stroke that traced the
+    /// shape's own outline. That stroke sat ON the ink, in a hue the
+    /// annotation palette all but swallowed, so a selected shape read
+    /// as unselected (user report, 2026-10-06). Callers paint this as
+    /// a dashed accent rectangle (`ui::hud::annotation_chrome`).
+    pub(crate) fn selection_box(&self) -> Bounds<Pixels> {
+        super::select::inflate(
+            &match self.kind {
+                // Point-carried shapes: the ink is the union of capsules
+                // and arrowheads from the shared geometry source ("what
+                // you see is what you box"). Neither `points` alone nor
+                // `bounds` will do: a capsule's radius is half the
+                // stroke width, an arrowhead's wings reach ~1.8× the
+                // stroke width past the segment, and freehand drags grow
+                // `points` while never touching `bounds` — which stays
+                // the 0×0 box the gesture started from.
+                ShapeKind::Pencil
+                | ShapeKind::Highlighter
+                | ShapeKind::Polyline
+                | ShapeKind::Line
+                | ShapeKind::Arrow => ink_aabb(self),
+                // Bounds-carried shapes: `bounds` already encloses the
+                // ink — rect strokes and the ellipse ring are drawn
+                // inward from it, the badge circle inscribes it, and
+                // text/mosaic/blur fill exactly it.
+                _ => self.bounds,
+            },
+            px(FRAME_PAD),
+        )
     }
 
     /// Handle anchors for the selection chrome — the points where a
@@ -69,7 +54,7 @@ impl Shape {
     /// line/arrow, every vertex of a polyline, the four corners of
     /// rectangles/ellipses (TL, TR, BR, BL). Freehand strokes and
     /// content shapes (badges, text, filters) have no per-point editing
-    /// semantics and get the outline alone.
+    /// semantics and get the frame alone.
     pub(crate) fn handle_points(&self) -> Vec<Point<Pixels>> {
         match self.kind {
             ShapeKind::Line | ShapeKind::Arrow => self.points.iter().take(2).cloned().collect(),
@@ -127,25 +112,34 @@ impl Shape {
     }
 }
 
-/// A 1 px stroke tracing a rectangle's perimeter.
-fn rect_stroke(b: Bounds<gpui_kit::Pixels>, offset: Point<Pixels>) -> Option<Path<Pixels>> {
-    let mut builder = PathBuilder::stroke(px(1.));
-    builder.add_polygon(
-        &[
-            point(b.left(), b.top()) + offset,
-            point(b.right(), b.top()) + offset,
-            point(b.right(), b.bottom()) + offset,
-            point(b.left(), b.bottom()) + offset,
-        ],
-        true,
-    );
-    builder.build().ok()
+/// The AABB of everything `line::geometry` would paint for a
+/// point-carried shape. Absorbs the raw points first so the result is
+/// never empty even when geometry degenerates to nothing (a
+/// zero-length line/arrow), then the polygons' vertices for the true
+/// ink extent.
+fn ink_aabb(shape: &Shape) -> Bounds<Pixels> {
+    let mut aabb: Option<Bounds<Pixels>> = None;
+    let mut absorb = |p: Point<Pixels>| {
+        let dot = Bounds::new(p, size(px(0.), px(0.)));
+        aabb = Some(match aabb {
+            Some(b) => b.union(&dot),
+            None => dot,
+        });
+    };
+    for p in &shape.points {
+        absorb(*p);
+    }
+    for poly in super::line::geometry(&shape.points, shape.width, shape.kind == ShapeKind::Arrow) {
+        for p in poly {
+            absorb(p);
+        }
+    }
+    aabb.unwrap_or(shape.bounds)
 }
 
 /// Append one eight-arc cubic ellipse contour to a builder (either
 /// fill or stroke mode). `direction` flips the winding to cut holes.
-/// Shared by the export ring ([`Shape::ellipse_path`]) and the chrome
-/// stroke so both use the identical ellipse approximation.
+/// Shared by the export ring ([`Shape::ellipse_path`]).
 pub(super) fn ellipse_contour(
     builder: &mut PathBuilder,
     center: Point<Pixels>,
@@ -169,25 +163,6 @@ pub(super) fn ellipse_contour(
     builder.close();
 }
 
-/// A 1 px stroke tracing an ellipse's perimeter (the bounds box; a
-/// circle is the square-bounds case).
-fn ellipse_stroke(b: Bounds<gpui_kit::Pixels>, offset: Point<Pixels>) -> Option<Path<Pixels>> {
-    let rx = f32::from(b.size.width) / 2.;
-    let ry = f32::from(b.size.height) / 2.;
-    if rx <= 0. || ry <= 0. {
-        return None;
-    }
-    let mut builder = PathBuilder::stroke(px(1.));
-    ellipse_contour(
-        &mut builder,
-        b.origin + offset + point(px(rx), px(ry)),
-        rx,
-        ry,
-        1.,
-    );
-    builder.build().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,33 +179,73 @@ mod tests {
         }
     }
 
+    /// Containment with slack: the sampled n-gon rims hit axis-aligned
+    /// extremes exactly for horizontal/vertical strokes but undershoot
+    /// them by up to ~0.5% of the radius on diagonals, so "covers"
+    /// tolerates a tenth of a pixel.
+    fn covers(b: &Bounds<Pixels>, x: f32, y: f32) -> bool {
+        const S: f32 = 0.1;
+        b.left() <= px(x + S)
+            && b.right() >= px(x - S)
+            && b.top() <= px(y + S)
+            && b.bottom() >= px(y - S)
+    }
+
     #[test]
-    fn freehand_chrome_traces_one_centerline_not_every_capsule() {
-        // Four points → three capsules; rim-tracing each rendered the
-        // selection as a chain of rings (user-reported after
-        // select-on-place made every fresh stroke selected).
-        for kind in [ShapeKind::Pencil, ShapeKind::Highlighter] {
-            let shape = shape(kind, &[(10., 30.), (40., 10.), (70., 30.), (90., 50.)]);
-            assert_eq!(
-                shape.hilite_paths(point(px(0.), px(0.))).len(),
-                1,
-                "{kind:?} chrome must be one centerline path"
-            );
+    fn arrow_frame_covers_the_head_wings_not_just_the_endpoints() {
+        // (10,50)→(110,50), width 20 → head 60, wings at base (50,50)
+        // reaching ±27 perpendicular. An endpoints-plus-half-width box
+        // would stop at y=40/60 and clip the wings; the ink box must
+        // not.
+        let b = shape(ShapeKind::Arrow, &[(10., 50.), (110., 50.)]).selection_box();
+        for (x, y) in [(10., 50.), (110., 50.), (50., 23.), (50., 77.)] {
+            assert!(covers(&b, x, y), "ink point ({x},{y}) outside frame {b:?}");
+        }
+        // …and it must not be absurdly larger than the ink either
+        // (the whole extent is x∈[0,110], y∈[23,77]).
+        assert!(b.left() >= px(-4.) && b.right() <= px(114.));
+        assert!(b.top() >= px(19.) && b.bottom() <= px(81.));
+    }
+
+    #[test]
+    fn horizontal_line_frame_has_visible_height() {
+        // Degenerate ink: the AABB of the endpoints is zero-height;
+        // the capsule radius (10) plus pad keeps the frame a band, not
+        // a line.
+        let b = shape(ShapeKind::Line, &[(30., 30.), (90., 30.)]).selection_box();
+        assert!(covers(&b, 20., 30.) && covers(&b, 100., 30.));
+        assert!(b.top() <= px(17.) && b.bottom() >= px(43.));
+        assert!(b.size.height >= px(26.));
+    }
+
+    #[test]
+    fn single_point_tap_frames_its_dot() {
+        let b = shape(ShapeKind::Pencil, &[(30., 30.)]).selection_box();
+        assert!(covers(&b, 20., 30.) && covers(&b, 40., 30.));
+    }
+
+    #[test]
+    fn freehand_frame_spans_every_point_even_though_bounds_stays_stale() {
+        // Freehand drags grow `points` and never update `bounds` (it
+        // stays the 0×0 start box) — the frame must come from the
+        // points' ink, proving `bounds` is unused on this path.
+        let b = shape(
+            ShapeKind::Pencil,
+            &[(10., 30.), (40., 10.), (70., 30.), (90., 50.)],
+        )
+        .selection_box();
+        for (x, y) in [(0., 20.), (100., 40.), (40., 0.), (70., 60.)] {
+            assert!(covers(&b, x, y), "ink point ({x},{y}) outside frame {b:?}");
         }
     }
 
     #[test]
-    fn single_point_tap_keeps_its_circle_rim() {
-        // A dot has no centerline — the geometry's circle outline is
-        // the only chrome that makes sense.
-        let shape = shape(ShapeKind::Pencil, &[(30., 30.)]);
-        assert_eq!(shape.hilite_paths(point(px(0.), px(0.))).len(), 1);
-    }
-
-    #[test]
-    fn line_keeps_its_capsule_rim() {
-        // A single segment's rim doubles as the width cue — unchanged.
-        let shape = shape(ShapeKind::Line, &[(10., 30.), (70., 30.)]);
-        assert_eq!(shape.hilite_paths(point(px(0.), px(0.))).len(), 1);
+    fn bounds_carried_shapes_frame_their_bounds_plus_pad() {
+        let mut s = shape(ShapeKind::Rectangle, &[]);
+        s.bounds = Bounds::new(point(px(10.), px(20.)), size(px(80.), px(60.)));
+        assert_eq!(
+            s.selection_box(),
+            Bounds::new(point(px(7.), px(17.)), size(px(86.), px(66.)))
+        );
     }
 }

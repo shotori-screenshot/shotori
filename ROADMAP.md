@@ -352,6 +352,46 @@ window so another output can finish displaying the shared image.
 
 ## Design decisions
 
+### The selected shape wears a dashed AABB frame (2026-10-06)
+
+The 1 px accent stroke that TRACED a selected shape's own visual
+outline (freehand centerline, capsule rim, ellipse ring — see the
+2026-09-29 entries below) is gone, replaced by a dashed accent
+rectangle around the shape's ink AABB with 3 px clearance
+(`Shape::selection_box`, `ui::hud::annotation_chrome`). User report:
+the trace sat ON the ink, in a hue the annotation palette all but
+swallowed, so a selected shape read as unselected — the exact
+visibility problem that drove the eraser ring to its double stroke.
+The box is the universal object-selection affordance
+(Figma/PowerPoint); it never touches the ink, and rect/ellipse corner
+handles finally land on the box's corners.
+
+- **`Shape.bounds` is NOT an AABB for point-carried shapes.** Freehand
+  drags push to `points` and never touch `bounds` — it stays the 0×0
+  box the gesture began at; line/arrow edits are no better. The frame
+  is computed from `line::geometry` polygons (the same "what you see
+  is what you hit" source), because the ink extends past the points:
+  every capsule by half the stroke width, an arrowhead's wings by up
+  to 1.8× the stroke width perpendicular at its base (the wings are
+  the regression test).
+- **Degenerate ink needs the pad.** A horizontal line's endpoint AABB
+  is zero-height; capsule radius + pad keeps its frame a band, not a
+  line.
+- **Three rect-ish accents on screen, three meanings.** The selection
+  region wears a SOLID accent border; the object frame is DASHED
+  accent; the area eraser's in-flight rect is DASHED WHITE. Dashes vs
+  solid separates object from region; hue separates a gesture in
+  flight from a selection. The dash rhythm `[4, 3]` is shared with the
+  eraser deliberately — siblings, different color.
+- **Rejected:** the double-stroke white/dark frame (the eraser ring's
+  contrast trick) — kept in the accent family instead, at the user's
+  pick; and keeping the on-ink outline alongside the box — clutter,
+  the same reasoning that killed the freehand ring-chain.
+
+Verified on the live compositor with the vptr + grim + vision loop:
+frame, clearance, endpoint dots, and no confusion with the region
+border.
+
 ### The eraser deletes objects, and touches ink only (2026-10-01)
 
 Issue #14: the pixel-restore eraser (rasterize coverage, blend back to

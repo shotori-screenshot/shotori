@@ -267,13 +267,19 @@ fn spinner() -> impl IntoElement {
         )
 }
 
-/// The annotation selection chrome: a 1 px accent stroke tracing the
-/// selected shape's own visual outline, plus the shared handle dots
-/// ([`paint_handle_dot`]) at its anchor points (endpoints for lines,
-/// vertices for polylines, corners for rects/ellipses). Pure rendering
-/// of [`crate::annotation::Shape`] geometry — independent of which
-/// preview path paints the marks, and the same visual language as
-/// [`selection_handles`].
+/// The annotation selection chrome: a 1 px dashed accent frame around
+/// the selected shape's ink bounding box ([`Shape::selection_box`]),
+/// plus the shared handle dots ([`paint_handle_dot`]) at its anchor
+/// points (endpoints for lines, vertices for polylines, corners for
+/// rects/ellipses). The dashed frame replaced a 1 px accent stroke
+/// that traced the shape's own outline — that stroke sat ON the ink,
+/// in a hue the annotation palette all but swallowed, so a selected
+/// shape read as unselected. Dashes also separate the frame from the
+/// selection region's SOLID accent border (object vs region), while
+/// the shared dash rhythm keeps the area eraser's white rect (a
+/// gesture in flight) its sibling: hue separates their meanings.
+/// Pure rendering of [`crate::annotation::Shape`] geometry, and the
+/// same visual language as [`selection_handles`].
 pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
@@ -281,9 +287,20 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
             let Some(shape) = &selected else {
                 return;
             };
-            let accent = rgba(theme::c().accent);
-            for path in shape.hilite_paths(viewport.origin) {
-                window.paint_path(path, accent);
+            let mut b = shape.selection_box();
+            b.origin += viewport.origin;
+            let mut builder = PathBuilder::stroke(px(1.)).dash_array(&[px(4.), px(3.)]);
+            builder.add_polygon(
+                &[
+                    point(b.left(), b.top()),
+                    point(b.right(), b.top()),
+                    point(b.right(), b.bottom()),
+                    point(b.left(), b.bottom()),
+                ],
+                true,
+            );
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, rgba(theme::c().accent));
             }
             // One helper, one size: a shape's resize affordance must read
             // as the same control the selection border wears.
