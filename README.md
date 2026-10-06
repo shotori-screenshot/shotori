@@ -33,6 +33,9 @@ and feedback are welcome in the
   scales and rotated outputs, with selections spanning screens
 - Annotations: rectangle, ellipse, line, polyline, arrow, numbered steps,
   pencil, highlighter, mosaic/blur, eraser, and text
+- Select tool (`V`): drawing never selects — picking up, moving, resizing
+  and retuning placed marks (double-click edits text, or a badge's value)
+  all happen in this mode
 - Object eraser: a brush (a live ring shows its exact footprint) or a
   rectangle sweep deletes whole annotations they touch — no half-erased
   pixels — and a single undo restores everything one sweep took

@@ -19,7 +19,7 @@ use crate::ui::theme;
 use crate::actions::{
     ClearAnnotations, CopySelection, OcrSelection, PinSelection, QuitOverlay, SaveSelection,
     ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic,
-    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleText,
+    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText,
 };
 use crate::model::placement::{GRIP_W, ROW_H};
 
@@ -144,6 +144,23 @@ pub(crate) fn selection_toolbar(
         .child(
             bar()
                 .child(grip("tb-grip-left", output.clone(), session.clone()))
+                .child(
+                    // The select tool — first, the Figma position:
+                    // selection is a mode you enter, never a side
+                    // effect of drawing (2026-10-06 flip). Its own
+                    // icon: Lucide's mouse-pointer isn't in
+                    // gpui-kit-assets' compiled set (see the svg).
+                    control(
+                        "tb-select".into(),
+                        "Select · V".into(),
+                        focus.clone(),
+                        |window, cx| {
+                            window.dispatch_action(Box::new(ToggleSelect), cx);
+                        },
+                    )
+                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Select))
+                    .child(own_icon("icons/select.svg")),
+                )
                 .child(
                     icon_button(
                         "tb-rectangle",

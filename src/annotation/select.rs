@@ -37,9 +37,9 @@ impl Annotations {
     /// topmost hit decides — the same shape a press would act on
     /// (`pointer_down` parks its click on the topmost hit, selected
     /// or not) — so a selected shape buried under a newer one still
-    /// reads as Pick at the overlap. Tools that never park a click
-    /// (polyline, the erasers) advertise no shape affordance at all:
-    /// their press means something else.
+    /// reads as Pick at the overlap. Every tool but the select tool
+    /// advertises no shape affordance at all: their press means
+    /// something else (draw, erase, region edit).
     pub(crate) fn shape_hover(&self, p: Point<Pixels>) -> Option<ShapeHover> {
         if !self.parks_click_select() {
             return None;
@@ -108,12 +108,14 @@ impl Annotations {
     }
 
     /// The kind whose spec governs the current edit target (selected
-    /// shape first, else the active tool).
+    /// shape first, else the active tool). The select tool is
+    /// filtered out — it has no size semantics of its own, so with it
+    /// active and nothing selected the settings row and slider hide.
     pub(crate) fn edit_kind(&self) -> Option<ShapeKind> {
         self.editing_text()
             .map(|shape| shape.kind)
             .or_else(|| self.selected().map(|shape| shape.kind))
-            .or(self.tool)
+            .or(self.tool.filter(|k| *k != ShapeKind::Select))
     }
 
     /// The slider's write path: apply `v` to the selected shape (one
@@ -257,17 +259,15 @@ impl Annotations {
     }
 
     /// Whether a press right now should park a click-select pending
-    /// resolution (release = select, drag past the slop = draw
-    /// through). Polyline never parks: its clicks PLACE VERTICES, and
-    /// an intercepting hit would break polygons mid-drawing — its
-    /// shapes stay selectable from any other tool. The eraser never
-    /// parks either: its press on a shape must erase it (issue #14),
-    /// not promise a selection.
+    /// resolution (release = select, drag past the slop = move it).
+    /// Since the 2026-10-06 select-tool flip this is the select
+    /// tool's EXCLUSIVE job: draw tools always draw (a pencil press
+    /// on an existing stroke inks over it, never selects it), and
+    /// having no tool at all is pure region editing. The cursor
+    /// affordance follows automatically (`shape_hover` gates on
+    /// this).
     pub(crate) fn parks_click_select(&self) -> bool {
-        !matches!(
-            self.tool,
-            Some(ShapeKind::Polyline | ShapeKind::Eraser | ShapeKind::EraserRect)
-        )
+        self.tool == Some(ShapeKind::Select)
     }
 
     /// Step the selected shape's size through its OWN preset ladder —
@@ -650,11 +650,10 @@ mod tests {
         // Integration of #16 + #17: the interior hit (#16) feeds the
         // hover classifier (#17), so a closed ring advertises Pick
         // inside before selection and Move on the selected body —
-        // the cursor never lags behind what a press would do. While
-        // the polyline tool is still active the hover advertises
-        // NOTHING: its press places a vertex, so no shape affordance
-        // may promise otherwise (the eraser's gate, issue #14, is the
-        // same rule).
+        // the cursor never lags behind what a press would do. Only
+        // the select tool advertises anything: a draw tool's press
+        // draws (the polyline's places a vertex), and no tool at all
+        // is region editing — neither may promise a selection.
         let selection = Bounds::new(point(px(-20.), px(0.)), size(px(100.), px(100.)));
         let mut a = Annotations::default();
         a.toggle(ShapeKind::Polyline);
@@ -665,10 +664,13 @@ mod tests {
             a.end();
         }
         a.finish_polyline();
-        // Freshly placed shapes auto-select (`record_add`), but the
-        // owning tool keeps the clicks — no affordance while it runs.
+        // Placing no longer selects (the 2026-10-06 flip), and while
+        // the owning tool runs the hover advertises nothing.
+        assert_eq!(a.selected_index(), None);
         assert_eq!(a.shape_hover(point(px(35.), px(35.))), None);
-        a.toggle(ShapeKind::Polyline); // off (also drops the selection)
+        a.toggle(ShapeKind::Polyline); // off
+        assert_eq!(a.shape_hover(point(px(35.), px(35.))), None); // no tool: no affordance
+        a.toggle(ShapeKind::Select);
         assert_eq!(
             a.shape_hover(point(px(35.), px(35.))),
             Some(ShapeHover::Pick)

@@ -40,8 +40,9 @@ pub(crate) const TB_W: f32 = 632.;
 /// hole between the tool cluster and the action cluster, which the
 /// flex_1 spacer widens into a visible gap (user-reported). Re-based
 /// 562 → 595 when the clear-all button joined the tool cluster
-/// (issue #15): one button pitch (30px button + 2px gap, probe-measured).
-pub(crate) const TB_W_ROW1: f32 = 595.;
+/// (issue #15), and 595 → 627 when the select button took the first
+/// slot (2026-10-06): one button pitch per addition (probe-measured).
+pub(crate) const TB_W_ROW1: f32 = 627.;
 /// Width of one drag-grip strip at the toolbar's left/right edge.
 pub(crate) const GRIP_W: f32 = 12.;
 /// The bar rows' horizontal padding. The grip elements sit INSIDE that

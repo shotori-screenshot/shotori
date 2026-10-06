@@ -19,7 +19,7 @@ use crate::actions::{
     CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, FinishPolyline, OcrSelection,
     PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, SelectScreen, ToggleArrow,
     ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic, ToggleNumber,
-    TogglePencil, TogglePolyline, ToggleRectangle, ToggleText, UndoAnnotation,
+    TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::model::selection::{PressTarget, Selection};
@@ -1085,6 +1085,9 @@ impl Render for Overlay {
             .size_full()
             .relative()
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &ToggleSelect, window, cx| {
+                this.toggle_tool(crate::annotation::ShapeKind::Select, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleRectangle, window, cx| {
                 this.toggle_tool(crate::annotation::ShapeKind::Rectangle, window, cx);
             }))
@@ -1560,10 +1563,23 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                         .session
                         .read(cx)
                         .to_global(&this.capture.output_name, event.position);
-                    // Double-click on an existing Text shape → inline edit.
-                    // Single-click falls through to session.pointer_down so
-                    // the normal click-select / drag-move path is preserved.
-                    if event.click_count >= 2 {
+                    // Double-click on an existing Text shape → inline
+                    // edit. Gated to the select and text tools since
+                    // the select-tool flip: a draw tool's first click
+                    // would ink over the shape, stranding a stray mark
+                    // next to the editor. (The text tool's own press
+                    // on an existing shape is a no-op — `begin`
+                    // refuses Text — which is why it stays allowed.)
+                    let tool = this.session.read(cx).annotations().tool();
+                    if event.click_count >= 2
+                        && matches!(
+                            tool,
+                            Some(
+                                crate::annotation::ShapeKind::Select
+                                    | crate::annotation::ShapeKind::Text
+                            )
+                        )
+                    {
                         let hit_text =
                             this.session
                                 .read(cx)
@@ -1589,8 +1605,9 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                         return;
                     }
                     // Double-click on a badge opens the value editor
-                    // (issue #2); the FIRST click of the pair already
-                    // selected it, so no click-select flow is disturbed.
+                    // (issue #2); select-tool only — the gate lives in
+                    // `number_at_double_click`, same reasoning as the
+                    // text gate above.
                     if event.click_count == 2
                         && let Some((ix, badge_local)) = this
                             .session
@@ -2242,9 +2259,10 @@ mod multi_output_tests {
         );
         vcx.run_until_parked();
 
-        // a rectangle annotation inside it: (60,70)-(140,130) — freshly
-        // placed marks select themselves, so the first hover is the
-        // move affordance of the ALREADY-selected shape
+        // a rectangle annotation inside it: (60,70)-(140,130). Placing
+        // no longer selects (the select-tool flip) — while the draw
+        // tool runs, hovering the ink stays a CROSSHAIR: the press
+        // would draw, and no affordance may promise otherwise.
         vcx.simulate_keystrokes("r");
         vcx.run_until_parked();
         vcx.simulate_mouse_down(
@@ -2264,30 +2282,24 @@ mod multi_output_tests {
         );
         vcx.run_until_parked();
         vcx.update(|_, cx| {
-            assert!(session.read(cx).annotations().selected().is_some());
+            assert!(session.read(cx).annotations().selected().is_none());
         });
-
-        // hover the top edge's midpoint (40 px from either corner
-        // handle, outside the 7 px grab radius): selected body = grab
         vcx.simulate_mouse_move(
             point(px(100.), px(70.)),
             MouseButton::Left,
             Default::default(),
         );
         vcx.run_until_parked();
-        vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
+        vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::Crosshair));
 
-        // Escape drops the selection (the tool stays active): the same
-        // body now advertises click-to-pick — a hand before anything
-        // is grabbed would read as "already holding" (issue #17)
-        vcx.simulate_keystrokes("escape");
+        // switch to the select tool: the same body now advertises
+        // click-to-pick — a hand before anything is grabbed would read
+        // as "already holding" (issue #17)
+        vcx.simulate_keystrokes("v");
         vcx.run_until_parked();
-        vcx.update(|_, cx| {
-            assert!(session.read(cx).annotations().selected().is_none());
-            assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::PointingHand);
-        });
+        vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::PointingHand));
 
-        // press-release without a drag: the shape is selected again and
+        // press-release without a drag: the shape is selected and
         // the body becomes a move affordance (open hand)
         vcx.simulate_mouse_down(
             point(px(100.), px(70.)),
@@ -2303,6 +2315,14 @@ mod multi_output_tests {
         vcx.update(|_, cx| {
             assert!(session.read(cx).annotations().selected().is_some());
             assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand);
+        });
+
+        // Escape drops the selection (the mode stays active): pick again
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            assert!(session.read(cx).annotations().selected().is_none());
+            assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::PointingHand);
         });
 
         // press and drag past the click slop: holding — closed hand

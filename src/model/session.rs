@@ -441,7 +441,14 @@ impl ScreenshotSession {
         let sel = self
             .local_bounds(name)
             .map(crate::model::placement::round_px)?;
-        let (width, height) = crate::model::placement::toolbar_size(self.annotations.enabled());
+        let (width, height) = crate::model::placement::toolbar_size(
+            // the placement basis must match the settings row's own
+            // visibility gate (edit_kind), not "a tool is lit": the
+            // select tool shows no settings row until a shape is
+            // selected, so keying on the lit tool would under- or
+            // over-reserve the toolbar's height
+            self.annotations.edit_kind().is_some(),
+        );
         let mut b = crate::model::placement::toolbar_bounds(&sel, ws, width, height);
         if let Some(pos) = self.toolbar_pos {
             b.origin = point(
@@ -513,7 +520,8 @@ impl ScreenshotSession {
             return false;
         };
         self.pointer_global = Some(self.to_global(name, local));
-        let (base_w, height) = crate::model::placement::toolbar_size(self.annotations.enabled());
+        let (base_w, height) =
+            crate::model::placement::toolbar_size(self.annotations.edit_kind().is_some());
         let w = base_w.min((f32::from(ws.width) - 16.).max(1.));
         let next = point(
             px((f32::from(local.x) - f32::from(grab.x))
@@ -688,14 +696,17 @@ impl ScreenshotSession {
     /// A double-click landing on a NUMBER badge: the shape index (for
     /// the overlay's value editor) plus the badge origin in the
     /// RECEIVING window's local coordinates (for the editor box).
-    /// None for every other kind or place — the click-select flow
-    /// itself is untouched.
+    /// None for every other kind or place. The select tool gates it:
+    /// a draw tool's first click would ink over the badge, so value
+    /// editing belongs to the mode whose clicks select.
     pub(crate) fn number_at_double_click(
         &self,
         name: &str,
         local: Point<Pixels>,
     ) -> Option<(usize, Point<Pixels>)> {
-        if !self.annotations.enabled() || self.selection.bounds().is_none() {
+        if self.annotations.tool() != Some(crate::annotation::ShapeKind::Select)
+            || self.selection.bounds().is_none()
+        {
             return None;
         }
         let origin = self.screen(name).bounds().origin;
@@ -723,8 +734,8 @@ impl ScreenshotSession {
                 return;
             }
             // press on a shape: click-or-drag resolves on the
-            // following move/up events (polyline never parks — its
-            // clicks place vertices)
+            // following move/up events — and only the select tool
+            // parks (draw tools draw right over existing ink)
             if selection.contains(&p)
                 && self.annotations.parks_click_select()
                 && let Some(ix) = self.annotations.hit_test(p)
@@ -2033,6 +2044,7 @@ mod tests {
             a.begin(point(px(10.), px(10.)), sel, false);
             a.drag_to(point(px(60.), px(60.)), sel, false);
             a.end();
+            a.toggle(ShapeKind::Select); // click-select needs the mode
         });
         let line = s.annotations().committed()[0].clone();
         // select, then drag the END handle without releasing
@@ -2449,6 +2461,8 @@ mod tests {
             a.begin(point(px(0.), px(10.)), sel, false); // global (0,10) → (40,50)
             a.drag_to(point(px(40.), px(50.)), sel, false);
             a.end();
+            // selection is the select tool's job now — switch to it
+            a.toggle(ShapeKind::Select);
         });
 
         // single click on the left edge band selects
@@ -2456,9 +2470,12 @@ mod tests {
         s.pointer_up("left", point(px(101.), px(5.)), false);
         assert!(s.annotations().selected().is_some());
 
-        // click on blank canvas deselects
-        s.pointer_down("left", point(px(300.), px(300.)), false);
-        s.pointer_up("left", point(px(300.), px(300.)), false);
+        // click on blank canvas deselects — blank INSIDE the selection:
+        // with the select tool a blank press is region editing, and a
+        // blank press OUTSIDE would start a fresh selection (wiping
+        // the annotations) before this click-selects anything again
+        s.pointer_down("left", point(px(150.), px(60.)), false); // global (50,80)
+        s.pointer_up("left", point(px(150.), px(60.)), false);
         assert!(s.annotations().selected().is_none());
 
         // Dragging a hit shape selects and moves it even if it was deselected.
@@ -2482,6 +2499,49 @@ mod tests {
     }
 
     #[test]
+    fn draw_tools_ink_over_shapes_instead_of_selecting() {
+        // The 2026-10-06 flip: a draw tool's press ALWAYS draws —
+        // parking a click-select on existing ink would both eat the
+        // stroke and surprise-select. Selection is the select tool's
+        // exclusive job.
+        use crate::annotation::ShapeKind;
+        let mut s = session();
+        s.select_all();
+        let sel = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Rectangle);
+            a.begin(point(px(0.), px(10.)), sel, false); // → (40,50)
+            a.drag_to(point(px(40.), px(50.)), sel, false);
+            a.end();
+            a.toggle(ShapeKind::Pencil); // stays active for the next press
+        });
+        // press ON the placed rectangle's edge and drag: a new stroke
+        // is inked over it, nothing gets selected
+        s.pointer_down("left", point(px(101.), px(5.)), false); // global (1,25)
+        s.pointer_move("left", point(px(130.), px(40.)), false);
+        s.pointer_up("left", point(px(130.), px(40.)), false);
+        assert_eq!(s.annotations().committed().len(), 2);
+        assert!(s.annotations().selected().is_none());
+    }
+
+    #[test]
+    fn select_tool_blank_press_edits_the_region_like_no_tool() {
+        // The select tool has no gesture of its own: a blank-canvas
+        // press falls through to region editing exactly like having
+        // no tool at all (interior press = move the region).
+        let mut s = session();
+        s.begin("left", point(px(10.), px(10.)));
+        s.end("left", point(px(60.), px(60.))); // global (-90,30)-(-40,80)
+        s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Select));
+        assert!(!s.annotations().enabled());
+        s.pointer_down("left", point(px(30.), px(30.)), false); // global (-70,50): interior
+        s.pointer_move("left", point(px(40.), px(35.)), false); // delta (10,5)
+        s.pointer_up("left", point(px(40.), px(35.)), false);
+        let b = s.selection.bounds().unwrap();
+        assert_eq!(b.origin, point(px(-80.), px(35.)));
+    }
+
+    #[test]
     fn dragging_the_selection_moves_it_and_undo_restores() {
         use crate::annotation::ShapeKind;
         let mut s = session();
@@ -2493,6 +2553,7 @@ mod tests {
             a.begin(rect.origin, sel, false);
             a.drag_to(rect.bottom_right(), sel, false);
             a.end();
+            a.toggle(ShapeKind::Select); // click-select needs the mode
         });
         // global → "left"-window local: left's origin is (-100, 20)
         let local = |p: gpui_kit::Point<gpui_kit::Pixels>| p - point(px(-100.), px(20.));
@@ -2551,6 +2612,7 @@ mod tests {
             a.begin(point(px(10.), px(10.)), sel, false);
             a.drag_to(point(px(60.), px(60.)), sel, false);
             a.end();
+            a.toggle(ShapeKind::Select); // click-select needs the mode
         });
         let line = s.annotations().committed()[0].clone();
         // click-select at the midpoint, then grab the END handle and
@@ -2580,6 +2642,7 @@ mod tests {
             a.begin(point(px(0.), px(10.)), sel, false);
             a.drag_to(point(px(40.), px(50.)), sel, false);
             a.end();
+            a.toggle(ShapeKind::Select); // click-select needs the mode
         });
         s.pointer_down("left", local(point(px(2.), px(25.))), false);
         s.pointer_up("left", local(point(px(2.), px(25.))), false);
@@ -3023,8 +3086,9 @@ mod tests {
         s.edit_annotations(|a| {
             a.deselect();
             a.toggle(crate::annotation::ShapeKind::Number);
+            a.toggle(crate::annotation::ShapeKind::Select);
         });
-        assert!(!s.annotations().enabled());
+        assert!(!s.annotations().enabled()); // select is a mode, not a draw tool
         assert!(s.annotations().selected().is_none());
 
         s.pointer_down("left", point(px(50.), px(50.)), false);
@@ -3057,6 +3121,7 @@ mod tests {
         s.edit_annotations(|a| {
             a.toggle(crate::annotation::ShapeKind::Text);
             a.add_text(bounds, "text".into());
+            a.toggle(crate::annotation::ShapeKind::Select); // moving needs the mode
         });
         let origin = s.screen_origin("left");
         for target in [

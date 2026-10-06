@@ -22,6 +22,7 @@ gpui_kit::actions!([
 // In-canvas annotation actions (shared by the overlay's keybindings and
 // the toolbar's tool buttons, like everything else in this module)
 gpui_kit::actions!([
+    ToggleSelect,
     ToggleRectangle,
     ToggleEllipse,
     ToggleLine,
@@ -67,13 +68,14 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// Annotation keybindings ("r" rectangle, "e" ellipse, "l" line, "a"
-/// arrow, "m" mosaic, "h" highlighter, "b" pencil, "n" number, "p"
-/// polyline, "t" text, "d" eraser; undo/redo; Ctrl+Shift+Del clears
-/// every placed annotation; Enter finishes a polyline). Also scoped to
-/// `ShotoriOverlay`, plus the PolylineDrawing sub-context.
+/// Annotation keybindings ("v" select, "r" rectangle, "e" ellipse, "l"
+/// line, "a" arrow, "m" mosaic, "h" highlighter, "b" pencil, "n"
+/// number, "p" polyline, "t" text, "d" eraser; undo/redo; Ctrl+Shift+Del
+/// clears every placed annotation; Enter finishes a polyline). Also
+/// scoped to `ShotoriOverlay`, plus the PolylineDrawing sub-context.
 pub fn init_annotation_keybindings(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("v", ToggleSelect, Some("ShotoriOverlay")),
         KeyBinding::new("r", ToggleRectangle, Some("ShotoriOverlay")),
         KeyBinding::new("e", ToggleEllipse, Some("ShotoriOverlay")),
         KeyBinding::new("l", ToggleLine, Some("ShotoriOverlay")),

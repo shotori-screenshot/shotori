@@ -29,6 +29,12 @@ pub(crate) enum ShapeKind {
     Line,
     Arrow,
     Polyline,
+    /// The select tool — a MODE, never a shape record (the erasers'
+    /// pattern: tool-only variants of this enum). Selection is its
+    /// exclusive job: draw tools never park a click-select or
+    /// auto-select on place (2026-10-06 flip), so a selected shape
+    /// implies this tool is active.
+    Select,
 }
 
 impl ShapeKind {
@@ -338,8 +344,12 @@ impl Annotations {
         }
     }
 
+    /// A tool that acts on canvas gestures (draw, erase) is active.
+    /// The select tool is deliberately NOT "enabled": it has no
+    /// gesture of its own — its pointer routing must fall through to
+    /// region editing exactly like having no tool at all.
     pub(crate) fn enabled(&self) -> bool {
-        self.tool.is_some()
+        self.tool.is_some_and(|k| k != ShapeKind::Select)
     }
     pub(crate) fn color(&self) -> (u32, &'static str) {
         if let Some(shape) = self.editing_text() {
@@ -372,6 +382,9 @@ impl Annotations {
             ShapeKind::EraserRect => self.preset.eraser_rect,
             ShapeKind::Number => self.preset.number,
             ShapeKind::Text => self.preset.text,
+            // unreachable in practice (edit_kind filters it): a mode
+            // has no size to remember
+            ShapeKind::Select => 0.,
         }
     }
     /// Remember a kind's size, clamped to its family's [`SizeSpec`].
@@ -392,6 +405,9 @@ impl Annotations {
             ShapeKind::EraserRect => &mut self.preset.eraser_rect,
             ShapeKind::Number => &mut self.preset.number,
             ShapeKind::Text => &mut self.preset.text,
+            // unreachable in practice (edit_kind filters it): nothing
+            // to remember for a mode
+            ShapeKind::Select => return,
         };
         *slot = v;
     }
@@ -855,22 +871,24 @@ impl Annotations {
         if self.selected.take().is_some() {
             return true;
         }
-        if self.enabled() {
-            self.tool = None;
+        // any lit tool button goes dark — the select tool included
+        // (it is not `enabled()`, but Esc must still exit it)
+        if self.tool.take().is_some() {
             return true;
         }
         false
     }
     /// Record a committed shape: the Add entry enables undo, and any
     /// diverging action invalidates the redo stack. Also drops the
-    /// selection — indices above the tail may have shifted.
+    /// selection — indices above the tail may have shifted, and since
+    /// the 2026-10-06 select-tool flip a placed mark no longer selects
+    /// itself: selecting is the select tool's job, never a side effect
+    /// of drawing.
     fn record_add(&mut self, shape: Shape) {
         self.shapes.push(shape.clone());
         self.history.push(HistoryEntry::Add(shape));
         self.redo.clear();
-        // freshly placed marks select themselves: wheel-resize or
-        // drag-tune right after release without a second click
-        self.selected = Some(self.shapes.len() - 1);
+        self.selected = None;
     }
 
     /// The stroke eraser's brush radius — half the eraser tool's
@@ -1457,9 +1475,12 @@ mod tests {
         a.drag_to(point(px(60.), px(50.)), selection(), false);
         a.end();
 
-        // the freshly placed top shape is selected (record_add picks
-        // it), so the bottom one is the unselected case: a press over
-        // it would pick it. Blank canvas offers nothing.
+        // Since the select-tool flip a placed shape is NOT selected
+        // and the rectangle tool advertises nothing; enter the select
+        // tool and the unselected bottom shape reads as a pick.
+        // Blank canvas offers nothing.
+        a.toggle(ShapeKind::Rectangle); // off
+        a.toggle(ShapeKind::Select);
         assert_eq!(
             a.shape_hover(point(px(0.), px(30.))),
             Some(ShapeHover::Pick)
@@ -1902,7 +1923,10 @@ mod tests {
     fn slider_drag_edits_the_selection_as_one_history_entry() {
         let mut a = Annotations::default();
         a.toggle(super::ShapeKind::Rectangle);
-        rectangle(&mut a); // width 3, auto-selected on commit
+        rectangle(&mut a); // width 3
+        a.toggle(super::ShapeKind::Rectangle); // off
+        a.toggle(super::ShapeKind::Select);
+        assert!(a.select_index(0)); // pick it with the select tool
         assert!(a.selected().is_some());
 
         // a whole drag: many Change values, one merged Edit
@@ -1932,7 +1956,8 @@ mod tests {
         a.toggle(super::ShapeKind::Pencil);
         a.begin(point(px(5.), px(5.)), selection(), false);
         a.drag_to(point(px(60.), px(50.)), selection(), false);
-        a.end(); // auto-selected
+        a.end(); // placed (no auto-select since the flip); the tool
+        // preset is the slider's target while it stays active
         a.apply_size(9.);
         a.end_size_drag();
         a.deselect();
@@ -2467,10 +2492,40 @@ mod tests {
         assert_eq!(a.next_number(), 2);
     }
     #[test]
+    fn placed_marks_do_not_select_themselves() {
+        // The 2026-10-06 select-tool flip: placing a mark leaves the
+        // selection empty (record_add drops it — indices shift), and
+        // picking it back up is the select tool's job.
+        let mut a = Annotations::default();
+        a.toggle(super::ShapeKind::Rectangle);
+        rectangle(&mut a);
+        assert!(a.selected_index().is_none());
+        a.toggle(super::ShapeKind::Rectangle);
+        a.toggle(super::ShapeKind::Select);
+        assert!(click(&mut a, point(px(12.), px(25.)))); // on the left edge band
+    }
+
+    #[test]
+    fn escape_exits_the_select_tool_like_any_other() {
+        // The select tool is not `enabled()` (no canvas gesture), but
+        // Esc must still leave it — cancel() drops ANY lit button.
+        let mut a = Annotations::default();
+        a.toggle(super::ShapeKind::Select);
+        assert!(!a.enabled());
+        assert_eq!(a.tool(), Some(super::ShapeKind::Select));
+        assert!(a.cancel());
+        assert_eq!(a.tool(), None);
+    }
+
+    #[test]
     fn set_color_updates_selected_shape_and_records_undo() {
         let mut a = Annotations::default();
         a.toggle(super::ShapeKind::Rectangle);
         rectangle(&mut a);
+        // placing no longer selects — pick it with the select tool
+        a.toggle(super::ShapeKind::Rectangle);
+        a.toggle(super::ShapeKind::Select);
+        assert!(a.select_index(0));
         let orig_color = a.visible().next().unwrap().color;
         assert_eq!(a.selected_index(), Some(0));
         a.set_color(1);

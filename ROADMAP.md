@@ -352,6 +352,47 @@ window so another output can finish displaying the shared image.
 
 ## Design decisions
 
+### Selection became a tool: drawing never selects (2026-10-06)
+
+The second interaction flip today. Click-select used to be ambient —
+every tool but polyline/erasers parked a click on ink, and
+`record_add` auto-selected each fresh mark ("wheel-tune right after
+release without a second click"). User verdict after living with it:
+surprising. Draw tools must always draw; selection is an explicit
+mode you enter.
+
+- **`ShapeKind::Select`** — a tool-only variant (the erasers'
+  pattern, never a shape record): first button in the toolbar, `V`,
+  Lucide's mouse-pointer as one of our own SVGs (gpui-kit-assets
+  doesn't compile it into `IconName`). Selection implies the mode
+  structurally: `toggle` deselects on every switch.
+- **`enabled()` excludes Select.** That boolean drives pointer
+  routing (move/up gates), the crosshair cursor, window-snap hover
+  and `begin`'s draw guard — false for Select, a blank press falls
+  through to region editing exactly like having no tool, and no draw
+  branch can swallow the region's `pointer_up` (the bug class the
+  gating exists to prevent). The one casualty: `cancel()`'s Esc arm
+  keyed on `enabled()` — it now drops ANY lit button.
+- **The toolbar height basis moved from `enabled()` to
+  `edit_kind().is_some()`.** The settings row's own gate was always
+  `edit_kind`; placement agreed only by the accident that
+  selection⇒tool held under auto-select. Keying both on edit_kind
+  fixes the mismatch class: Select + selected shape → two rows (the
+  shape's palette/size), Select + nothing → one row. `TB_W_ROW1`
+  re-based 595 → 627 (the select button's pitch).
+- **Double-click edits follow the mode.** Text edit: Select or Text
+  tool — a draw tool's first click would strand a stray mark beside
+  the editor, while the text tool's press on existing ink is already
+  a no-op (`begin` refuses Text). Badge value editor: Select only
+  (`number_at_double_click` gates).
+- **`parks_click_select` collapsed to `tool == Select`** and
+  `shape_hover`'s cursor affordance rides it: crosshair over ink
+  under draw tools (the press draws), pointing hand under Select.
+- e2e-verified with the vptr + grim + vision loop: draw → no chrome
+  and no dots; switch → single row; click the ink → dashed frame +
+  endpoint dots + settings row back; drag → the whole frame moves;
+  blank click → deselect, arrow stays, one row again.
+
 ### The selected shape wears a dashed AABB frame (2026-10-06)
 
 The 1 px accent stroke that TRACED a selected shape's own visual
