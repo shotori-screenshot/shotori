@@ -23,6 +23,8 @@ locally on your machine.
 
 **[简体中文](README.zh-CN.md)**
 
+![Shotori — region selection with two pins floating over the desktop](assets/screenshots/selection-and-pins.png)
+
 ## Highlights
 
 - **Wayland-native** — built on `wlr-screencopy` and layer-shell; at

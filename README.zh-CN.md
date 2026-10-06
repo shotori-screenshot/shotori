@@ -19,6 +19,8 @@ Wayland 原生截图工具——选区、标注、贴图、长截图，需要文
 
 **[English](README.md)**
 
+![Shotori——选区与两张贴图悬浮在桌面上](assets/screenshots/selection-and-pins.png)
+
 ## 状态
 
 Shotori 处于**早期开发阶段**（pre-1.0）。截图、标注、复制、保存、OCR、
