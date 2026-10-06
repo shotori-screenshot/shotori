@@ -105,22 +105,9 @@ with waybar, KDE Plasma, and the GNOME appindicator extension).
 
 ## Usage
 
-Run `shotori` (or `shotori gui`): every screen freezes and a selection overlay
-appears. A toolbar with equivalent buttons shows up below the selection after
-release.
-
-| Key                | Action                                                   |
-| ------------------ | -------------------------------------------------------- |
-| drag               | select a region                                          |
-| `Ctrl+A`           | select this whole screen; again → every screen           |
-| `Enter` / `Ctrl+C` | copy the selection to the clipboard                      |
-| `Ctrl+S`           | save the selection — system "save as" dialog             |
-| `Ctrl+O`           | OCR the selection → text to the clipboard                |
-| `Ctrl+P`           | pin the selection to the screen                          |
-| `Ctrl+L`           | long screenshot — scroll or drag the frame over the       |
-|                    | content, stitched live (Enter copy, Ctrl+S save, Esc      |
-|                    | cancel)                                                   |
-| `Esc`              | abandon the current drag / exit                          |
+Run `shotori` (or `shotori gui`): every screen freezes, drag out a
+selection, and pick an action from the toolbar that appears below it —
+copy, save, OCR, pin, or long screenshot.
 
 ## FAQ
 
