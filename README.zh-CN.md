@@ -9,11 +9,12 @@
 ![Platform](https://img.shields.io/badge/platform-Linux-8892bf)
 ![Status](https://img.shields.io/badge/status-early%20development-orange)
 
-Wayland 原生的截图工具，内置本地 OCR——整套 UI 用
+Wayland 原生截图工具——选区、标注、贴图、长截图，需要文字时本地 OCR——
+无云端、无浏览器扩展，整套 UI 用
 [gpui-kit](https://crates.io/crates/gpui-kit) 手绘。
 
-冻结屏幕、拖框选区，然后复制、保存、标注，或者直接把图里的文字读出来——
-全程不用碰鼠标。
+冻结屏幕、拖框选区，然后复制、保存、标注、贴图，或者把滚动内容拼成一张
+长图——一切都在本机完成。
 
 **[English](README.md)**
 

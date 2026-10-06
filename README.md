@@ -10,14 +10,14 @@
 ![Platform](https://img.shields.io/badge/platform-Linux-8892bf)
 ![Status](https://img.shields.io/badge/status-beta-yellow)
 
-A Wayland-native screenshot tool with built-in, on-device OCR — annotate,
-pin, and stitch long pages without a browser extension, without a cloud
-service, and without leaving the keyboard.
+A Wayland-native screenshot tool — select, annotate, pin, long-capture
+scrolling pages, and read text with on-device OCR. No cloud, no browser
+extensions.
 
 Shotori freezes every screen, you drag a selection, and the selection
-flows to wherever it's needed: clipboard, save dialog, text (OCR), a
-pinned floating copy — or a long screenshot that stitches itself while
-you scroll. The entire UI is hand-drawn with
+flows to wherever it's needed: clipboard, save dialog, text, a pinned
+floating copy — or a long screenshot that stitches itself while you
+scroll. The entire UI is hand-drawn with
 [gpui-kit](https://crates.io/crates/gpui-kit), and everything runs
 locally on your machine.
 
@@ -40,8 +40,6 @@ locally on your machine.
   scroll to zoom
 - **A full annotation kit** — shapes, arrows, numbered steps, freehand,
   highlighter, mosaic/blur and text, all editable after the fact
-- **Keyboard-first** — every exit is one keystroke: copy, save, OCR,
-  pin, long screenshot
 
 ## Status
 
