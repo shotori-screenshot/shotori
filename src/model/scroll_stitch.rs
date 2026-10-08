@@ -30,6 +30,14 @@
 //!   tables — multiple offsets fit equally well) and flat regions (pure
 //!   white PDF margins carry no signal) all have distinct outcomes so
 //!   the scroll loop can log, retry or stop intelligently.
+//! - **Sticky-band detection** — fixed chrome inside the selection
+//!   (site navbars that pin on scroll) violates the row-translation
+//!   assumption; since the static edge trim only survives small bands,
+//!   each accepted moving frame also votes per sampled row ("still at
+//!   the same viewport row while the page moved"), and a persistent
+//!   structured prefix commits as a band: masked out of matching, and
+//!   written ONCE at the canvas top (the Android ScrollCapture
+//!   semantic). See [`StickyBands`].
 //! - **Newest-wins canvas** — on every accepted frame the whole viewport
 //!   rectangle is rewritten into the canvas (not just the new band).
 //!   Where old and new overlap the fresh pixels win, so blinking carets
@@ -49,10 +57,13 @@
 //!
 //! Known v1 limitations (deliberate): integer offsets only
 //! (sub-pixel smooth scrolling can drop/duplicate one seam row per
-//! step), sticky chrome taller than the edge trim (~6% of the viewport
-//! top) still poisons matching (a fixed navbar is duplicated along the
-//! seam — select below it), single contiguous canvas (no tiling for
-//! multi-hundred-MB captures).
+//! step), mid-frame fixed elements (an in-table sticky header) are not
+//! detected (only edge-anchored bands are), the bottom band is
+//! match-mask-only (its pixels still repeat down the canvas — pinning
+//! it needs bottom-anchored surgery with its own transition
+//! bookkeeping), collapsing toolbars keep their tallest extent (rows a
+//! shrunken band exposes are lost, not misplaced), single contiguous
+//! canvas (no tiling for multi-hundred-MB captures).
 
 /// Tuning knobs for [`ScrollStitcher`]. Defaults are tuned for text
 /// content under *our* auto-scroll (small, roughly known steps); manual
@@ -284,6 +295,238 @@ impl RowProfile {
     }
 }
 
+/// Sticky-band detection: fixed chrome inside the selection (site
+/// navbars that pin on scroll, floating toolbars) violates the
+/// row-translation assumption the matcher stands on. The static edge
+/// trim (~6 %) only survives small bands and only for MATCHING — the
+/// band pixels still land in the canvas at every viewport position
+/// ("a fixed navbar is duplicated along the seam"). This adds the
+/// visual detection layer:
+///
+/// - **Evidence** — on every accepted frame with dy ≠ 0 (a MOVING page
+///   is what makes "still at the same viewport row" mean "fixed
+///   chrome" instead of "nothing scrolled"), each sampled row that is
+///   near-identical to the comparison base at offset 0 accumulates a
+///   stillness run. Content rows cannot stay identical while the page
+///   moves under them.
+/// - **Commit** — a run of [`STILL_FRAMES`] over a top-anchored prefix
+///   of rows, backed by at least one structured row (a band that is
+///   uniformly flat is indistinguishable from flat CONTENT — pure-white
+///   margins must not get pinned), commits the band.
+/// - **Canvas semantics** — a committed top band is written ONCE, from
+///   the committing frame, and pinned at the canvas top (the Android
+///   ScrollCapture semantic: `scrollBounds` covers "only the content
+///   which tracks with scrolling movement"). During the detection
+///   delay the band rows were still being written as content at each
+///   viewport position; committing surgically removes those duplicate
+///   segments (tracked in `pending`) so the content stream stays exact.
+/// - **Bottom band** — mask-only in this version: it leaves the match
+///   scan (matching survives tall floating footers) but keeps today's
+///   canvas behavior. Pinning it would need bottom-anchored surgery
+///   with its own transition bookkeeping.
+///
+/// Collapsing toolbars (the band SHRINKS after pinning) are handled by
+/// never shrinking the committed height: the band area keeps its
+/// tallest extent and each frame's live prefix is bottom-aligned into
+/// it, so the pin line — the only row where band meets content — stays
+/// pixel-continuous.
+const STILL_FRAMES: u16 = 2;
+/// A committed band must span at least this many sampled rows — noise
+/// (a caret row, a one-row border) must not pin.
+const MIN_BAND_GRIDS: usize = 2;
+/// Bands taller than a quarter of the viewport are content, not chrome
+/// (the matcher's overlap budget could not survive them anyway).
+const MAX_BAND_FRACTION: f32 = 0.25;
+/// Luma spread within a sampled row for it to count as "structured" —
+/// the band-level flat-content guard (see above).
+const STRUCTURED_SPREAD: u8 = 4;
+
+/// Sticky-band state, in viewport (frame) coordinates.
+#[derive(Debug, Clone)]
+struct StickyBands {
+    /// Committed top band height in canvas rows. Monotone; 0 until a
+    /// band is committed.
+    top: u32,
+    /// Rows the commit surgeries spliced into the canvas — the part of
+    /// the physical height that is band, not content (a band pinned
+    /// from the first frame reuses the seed frame's rows and never
+    /// counts here). `height() = viewport_height + inserted +
+    /// max_position`.
+    inserted: u32,
+    /// Committed bottom band height in rows — match mask only (see the
+    /// module notes above).
+    bot: u32,
+    /// Consecutive still frames per sampled row (top tracking), one
+    /// entry per `step`-spaced row of the viewport.
+    run: Vec<u16>,
+    /// Same, counted from the bottom edge upward.
+    bot_run: Vec<u16>,
+    /// Content positions of the frames processed since the top prefix
+    /// went still — the raw material for the commit surgery's duplicate
+    /// segments. Reset whenever the prefix breaks (a row moved again)
+    /// or the walk stops being monotonically downward (a Contained or
+    /// Prepend frame interleaves duplicated content in ways the segment
+    /// math does not model; detection simply restarts).
+    pending: Vec<i64>,
+    /// The current still top prefix, in sampled rows (`run ≥ 1`).
+    /// Bottom-aligned into the band area on every write — the collapsing
+    /// toolbar handling above.
+    prefix: usize,
+}
+
+impl StickyBands {
+    fn new() -> Self {
+        Self {
+            top: 0,
+            inserted: 0,
+            bot: 0,
+            run: Vec::new(),
+            bot_run: Vec::new(),
+            pending: Vec::new(),
+            prefix: 0,
+        }
+    }
+
+    /// Fold one frame's stillness evidence in. `still` is per-sampled-row
+    /// stillness against the comparison base at offset 0; `position` is
+    /// the frame's content position (post-transition). Sized on first
+    /// use — the stitcher is constructed before any evidence exists.
+    fn update(&mut self, still: &[bool], position: i64) {
+        if self.run.len() != still.len() {
+            self.run = vec![0; still.len()];
+            self.bot_run = vec![0; still.len()];
+        }
+        let monotone = self.pending.last().is_none_or(|&p| position > p);
+        for (j, &s) in still.iter().enumerate() {
+            self.run[j] = if s { self.run[j].saturating_add(1) } else { 0 };
+        }
+        // bot_run counts from the BOTTOM edge: index k is the k-th
+        // sampled row up from the bottom.
+        for k in 0..still.len() {
+            let still_from_bottom = still[still.len() - 1 - k];
+            self.bot_run[k] = if still_from_bottom {
+                self.bot_run[k].saturating_add(1)
+            } else {
+                0
+            };
+        }
+        // The top prefix: rows [0, prefix) all still THIS frame.
+        self.prefix = still.iter().take_while(|&s| *s).count();
+        if self.prefix >= MIN_BAND_GRIDS && monotone {
+            self.pending.push(position);
+        } else {
+            // Prefix broke or the walk reversed — everything recorded
+            // since the band went still is no longer trustworthy as
+            // duplicate-segment geometry.
+            self.pending.clear();
+        }
+    }
+
+    /// Whether the top band should commit now, and at what height (in
+    /// canvas rows). Requires the full prefix to have been still for
+    /// [`STILL_FRAMES`] frames, structure inside the band, and a height
+    /// between the current band and the fraction cap.
+    fn top_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
+        let step = cur.step.max(1);
+        let skip = (self.top as usize).div_ceil(step);
+        let rows = self.commit_height(&self.run, skip, step, viewport_height)?;
+        // At least one structured row must attest the band (the
+        // flat-content guard — see the struct docs).
+        let structured = (skip..)
+            .take_while(|&j| (j * step) as u32 <= rows)
+            .any(|j| grid_row_structured(cur, j * step));
+        (structured && rows > self.top).then_some(rows)
+    }
+
+    /// The bottom-band analogue: same evidence bar, mask-only effect.
+    /// `bot_run` counts from the BOTTOM edge, so its anchored skip and
+    /// structure rows are mirrored.
+    fn bot_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
+        let step = cur.step.max(1);
+        let skip = (self.bot as usize).div_ceil(step);
+        let rows = self.commit_height(&self.bot_run, skip, step, viewport_height)?;
+        let last = cur.height as usize - 1;
+        let structured = (skip..)
+            .take_while(|&j| (j * step) as u32 <= rows)
+            .any(|j| grid_row_structured(cur, last - j * step));
+        (structured && rows > self.bot).then_some(rows)
+    }
+
+    /// Shared commit-height test for one edge's run table: how many
+    /// rows from the anchored edge have been still for
+    /// [`STILL_FRAMES`] frames, capped by the fraction limit. `skip`
+    /// is how many anchored grids the already-committed band covers;
+    /// grid `j` attests to rows `[j·step, (j+1)·step)` from the edge,
+    /// so the committed height is the last attested grid's far edge —
+    /// at most `step − 1` rows coarser than the true band, which only
+    /// ever pins a sliver of content beyond the chrome.
+    fn commit_height(
+        &self,
+        run: &[u16],
+        skip: usize,
+        step: usize,
+        viewport_height: u32,
+    ) -> Option<u32> {
+        let mut grids = 0usize;
+        for &r in run.iter().skip(skip) {
+            if r < STILL_FRAMES {
+                break;
+            }
+            grids += 1;
+        }
+        if grids < MIN_BAND_GRIDS {
+            return None;
+        }
+        let rows = ((skip + grids) * step) as u32;
+        let cap = (viewport_height as f32 * MAX_BAND_FRACTION) as u32;
+        (rows <= cap).then_some(rows)
+    }
+}
+
+/// Whether sampled row `j` of `profile` carries alignment-grade texture
+/// (luma spread across the interior columns). Band-level flat-content
+/// guard: a "still" band with no structured row at all is a flat
+/// content region, not chrome.
+fn grid_row_structured(profile: &RowProfile, j: usize) -> bool {
+    profile
+        .data
+        .get(j * profile.stride..(j + 1) * profile.stride)
+        .is_some_and(|l| {
+            let (mut lo, mut hi) = (u8::MAX, u8::MIN);
+            for &v in l {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            hi.saturating_sub(lo) > STRUCTURED_SPREAD
+        })
+}
+
+/// Per-sampled-row stillness of `cur` against `base` at offset 0 (same
+/// viewport position). Only meaningful on frames accepted with dy ≠ 0 —
+/// see [`StickyBands`]. The grid matches `cur.step` so the band
+/// geometry and the matcher's scan share one coordinate system.
+fn stillness_grid(base: &RowProfile, cur: &RowProfile, options: &StitchOptions) -> Vec<bool> {
+    if base.stride != cur.stride || base.height != cur.height {
+        return Vec::new();
+    }
+    let h = cur.height as usize;
+    let mut still = Vec::with_capacity(h.div_ceil(cur.step.max(1)));
+    let mut j = 0usize;
+    while j < h {
+        let c = &cur.data[j * cur.stride..(j + 1) * cur.stride];
+        let b = &base.data[j * cur.stride..(j + 1) * cur.stride];
+        let mad = c
+            .iter()
+            .zip(b.iter())
+            .map(|(a, b)| u32::from(a.abs_diff(*b)))
+            .sum::<u32>() as f32
+            / cur.stride as f32;
+        still.push(mad <= options.cost_threshold);
+        j += cur.step;
+    }
+    still
+}
+
 /// The best offset found for a frame pair and the evidence for it.
 struct OffsetEstimate {
     /// Viewport movement in rows, positive = down (canvas-append side).
@@ -315,12 +558,15 @@ enum Placement {
 /// comparison window is the overlap `height − |d|`. Candidates are
 /// capped at `height × max_motion_ratio` and must leave `min_overlap`
 /// rows. The comparison is full-row pixel MAD on a step-spaced grid of
-/// rows (see [`RowProfile`] for why means are not enough). Returns
+/// rows (see [`RowProfile`] for why means are not enough). `sticky_trim`
+/// extends the static edge trim by the committed sticky bands (see
+/// [`StickyBands`]) so detected chrome leaves the scan too. Returns
 /// [`None`] when no candidate is admissible at all.
 fn estimate_offset(
     prev: &RowProfile,
     cur: &RowProfile,
     options: &StitchOptions,
+    sticky_trim: (u32, u32),
 ) -> Option<OffsetEstimate> {
     let h = prev.height.min(cur.height) as i32;
     if h <= 0 || prev.stride != cur.stride {
@@ -336,10 +582,16 @@ fn estimate_offset(
     // semantics are unchanged (translation is uniform below the band)
     // and the canvas still writes whole frames. Small frames (tests,
     // tiny selections) keep every row: there is no budget to spare.
+    // Detected sticky bands (adaptive, any height up to the fraction
+    // cap) extend the static budget — the static trim survives only as
+    // the pre-detection fallback.
     let (trim_top, trim_bot) = if h >= 200 {
-        ((h / 16).min(96), (h / 48).min(32))
+        (
+            (h / 16).min(96).max(sticky_trim.0 as i32),
+            (h / 48).min(32).max(sticky_trim.1 as i32),
+        )
     } else {
-        (0, 0)
+        (sticky_trim.0 as i32, sticky_trim.1 as i32)
     };
     let max_motion = ((h as f32) * options.max_motion_ratio) as i32;
     let max_admissible = max_motion.min(h - trim_top - trim_bot - options.min_overlap as i32);
@@ -428,6 +680,8 @@ pub(crate) struct ScrollStitcher {
     /// duplicate test memcmp's it).
     anchor_raw: Vec<u8>,
     anchor_profile: RowProfile,
+    /// Sticky-band detection state (see [`StickyBands`]).
+    sticky: StickyBands,
     /// The profile of the last frame ACCEPTED into the canvas. The
     /// FIRST comparison base in [`ScrollStitcher::place`] — see the
     /// module docs ("dual anchor"): a clean frame after a tear matches
@@ -470,6 +724,7 @@ impl ScrollStitcher {
             },
             anchor_raw: first_frame.to_vec(),
             anchor_profile: profile.clone(),
+            sticky: StickyBands::new(),
             stable_profile: profile,
             frames_pushed: 1,
             frames_accepted: 1,
@@ -481,7 +736,11 @@ impl ScrollStitcher {
     }
 
     fn height(&self) -> u32 {
-        (i64::from(self.viewport_height) + self.state.max_position) as u32
+        // Physical canvas rows: the seed frame's viewport rows, every
+        // spliced band row, and the grown content below.
+        (i64::from(self.viewport_height)
+            + i64::from(self.sticky.inserted)
+            + self.state.max_position) as u32
     }
 
     /// The stitched image so far (RGBA, `width` × `height()`).
@@ -502,8 +761,14 @@ impl ScrollStitcher {
     /// Where the capture viewport currently sits on the canvas:
     /// (top row, row count). Feeds the preview's viewport highlight —
     /// moving the region frame or scrolling both travel through here.
+    /// With a committed top band the reported span is the CONTENT
+    /// segment (the band area at the canvas top is every frame's, not a
+    /// position — the highlight belongs below it).
     pub(crate) fn viewport_span(&self) -> (u32, u32) {
-        (self.state.position.max(0) as u32, self.viewport_height)
+        (
+            self.sticky.top + self.state.position.max(0) as u32,
+            self.viewport_height - self.sticky.top,
+        )
     }
 
     /// (frames pushed, frames folded into the canvas) — health signals
@@ -539,7 +804,9 @@ impl ScrollStitcher {
 
     /// One matcher verdict against a specific comparison base.
     fn classify(&self, base: &RowProfile, cur: &RowProfile) -> Placement {
-        let Some(estimate) = estimate_offset(base, cur, &self.options) else {
+        // Committed sticky bands extend the edge trim of the scan.
+        let trim = (self.sticky.top, self.sticky.bot);
+        let Some(estimate) = estimate_offset(base, cur, &self.options, trim) else {
             return Placement::Reject(StitchReject::InsufficientOverlap);
         };
         if estimate.cost > self.options.cost_threshold {
@@ -573,40 +840,103 @@ impl ScrollStitcher {
         // The riding anchor remains the fallback for motion beyond the
         // stable window — a jump no single bridge could cover — where
         // the band loss is the documented, unavoidable cost.
-        let estimate = match self.classify(&self.stable_profile, profile) {
-            Placement::Match(e) => e,
+        let (estimate, stable_used) = match self.classify(&self.stable_profile, profile) {
+            Placement::Match(e) => (e, true),
             Placement::NoMotion => return StitchOutcome::NoMotion,
             Placement::Reject(_) => match self.classify(&self.anchor_profile, profile) {
-                Placement::Match(e) => e,
+                Placement::Match(e) => (e, false),
                 Placement::NoMotion => return StitchOutcome::NoMotion,
                 Placement::Reject(reason) => return StitchOutcome::Rejected(reason),
             },
         };
 
         let (next, branch, growth) = self.state.transition(estimate.dy);
-        if self.viewport_height as u64 + next.max_position as u64 > self.options.max_height as u64 {
+        if u64::from(self.viewport_height)
+            + u64::from(self.sticky.inserted)
+            + next.max_position as u64
+            > self.options.max_height as u64
+        {
             return StitchOutcome::Rejected(StitchReject::HeightLimit);
         }
 
+        // Sticky evidence rides on the same accepted match — stillness
+        // is only meaningful against the base that produced it.
+        {
+            let base = if stable_used {
+                &self.stable_profile
+            } else {
+                &self.anchor_profile
+            };
+            let still = stillness_grid(base, profile, &self.options);
+            if !still.is_empty() {
+                self.sticky.update(&still, next.position);
+                if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
+                    self.commit_top_band(t, frame);
+                }
+                if let Some(b) = self.sticky.bot_commit(profile, self.viewport_height) {
+                    self.sticky.bot = b;
+                }
+            }
+        }
+
         let row = self.width as usize * 4;
-        let frame_bytes = self.frame_bytes();
+        let top = self.sticky.top as usize;
         if branch == Branch::Prepend && growth > 0 {
-            // Grow at the top: shift the existing rows down (memmove
-            // semantics — copy_within handles the overlap), leaving
-            // zeroed rows above for the viewport write.
+            // Grow at the top of the CONTENT area: shift the content
+            // rows down (memmove semantics — copy_within handles the
+            // overlap), leaving zeroed rows above for the viewport
+            // write. The band area at the physical top stays put.
             let shift = growth as usize * row;
             self.canvas.resize(self.canvas.len() + shift, 0);
             let len = self.canvas.len();
-            self.canvas.copy_within(0..len - shift, shift);
+            self.canvas.copy_within(top..len - shift, top + shift);
         } else if branch == Branch::Append && growth > 0 {
             self.canvas
                 .resize(self.canvas.len() + growth as usize * row, 0);
         }
         // Newest-wins: rewrite the whole viewport rectangle, not just the
-        // new band (see the module docs). `next.position` is the new
-        // viewport top in canvas rows for every branch.
-        let dst = next.position as usize * row;
-        self.canvas[dst..dst + frame_bytes].copy_from_slice(frame);
+        // new band (see the module docs). With a committed top band the
+        // frame splits: rows [0, prefix) bottom-align into the band area
+        // (rewritten every frame — a collapsing toolbar shrinks the live
+        // prefix while the band keeps its tallest extent), rows from
+        // `start = max(top, prefix)` land in the content area at
+        // `position + start`. During the detection delay (prefix still
+        // tentative, top not yet committed) the still prefix rows are
+        // SKIPPED: writing them would stamp chrome pixels into the
+        // content plane (placeholder-type sticky would happen to match;
+        // browser-chrome type would corrupt whatever the earlier frames
+        // recorded there). Skipping shifts nothing — the remaining rows
+        // keep the `position + row` mapping either way.
+        // Grid j attests rows [j·step, (j+1)·step); the prefix height is
+        // the last attested row + 1 (one grid coarser than the truth,
+        // never writing a row only its grid's FIRST row vouches for).
+        // Zero prefix must stay zero — a phantom one-row skip would
+        // punch a hole in every ordinary scroll (newly prepended rows
+        // have no earlier frame to backfill them).
+        let live_prefix = if self.sticky.prefix == 0 {
+            0
+        } else {
+            ((self.sticky.prefix - 1) * profile.step.max(1) + 1).min(self.viewport_height as usize)
+        };
+        let prefix_rows = live_prefix.min(top);
+        if prefix_rows > 0 {
+            let band_bytes = prefix_rows * row;
+            let band_dst = (top - prefix_rows) * row;
+            self.canvas[band_dst..band_dst + band_bytes].copy_from_slice(&frame[..band_bytes]);
+        }
+        // Collapsing toolbars (live prefix below the committed height)
+        // write from the committed height: the exposed rows are lost
+        // rather than misplaced (the documented v1 simplification).
+        let start = top.max(live_prefix);
+        // `inserted` is the physical shift the commit surgeries imposed
+        // on the content stream (mid-scroll pins splice the band in and
+        // everything below moves down by `top`; a band pinned from the
+        // first frame reuses the seed rows and shifts nothing). The
+        // write destination must follow whichever happened.
+        let dst = (next.position as usize + start + self.sticky.inserted as usize) * row;
+        let src = start * row;
+        let content_bytes = (self.viewport_height as usize - start) * row;
+        self.canvas[dst..dst + content_bytes].copy_from_slice(&frame[src..]);
         self.state = next;
         self.frames_accepted += 1;
         // The accepted frame is the new stable base (see `place`).
@@ -622,6 +952,50 @@ impl ScrollStitcher {
             },
             Branch::Contained => StitchOutcome::Contained { dy: estimate.dy },
         }
+    }
+
+    /// Commit surgery for a newly detected top band of `t` rows (see
+    /// [`StickyBands`]). The insight that keeps this cheap: the "band
+    /// copies" the detection delay wrote at each viewport top are NOT
+    /// wrong — a sticky element's placeholder in the content plane
+    /// renders the element itself, so those pixels are the correct
+    /// content for exactly where they landed (newest-wins keeps the
+    /// last copy, and later frames wash the placeholder once the
+    /// element scrolls out of its container). The surgery therefore
+    /// only has to make room: splice `t − top` fresh rows in at the
+    /// band line, seed them from this frame's band rows, and leave
+    /// `state` untouched — the content mapping (`canvas row =
+    /// top + position + (row − top)`) is unchanged for rows below the
+    /// band, so position/max_position stay valid as-is. The one
+    /// exception is a band that was pinned from the very FIRST frame:
+    /// the seed frame already wrote it at the canvas top, so the
+    /// splice would duplicate it — detected by the canvas top already
+    /// matching the frame's band rows (memcmp; also covers band
+    /// growth when the old band rows at [0, top) still match).
+    fn commit_top_band(&mut self, t: u32, frame: &[u8]) {
+        let m0 = self.sticky.top;
+        let g = t - m0; // band growth in rows
+        let row = self.width as usize * 4;
+        let t_bytes = t as usize * row;
+
+        let already_pinned =
+            self.canvas.len() >= t_bytes && self.canvas[..t_bytes] == frame[..t_bytes];
+        if !already_pinned {
+            // Splice g fresh rows in at the band line (below any
+            // previously committed band), shifting the content down.
+            let at = m0 as usize * row;
+            let add = g as usize * row;
+            let len = self.canvas.len();
+            self.canvas.resize(len + add, 0);
+            self.canvas.copy_within(at..len, at + add);
+            // Seed the new band rows so the pin line (band bottom meets
+            // content top) is continuous even before the write path
+            // refreshes it.
+            self.canvas[at..t_bytes].copy_from_slice(&frame[at..t_bytes]);
+            self.sticky.inserted += g;
+        }
+        self.sticky.top = t;
+        self.sticky.pending.clear();
     }
 }
 
@@ -1133,5 +1507,186 @@ mod tests {
         let (pushed, accepted) = s.stats();
         assert_eq!(pushed, 201);
         assert!(accepted >= 2);
+    }
+
+    // === Sticky-band detection ==========================================
+
+    /// A structured (non-flat) fixed chrome row: dark left half, bright
+    /// right half — constant across frames (what makes it sticky) but
+    /// with in-row luma spread (what lets the band-level flat-content
+    /// guard distinguish it from flat content).
+    fn chrome_band(rows: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((W * rows * 4) as usize);
+        for _ in 0..rows {
+            for x in 0..W {
+                let px: [u8; 4] = if x < W / 2 {
+                    [30, 30, 40, 255]
+                } else {
+                    [220, 220, 230, 255]
+                };
+                v.extend_from_slice(&px);
+            }
+        }
+        v
+    }
+
+    /// A page with a structured header pinned from the FIRST frame; the
+    /// content scrolls beneath it (the classic fixed site navbar).
+    #[test]
+    fn structured_header_from_the_first_frame_pins_once() {
+        const H2: u32 = 800;
+        const HDR: u32 = 48;
+        let band = chrome_band(HDR);
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for row in top..top + H2 - HDR {
+                v.extend_from_slice(&source_row(row).repeat(W as usize));
+            }
+            v
+        };
+        let expected = |last: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for row in 0..last + H2 - HDR {
+                v.extend_from_slice(&source_row(row).repeat(W as usize));
+            }
+            v
+        };
+
+        let mut s = ScrollStitcher::new(W, H2, &frame(0), StitchOptions::default()).unwrap();
+        // Run 1 on the second frame, run 2 → committed on the third.
+        s.push(&frame(30));
+        s.push(&frame(60));
+        s.push(&frame(95));
+        // Band written ONCE at the top (the seed frame already had it
+        // there — no splice), content stream exact beneath it.
+        assert_eq!(s.dimensions(), (W, HDR + (95 + H2 - HDR)));
+        assert_eq!(s.canvas(), expected(95).as_slice());
+        // The highlight reports the CONTENT segment, below the band.
+        assert_eq!(s.viewport_span(), (HDR + 95, H2 - HDR));
+    }
+
+    /// The mid-scroll pin: the navbar travels WITH the content until it
+    /// reaches the viewport top (its placeholder stays in the content
+    /// plane — rendered once there), then freezes. Detection commits a
+    /// few frames later; the surgery splices the band in and the
+    /// content stream stays exact, navbar appearing once in the band
+    /// and once at its pre-pin content position.
+    #[test]
+    fn mid_scroll_pin_splices_the_band_and_keeps_the_content_exact() {
+        const H2: u32 = 800;
+        const NAV: u32 = 12;
+        const NAV_AT: u32 = 40; // the navbar's content-plane rows
+        let band = chrome_band(NAV);
+        // The source page carries the navbar content at its placeholder.
+        let row_of = |row: u32| -> Vec<u8> {
+            if (NAV_AT..NAV_AT + NAV).contains(&row) {
+                let mut v = Vec::with_capacity(W as usize * 4);
+                for x in 0..W {
+                    let px: [u8; 4] = if x < W / 2 {
+                        [30, 30, 40, 255]
+                    } else {
+                        [220, 220, 230, 255]
+                    };
+                    v.extend_from_slice(&px);
+                }
+                v
+            } else {
+                source_row(row).repeat(W as usize)
+            }
+        };
+        // Pre-pin: the whole viewport is content. Post-pin: the band
+        // sits at [0, NAV) and viewport row r >= NAV shows source row
+        // c + r (the placeholder scrolls on under the frozen band).
+        let frame = |c: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            if c >= NAV_AT {
+                v.extend_from_slice(&band);
+                for row in c + NAV..c + H2 {
+                    v.extend_from_slice(&row_of(row));
+                }
+            } else {
+                for row in c..c + H2 {
+                    v.extend_from_slice(&row_of(row));
+                }
+            }
+            v
+        };
+        let expected = |last: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for row in 0..last + H2 {
+                v.extend_from_slice(&row_of(row));
+            }
+            v
+        };
+
+        // c = 40 is the first pinned frame; the still run reaches 2 two
+        // frames later, so the commit happens while scrolling through
+        // pinned territory.
+        let mut s = ScrollStitcher::new(W, H2, &frame(0), StitchOptions::default()).unwrap();
+        for c in [20u32, 40, 60, 90] {
+            let out = s.push(&frame(c));
+            assert!(
+                matches!(out, StitchOutcome::Appended { .. }),
+                "frame {c}: {out:?}"
+            );
+        }
+        // Band spliced once at the top (+NAV rows). The content plane
+        // ends at last + H (pinned frames contribute H − NAV viewport
+        // rows, but the first frame's full H rows seed the plane): the
+        // navbar's own placeholder rows [40, 52) appear exactly once.
+        assert_eq!(s.dimensions(), (W, NAV + 90 + H2));
+        assert_eq!(s.canvas(), expected(90).as_slice());
+    }
+
+    /// A tall fixed footer only masks the MATCH (taller than the static
+    /// bottom trim); the canvas keeps today's write-through behavior.
+    #[test]
+    fn structured_footer_masks_matching_without_canvas_surgery() {
+        const H2: u32 = 800;
+        const FTR: u32 = 40; // > the static trim (min(800/48, 32))
+        let band = chrome_band(FTR);
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            for row in top..top + H2 - FTR {
+                v.extend_from_slice(&source_row(row).repeat(W as usize));
+            }
+            v.extend_from_slice(&band);
+            v
+        };
+        let mut s = ScrollStitcher::new(W, H2, &frame(0), StitchOptions::default()).unwrap();
+        let out = s.push(&frame(40));
+        assert!(matches!(out, StitchOutcome::Appended { .. }), "{out:?}");
+        let out = s.push(&frame(80)); // second still frame → bot mask commits
+        assert!(matches!(out, StitchOutcome::Appended { .. }), "{out:?}");
+        // No top band ever: the header scrolls.
+        assert_eq!(s.viewport_span().0, 80);
+        assert_eq!(s.dimensions(), (W, H2 + 80));
+    }
+
+    /// A flat TOP region of moving content must NOT be pinned: the
+    /// band-level structure guard is what separates "flat because
+    /// chrome" from "flat because blank".
+    #[test]
+    fn flat_top_content_is_not_pinned() {
+        const H2: u32 = 800;
+        const FLAT: u32 = 100; // > any committed-band minimum
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            for row in 0..H2 {
+                let px = if row < FLAT {
+                    [0xff, 0xff, 0xff, 0xff]
+                } else {
+                    source_row(top + row)
+                };
+                v.extend_from_slice(&px.repeat(W as usize));
+            }
+            v
+        };
+        let mut s = ScrollStitcher::new(W, H2, &frame(0), StitchOptions::default()).unwrap();
+        let out = s.push(&frame(40));
+        assert!(matches!(out, StitchOutcome::Appended { .. }), "{out:?}");
+        // Still all-flat rows accumulated a run, but no structure → no
+        // commit: the span stays whole-viewport.
+        assert_eq!(s.viewport_span(), (40, H2));
     }
 }
