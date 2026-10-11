@@ -90,3 +90,26 @@ pub fn boot_mark(label: &str) {
         label
     );
 }
+
+/// Re-exec ourselves with a subcommand, detached: the child outlives
+/// this call and this process (dropping the handle leaves it running —
+/// same pattern as the notify child). The tray uses it to launch
+/// sessions; the overlay's settings button uses it to hand off to the
+/// settings window before the capture process exits.
+pub fn launch_detached(subcommand: &str) {
+    use std::process::Command;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("[shotori] cannot locate own executable: {e}");
+            return;
+        }
+    };
+    match Command::new(exe).arg(subcommand).spawn() {
+        Ok(child) => {
+            drop(child);
+            println!("[shotori] launched `{subcommand}`");
+        }
+        Err(e) => eprintln!("[shotori] failed to launch `{subcommand}`: {e}"),
+    }
+}

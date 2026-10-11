@@ -14,8 +14,6 @@
 //! Quit mode is [`QuitMode::Explicit`]: the app has no windows, so the
 //! default last-window-closed heuristic would exit immediately.
 
-use std::process::Command;
-
 use gpui_kit::*;
 use gpui_tray::{Icon, Tray};
 
@@ -66,26 +64,10 @@ fn setup(cx: &mut App) -> gpui_tray::Result<()> {
     Ok(())
 }
 
-/// Re-exec ourselves with a subcommand, detached: the child outlives
-/// this call; dropping the handle leaves it running (same pattern as
-/// the notify child).
+/// Re-exec ourselves with a subcommand, detached — shared with the
+/// overlay's settings handoff (see [`crate::launch_detached`]).
 fn launch(subcommand: &str) {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[shotori] tray: cannot locate own executable: {e}");
-            return;
-        }
-    };
-    let mut cmd = Command::new(exe);
-    cmd.arg(subcommand);
-    match cmd.spawn() {
-        Ok(child) => {
-            drop(child);
-            println!("[shotori] tray: {subcommand} launched");
-        }
-        Err(e) => eprintln!("[shotori] tray: failed to launch {subcommand}: {e}"),
-    }
+    crate::launch_detached(subcommand);
 }
 
 fn take_screenshot(_: &TakeScreenshot, _: &mut App) {

@@ -44,7 +44,8 @@ gpui_kit::assets::icon_assets!(
         Pin,
         Trash,
         X,
-        Copy
+        Copy,
+        Cog
     ]
 );
 
@@ -286,6 +287,16 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         shortcut: "Enter / Ctrl+C",
         icon: ButtonIcon::Kit(IconName::Copy),
     },
+    ButtonMeta {
+        // The visible entry into the settings editor. A regular
+        // configurable button like every other: hiding it is a choice
+        // (the tray menu and `shotori settings` remain as backstops).
+        button: crate::model::settings::ToolbarButton::Settings,
+        debug_id: "tb-settings",
+        name: "Settings",
+        shortcut: "Ctrl+,",
+        icon: ButtonIcon::Kit(IconName::Cog),
+    },
 ];
 
 /// The action each button dispatches — the exact same actions the
@@ -312,6 +323,7 @@ fn action_for(button: crate::model::settings::ToolbarButton) -> Box<dyn gpui_kit
         B::Scroll => Box::new(ScrollSelection),
         B::Cancel => Box::new(QuitOverlay),
         B::Copy => Box::new(CopySelection),
+        B::Settings => Box::new(crate::actions::OpenSettings),
     }
 }
 

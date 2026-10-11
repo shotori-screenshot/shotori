@@ -17,10 +17,10 @@ use gpui_kit::*;
 
 use crate::actions::{
     CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, FinishPolyline, OcrSelection,
-    PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, ScrollSelection, SelectScreen,
-    ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMosaic,
-    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleText,
-    UndoAnnotation,
+    OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, ScrollSelection,
+    SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
+    ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect,
+    ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::model::selection::{PressTarget, Selection};
@@ -1372,6 +1372,17 @@ impl Render for Overlay {
                 }
                 cx.stop_propagation();
                 cx.notify();
+            }))
+            // The gear / Ctrl+, — the one "exit" that leads somewhere:
+            // a regular toplevel cannot coexist with exclusive-keyboard
+            // overlays (the same constraint as the save dialog), so the
+            // session ends here and a detached settings process takes
+            // over. It boots slowly enough (wgpu init) that the overlay
+            // is gone by the time its window maps.
+            .on_action(cx.listener(|_, _: &OpenSettings, _, cx| {
+                crate::launch_detached("settings");
+                cx.quit();
+                cx.stop_propagation();
             }))
             // ── Selection interaction (events → state machine) ─────────
             // (the LEFT down is handled window-level in `pointer_event_sink`:

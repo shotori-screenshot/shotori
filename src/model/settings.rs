@@ -51,6 +51,7 @@ pub enum ToolbarButton {
     Scroll,
     Cancel,
     Copy,
+    Settings,
 }
 
 /// The row-one groups the settings palette groups buttons by (the
@@ -67,7 +68,7 @@ impl ToolbarButton {
     /// Every button, in factory/display order. The settings palette
     /// lists and the factory row both iterate this — one order
     /// everywhere.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Select,
         Self::Rectangle,
         Self::Ellipse,
@@ -87,6 +88,7 @@ impl ToolbarButton {
         Self::Scroll,
         Self::Cancel,
         Self::Copy,
+        Self::Settings,
     ];
 
     /// Stable id for the settings file.
@@ -111,6 +113,7 @@ impl ToolbarButton {
             Self::Scroll => "scroll",
             Self::Cancel => "cancel",
             Self::Copy => "copy",
+            Self::Settings => "settings",
         }
     }
 
@@ -136,6 +139,9 @@ impl ToolbarButton {
             | Self::Clear => ToolbarCluster::Tools,
             Self::Ocr | Self::Save | Self::Pin | Self::Scroll => ToolbarCluster::Actions,
             Self::Cancel | Self::Copy => ToolbarCluster::Confirm,
+            // app-level, not selection-level — groups with the confirm
+            // end of the bar and the palette's Actions section
+            Self::Settings => ToolbarCluster::Confirm,
         }
     }
 }
@@ -180,9 +186,10 @@ impl ToolbarItem {
 
 /// The factory row: exactly the layout the hardcoded toolbar shipped
 /// before customization existed — the tool cluster and the confirm
-/// pair each get their group break — a fresh install and "Reset to
-/// defaults" both land here.
-pub const DEFAULT_ROW: [ToolbarItem; 21] = [
+/// pair each get their group break, the settings gear closes the row
+/// (the always-visible entry into this editor) — a fresh install and
+/// "Reset to defaults" both land here.
+pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Select),
     ToolbarItem::Button(ToolbarButton::Rectangle),
     ToolbarItem::Button(ToolbarButton::Ellipse),
@@ -204,6 +211,7 @@ pub const DEFAULT_ROW: [ToolbarItem; 21] = [
     ToolbarItem::Separator,
     ToolbarItem::Button(ToolbarButton::Cancel),
     ToolbarItem::Button(ToolbarButton::Copy),
+    ToolbarItem::Button(ToolbarButton::Settings),
 ];
 
 /// User settings. Default = the factory row.
@@ -498,20 +506,20 @@ mod tests {
     fn factory_row_is_the_historical_layout() {
         let row = Settings::default().row().to_vec();
         // the pre-customization toolbar, item for item — two group
-        // breaks: tool cluster | actions | confirm pair
-        assert_eq!(row.len(), 21);
+        // breaks (tool cluster | actions | confirm pair), gear last
+        assert_eq!(row.len(), 22);
         assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
         assert_eq!(row[13], ToolbarItem::Separator);
         assert_eq!(row[18], ToolbarItem::Separator);
         assert_eq!(
             *row.last().unwrap(),
-            ToolbarItem::Button(ToolbarButton::Copy)
+            ToolbarItem::Button(ToolbarButton::Settings)
         );
         // every button placed exactly once
         for button in ToolbarButton::ALL {
             assert!(Settings::default().toolbar_visible(button));
         }
-        assert_eq!(Settings::default().row1_button_count(), 19);
+        assert_eq!(Settings::default().row1_button_count(), 20);
         assert_eq!(Settings::default().row1_separator_count(), 2);
     }
 
@@ -641,7 +649,7 @@ mod tests {
         assert!(!s.toolbar_visible(ToolbarButton::Scroll));
         assert!(s.toolbar_visible(ToolbarButton::Copy));
         // factory order otherwise, both separators intact
-        assert_eq!(s.row1_button_count(), 17);
+        assert_eq!(s.row1_button_count(), 18);
         assert_eq!(s.row1_separator_count(), 2);
         assert_eq!(errors.len(), 1, "unknown hidden id reported");
     }

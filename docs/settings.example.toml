@@ -13,12 +13,12 @@
 # Known button ids (factory order):
 #   select, rectangle, ellipse, line, polyline, arrow, number,
 #   pencil, highlighter, mosaic, eraser, text, clear,
-#   ocr, save, pin, scroll, cancel, copy
+#   ocr, save, pin, scroll, cancel, copy, settings
 #
 # The value below is the factory layout.
 items = [
   "select", "rectangle", "ellipse", "line", "polyline", "arrow",
   "number", "pencil", "highlighter", "mosaic", "eraser", "text",
   "clear", "separator", "ocr", "save", "pin", "scroll", "separator",
-  "cancel", "copy",
+  "cancel", "copy", "settings",
 ]

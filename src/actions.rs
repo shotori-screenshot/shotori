@@ -17,7 +17,8 @@ gpui_kit::actions!([
     PinSelection,
     OcrSelection,
     SelectScreen,
-    ScrollSelection
+    ScrollSelection,
+    OpenSettings
 ]);
 
 // In-canvas annotation actions (shared by the overlay's keybindings and
@@ -57,6 +58,9 @@ pub fn bind_keys(cx: &mut App) {
         // the fifth exit: auto-scroll the selection into a long
         // screenshot (l = long; plain keys are all annotation tools)
         KeyBinding::new("ctrl-l", ScrollSelection, Some("ShotoriOverlay")),
+        // settings: the conventional accelerator; the gear button on
+        // the toolbar dispatches the same action
+        KeyBinding::new("ctrl-,", OpenSettings, Some("ShotoriOverlay")),
         // the scroll preview panel is its own context (the overlays are
         // gone while it lives); shortcuts mirror the selection flow
         KeyBinding::new(
