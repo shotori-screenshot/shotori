@@ -150,6 +150,15 @@ const SEP_PITCH: f32 = 11.;
 /// was measured against (the spacer itself rendered zero-width; only
 /// its gap remains as a footprint now that the variant is gone).
 const GONE_SPACER_GAP: f32 = 2.;
+/// The composition of the row TB_W_ROW1 was probe-measured against:
+/// 19 buttons, one zero-width spacer child, one separator — the
+/// pre-customization toolbar. Pinned EXPLICITLY because the factory
+/// row later gained the settings gear: keying the anchor off
+/// ALL.len() silently rebased it, and a 32px-short basis put the
+/// right grip's hand-cursor rect over the buttons instead of the
+/// rendered grip (user-reported — grips derive from this basis).
+const ANCHOR_BUTTONS: f32 = 19.;
+const ANCHOR_SEPARATORS: f32 = 1.;
 /// Floor for the degenerate everything-hidden bar (grips + padding +
 /// slack) — the basis must stay positive for the clamps.
 const ROW1_W_MIN: f32 = 48.;
@@ -162,20 +171,17 @@ pub(crate) fn default_row1_basis() -> f32 {
 }
 
 /// The configured row's width basis, as exact per-child deltas from
-/// the probe-measured default (see TB_W_ROW1's comment: totals are
+/// the probe-measured anchor (see TB_W_ROW1's comment: totals are
 /// measured, never re-derived from first principles — but a delta per
-/// removed/added child is exact geometry). The anchor was measured
-/// with a zero-width spacer child and a single separator; today's
-/// factory row drops that child (-2px of gap) and carries two
-/// separators (+11px): 660 - 2 + 11 = 669.
+/// removed/added child is exact geometry). Today's factory row: 20
+/// buttons and two separators, no spacer child →
+/// 660 - 2 + 32 + 11 = 701.
 pub(crate) fn row1_basis(settings: &crate::model::settings::Settings) -> f32 {
-    use crate::model::settings::ToolbarButton;
     let buttons = settings.row1_button_count() as f32;
     let separators = settings.row1_separator_count() as f32;
-    let factory_buttons = ToolbarButton::ALL.len() as f32;
     (TB_W_ROW1 - GONE_SPACER_GAP
-        + BTN_PITCH * (buttons - factory_buttons)
-        + SEP_PITCH * (separators - 1.))
+        + BTN_PITCH * (buttons - ANCHOR_BUTTONS)
+        + SEP_PITCH * (separators - ANCHOR_SEPARATORS))
         .max(ROW1_W_MIN)
 }
 
@@ -515,10 +521,12 @@ mod tests {
                 .collect(),
         );
         let (w, h) = toolbar_size(false, &s);
-        // factory row keeps BOTH separators: +1 separator vs the anchor
+        // 17 buttons (3 off the 20-button factory) + 2 separators,
+        // against the 19-button/1-separator anchor:
+        // 660 - 2 + 32*(17-19) + 11*(2-1)
         assert_eq!(
             w,
-            TB_W_ROW1 - super::GONE_SPACER_GAP + super::SEP_PITCH - 3. * super::BTN_PITCH
+            TB_W_ROW1 - super::GONE_SPACER_GAP - 2. * super::BTN_PITCH + super::SEP_PITCH
         );
         assert_eq!(h, ROW_H);
         // annotating is the fixed-width settings row — unaffected
@@ -535,7 +543,7 @@ mod tests {
         );
         assert_eq!(
             toolbar_size(false, &s).0,
-            TB_W_ROW1 - super::GONE_SPACER_GAP + 2. * super::SEP_PITCH
+            TB_W_ROW1 - super::GONE_SPACER_GAP + super::BTN_PITCH + 2. * super::SEP_PITCH
         );
 
         // empty row (hide everything): the floor keeps the basis positive

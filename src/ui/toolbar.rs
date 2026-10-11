@@ -45,7 +45,7 @@ gpui_kit::assets::icon_assets!(
         Trash,
         X,
         Copy,
-        Cog
+        Settings
     ]
 );
 
@@ -291,11 +291,14 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // The visible entry into the settings editor. A regular
         // configurable button like every other: hiding it is a choice
         // (the tray menu and `shotori settings` remain as backstops).
+        // Lucide's classic "settings" gear — the one every desktop
+        // app uses; the chunkier cog variant reads poorly at 18px
+        // (user-reported).
         button: crate::model::settings::ToolbarButton::Settings,
         debug_id: "tb-settings",
         name: "Settings",
         shortcut: "Ctrl+,",
-        icon: ButtonIcon::Kit(IconName::Cog),
+        icon: ButtonIcon::Kit(IconName::Settings),
     },
 ];
 

@@ -2577,30 +2577,30 @@ mod multi_output_tests {
         vcx.run_until_parked();
         vcx.update(|_, cx| {
             let anchored = session.read(cx).toolbar_bounds("main").unwrap();
-            assert_eq!(anchored.origin, point(px(112.), px(514.)));
+            // the inset would put it at x=112, but the factory bar
+            // (~701px) does not fit an 800px window at that offset —
+            // the horizontal clamp pins it into the right edge
+            let basis = crate::model::placement::default_row1_basis();
+            assert_eq!(
+                anchored.origin,
+                point(px((800. - basis - 8.).min(112.)), px(514.))
+            );
         });
 
         // hovering either grip: the open-hand affordance
-        vcx.simulate_mouse_move(
-            point(px(118.), px(533.)),
-            MouseButton::Left,
-            Default::default(),
-        );
+        let (left_grip, right_grip) =
+            vcx.update(|_, cx| session.read(cx).toolbar_grips("main").unwrap());
+        vcx.simulate_mouse_move(left_grip.center(), MouseButton::Left, Default::default());
         vcx.run_until_parked();
         vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
-        let right_grip =
-            vcx.update(|_, cx| session.read(cx).toolbar_grips("main").unwrap().1.center());
-        vcx.simulate_mouse_move(right_grip, MouseButton::Left, Default::default());
+        vcx.simulate_mouse_move(right_grip.center(), MouseButton::Left, Default::default());
         vcx.run_until_parked();
         vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
 
         // press the LEFT grip, drag, release: the toolbar follows to any
         // spot on the layer; the selection beneath is untouched
-        vcx.simulate_mouse_down(
-            point(px(118.), px(533.)),
-            MouseButton::Left,
-            Default::default(),
-        );
+        let press = left_grip.center();
+        vcx.simulate_mouse_down(press, MouseButton::Left, Default::default());
         vcx.simulate_mouse_move(
             point(px(250.), px(100.)),
             MouseButton::Left,
@@ -2610,7 +2610,8 @@ mod multi_output_tests {
         vcx.update(|_, cx| {
             assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::ClosedHand);
             let b = session.read(cx).toolbar_bounds("main").unwrap();
-            // grab (6,19) held, x clamped to the window (narrow single-row bar)
+            // grip-center grab (11,19) held, x clamped to the window
+            // (narrow single-row bar)
             assert_eq!(
                 b.origin,
                 point(
