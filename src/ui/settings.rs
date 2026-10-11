@@ -73,6 +73,20 @@ struct DraggedItem {
     from: Option<usize>,
 }
 
+/// Presentation mirror of the live drag: the carried item, its origin
+/// (`None` = palette) and the insertion slot the pointer last aimed —
+/// indexed against the DISPLAYED row (the lifted item has left the
+/// flow). Every drag-move listener refreshes it wholesale from the
+/// event payload; `commit` clears it. Render gates it on
+/// `has_active_drag` — a cancelled drag leaves a stale entry that is
+/// invisible until the next drag's first move overwrites it (one
+/// frame at worst).
+struct DragPreview {
+    item: ToolbarItem,
+    origin: Option<usize>,
+    slot: usize,
+}
+
 /// The drag payload marking a scrollbar-rail scrub in flight.
 struct RailScrub;
 
@@ -228,9 +242,10 @@ struct SettingsWindow {
     /// The last save's failure (or load warning), shown inline until
     /// the next successful save.
     error: Option<String>,
-    /// Where a drag in flight would land (insertion slot), for the
-    /// accent caret. `None` outside drags.
-    drop_target: Option<usize>,
+    /// The live drag's presentation mirror (carried item, origin,
+    /// aimed insertion slot) — see [`DragPreview`]. `None` outside
+    /// drags.
+    drag: Option<DragPreview>,
     /// The Appearance editor's state (theme.toml working copy + the
     /// picker/slider entities its rows render).
     appearance: AppearanceState,
@@ -281,7 +296,7 @@ impl SettingsWindow {
             settings,
             path: crate::model::settings::config_path(),
             error: warnings.first().cloned(),
-            drop_target: None,
+            drag: None,
             appearance,
             sidebar_collapsed: false,
             preview_scroll: ScrollHandle::new(),
@@ -294,10 +309,10 @@ impl SettingsWindow {
     /// Install a row and write it through. Rows built here are valid
     /// by construction (buttons can only come from the palette, which
     /// never offers one that is already placed). Any row change
-    /// invalidates a recorded drop target.
+    /// retires the drag mirror.
     fn commit(&mut self, row: Vec<ToolbarItem>, cx: &mut Context<Self>) {
         self.settings.set_row(row);
-        self.drop_target = None;
+        self.drag = None;
         self.persist(cx);
     }
 
@@ -315,9 +330,9 @@ impl SettingsWindow {
     }
 
     /// A drop landed in preview slot `i` (slot i sits before row item
-    /// i; slot n = after the last item — slots are indexed against the
-    /// row WITH the dragged item still in place, hence the -1 when
-    /// moving right). The index math lives in the model, tested there.
+    /// i as displayed during the drag — the lifted item is not in the
+    /// count; what the gap preview showed is what lands). The index
+    /// math lives in the model, tested there.
     fn drop_at(&mut self, i: usize, dragged: &DraggedItem, cx: &mut Context<Self>) {
         let row = Settings::apply_drop(dragged.item, self.settings.row(), i, dragged.from);
         self.edge_scroll.stop();
@@ -349,17 +364,36 @@ impl SettingsWindow {
 
     /// The live toolbar: the real bar container and grip textures with
     /// the configured row inside. Items drag (reorder) and click
-    /// (remove). Drop targets are the items themselves (before/after
-    /// by pointer vs the item's center — a full 30px target, not a
-    /// strip); the grips pin the two ends, and the insertion point
-    /// renders as a single accent caret. Nothing widens the bar while
-    /// dragging — inserted slot strips once grew it by ~350px and
-    /// pushed the right grip off the window (user-reported).
+    /// (remove). While a drag is in flight the carried item LEAVES the
+    /// flow (the ghost under the cursor is the item) and the aimed
+    /// slot renders as a gap the item's own footprint wide — a live
+    /// preview of the row after the drop, so the bar's width stays
+    /// constant during a reorder (the gap replaces the lifted item).
+    /// Drop targets are the items themselves (before/after by pointer
+    /// vs the item's center — a full 30px target, not a strip); the
+    /// grips pin the two ends.
     fn toolbar_preview(&self, cx: &Context<Self>) -> Div {
         let row: Vec<ToolbarItem> = self.settings.row().to_vec();
-        let dragging = cx.has_active_drag();
-        let caret_at = if dragging { self.drop_target } else { None };
         let len = row.len();
+        // what the drag carries and where it came from — the mirror is
+        // only trusted while a drag is actually active (a cancelled
+        // drag leaves it stale but `None`-gated here)
+        let drag = if cx.has_active_drag() {
+            self.drag.as_ref()
+        } else {
+            None
+        };
+        // the displayed row: the lifted item is hidden; the aimed slot
+        // is clamped into the displayed range (a stale slot from a
+        // shorter previous row must not index past the end)
+        let hide = drag.and_then(|d| d.origin);
+        let shown: Vec<(usize, ToolbarItem)> = row
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != hide)
+            .map(|(i, item)| (i, *item))
+            .collect();
+        let slot = drag.map(|d| d.slot.min(shown.len()));
         let pin_start = cx.listener(
             move |this: &mut Self,
                   event: &DragMoveEvent<DraggedItem>,
@@ -369,13 +403,14 @@ impl SettingsWindow {
                 // listener during a matching drag — it has no hover filter
                 // (it exists for drag sources tracking themselves, "like
                 // resizing" per its docs). Self-filter by pointer-in-bounds,
-                // or every listener overwrites the others and the caret
+                // or every listener overwrites the others and the gap
                 // sticks wherever the last-registered element (the right
                 // grip) pins it.
                 if !event.bounds.contains(&event.event.position) {
                     return;
                 }
-                this.set_drop_target(0, cx);
+                let (item, from) = drag_payload(event, cx);
+                this.aim_drag(item, from, 0, cx);
             },
         );
         let pin_end = cx.listener(
@@ -386,14 +421,19 @@ impl SettingsWindow {
                 if !event.bounds.contains(&event.event.position) {
                     return;
                 }
-                this.set_drop_target(len, cx);
+                let (item, from) = drag_payload(event, cx);
+                // `len` counts the FULL row; during a reorder one item
+                // is hidden, so this clamps to the displayed end inside
+                // `aim_drag`'s consumers (and `apply_drop` clamps too)
+                this.aim_drag(item, from, len, cx);
             },
         );
         let bar_fallback = cx.listener(
             move |this: &mut Self, dragged: &DraggedItem, _, cx: &mut Context<Self>| {
-                // gaps, padding and the caret itself: no item handled
-                // the drop — land at the slot the pointer last aimed at
-                if let Some(slot) = this.drop_target {
+                // gaps, padding and the gap preview itself: no item
+                // handled the drop — land at the slot the pointer last
+                // aimed at
+                if let Some(slot) = this.drag.as_ref().map(|d| d.slot) {
                     this.drop_at(slot, dragged, cx);
                 }
             },
@@ -406,30 +446,60 @@ impl SettingsWindow {
             .flex_none()
             .on_drop(bar_fallback)
             .child(grip_end("pv-grip-left").on_drag_move(pin_start));
-        for (i, item) in row.iter().enumerate() {
-            if caret_at == Some(i) {
-                bar = bar.child(insertion_caret());
+        for (j, (i, item)) in shown.iter().enumerate() {
+            // `slot` derives from `drag`, so Some(slot) implies the
+            // drag mirror is present — the footprint is the carried
+            // item's own
+            if slot == Some(j)
+                && let Some(d) = drag
+            {
+                bar = bar.child(insertion_slot(item_footprint(d.item)));
             }
-            bar = bar.child(self.preview_item(i, *item, cx));
+            bar = bar.child(self.preview_item(*i, j, *item, cx));
         }
-        if caret_at == Some(len) {
-            bar = bar.child(insertion_caret());
+        if slot == Some(shown.len())
+            && let Some(d) = drag
+        {
+            bar = bar.child(insertion_slot(item_footprint(d.item)));
         }
         bar.child(grip_end("pv-grip-right").on_drag_move(pin_end))
     }
 
-    /// Record which insertion slot the pointer hovers; notifies only
-    /// on change (this fires on every mouse move during a drag).
-    fn set_drop_target(&mut self, slot: usize, cx: &mut Context<Self>) {
-        if self.drop_target != Some(slot) {
-            self.drop_target = Some(slot);
-            cx.notify();
+    /// Record what the drag carries and the slot it aims; notifies
+    /// only on change (drag-move fires on every mouse move). The slot
+    /// is indexed against the DISPLAYED row — the lifted item is not
+    /// in it (see [`Settings::apply_drop`]).
+    fn aim_drag(
+        &mut self,
+        item: ToolbarItem,
+        origin: Option<usize>,
+        slot: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .drag
+            .as_ref()
+            .is_some_and(|d| d.origin == origin && d.slot == slot)
+        {
+            return;
         }
+        self.drag = Some(DragPreview { item, origin, slot });
+        cx.notify();
     }
 
     /// One preview item: the real visual, but dragging reorders and
-    /// clicking removes — the action itself never fires here.
-    fn preview_item(&self, i: usize, item: ToolbarItem, cx: &Context<Self>) -> AnyElement {
+    /// clicking removes — the action itself never fires here. `i` is
+    /// the ORIGINAL row index (the payload's removal source and the
+    /// click-to-remove target); `j` is the DISPLAYED index while a
+    /// drag hides the lifted item — insertion slots count against the
+    /// displayed row, so the gap preview and the eventual drop agree.
+    fn preview_item(
+        &self,
+        i: usize,
+        j: usize,
+        item: ToolbarItem,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let payload = DraggedItem {
             item,
             from: Some(i),
@@ -446,14 +516,18 @@ impl SettingsWindow {
                 if !event.bounds.contains(&event.event.position) {
                     return;
                 }
+                // the slot this item aims at; the payload says what is
+                // being carried (hovering A while dragging B aims B's
+                // gap around A, not A's own)
+                let (item, from) = drag_payload(event, cx);
                 let center = event.bounds.origin.x + event.bounds.size.width / 2.;
-                let slot = usize::from(event.event.position.x > center) + i;
-                this.set_drop_target(slot, cx);
+                let slot = usize::from(event.event.position.x > center) + j;
+                this.aim_drag(item, from, slot, cx);
             },
         );
         let drop = cx.listener(
             move |this: &mut Self, dragged: &DraggedItem, _, cx: &mut Context<Self>| {
-                let slot = this.drop_target.unwrap_or(i);
+                let slot = this.drag.as_ref().map(|d| d.slot).unwrap_or(j);
                 this.drop_at(slot, dragged, cx);
             },
         );
@@ -473,7 +547,14 @@ impl SettingsWindow {
                 None => div().into_any_element(),
             },
             ToolbarItem::Separator => layout_visual(
-                "pv-separator",
+                // UNIQUE per instance: stateful element state (the
+                // pending mouse-down that arms a drag) is keyed by
+                // element id. A shared "pv-separator" made one press
+                // arm EVERY separator's drag listener at once, and
+                // bubble dispatch (right-to-left) let the RIGHTMOST
+                // separator win the drag start — grabbing any of them
+                // always picked up the rightmost one (user-reported).
+                format!("pv-separator-{i}").into(),
                 payload,
                 cx,
                 i,
@@ -639,16 +720,41 @@ fn ghost_constructor(
     cx.new(|_| DragGhost { item: item.item })
 }
 
-/// The accent caret marking where a drag would land. Purely visual —
-/// 3px wide, so a drag in flight cannot push the bar's right edge off
-/// the window (the slot strips it replaced cost ~16px per gap).
-fn insertion_caret() -> Div {
+/// The live-insertion preview: a reserved gap the carried item's own
+/// footprint wide, so the row reads exactly as it will after the drop
+/// (a bar-origin reorder keeps the bar's width constant — the gap
+/// replaces the lifted item; a palette insert grows it by one
+/// footprint, bounded, unlike the old per-slot strips that grew the
+/// bar ~350px and pushed the right grip off the window).
+fn insertion_slot(footprint: Pixels) -> Div {
     div()
-        .w(px(3.))
+        .w(footprint)
         .h(px(26.))
-        .rounded(px(2.))
-        .bg(rgba(theme::c().accent))
+        .rounded(px(5.))
         .flex_shrink_0()
+        .border_1()
+        .border_color(rgba(theme::c().accent))
+        .bg(rgba(theme::c().accent).opacity(0.15))
+}
+
+/// The width an item occupies on the bar — what the insertion gap
+/// reserves. Must track the real visuals' footprints (`control`'s
+/// 30px buttons, `layout_visual`'s 18px separator hit shell) or the
+/// bar visibly changes width when a drag lifts an item.
+fn item_footprint(item: ToolbarItem) -> Pixels {
+    match item {
+        ToolbarItem::Button(_) => px(30.),
+        ToolbarItem::Separator => px(18.),
+    }
+}
+
+/// Copy the drag payload out of a drag-move event (the whole payload,
+/// not just the slot: hovering A while carrying B must aim B's gap
+/// around A). Returns copies — the payload borrows `cx`, which the
+/// caller needs mutably right after.
+fn drag_payload(event: &DragMoveEvent<DraggedItem>, cx: &App) -> (ToolbarItem, Option<usize>) {
+    let drag = event.drag(cx);
+    (drag.item, drag.from)
 }
 
 /// Wrap a preview layout item (the separator) in the interaction
@@ -657,7 +763,7 @@ fn insertion_caret() -> Div {
 /// in a wider hit target — a 2px separator is un-grabbable on its
 /// own.
 fn layout_visual(
-    id: &'static str,
+    id: SharedString,
     payload: DraggedItem,
     cx: &Context<SettingsWindow>,
     i: usize,

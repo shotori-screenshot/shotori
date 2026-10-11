@@ -248,11 +248,12 @@ struct ToolbarFile {
 
 impl Settings {
     /// Commit a drop into preview slot `slot` (slot i sits before row
-    /// item i; slot n = after the last item). Slots are indexed
-    /// against the row WITH the dragged item still in place, hence
-    /// the -1 when moving right past the source. `from` = `Some(src)`
-    /// reorders an item already on the row; `None` inserts a palette
-    /// item.
+    /// item i as DISPLAYED during the drag — i.e. after the lifted
+    /// item has left the flow; the editor hides the carried item, so
+    /// what the gap-preview showed is exactly what this lands). `from`
+    /// = `Some(src)` reorders an item already on the row (`src` is the
+    /// ORIGINAL index); `None` inserts a palette item against the
+    /// full row.
     pub fn apply_drop(
         item: ToolbarItem,
         row: &[ToolbarItem],
@@ -260,14 +261,11 @@ impl Settings {
         from: Option<usize>,
     ) -> Vec<ToolbarItem> {
         let mut row = row.to_vec();
-        let (item, dst) = match from {
-            Some(src) if src < row.len() => {
-                let moved = row.remove(src);
-                (moved, if slot > src { slot - 1 } else { slot })
-            }
-            _ => (item, slot),
+        let item = match from {
+            Some(src) if src < row.len() => row.remove(src),
+            _ => item,
         };
-        row.insert(dst.min(row.len()), item);
+        row.insert(slot.min(row.len()), item);
         row
     }
     /// The configured row, in display order.
@@ -594,19 +592,21 @@ mod tests {
             [btn(B::Copy), btn(B::Save), btn(B::Pin), btn(B::Ocr)]
         );
 
-        // reorder: drag Copy (slot 0) to before Pin (slot 2) — the
-        // slot was indexed with Copy still in place, so the insert
-        // lands one to the left of the naive read
+        // reorder: slots are indexed against the displayed row — the
+        // lifted item is already gone. Copy lifts → [Save, Pin]; the
+        // gap between Save and Pin is slot 1
         assert_eq!(
-            Settings::apply_drop(btn(B::Copy), &row, 2, Some(0)),
+            Settings::apply_drop(btn(B::Copy), &row, 1, Some(0)),
             [btn(B::Save), btn(B::Copy), btn(B::Pin)]
         );
-        // drag Pin (slot 2) to the very front
+        // drag Pin (slot 2) to the very front: Pin lifts → [Copy, Save],
+        // slot 0 = before Copy
         assert_eq!(
             Settings::apply_drop(btn(B::Pin), &row, 0, Some(2)),
             [btn(B::Pin), btn(B::Copy), btn(B::Save)]
         );
-        // drop back onto its own slot: no-op
+        // drop back onto its own gap: Save lifts → [Copy, Pin], the
+        // middle gap is slot 1 — no-op
         assert_eq!(
             Settings::apply_drop(btn(B::Save), &row, 1, Some(1)),
             row.to_vec()
