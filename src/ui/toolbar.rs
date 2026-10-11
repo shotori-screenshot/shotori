@@ -248,13 +248,6 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         icon: ButtonIcon::Kit(IconName::ScanText),
     },
     ButtonMeta {
-        button: crate::model::settings::ToolbarButton::Save,
-        debug_id: "tb-save",
-        name: "Save",
-        shortcut: "Ctrl+S",
-        icon: ButtonIcon::Kit(IconName::Save),
-    },
-    ButtonMeta {
         // own icon: the gpui-kit asset whitelist (`icon_assets!`) does
         // not bundle a pin, and IconName::Pin would render an empty
         // slot — same situation as the mosaic icon
@@ -274,11 +267,11 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         icon: ButtonIcon::Own("icons/scroll.svg"),
     },
     ButtonMeta {
-        button: crate::model::settings::ToolbarButton::Cancel,
-        debug_id: "tb-cancel",
-        name: "Cancel",
-        shortcut: "Esc",
-        icon: ButtonIcon::Kit(IconName::X),
+        button: crate::model::settings::ToolbarButton::Save,
+        debug_id: "tb-save",
+        name: "Save",
+        shortcut: "Ctrl+S",
+        icon: ButtonIcon::Kit(IconName::Save),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Copy,
@@ -299,6 +292,13 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         name: "Settings",
         shortcut: "Ctrl+,",
         icon: ButtonIcon::Kit(IconName::Settings),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Cancel,
+        debug_id: "tb-cancel",
+        name: "Cancel",
+        shortcut: "Esc",
+        icon: ButtonIcon::Kit(IconName::X),
     },
 ];
 

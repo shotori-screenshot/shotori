@@ -83,12 +83,12 @@ impl ToolbarButton {
         Self::Text,
         Self::Clear,
         Self::Ocr,
-        Self::Save,
         Self::Pin,
         Self::Scroll,
-        Self::Cancel,
+        Self::Save,
         Self::Copy,
         Self::Settings,
+        Self::Cancel,
     ];
 
     /// Stable id for the settings file.
@@ -184,11 +184,11 @@ impl ToolbarItem {
     }
 }
 
-/// The factory row: exactly the layout the hardcoded toolbar shipped
-/// before customization existed — the tool cluster and the confirm
-/// pair each get their group break, the settings gear closes the row
-/// (the always-visible entry into this editor) — a fresh install and
-/// "Reset to defaults" both land here.
+/// The factory row — the maintainer's preferred default (captured
+/// from a live editor session): the tool cluster, then the action
+/// group ending in Copy, then a group break before the gear-and-
+/// cancel pair. A fresh install, "Reset to defaults" and legacy
+/// `hidden`-format migration all land here.
 pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Select),
     ToolbarItem::Button(ToolbarButton::Rectangle),
@@ -205,13 +205,13 @@ pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Clear),
     ToolbarItem::Separator,
     ToolbarItem::Button(ToolbarButton::Ocr),
-    ToolbarItem::Button(ToolbarButton::Save),
     ToolbarItem::Button(ToolbarButton::Pin),
     ToolbarItem::Button(ToolbarButton::Scroll),
-    ToolbarItem::Separator,
-    ToolbarItem::Button(ToolbarButton::Cancel),
+    ToolbarItem::Button(ToolbarButton::Save),
     ToolbarItem::Button(ToolbarButton::Copy),
+    ToolbarItem::Separator,
     ToolbarItem::Button(ToolbarButton::Settings),
+    ToolbarItem::Button(ToolbarButton::Cancel),
 ];
 
 /// User settings. Default = the factory row.
@@ -503,17 +503,18 @@ mod tests {
     }
 
     #[test]
-    fn factory_row_is_the_historical_layout() {
+    fn factory_row_is_the_maintainer_default() {
         let row = Settings::default().row().to_vec();
-        // the pre-customization toolbar, item for item — two group
-        // breaks (tool cluster | actions | confirm pair), gear last
+        // tools | ocr pin scroll save copy | settings cancel — two
+        // group breaks, cancel (not the gear) closes the row
         assert_eq!(row.len(), 22);
         assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
         assert_eq!(row[13], ToolbarItem::Separator);
-        assert_eq!(row[18], ToolbarItem::Separator);
+        assert_eq!(row[19], ToolbarItem::Separator);
+        assert_eq!(row[20], ToolbarItem::Button(ToolbarButton::Settings));
         assert_eq!(
             *row.last().unwrap(),
-            ToolbarItem::Button(ToolbarButton::Settings)
+            ToolbarItem::Button(ToolbarButton::Cancel)
         );
         // every button placed exactly once
         for button in ToolbarButton::ALL {
