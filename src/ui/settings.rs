@@ -125,6 +125,9 @@ struct SettingsWindow {
     /// The last save's failure (or load warning), shown inline until
     /// the next successful save.
     error: Option<String>,
+    /// Where a drag in flight would land (insertion slot), for the
+    /// accent caret. `None` outside drags.
+    drop_target: Option<usize>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -145,6 +148,7 @@ impl SettingsWindow {
             settings,
             path: crate::model::settings::config_path(),
             error: warnings.first().cloned(),
+            drop_target: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -152,9 +156,11 @@ impl SettingsWindow {
 
     /// Install a row and write it through. Rows built here are valid
     /// by construction (buttons can only come from the palette, which
-    /// never offers one that is already placed).
+    /// never offers one that is already placed). Any row change
+    /// invalidates a recorded drop target.
     fn commit(&mut self, row: Vec<ToolbarItem>, cx: &mut Context<Self>) {
         self.settings.set_row(row);
+        self.drop_target = None;
         self.persist(cx);
     }
 
@@ -205,40 +211,100 @@ impl SettingsWindow {
 
     /// The live toolbar: the real bar container and grip textures with
     /// the configured row inside. Items drag (reorder) and click
-    /// (remove); while a drag is in flight, drop slots appear between
-    /// the items — the bar visibly opens up where an item would land.
+    /// (remove). Drop targets are the items themselves (before/after
+    /// by pointer vs the item's center — a full 30px target, not a
+    /// strip); the grips pin the two ends, and the insertion point
+    /// renders as a single accent caret. Nothing widens the bar while
+    /// dragging — inserted slot strips once grew it by ~350px and
+    /// pushed the right grip off the window (user-reported).
     fn toolbar_preview(&self, cx: &Context<Self>) -> Div {
         let row: Vec<ToolbarItem> = self.settings.row().to_vec();
         let dragging = cx.has_active_drag();
-        let mut bar = toolbar::bar().child(grip_end("pv-grip-left"));
+        let caret_at = if dragging { self.drop_target } else { None };
+        let len = row.len();
+        let pin_start = cx.listener(
+            move |this: &mut Self, _: &DragMoveEvent<DraggedItem>, _, cx: &mut Context<Self>| {
+                this.set_drop_target(0, cx);
+            },
+        );
+        let pin_end = cx.listener(
+            move |this: &mut Self, _: &DragMoveEvent<DraggedItem>, _, cx: &mut Context<Self>| {
+                this.set_drop_target(len, cx);
+            },
+        );
+        let bar_fallback = cx.listener(
+            move |this: &mut Self, dragged: &DraggedItem, _, cx: &mut Context<Self>| {
+                // gaps, padding and the caret itself: no item handled
+                // the drop — land at the slot the pointer last aimed at
+                if let Some(slot) = this.drop_target {
+                    this.drop_at(slot, dragged, cx);
+                }
+            },
+        );
+        let mut bar = toolbar::bar()
+            // hug the row like the real toolbar does — the page column
+            // would otherwise stretch the bar full-width, inflating the
+            // flexible gaps into wide slabs the real bar never shows
+            .self_start()
+            .on_drop(bar_fallback)
+            .child(grip_end("pv-grip-left").on_drag_move(pin_start));
         for (i, item) in row.iter().enumerate() {
-            if dragging {
-                bar = bar.child(self.drop_slot(i, cx));
+            if caret_at == Some(i) {
+                bar = bar.child(insertion_caret());
             }
             bar = bar.child(self.preview_item(i, *item, cx));
         }
-        if dragging {
-            bar = bar.child(self.drop_slot(row.len(), cx));
+        if caret_at == Some(len) {
+            bar = bar.child(insertion_caret());
         }
-        bar.child(grip_end("pv-grip-right"))
+        bar.child(grip_end("pv-grip-right").on_drag_move(pin_end))
+    }
+
+    /// Record which insertion slot the pointer hovers; notifies only
+    /// on change (this fires on every mouse move during a drag).
+    fn set_drop_target(&mut self, slot: usize, cx: &mut Context<Self>) {
+        if self.drop_target != Some(slot) {
+            self.drop_target = Some(slot);
+            cx.notify();
+        }
     }
 
     /// One preview item: the real visual, but dragging reorders and
     /// clicking removes — the action itself never fires here.
     fn preview_item(&self, i: usize, item: ToolbarItem, cx: &Context<Self>) -> AnyElement {
-        let entity = cx.entity();
         let payload = DraggedItem {
             item,
             from: Some(i),
         };
+        // the whole item is the drop target: before me / after me by
+        // the pointer against my own center (the event carries this
+        // element's hitbox bounds)
+        let hover = cx.listener(
+            move |this: &mut Self,
+                  event: &DragMoveEvent<DraggedItem>,
+                  _,
+                  cx: &mut Context<Self>| {
+                let center = event.bounds.origin.x + event.bounds.size.width / 2.;
+                let slot = usize::from(event.event.position.x > center) + i;
+                this.set_drop_target(slot, cx);
+            },
+        );
+        let drop = cx.listener(
+            move |this: &mut Self, dragged: &DraggedItem, _, cx: &mut Context<Self>| {
+                let slot = this.drop_target.unwrap_or(i);
+                this.drop_at(slot, dragged, cx);
+            },
+        );
         match item {
             ToolbarItem::Button(button) => match toolbar::meta_for(button) {
                 Some(meta) => {
-                    let remove = entity.clone();
+                    let remove = cx.entity();
                     toolbar::preview_control(meta, &self.focus, move |_, cx| {
                         remove.update(cx, |this, cx| this.remove_at(i, cx));
                     })
-                    .on_drag(payload, ghost_constructor())
+                    .on_drag(payload, ghost_constructor)
+                    .on_drag_move(hover)
+                    .on_drop(drop)
                     .into_any_element()
                 }
                 // unreachable: BUTTONS covers every ToolbarButton
@@ -247,63 +313,19 @@ impl SettingsWindow {
             ToolbarItem::Separator => layout_visual(
                 "pv-separator",
                 payload,
-                entity,
+                cx,
                 i,
+                hover,
+                drop,
                 div()
                     .w(px(2.))
                     .h(px(18.))
                     .bg(rgba(theme::c().toolbar_border)),
             ),
-            ToolbarItem::Spacer => layout_visual(
-                "pv-spacer",
-                payload,
-                entity,
-                i,
-                div()
-                    .flex_1()
-                    .min_w(px(56.))
-                    .h(px(22.))
-                    .rounded(px(4.))
-                    .bg(rgba(theme::c().toolbar_hover))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(11.))
-                    .text_color(rgba(theme::c().hint_text))
-                    .child("⟷"),
-            ),
+            ToolbarItem::Spacer => {
+                layout_visual("pv-spacer", payload, cx, i, hover, drop, spacer_texture())
+            }
         }
-    }
-
-    /// An insertion point between preview items. Only rendered while a
-    /// compatible drag is active (otherwise it would take layout space
-    /// and shift the preview); the whole slot tints when the payload
-    /// hovers it — deliberately NOT resized, a hitbox that shrinks
-    /// under the pointer drops the drag — and the drop commits at its
-    /// index.
-    fn drop_slot(&self, i: usize, cx: &Context<Self>) -> impl IntoElement {
-        let entity = cx.entity();
-        div()
-            .id(("pv-drop", i))
-            .w(px(16.))
-            .h(px(crate::model::placement::ROW_H - 8.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(2.))
-            .child(
-                div()
-                    .w(px(3.))
-                    .h(px(20.))
-                    .rounded(px(2.))
-                    .bg(rgba((theme::c().toolbar_border & 0xFFFFFF00) | 0x50)),
-            )
-            .drag_over::<DraggedItem>(|s, _, _, _| {
-                s.bg(rgba((theme::c().accent & 0xFFFFFF00) | 0x99))
-            })
-            .on_drop(move |dragged: &DraggedItem, _, cx| {
-                entity.update(cx, |this, cx| this.drop_at(i, dragged, cx));
-            })
     }
 
     /// The palette: every control not currently on the bar, plus the
@@ -384,7 +406,7 @@ impl SettingsWindow {
             .text_size(px(12.))
             .text_color(rgba(theme::c().toolbar_text))
             .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-            .on_drag(payload, ghost_constructor())
+            .on_drag(payload, ghost_constructor)
             .on_click(move |_, _, cx| {
                 click_entity.update(cx, |this, cx| this.append(item, cx));
             })
@@ -431,8 +453,11 @@ impl SettingsWindow {
     }
 }
 
-/// A bar-end grip for the preview: the real texture, non-interactive.
-fn grip_end(id: &'static str) -> impl IntoElement {
+/// A bar-end grip for the preview: the real texture, non-interactive
+/// as a grip (dragging the PREVIEW bar around would be a lie — it has
+/// no placement), but it carries the drag-move target that pins the
+/// insertion point to its end of the bar.
+fn grip_end(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -441,22 +466,59 @@ fn grip_end(id: &'static str) -> impl IntoElement {
         .child(toolbar::grip_texture())
 }
 
-/// The drag-ghost constructor gpui calls when a drag starts.
-fn ghost_constructor()
--> impl Fn(&DraggedItem, Point<Pixels>, &mut Window, &mut App) -> gpui_kit::Entity<DragGhost> + 'static
-{
-    |item: &DraggedItem, _, _, cx| cx.new(|_| DragGhost { item: item.item })
+/// The drag-ghost constructor gpui calls when a drag starts. A fn
+/// item (not a closure) so it coerces to the higher-ranked `impl Fn`
+/// bound `on_drag` demands.
+fn ghost_constructor(
+    item: &DraggedItem,
+    _: Point<Pixels>,
+    _: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::Entity<DragGhost> {
+    cx.new(|_| DragGhost { item: item.item })
+}
+
+/// The accent caret marking where a drag would land. Purely visual —
+/// 3px wide, so a drag in flight cannot push the bar's right edge off
+/// the window (the slot strips it replaced cost ~16px per gap).
+fn insertion_caret() -> Div {
+    div()
+        .w(px(3.))
+        .h(px(26.))
+        .rounded(px(2.))
+        .bg(rgba(theme::c().accent))
+        .flex_shrink_0()
+}
+
+/// The spacer's "flexible" texture: quiet dashes of divs — no glyph
+/// (a text arrow renders at a different weight than the icon set, and
+/// a filled pill reads as a button, which it must not —
+/// user-reported) — and no background fill.
+fn spacer_texture() -> Div {
+    let dash = rgba((theme::c().toolbar_text & 0xFFFFFF00) | 0x90);
+    div()
+        .flex_1()
+        .min_w(px(56.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .children([(); 4].map(|_| div().w(px(6.)).h(px(2.)).rounded(px(1.)).bg(dash)))
 }
 
 /// Wrap a preview layout item (separator / spacer) in the interaction
 /// shell the buttons get from `preview_control`: drag to reorder,
-/// click to remove. The visual sits centered in a wider hit target —
-/// a 2px separator is un-grabbable on its own.
+/// hover to aim the caret, click to remove. The visual sits centered
+/// in a wider hit target — a 2px separator is un-grabbable on its
+/// own.
 fn layout_visual(
     id: &'static str,
     payload: DraggedItem,
-    entity: gpui_kit::Entity<SettingsWindow>,
+    cx: &Context<SettingsWindow>,
     i: usize,
+    hover: impl Fn(&DragMoveEvent<DraggedItem>, &mut Window, &mut App) + 'static,
+    drop: impl Fn(&DraggedItem, &mut Window, &mut App) + 'static,
     visual: impl IntoElement,
 ) -> AnyElement {
     div()
@@ -468,28 +530,35 @@ fn layout_visual(
         .h(px(crate::model::placement::ROW_H - 8.))
         .rounded(px(4.))
         .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-        .on_drag(payload, ghost_constructor())
-        .on_click(move |_, _, cx| {
-            entity.update(cx, |this, cx| this.remove_at(i, cx));
-        })
+        .on_drag(payload, ghost_constructor)
+        .on_drag_move(hover)
+        .on_drop(drop)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.remove_at(i, cx);
+        }))
         .child(visual)
         .into_any_element()
 }
 
 /// The icon an item shows outside the button chrome (ghost, palette
 /// chip): the toolbar's own glyphs for buttons, simple marks for the
-/// layout items.
+/// layout items — the same dash texture the spacer shows on the bar,
+/// so the palette chip previews exactly what lands.
 fn icon_visual(item: ToolbarItem) -> AnyElement {
     match item {
         ToolbarItem::Button(button) => match toolbar::meta_for(button) {
             Some(meta) => meta.icon.svg().into_any_element(),
             None => div().into_any_element(),
         },
-        ToolbarItem::Spacer => div()
-            .w(px(18.))
-            .h(px(2.))
-            .bg(rgba(theme::c().toolbar_border))
-            .into_any_element(),
+        ToolbarItem::Spacer => {
+            let dash = rgba((theme::c().toolbar_text & 0xFFFFFF00) | 0x90);
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .children([(); 3].map(|_| div().w(px(4.)).h(px(2.)).rounded(px(1.)).bg(dash)))
+                .into_any_element()
+        }
         ToolbarItem::Separator => div()
             .w(px(2.))
             .h(px(14.))
