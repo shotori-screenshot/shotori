@@ -45,7 +45,9 @@ gpui_kit::assets::icon_assets!(
         Trash,
         X,
         Copy,
-        Settings
+        Settings,
+        Settings2,
+        PanelTop
     ]
 );
 

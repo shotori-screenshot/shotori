@@ -8,21 +8,32 @@
 //!
 //! Launch: `shotori settings` or the tray menu. The screenshot overlay
 //! is a run-and-exit process, so edits cannot reach a live session:
-//! every change writes straight through to `settings.toml` (see
+//! every change writes straight through to its config file (see
 //! [`crate::model::settings`]) and the NEXT capture picks it up —
 //! crash-safe by construction, no OK button, no dirty state.
 //!
-//! v1 section: the selection toolbar's layout, edited by dragging —
-//! a live preview bar (the real render pieces: [`crate::ui::toolbar`])
-//! plus a palette of the controls not currently placed. Drag between
-//! the two in either direction, drag inside the bar to reorder, click
-//! to remove/append. gpui's native drag-and-drop carries the payload;
-//! the drop slots between the preview items only exist while a drag is
-//! in flight, so the bar visibly opens up where an item would land.
+//! Structure: a gpui-component [`Sidebar`] shell with one page per
+//! section (the registry IS the match in `page` — adding a section is
+//! an enum variant + a page fn + a sidebar item). The shell's chrome
+//! runs on the component design system, synced to the active shotori
+//! palette; the pages' preview surfaces (the toolbar editor) render
+//! with overlay colors, so what you edit is what the overlay shows.
+//!
+//! v1 sections: General (read-only facts) and the selection toolbar's
+//! layout, edited by dragging — a live preview bar (the real render
+//! pieces: [`crate::ui::toolbar`]) plus a palette of the controls not
+//! currently placed. Drag between the two in either direction, drag
+//! inside the bar to reorder, click to remove/append. gpui's native
+//! drag-and-drop carries the payload; the drop slots between the
+//! preview items only exist while a drag is in flight, so the bar
+//! visibly opens up where an item would land.
 
 use std::path::PathBuf;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
+use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::{Icon, Theme, ThemeMode};
 use gpui_kit::*;
 
 use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster, ToolbarItem};
@@ -31,9 +42,18 @@ use crate::ui::toolbar;
 
 gpui_kit::actions!([CloseSettings]);
 
-const WINDOW_W: f32 = 800.;
-const WINDOW_H: f32 = 560.;
+const WINDOW_W: f32 = 1024.;
+const WINDOW_H: f32 = 640.;
 const PAGE_PAD: f32 = 24.;
+
+/// One page of the settings window. The sidebar switches `section`;
+/// each page owns the state it needs on [`SettingsWindow`] (today only
+/// the toolbar editor has any — future sections add fields alongside).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    General,
+    Toolbar,
+}
 
 /// The drag-and-drop payload: what is being carried and where it came
 /// from (`None` = palette: a fresh insert; `Some(i)` = the preview
@@ -76,6 +96,8 @@ pub fn run() {
         .run(|cx| {
             cx.set_app_identity(crate::APP_ID, "Shotori");
             gpui_kit::base::init(cx);
+            // the component design system (sidebar, its theme registry)
+            gpui_kit::component::init(cx);
             cx.bind_keys([KeyBinding::new(
                 "escape",
                 CloseSettings,
@@ -99,8 +121,9 @@ pub fn run() {
 }
 
 fn window_options() -> WindowOptions {
-    // Wide enough for the factory row (~670px) to preview without
-    // squeezing; the palette below wraps, so height is forgiving.
+    // The sidebar (255px) plus content wide enough for the factory row
+    // (~703px) to preview without squeezing; the palette below wraps,
+    // so height is forgiving.
     WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: Some(TitlebarOptions {
@@ -111,12 +134,50 @@ fn window_options() -> WindowOptions {
             origin: point(px(0.), px(0.)),
             size: size(px(WINDOW_W), px(WINDOW_H)),
         })),
+        // Compositors that tile new toplevels (niri's default) may
+        // still squeeze below the requested bounds; the min size keeps
+        // the toolbar page usable, and its horizontal scroll is the
+        // floor below that.
+        window_min_size: Some(size(px(940.), px(540.))),
         focus: true,
         ..Default::default()
     }
 }
 
+/// Align the shell's design-system theme with the active shotori
+/// theme: mode from the system appearance (the component theme ships
+/// light/dark pairs of its own), accent from the shotori palette — the
+/// sidebar then reads as one product with the overlay instead of a
+/// foreign default blue. Shotori-side, [`theme::follow_system`] keeps
+/// the overlay palettes switching in step.
+fn sync_shell_theme(window: &mut Window, cx: &mut App) {
+    theme::follow_system(window.appearance());
+    let dark = matches!(
+        window.appearance(),
+        gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
+    );
+    Theme::change(
+        if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        None,
+        cx,
+    );
+    // Second `update`, after the mode load replaced the colors — the
+    // documented order (Theme::update's doc).
+    let accent: Hsla = rgba(theme::c().accent).into();
+    let accent_text: Hsla = rgba(theme::c().accent_text()).into();
+    Theme::update(cx, |t| {
+        t.colors.accent = accent;
+        t.colors.accent_foreground = accent_text;
+    });
+}
+
 struct SettingsWindow {
+    /// Which page is showing (sidebar-driven).
+    section: Section,
     /// Working copy of the user's settings; every change writes
     /// through to `path` immediately.
     settings: Settings,
@@ -134,17 +195,17 @@ struct SettingsWindow {
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // follow the system palette like the overlay does
-        theme::follow_system(window.appearance());
+        sync_shell_theme(window, cx);
         let (settings, warnings) = Settings::load(crate::model::settings::config_path().as_deref());
         for warning in &warnings {
             eprintln!("[shotori] settings: {warning}");
         }
         let subscriptions = vec![window.observe_window_appearance(|window, cx| {
-            theme::follow_system(window.appearance());
+            sync_shell_theme(window, cx);
             cx.refresh_windows();
         })];
         Self {
+            section: Section::Toolbar,
             settings,
             path: crate::model::settings::config_path(),
             error: warnings.first().cloned(),
@@ -575,6 +636,7 @@ impl Render for SettingsWindow {
         div()
             .id("settings-root")
             .size_full()
+            .flex()
             .bg(rgba(t.toolbar_bg))
             .text_color(rgba(t.toolbar_text))
             .track_focus(&self.focus)
@@ -585,53 +647,168 @@ impl Render for SettingsWindow {
             .on_action(cx.listener(|_, _: &CloseSettings, window, _| {
                 window.remove_window();
             }))
+            .child(self.sidebar(cx))
+            .child(self.page(cx))
+    }
+}
+
+/// One page's heading.
+fn page_header(title: &str, blurb: &str) -> Div {
+    let t = theme::c();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .child(
+            div()
+                .text_size(px(16.))
+                .text_color(rgba(t.btn_text))
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(rgba(t.hint_text))
+                .child(blurb.to_string()),
+        )
+}
+
+impl SettingsWindow {
+    /// The navigation sidebar: one item per section, the active page
+    /// highlighted. Fixed-width for now — collapsing is a shell nicety
+    /// the settings window does not need at three sections.
+    fn sidebar(&self, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
+        let active = self.section;
+        let item = |label: &'static str, icon: IconName, target: Section| {
+            let selected = active == target;
+            let click = cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
+                if this.section != target {
+                    this.section = target;
+                    cx.notify();
+                }
+            });
+            SidebarMenuItem::new(label)
+                .icon(Icon::new(icon))
+                .active(selected)
+                .on_click(click)
+        };
+        Sidebar::new("settings-sidebar").collapsible(false).child(
+            SidebarMenu::new()
+                .child(item("General", IconName::Settings2, Section::General))
+                .child(item("Toolbar", IconName::PanelTop, Section::Toolbar)),
+        )
+    }
+
+    /// The content pane: the active section's page. This match is the
+    /// section registry — a new section is a variant, a page fn and a
+    /// sidebar item above.
+    fn page(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        match self.section {
+            Section::General => self.page_general(cx),
+            Section::Toolbar => self.page_toolbar(cx),
+        }
+    }
+
+    /// General: read-only facts about this installation. No toggles
+    /// yet — every behavior shotori has lives in a real file with a
+    /// purpose-built editor elsewhere in this window; placeholders
+    /// pretending to be settings would be worse than none.
+    fn page_general(&self, _: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme::c();
+        let theme_path = theme::load::config_path();
+        let row = |label: &str, value: String| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgba(t.hint_text))
+                        .child(label.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgba(t.btn_text))
+                        .child(value),
+                )
+        };
+        div()
+            .id("page-general")
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .p(px(PAGE_PAD))
+            .size_full()
+            .overflow_y_scroll()
+            .child(page_header(
+                "General",
+                "About this installation and where its configuration lives.",
+            ))
+            .child(row(
+                "Version",
+                format!("shotori {}", env!("CARGO_PKG_VERSION")),
+            ))
+            .child(row(
+                "Settings file",
+                self.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "no config directory (is HOME set?)".into()),
+            ))
+            .child(row(
+                "Theme file",
+                theme_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "built-in theme (no file)".into()),
+            ))
             .child(
                 div()
-                    .id("settings-body")
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .p(px(PAGE_PAD))
-                    .gap(px(10.))
-                    .overflow_y_scroll()
-                    // header
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(16.))
-                                    .text_color(rgba(t.btn_text))
-                                    .child("Toolbar"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgba(t.hint_text))
-                                    .child(
-                                        "Arrange the selection toolbar. Changes apply the next \
-                                         time you take a screenshot.",
-                                    ),
-                            ),
-                    )
-                    // the live preview
-                    .child(self.toolbar_preview(cx))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(t.hint_text))
-                            .child(
-                                "Drag a control to move it · drop it here or on the palette to \
-                                 remove it · click to remove / append · hidden controls keep \
-                                 their keyboard shortcuts",
-                            ),
-                    )
-                    // the palette
-                    .child(self.palette(cx))
-                    .child(div().flex_1())
-                    .child(self.footer(cx)),
+                        "Edits anywhere in this window write straight through to the files above — \
+                     the next screenshot picks them up.",
+                    ),
             )
+    }
+
+    /// Toolbar: the drag-and-drop editor. Both-axis scroll: the preview
+    /// bar hugs its content (703px at the factory row) and a tiled
+    /// window narrower than that must pan, not clip.
+    fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme::c();
+        div()
+            .id("page-toolbar")
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(PAGE_PAD))
+            .size_full()
+            .overflow_scroll()
+            // header
+            .child(page_header(
+                "Toolbar",
+                "Arrange the selection toolbar. Changes apply the next time you take a \
+                 screenshot.",
+            ))
+            // the live preview
+            .child(self.toolbar_preview(cx))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .child(
+                        "Drag a control to move it · drop it here or on the palette to remove \
+                         it · click to remove / append · hidden controls keep their keyboard \
+                         shortcuts",
+                    ),
+            )
+            // the palette
+            .child(self.palette(cx))
+            .child(div().flex_1())
+            .child(self.footer(cx))
     }
 }

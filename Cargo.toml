@@ -22,7 +22,7 @@ categories = ["graphics", "multimedia::images", "command-line-utilities"]
 # default-features off: the default pulls the component library, whose
 # Root/WindowState is poison for layer-shell overlays (AGENTS.md "the
 # Root/CSD poisoning case"). We only use the base layer + assets.
-gpui-kit = { version = "0.7", default-features = false, features = ["assets"] }
+gpui-kit = { version = "0.7", default-features = false, features = ["assets", "component"] }
 anyhow = "1.0"
 png = "0.18"
 
