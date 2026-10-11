@@ -2457,11 +2457,10 @@ mod multi_output_tests {
         vcx.update(|window, cx| window.draw(cx).clear(cx));
 
         // Single row (no tool active): the bar hugs the configured
-        // factory row (its basis width) and the spacer between the
+        // factory row (its basis width) and the separator between the
         // tool cluster and the action cluster renders as a small
         // deliberate group break — NOT the ~70px dead hole a full-TB_W
-        // bar showed (user-reported), and not zero either (the spacer
-        // keeps its minimum width).
+        // bar showed (user-reported), and not a bare 2px gap either.
         vcx.update(|_, cx| {
             assert_eq!(
                 session.read(cx).toolbar_bounds("main").unwrap().size.width,
@@ -2473,8 +2472,8 @@ mod multi_output_tests {
                 - vcx.debug_bounds("tb-clear").unwrap().right(),
         );
         assert!(
-            (crate::model::placement::SPACER_MIN..=24.).contains(&gap),
-            "the tools/actions break must read as a deliberate break, got {gap}px"
+            (9. ..=16.).contains(&gap),
+            "the tools/actions break must read as a deliberate separator break, got {gap}px"
         );
         // …and the right edge is intact: the copy button ends far enough
         // from the bar's right edge that the grip strip still fits

@@ -7,11 +7,8 @@
 
 [toolbar]
 # Row one of the selection toolbar, left to right. Buttons not listed
-# are hidden (their keyboard shortcuts keep working).
-#
-# Two layout items can be mixed in:
-#   "spacer"    flexible gap between groups (grows when the bar has room)
-#   "separator" the thin vertical group break
+# are hidden (their keyboard shortcuts keep working). "separator" is
+# the thin vertical group break; any number may appear.
 #
 # Known button ids (factory order):
 #   select, rectangle, ellipse, line, polyline, arrow, number,
@@ -22,6 +19,6 @@
 items = [
   "select", "rectangle", "ellipse", "line", "polyline", "arrow",
   "number", "pencil", "highlighter", "mosaic", "eraser", "text",
-  "clear", "spacer", "ocr", "save", "pin", "scroll", "separator",
+  "clear", "separator", "ocr", "save", "pin", "scroll", "separator",
   "cancel", "copy",
 ]

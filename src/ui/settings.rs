@@ -223,12 +223,31 @@ impl SettingsWindow {
         let caret_at = if dragging { self.drop_target } else { None };
         let len = row.len();
         let pin_start = cx.listener(
-            move |this: &mut Self, _: &DragMoveEvent<DraggedItem>, _, cx: &mut Context<Self>| {
+            move |this: &mut Self,
+                  event: &DragMoveEvent<DraggedItem>,
+                  _,
+                  cx: &mut Context<Self>| {
+                // on_drag_move fires for EVERY element that registered a
+                // listener during a matching drag — it has no hover filter
+                // (it exists for drag sources tracking themselves, "like
+                // resizing" per its docs). Self-filter by pointer-in-bounds,
+                // or every listener overwrites the others and the caret
+                // sticks wherever the last-registered element (the right
+                // grip) pins it.
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
                 this.set_drop_target(0, cx);
             },
         );
         let pin_end = cx.listener(
-            move |this: &mut Self, _: &DragMoveEvent<DraggedItem>, _, cx: &mut Context<Self>| {
+            move |this: &mut Self,
+                  event: &DragMoveEvent<DraggedItem>,
+                  _,
+                  cx: &mut Context<Self>| {
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
                 this.set_drop_target(len, cx);
             },
         );
@@ -278,12 +297,16 @@ impl SettingsWindow {
         };
         // the whole item is the drop target: before me / after me by
         // the pointer against my own center (the event carries this
-        // element's hitbox bounds)
+        // element's hitbox bounds; the contains() guard is the hover
+        // filter on_drag_move lacks — see the grips' note)
         let hover = cx.listener(
             move |this: &mut Self,
                   event: &DragMoveEvent<DraggedItem>,
                   _,
                   cx: &mut Context<Self>| {
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
                 let center = event.bounds.origin.x + event.bounds.size.width / 2.;
                 let slot = usize::from(event.event.position.x > center) + i;
                 this.set_drop_target(slot, cx);
@@ -322,9 +345,6 @@ impl SettingsWindow {
                     .h(px(18.))
                     .bg(rgba(theme::c().toolbar_border)),
             ),
-            ToolbarItem::Spacer => {
-                layout_visual("pv-spacer", payload, cx, i, hover, drop, spacer_texture())
-            }
         }
     }
 
@@ -358,8 +378,7 @@ impl SettingsWindow {
                 chips = chips.child(self.palette_chip(ToolbarItem::Button(meta.button), cx));
             }
         }
-        // layout items are always offered — spacers/separators stack
-        chips = chips.child(self.palette_chip(ToolbarItem::Spacer, cx));
+        // layout items are always offered — separators stack
         chips = chips.child(self.palette_chip(ToolbarItem::Separator, cx));
 
         let entity = cx.entity();
@@ -490,24 +509,7 @@ fn insertion_caret() -> Div {
         .flex_shrink_0()
 }
 
-/// The spacer's "flexible" texture: quiet dashes of divs — no glyph
-/// (a text arrow renders at a different weight than the icon set, and
-/// a filled pill reads as a button, which it must not —
-/// user-reported) — and no background fill.
-fn spacer_texture() -> Div {
-    let dash = rgba((theme::c().toolbar_text & 0xFFFFFF00) | 0x90);
-    div()
-        .flex_1()
-        .min_w(px(56.))
-        .h(px(24.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(4.))
-        .children([(); 4].map(|_| div().w(px(6.)).h(px(2.)).rounded(px(1.)).bg(dash)))
-}
-
-/// Wrap a preview layout item (separator / spacer) in the interaction
+/// Wrap a preview layout item (the separator) in the interaction
 /// shell the buttons get from `preview_control`: drag to reorder,
 /// hover to aim the caret, click to remove. The visual sits centered
 /// in a wider hit target — a 2px separator is un-grabbable on its
@@ -541,24 +543,14 @@ fn layout_visual(
 }
 
 /// The icon an item shows outside the button chrome (ghost, palette
-/// chip): the toolbar's own glyphs for buttons, simple marks for the
-/// layout items — the same dash texture the spacer shows on the bar,
-/// so the palette chip previews exactly what lands.
+/// chip): the toolbar's own glyphs for buttons, a small bar for the
+/// separator — the palette chip previews exactly what lands.
 fn icon_visual(item: ToolbarItem) -> AnyElement {
     match item {
         ToolbarItem::Button(button) => match toolbar::meta_for(button) {
             Some(meta) => meta.icon.svg().into_any_element(),
             None => div().into_any_element(),
         },
-        ToolbarItem::Spacer => {
-            let dash = rgba((theme::c().toolbar_text & 0xFFFFFF00) | 0x90);
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .children([(); 3].map(|_| div().w(px(4.)).h(px(2.)).rounded(px(1.)).bg(dash)))
-                .into_any_element()
-        }
         ToolbarItem::Separator => div()
             .w(px(2.))
             .h(px(14.))
@@ -573,7 +565,6 @@ fn item_name(item: ToolbarItem) -> String {
             Some(meta) => meta.name.to_string(),
             None => button.id().to_string(),
         },
-        ToolbarItem::Spacer => "Flexible gap".into(),
         ToolbarItem::Separator => "Separator".into(),
     }
 }

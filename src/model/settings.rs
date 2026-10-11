@@ -54,8 +54,8 @@ pub enum ToolbarButton {
 }
 
 /// The row-one groups the settings palette groups buttons by (the
-/// toolbar itself renders one flat sequence — the factory row's
-/// spacer/separator reproduce the two-cluster look).
+/// toolbar itself renders one flat sequence — the factory row's two
+/// separators reproduce the two-cluster look).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarCluster {
     Tools,
@@ -145,12 +145,11 @@ impl ToolbarButton {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarItem {
     Button(ToolbarButton),
-    /// Flexible gap between controls (the factory row uses one between
-    /// the tool cluster and the action cluster). Grows when the bar
-    /// has spare room, never below its minimum width — see the spacer
-    /// pitch notes in `model::placement`.
-    Spacer,
-    /// The thin vertical group break.
+    /// The thin vertical group break. Any number may appear — grouping
+    /// is the one layout concept the toolbar needs (a "flexible gap"
+    /// variant was tried and dropped: the bar hugs its content, so a
+    /// flexible gap can never flex — it was just a separator without
+    /// the line).
     Separator,
 }
 
@@ -159,14 +158,12 @@ impl ToolbarItem {
     pub const fn id(self) -> &'static str {
         match self {
             Self::Button(button) => button.id(),
-            Self::Spacer => "spacer",
             Self::Separator => "separator",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
-            "spacer" => Some(Self::Spacer),
             "separator" => Some(Self::Separator),
             _ => ToolbarButton::from_id(id).map(Self::Button),
         }
@@ -175,7 +172,6 @@ impl ToolbarItem {
     /// Human name for the drag ghost / palette chip of a layout item.
     pub fn layout_name(self) -> Option<&'static str> {
         match self {
-            Self::Spacer => Some("Flexible gap"),
             Self::Separator => Some("Separator"),
             Self::Button(_) => None,
         }
@@ -183,8 +179,9 @@ impl ToolbarItem {
 }
 
 /// The factory row: exactly the layout the hardcoded toolbar shipped
-/// before customization existed (tools, gap, actions, break, confirm
-/// pair) — a fresh install and "Reset to defaults" both land here.
+/// before customization existed — the tool cluster and the confirm
+/// pair each get their group break — a fresh install and "Reset to
+/// defaults" both land here.
 pub const DEFAULT_ROW: [ToolbarItem; 21] = [
     ToolbarItem::Button(ToolbarButton::Select),
     ToolbarItem::Button(ToolbarButton::Rectangle),
@@ -199,7 +196,7 @@ pub const DEFAULT_ROW: [ToolbarItem; 21] = [
     ToolbarItem::Button(ToolbarButton::Eraser),
     ToolbarItem::Button(ToolbarButton::Text),
     ToolbarItem::Button(ToolbarButton::Clear),
-    ToolbarItem::Spacer,
+    ToolbarItem::Separator,
     ToolbarItem::Button(ToolbarButton::Ocr),
     ToolbarItem::Button(ToolbarButton::Save),
     ToolbarItem::Button(ToolbarButton::Pin),
@@ -296,13 +293,6 @@ impl Settings {
         self.row
             .iter()
             .filter(|item| matches!(item, ToolbarItem::Separator))
-            .count()
-    }
-
-    pub fn row1_spacer_count(&self) -> usize {
-        self.row
-            .iter()
-            .filter(|item| matches!(item, ToolbarItem::Spacer))
             .count()
     }
 
@@ -439,7 +429,7 @@ impl Settings {
 /// All valid ids, comma-joined for error messages.
 fn known_ids() -> String {
     let mut ids: Vec<&str> = ToolbarButton::ALL.iter().map(|b| b.id()).collect();
-    ids.extend(["spacer", "separator"]);
+    ids.extend(["separator"]);
     ids.join(", ")
 }
 
@@ -493,24 +483,25 @@ mod tests {
             assert_eq!(ToolbarButton::from_id(button.id()), Some(button));
             assert!(seen.insert(button.id()), "duplicate id {}", button.id());
         }
-        for id in ["spacer", "separator"] {
-            assert!(seen.insert(id), "duplicate id {id}");
-        }
-        assert_eq!(ToolbarItem::from_id("spacer"), Some(ToolbarItem::Spacer));
+        assert!(seen.insert("separator"), "duplicate id separator");
         assert_eq!(
             ToolbarItem::from_id("separator"),
             Some(ToolbarItem::Separator)
         );
         assert_eq!(ToolbarItem::from_id("translate"), None);
+        // the dropped spacer variant degrades to a warning, not a load
+        // failure (files written by the short-lived v1 editor)
+        assert_eq!(ToolbarItem::from_id("spacer"), None);
     }
 
     #[test]
     fn factory_row_is_the_historical_layout() {
         let row = Settings::default().row().to_vec();
-        // the pre-customization toolbar, item for item
+        // the pre-customization toolbar, item for item — two group
+        // breaks: tool cluster | actions | confirm pair
         assert_eq!(row.len(), 21);
         assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
-        assert_eq!(row[13], ToolbarItem::Spacer);
+        assert_eq!(row[13], ToolbarItem::Separator);
         assert_eq!(row[18], ToolbarItem::Separator);
         assert_eq!(
             *row.last().unwrap(),
@@ -521,8 +512,7 @@ mod tests {
             assert!(Settings::default().toolbar_visible(button));
         }
         assert_eq!(Settings::default().row1_button_count(), 19);
-        assert_eq!(Settings::default().row1_separator_count(), 1);
-        assert_eq!(Settings::default().row1_spacer_count(), 1);
+        assert_eq!(Settings::default().row1_separator_count(), 2);
     }
 
     #[test]
@@ -537,7 +527,6 @@ mod tests {
         assert!(!s.toolbar_visible(ToolbarButton::Save));
         assert_eq!(s.row1_button_count(), 2);
         assert_eq!(s.row1_separator_count(), 1);
-        assert_eq!(s.row1_spacer_count(), 0);
         // an empty row is a valid "hide everything" toolbar
         s.set_row(Vec::new());
         assert_eq!(s.row1_button_count(), 0);
@@ -556,7 +545,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
         std::fs::write(
             &path,
-            "[toolbar]\nitems = [\"copy\", \"spacer\", \"bogus\", \"separator\", \"save\"]\n",
+            "[toolbar]\nitems = [\"copy\", \"bogus\", \"separator\", \"save\"]\n",
         )
         .unwrap();
         let (s, errors) = Settings::load(Some(&path));
@@ -564,7 +553,6 @@ mod tests {
             s.row(),
             &[
                 ToolbarItem::Button(ToolbarButton::Copy),
-                ToolbarItem::Spacer,
                 ToolbarItem::Separator,
                 ToolbarItem::Button(ToolbarButton::Save),
             ]
@@ -572,7 +560,7 @@ mod tests {
         assert_eq!(errors.len(), 1, "the unknown id must be reported");
         assert!(errors[0].contains("bogus"));
         assert!(
-            errors[0].contains("spacer"),
+            errors[0].contains("separator"),
             "known ids are listed in the error"
         );
     }
@@ -620,11 +608,11 @@ mod tests {
             [btn(B::Pin), btn(B::Copy), btn(B::Save), btn(B::Pin)]
         );
 
-        // layout items stack: a second spacer drops in fine
-        let with_spacer = [btn(B::Copy), ToolbarItem::Spacer];
+        // layout items stack: a second separator drops in fine
+        let with_sep = [btn(B::Copy), ToolbarItem::Separator];
         assert_eq!(
-            Settings::apply_drop(ToolbarItem::Spacer, &with_spacer, 2, None),
-            [btn(B::Copy), ToolbarItem::Spacer, ToolbarItem::Spacer]
+            Settings::apply_drop(ToolbarItem::Separator, &with_sep, 2, None),
+            [btn(B::Copy), ToolbarItem::Separator, ToolbarItem::Separator]
         );
     }
 
@@ -652,9 +640,9 @@ mod tests {
         assert!(!s.toolbar_visible(ToolbarButton::Pin));
         assert!(!s.toolbar_visible(ToolbarButton::Scroll));
         assert!(s.toolbar_visible(ToolbarButton::Copy));
-        // factory order otherwise, spacer and separator intact
+        // factory order otherwise, both separators intact
         assert_eq!(s.row1_button_count(), 17);
-        assert_eq!(s.row1_spacer_count(), 1);
+        assert_eq!(s.row1_separator_count(), 2);
         assert_eq!(errors.len(), 1, "unknown hidden id reported");
     }
 
@@ -675,9 +663,8 @@ mod tests {
         let mut s = Settings::default();
         s.set_row(vec![
             ToolbarItem::Button(ToolbarButton::Pin),
-            ToolbarItem::Spacer,
-            ToolbarItem::Button(ToolbarButton::Eraser),
             ToolbarItem::Separator,
+            ToolbarItem::Button(ToolbarButton::Eraser),
         ]);
         s.save(&path).expect("save must create parent dirs");
         let (back, errors) = Settings::load(Some(&path));
@@ -685,7 +672,7 @@ mod tests {
         assert_eq!(back, s);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[toolbar]"));
-        assert!(text.contains("\"spacer\""));
+        assert!(text.contains("\"separator\""));
     }
 
     #[test]

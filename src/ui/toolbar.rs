@@ -364,21 +364,10 @@ impl ButtonMeta {
     }
 }
 
-/// The flexible gap between clusters. A plain flex_1 collapses to zero
-/// in the content-hugging bar, so it keeps a minimum width — a group
-/// break must read as a break. The width basis counts the same
-/// minimum (see `model::placement::row1_basis`).
-pub(crate) fn spacer() -> Div {
-    div()
-        .flex_1()
-        .min_w(px(crate::model::placement::SPACER_MIN))
-}
-
 /// Row one, rendered in the configured order (see
 /// `model::settings::Settings::row`): presence in the row IS
 /// visibility, the row's order IS the layout. The factory row
-/// reproduces the historical two-cluster look through its spacer and
-/// separator.
+/// reproduces the historical two-cluster look through its separators.
 fn row_one(
     annotations: &crate::annotation::Annotations,
     focus: &FocusHandle,
@@ -410,7 +399,6 @@ fn row_one(
                 .into_any_element()
             }
             ToolbarItem::Separator => separator().into_any_element(),
-            ToolbarItem::Spacer => spacer().into_any_element(),
         })
         .collect()
 }
