@@ -197,6 +197,23 @@ fn show(
     }
     let handle = n.show()?;
     if let Some(path) = open_path {
+        // A watchdog bounds this child's lifetime: notification daemons
+        // with persistent histories (quickshell, notification centers)
+        // may never emit `NotificationClosed`, and `wait_for_action`
+        // would then block forever — every screenshot would leave an
+        // orphan process holding its fds and D-Bus connection (#23).
+        // The action popup times out at 10s; the 12s grace lets a
+        // last-moment click win the race, and any exit path reaps the
+        // thread with the process. Best-effort: if the thread cannot
+        // spawn, waiting on the daemon (the old behavior) is the
+        // fallback.
+        std::thread::Builder::new()
+            .name("shotori-notify-watchdog".into())
+            .spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(12));
+                std::process::exit(0);
+            })
+            .ok();
         handle.wait_for_action(|action| {
             if action == "default"
                 && let Err(error) = open_image(path)
