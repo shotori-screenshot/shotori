@@ -14,7 +14,7 @@
 //! Colors are `u32` in gpui's `0xRRGGBBAA` layout (e.g. the orange
 //! accent is `0xFF6A00FF`).
 
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 pub mod load;
 
@@ -27,7 +27,7 @@ pub const PALETTE_NAMES: [&str; PALETTE] =
 
 /// The complete visual vocabulary of the overlay. One struct so a theme
 /// is a value: build it, override it, ship it.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Theme {
     /// Dim layer OUTSIDE the selection: color at full opacity + strength.
     /// What gets painted is [`Theme::dim`] (color with alpha applied).
@@ -162,36 +162,170 @@ const fn dark_const() -> Theme {
     Theme::dark()
 }
 
-struct Palettes {
-    fixed_or_dark: Theme,
-    light: Option<Theme>,
+/// One addressable solid-color field of [`Theme`] — the registry the
+/// Appearance editor and `theme.toml` both speak. Labels, file keys
+/// and accessors come from here and nowhere else, so the picker grid,
+/// the save format and the mockup cannot drift apart. The derived
+/// fields (accent → pin_border tint, `adapt_accent` → toolbar_selected
+/// tint) live in `load::apply`'s override logic, not here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColorKey {
+    DimColor,
+    Accent,
+    PinBorder,
+    ChipBg,
+    HintText,
+    BtnText,
+    BtnHoverBg,
+    ToolbarBg,
+    ToolbarText,
+    ToolbarBorder,
+    ToolbarHover,
+    ToolbarSelected,
+    SwatchBorder,
 }
-static ACTIVE: OnceLock<Palettes> = OnceLock::new();
-static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-const FALLBACK: Theme = Theme::dark();
 
-impl Palettes {
-    fn current(&self, dark: bool) -> &Theme {
-        if dark {
-            &self.fixed_or_dark
-        } else {
-            self.light.as_ref().unwrap_or(&self.fixed_or_dark)
+impl ColorKey {
+    pub const ALL: [Self; 13] = [
+        Self::DimColor,
+        Self::Accent,
+        Self::PinBorder,
+        Self::ChipBg,
+        Self::HintText,
+        Self::BtnText,
+        Self::BtnHoverBg,
+        Self::ToolbarBg,
+        Self::ToolbarText,
+        Self::ToolbarBorder,
+        Self::ToolbarHover,
+        Self::ToolbarSelected,
+        Self::SwatchBorder,
+    ];
+
+    /// Human label (settings copy lives with the registry it names).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DimColor => "Dim",
+            Self::Accent => "Accent",
+            Self::PinBorder => "Pin border",
+            Self::ChipBg => "Chip background",
+            Self::HintText => "Hint text",
+            Self::BtnText => "Button text",
+            Self::BtnHoverBg => "Button hover",
+            Self::ToolbarBg => "Toolbar background",
+            Self::ToolbarText => "Toolbar text",
+            Self::ToolbarBorder => "Toolbar border",
+            Self::ToolbarHover => "Toolbar hover",
+            Self::ToolbarSelected => "Toolbar selected",
+            Self::SwatchBorder => "Swatch border",
+        }
+    }
+
+    /// The `theme.toml` key (stable — files outlive binaries).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::DimColor => "dim_color",
+            Self::Accent => "accent",
+            Self::PinBorder => "pin_border",
+            Self::ChipBg => "chip_bg",
+            Self::HintText => "hint_text",
+            Self::BtnText => "btn_text",
+            Self::BtnHoverBg => "btn_hover_bg",
+            Self::ToolbarBg => "toolbar_bg",
+            Self::ToolbarText => "toolbar_text",
+            Self::ToolbarBorder => "toolbar_border",
+            Self::ToolbarHover => "toolbar_hover",
+            Self::ToolbarSelected => "toolbar_selected",
+            Self::SwatchBorder => "swatch_border",
+        }
+    }
+
+    pub fn get(self, theme: &Theme) -> u32 {
+        match self {
+            Self::DimColor => theme.dim_color,
+            Self::Accent => theme.accent,
+            Self::PinBorder => theme.pin_border,
+            Self::ChipBg => theme.chip_bg,
+            Self::HintText => theme.hint_text,
+            Self::BtnText => theme.btn_text,
+            Self::BtnHoverBg => theme.btn_hover_bg,
+            Self::ToolbarBg => theme.toolbar_bg,
+            Self::ToolbarText => theme.toolbar_text,
+            Self::ToolbarBorder => theme.toolbar_border,
+            Self::ToolbarHover => theme.toolbar_hover,
+            Self::ToolbarSelected => theme.toolbar_selected,
+            Self::SwatchBorder => theme.swatch_border,
+        }
+    }
+
+    pub fn set(self, theme: &mut Theme, color: u32) {
+        match self {
+            Self::DimColor => theme.dim_color = color,
+            Self::Accent => theme.accent = color,
+            Self::PinBorder => theme.pin_border = color,
+            Self::ChipBg => theme.chip_bg = color,
+            Self::HintText => theme.hint_text = color,
+            Self::BtnText => theme.btn_text = color,
+            Self::BtnHoverBg => theme.btn_hover_bg = color,
+            Self::ToolbarBg => theme.toolbar_bg = color,
+            Self::ToolbarText => theme.toolbar_text = color,
+            Self::ToolbarBorder => theme.toolbar_border = color,
+            Self::ToolbarHover => theme.toolbar_hover = color,
+            Self::ToolbarSelected => theme.toolbar_selected = color,
+            Self::SwatchBorder => theme.swatch_border = color,
         }
     }
 }
 
-pub fn c() -> &'static Theme {
+#[derive(Clone, Copy)]
+struct Palettes {
+    fixed_or_dark: Theme,
+    light: Option<Theme>,
+}
+/// Replaceable on purpose: the settings window's Appearance editor
+/// writes the working theme here on every change, live-previewing the
+/// next capture's palette in its own chrome. (The overlay process is
+/// short-lived and never edits; it installs once at startup.)
+static ACTIVE: RwLock<Palettes> = RwLock::new(Palettes {
+    fixed_or_dark: Theme::dark(),
+    light: None,
+});
+static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+impl Palettes {
+    fn current(&self, dark: bool) -> Theme {
+        if dark {
+            self.fixed_or_dark
+        } else {
+            self.light.unwrap_or(self.fixed_or_dark)
+        }
+    }
+}
+
+/// The active palette. By value: the theme became replaceable (see
+/// [`set`]) and a reference into the lock cannot outlive the read —
+/// every field is `Copy`, so handing the struct out is free.
+pub fn c() -> Theme {
     ACTIVE
-        .get()
-        .map(|p| p.current(SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed)))
-        .unwrap_or(&FALLBACK)
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .current(SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// True when the system appearance currently selects the dark palette
+/// (the `auto` base follows it; the Appearance mockup shows whichever
+/// palette this picks, exactly like a capture would).
+pub fn system_dark() -> bool {
+    SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn set(theme: Theme, light: Option<Theme>) {
-    let _ = ACTIVE.set(Palettes {
+    *ACTIVE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Palettes {
         fixed_or_dark: theme,
         light,
-    });
+    };
 }
 
 /// Called by GPUI on initial window creation and appearance changes.

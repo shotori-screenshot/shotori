@@ -1,9 +1,30 @@
 # Copy to ~/.config/shotori/theme.toml (Windows: %APPDATA%\shotori\theme.toml).
-# Backgrounds, icons and control states switch together; do not copy resolved colors here.
+# Managed by `shotori settings` (Appearance section); hand edits are welcome —
+# the two stay compatible: the editor only writes the keys you override.
+#
+# base picks a complete palette (surfaces and control states switch
+# together by construction); every other key is an optional single-field
+# override on top of that base. Colors are opaque #RRGGBB or #RRGGBBAA.
 base = "auto" # auto | dark | light | high_contrast
 
-# Optional: opaque #RRGGBB or #RRGGBBAA colors.
+# Any subset of the fields below, e.g.:
 # accent = "#FF6A00"
+# dim_color = "#000000"
 # dim_opacity = 0.55
+# pin_border = "#FF6A0099"
+# chip_bg = "#16161DE6"
+# hint_text = "#AAAAAA"
+# btn_text = "#EEEEEE"
+# btn_hover_bg = "#FFFFFF26"
+# toolbar_bg = "#202028"
+# toolbar_text = "#E8E8EE"
+# toolbar_border = "#3E3E4C"
+# toolbar_hover = "#2C2C3A"
+# toolbar_selected = "#453528"
+# swatch_border = "#FFFFFF38"
+#
 # Exactly seven annotation colors, in palette order:
 # annotation_colors = ["#FF4545", "#FF8A32", "#FFD43B", "#40C878", "#409CFF", "#222222", "#FFFFFF"]
+#
+# Derivation notes: setting `accent` retints `pin_border` and
+# `toolbar_selected` unless those are set explicitly.

@@ -47,7 +47,8 @@ gpui_kit::assets::icon_assets!(
         Copy,
         Settings,
         Settings2,
-        PanelTop
+        PanelTop,
+        Palette
     ]
 );
 

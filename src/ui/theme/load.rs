@@ -1,17 +1,96 @@
-//! TOML theme settings. Surface colors belong to complete built-in palettes;
-//! configuration cannot mix a light background with dark control states.
-use super::{PALETTE, Theme};
-use serde::Deserialize;
+//! TOML theme settings. `base` picks a complete built-in palette
+//! (surfaces and control states switch together by construction); any
+//! other key is a single-field override on top of that base — the
+//! Appearance editor writes this file, `--theme FILE` / the XDG
+//! fallback read it.
+use super::{ColorKey, PALETTE, Theme};
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[derive(Deserialize, Default, Debug)]
+/// Every solid-color field is an optional hex override keyed by
+/// [`ColorKey::key`] — serde sees flat fields, the `ColorKey` registry
+/// is the one place that knows which strings exist.
+#[derive(Deserialize, Serialize, Default, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeFile {
     pub base: Option<String>,
+    pub dim_color: Option<String>,
     pub accent: Option<String>,
+    pub pin_border: Option<String>,
+    pub chip_bg: Option<String>,
+    pub hint_text: Option<String>,
+    pub btn_text: Option<String>,
+    pub btn_hover_bg: Option<String>,
+    pub toolbar_bg: Option<String>,
+    pub toolbar_text: Option<String>,
+    pub toolbar_border: Option<String>,
+    pub toolbar_hover: Option<String>,
+    pub toolbar_selected: Option<String>,
+    pub swatch_border: Option<String>,
     pub dim_opacity: Option<f32>,
     pub annotation_colors: Option<Vec<String>>,
+}
+
+impl ThemeFile {
+    /// The override for one color field, if set.
+    pub fn color(&self, key: ColorKey) -> Option<&String> {
+        match key {
+            ColorKey::DimColor => self.dim_color.as_ref(),
+            ColorKey::Accent => self.accent.as_ref(),
+            ColorKey::PinBorder => self.pin_border.as_ref(),
+            ColorKey::ChipBg => self.chip_bg.as_ref(),
+            ColorKey::HintText => self.hint_text.as_ref(),
+            ColorKey::BtnText => self.btn_text.as_ref(),
+            ColorKey::BtnHoverBg => self.btn_hover_bg.as_ref(),
+            ColorKey::ToolbarBg => self.toolbar_bg.as_ref(),
+            ColorKey::ToolbarText => self.toolbar_text.as_ref(),
+            ColorKey::ToolbarBorder => self.toolbar_border.as_ref(),
+            ColorKey::ToolbarHover => self.toolbar_hover.as_ref(),
+            ColorKey::ToolbarSelected => self.toolbar_selected.as_ref(),
+            ColorKey::SwatchBorder => self.swatch_border.as_ref(),
+        }
+    }
+
+    /// Set (or clear with `None`) one color override — the Appearance
+    /// editor's write path.
+    pub fn set_color(&mut self, key: ColorKey, hex_value: Option<String>) {
+        let slot = match key {
+            ColorKey::DimColor => &mut self.dim_color,
+            ColorKey::Accent => &mut self.accent,
+            ColorKey::PinBorder => &mut self.pin_border,
+            ColorKey::ChipBg => &mut self.chip_bg,
+            ColorKey::HintText => &mut self.hint_text,
+            ColorKey::BtnText => &mut self.btn_text,
+            ColorKey::BtnHoverBg => &mut self.btn_hover_bg,
+            ColorKey::ToolbarBg => &mut self.toolbar_bg,
+            ColorKey::ToolbarText => &mut self.toolbar_text,
+            ColorKey::ToolbarBorder => &mut self.toolbar_border,
+            ColorKey::ToolbarHover => &mut self.toolbar_hover,
+            ColorKey::ToolbarSelected => &mut self.toolbar_selected,
+            ColorKey::SwatchBorder => &mut self.swatch_border,
+        };
+        *slot = hex_value;
+    }
+
+    /// True when no field is overridden — the base palette alone.
+    pub fn is_base_only(&self) -> bool {
+        self.dim_color.is_none()
+            && self.accent.is_none()
+            && self.pin_border.is_none()
+            && self.chip_bg.is_none()
+            && self.hint_text.is_none()
+            && self.btn_text.is_none()
+            && self.btn_hover_bg.is_none()
+            && self.toolbar_bg.is_none()
+            && self.toolbar_text.is_none()
+            && self.toolbar_border.is_none()
+            && self.toolbar_hover.is_none()
+            && self.toolbar_selected.is_none()
+            && self.swatch_border.is_none()
+            && self.dim_opacity.is_none()
+            && self.annotation_colors.is_none()
+    }
 }
 
 fn hex(s: &str) -> Result<u32, String> {
@@ -30,7 +109,7 @@ fn hex(s: &str) -> Result<u32, String> {
     }
     Ok(value)
 }
-fn to_hex(v: u32) -> String {
+pub(crate) fn to_hex(v: u32) -> String {
     format!("#{v:08X}")
 }
 #[derive(Debug)]
@@ -53,14 +132,20 @@ pub fn built_in(name: &str) -> Result<Theme, String> {
 
 fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
     let mut errors = Vec::new();
-    if let Some(value) = &file.accent {
-        match hex(value) {
-            Ok(color) => {
-                theme.accent = color;
-                theme.pin_border = (color & 0xffffff00) | 0x99;
+    for key in ColorKey::ALL {
+        if let Some(value) = file.color(key) {
+            match hex(value) {
+                Ok(color) => key.set(theme, color),
+                Err(e) => errors.push(format!("{}: {e}", key.key())),
             }
-            Err(e) => errors.push(format!("accent: {e}")),
         }
+    }
+    // Derived tints: accent pulls pin_border along (the historical
+    // single-knob behavior) unless pin_border is set explicitly, and
+    // recolors toolbar_selected unless that was set explicitly — an
+    // explicit override always wins over the derivation.
+    if file.accent.is_some() && file.pin_border.is_none() {
+        theme.pin_border = (theme.accent & 0xffffff00) | 0x99;
     }
     if let Some(value) = file.dim_opacity {
         if (0.0..=1.0).contains(&value) {
@@ -82,12 +167,17 @@ fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
             }
         }
     }
-    theme.adapt_accent();
+    if file.toolbar_selected.is_none() {
+        theme.adapt_accent();
+    }
     errors
 }
 
 impl ThemeFile {
-    fn palettes(&self) -> (Theme, Option<Theme>, Vec<String>) {
+    /// The resolved palettes this file describes (auto base = the
+    /// dark/light pair; a fixed base = one palette). Errors are the
+    /// per-field override problems, shared by both palettes' applies.
+    pub(crate) fn palettes(&self) -> (Theme, Option<Theme>, Vec<String>) {
         let base = self.base.as_deref().unwrap_or("auto");
         let (mut dark, mut light, mut errors) = if base == "auto" {
             (Theme::dark(), Some(Theme::light()), Vec::new())
@@ -107,7 +197,58 @@ impl ThemeFile {
 
 pub fn load_file(path: &Path) -> Result<ThemeFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("{}: {e}. Use a TOML file with base, accent, dim_opacity and annotation_colors; surface colors are managed together.", path.display()))
+    toml::from_str(&text).map_err(|e| format!("{}: {e}. Use a TOML file with base, per-color overrides (hex), dim_opacity and annotation_colors; see docs/theme.example.toml.", path.display()))
+}
+
+/// The Appearance editor's working copy: the config file if there is
+/// one, else a blank base-only file. A MISSING file is the normal
+/// first-run state (no error — the first edit creates it); only
+/// unreadable or unparsable files travel back as errors, so the user
+/// sees their broken file instead of silently editing a fresh one.
+pub fn load_editable(path: Option<&Path>) -> (ThemeFile, Vec<String>) {
+    match path {
+        Some(path) if !path.exists() => (ThemeFile::default(), Vec::new()),
+        Some(path) => match load_file(path) {
+            Ok(file) => (file, Vec::new()),
+            Err(error) => (ThemeFile::default(), vec![error]),
+        },
+        None => (ThemeFile::default(), Vec::new()),
+    }
+}
+
+/// Write the editing state back as `theme.toml` — only the overridden
+/// keys are written (base + deltas), so the file stays a minimal,
+/// human-editable diff against the base palette. The header says who
+/// manages it; unknown keys cannot exist (`deny_unknown_fields`).
+pub fn save(path: &Path, file: &ThemeFile) -> Result<(), String> {
+    let mut table = toml::Table::new();
+    table.insert(
+        "base".into(),
+        toml::Value::String(file.base.clone().unwrap_or_else(|| "auto".into())),
+    );
+    for key in ColorKey::ALL {
+        if let Some(value) = file.color(key) {
+            table.insert(key.key().into(), toml::Value::String(value.clone()));
+        }
+    }
+    if let Some(opacity) = file.dim_opacity {
+        table.insert("dim_opacity".into(), toml::Value::Float(opacity as f64));
+    }
+    if let Some(colors) = &file.annotation_colors {
+        table.insert(
+            "annotation_colors".into(),
+            toml::Value::Array(colors.iter().cloned().map(toml::Value::String).collect()),
+        );
+    }
+    let body = table.to_string();
+    let text = format!(
+        "# Shotori theme — managed by `shotori settings`; base + overrides.\n\
+         # base = auto | dark | light | high_contrast, every other key is optional.\n{body}"
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -225,14 +366,28 @@ mod tests {
         }
     }
     #[test]
-    fn old_mixed_surface_overrides_and_unknown_fields_are_rejected() {
+    fn unknown_fields_are_still_rejected() {
+        // A typo'd key must fail loudly (deny_unknown_fields) — the
+        // days of silently ignoring surface overrides are over, they
+        // are legal now and every key must be spelled right.
         for content in [
-            "base = 'dark'\ntoolbar_bg = '#FAFAFC'\ntoolbar_selected = '#453528'",
             "acccent = '#00FF00'",
-            r##"{"base":"dark","toolbar_bg":"#FAFAFC"}"##,
+            "base = 'dark'\ntollbar_bg = '#FAFAFC'",
         ] {
             assert!(toml::from_str::<ThemeFile>(content).is_err());
         }
+    }
+    #[test]
+    fn surface_overrides_are_composable_now() {
+        // The v2 contract: any subset of fields on any base — the
+        // Appearance editor writes exactly this shape.
+        let file: ThemeFile =
+            toml::from_str("base = 'dark'\ntoolbar_bg = '#FAFAFC'\ntoolbar_text = '#30343B'")
+                .unwrap();
+        let (theme, _, errors) = file.palettes();
+        assert!(errors.is_empty());
+        assert_eq!(theme.toolbar_bg, 0xFAFAFCFF);
+        assert_eq!(theme.toolbar_text, 0x30343BFF);
     }
     #[test]
     fn invalid_values_preserve_readable_palettes() {
@@ -264,9 +419,66 @@ mod tests {
     fn malformed_file_falls_back_without_partial_application() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
-        std::fs::write(&path, "base = 'light'\ntoolbar_text = '#FFFFFF'").unwrap();
-        let (file, _, errors) = resolve(None, Some(path));
+        // Invalid TOML syntax: the file never parses, resolve falls
+        // back to the default (auto) file with the error attached.
+        std::fs::write(&path, "base = 'light'\ntoolbar_text = ").unwrap();
+        let (file, _, errors) = resolve(None, Some(path.clone()));
         assert_eq!(errors.len(), 1);
         assert!(file.palettes().1.is_some());
+        // A bad VALUE parses but applies nothing for that field —
+        // resolve stays quiet (the file loaded), palettes() reports
+        // the per-field error.
+        std::fs::write(&path, "base = 'light'\ntoolbar_text = 'whiteish'").unwrap();
+        let (file, _, errors) = resolve(None, Some(path));
+        assert!(errors.is_empty());
+        let (theme, _single, palette_errors) = file.palettes();
+        assert_eq!(palette_errors.len(), 1);
+        assert!(palette_errors[0].contains("toolbar_text"));
+        // fixed base = one palette; the bad field left it at the base
+        assert_eq!(theme.toolbar_text, Theme::light().toolbar_text);
+    }
+    #[test]
+    fn explicit_overrides_beat_derivations() {
+        // accent alone pulls pin_border and toolbar_selected along …
+        let file: ThemeFile = toml::from_str("accent = '#123456'").unwrap();
+        let (theme, _, _) = file.palettes();
+        assert_eq!(theme.accent, 0x123456FF);
+        assert_eq!(theme.pin_border, 0x12345699);
+        let mut derived = theme;
+        derived.adapt_accent();
+        assert_eq!(theme.toolbar_selected, derived.toolbar_selected);
+        // … but an explicit value for a derived field wins. (Opaque
+        // hex only — the file format has no alpha but the derived
+        // pin tints carry one.)
+        let file: ThemeFile = toml::from_str(
+            "accent = '#123456'\npin_border = '#ABCDEFFF'\ntoolbar_selected = '#111111FF'",
+        )
+        .unwrap();
+        let (theme, _, _) = file.palettes();
+        assert_eq!(theme.pin_border, 0xABCDEFFF);
+        assert_eq!(theme.toolbar_selected, 0x111111FF);
+    }
+    #[test]
+    fn save_round_trips_and_writes_only_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        let file: ThemeFile = toml::from_str(
+            "base = 'light'\naccent = '#123456'\ntoolbar_bg = '#202028'\ndim_opacity = 0.3",
+        )
+        .unwrap();
+        save(&path, &file).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // only overridden keys + base are written
+        assert!(text.contains("base = \"light\""));
+        assert!(text.contains("accent"));
+        assert!(text.contains("toolbar_bg"));
+        assert!(!text.contains("toolbar_text"));
+        let reloaded = load_file(&path).unwrap();
+        assert_eq!(reloaded, file);
+        assert!(!reloaded.is_base_only());
+        // base-only files round-trip too
+        let file = ThemeFile::default();
+        save(&path, &file).unwrap();
+        assert!(load_file(&path).unwrap().is_base_only());
     }
 }
