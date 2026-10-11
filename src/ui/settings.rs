@@ -37,7 +37,6 @@ use gpui_kit::base::slider::{
     Slider, SliderEvent, SliderState, SliderThumb, SliderTrack, SliderValue,
 };
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
@@ -72,6 +71,31 @@ enum Section {
 struct DraggedItem {
     item: ToolbarItem,
     from: Option<usize>,
+}
+
+/// The drag payload marking a scrollbar-rail scrub in flight.
+struct RailScrub;
+
+/// An empty drag ghost for the scrollbar scrub — the thumb itself is
+/// the feedback (it re-renders from the handle on every scrub event),
+/// so nothing follows the pointer.
+struct NoGhost;
+
+impl Render for NoGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The scrub's ghost constructor (fn item, matching the higher-ranked
+/// `impl Fn` bound `on_drag` demands — see `ghost_constructor`).
+fn rail_scrub_ghost(
+    _: &RailScrub,
+    _: Point<Pixels>,
+    _: &mut Window,
+    cx: &mut App,
+) -> Entity<NoGhost> {
+    cx.new(|_| NoGhost)
 }
 
 /// The chip that follows the pointer during a drag.
@@ -709,6 +733,20 @@ impl Render for SettingsWindow {
     }
 }
 
+/// Thumb display geometry for the rail: `(thumb_w, usable_track)`,
+/// derived from the handle — viewport/content ratio, clamped to a
+/// grabbable 24px minimum so a long row keeps a handle-sized thumb.
+/// One helper so the render and the scrub cannot disagree.
+fn rail_thumb_geometry(handle: &ScrollHandle) -> (Pixels, Pixels) {
+    let viewport_w = handle.bounds().size.width;
+    let max_x = handle.max_offset().x;
+    let content_w = (viewport_w + max_x).max(px(1.));
+    let ratio = (viewport_w / content_w).clamp(0., 1.);
+    let thumb = px(ratio * viewport_w.as_f32()).max(px(24.));
+    let usable = (viewport_w - thumb).max(px(0.));
+    (thumb, usable)
+}
+
 /// Ramped auto-scroll delta for a drag parked at the strip's edge:
 /// nothing across the middle of the strip, then speed ramps from
 /// ~6px/frame at the zone boundary to ~36px/frame at the very edge
@@ -949,13 +987,13 @@ impl SettingsWindow {
             .child(self.footer(cx))
     }
 
-    /// The preview bar's scroll viewport, with its scrollbar BELOW it —
-    /// outside the scrolled content, never over the icons. The bar hugs
-    /// its content (the factory row is ~703px — the box follows the
-    /// element, never the pane) and pans when the pane is narrower;
-    /// dragging into an edge zone pans with the drag (classic edge
-    /// auto-scroll: park the item at an edge and the strip keeps moving
-    /// under it).
+    /// The preview bar's scroll viewport. The bar hugs its content (the
+    /// factory row is ~703px — the box follows the element, never the
+    /// pane) and pans when the pane is narrower; its scrollbar is a
+    /// separately drawn rail below, outside the bar's box ([`Self::
+    /// scrollbar_rail`]). Dragging into an edge zone pans with the drag
+    /// (classic edge auto-scroll: park the item at an edge and the
+    /// strip keeps moving under it).
     fn preview_strip(&self, cx: &Context<Self>) -> Div {
         let edge = cx.listener(
             move |this: &mut Self,
@@ -1009,19 +1047,117 @@ impl SettingsWindow {
                     .flex_row()
                     .overflow_x_scroll()
                     .track_scroll(&self.preview_scroll)
+                    // observe-only: the native scroll still runs, this
+                    // repaints so the drawn thumb below follows the
+                    // offset the container just applied
+                    .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                        cx.notify();
+                    }))
                     .on_drag_move(edge)
                     .child(self.toolbar_preview(cx)),
             )
-            .child(
-                div()
-                    .id("preview-scrollbar-row")
-                    .relative()
-                    .w_full()
-                    .h(px(8.))
-                    // viewport comes from the scroll handle itself (the
-                    // default): exactly the strip above
-                    .child(Scrollbar::horizontal(&self.preview_scroll).id("preview-scrollbar")),
-            )
+            // the scrollbar, drawn outside the bar's box (see
+            // [`SettingsWindow::scrollbar_rail`])
+            .child(self.scrollbar_rail(cx))
+    }
+
+    /// The preview strip's scrollbar: HAND-DRAWN, below and outside the
+    /// bar's box, with its geometry linked straight to the scroll
+    /// handle — thumb width = viewport/content, thumb x = offset/max.
+    ///
+    /// The gpui-base `Scrollbar` component was tried here first and
+    /// read as "inside the toolbar" twice: it lays itself out as an
+    /// absolute overlay (relative(1.) sizing) whose faded pill sits
+    /// flush against the bar's bottom edge, merging with the bar's
+    /// airspace. A drawn rail with explicit coordinates cannot drift
+    /// from where it is placed; scrubbing maps pointer x to offset
+    /// Slider-track-style (the thumb centers under the pointer, so a
+    /// click lands as a 1px drag and jumps).
+    fn scrollbar_rail(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let handle = &self.preview_scroll;
+        let max_x = handle.max_offset().x;
+        let overflow = max_x > px(0.);
+        let t = theme::c();
+
+        // display geometry: thumb clamped to a grabbable 24px minimum
+        let (thumb_w, usable) = rail_thumb_geometry(handle);
+        let thumb_x = if max_x > px(0.) {
+            usable * (handle.offset().x / max_x)
+        } else {
+            px(0.)
+        };
+
+        let scrub = cx.listener(
+            move |this: &mut Self, event: &DragMoveEvent<RailScrub>, _, cx: &mut Context<Self>| {
+                // on_drag_move has no hover filter — self-filter by
+                // pointer-in-bounds (the grips' note in
+                // `toolbar_preview`)
+                if !event.bounds.contains(&event.event.position) {
+                    return;
+                }
+                let pointer = event.event.position;
+                let rail = event.bounds;
+                this.scrub_rail_to(rail, pointer, cx);
+            },
+        );
+
+        div()
+            .id("preview-scrollbar")
+            // zero-height when the bar fits — no empty gutter under a
+            // full-width row; the first scroll event reveals the rail
+            .when(overflow, |rail| rail.mt(px(4.)).h(px(6.)))
+            .when(!overflow, |rail| rail.h(px(0.)))
+            .relative()
+            .w_full()
+            .on_drag(RailScrub, rail_scrub_ghost)
+            .on_drag_move(scrub)
+            .when(overflow, |rail| {
+                rail.child(
+                    // faint full-width track
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(2.))
+                        .w_full()
+                        .h(px(2.))
+                        .rounded(px(1.))
+                        .bg(rgba((t.toolbar_border & 0xFFFFFF00) | 0x59)),
+                )
+                .child(
+                    // the thumb: btn_text at 60% alpha, full on hover
+                    div()
+                        .id("preview-scrollbar-thumb")
+                        .absolute()
+                        .top(px(0.))
+                        .left(thumb_x)
+                        .w(thumb_w)
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(rgba((t.btn_text & 0xFFFFFF00) | 0x99))
+                        .hover(|s| s.bg(rgba(t.btn_text))),
+                )
+            })
+    }
+
+    /// Pointer → scroll offset, Slider-track semantics: the thumb
+    /// centers under the pointer.
+    fn scrub_rail_to(
+        &mut self,
+        rail: Bounds<Pixels>,
+        pointer: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = self.preview_scroll.clone();
+        let max_x = handle.max_offset().x;
+        if max_x <= px(0.) {
+            return;
+        }
+        let (thumb_w, usable) = rail_thumb_geometry(&handle);
+        let local_x = pointer.x - rail.origin.x;
+        let fraction = ((local_x - thumb_w / 2.) / usable).clamp(0., 1.);
+        let next = px(fraction * max_x.as_f32());
+        handle.set_offset(point(next, handle.offset().y));
+        cx.notify();
     }
 
     /// Appearance: theme base + per-field colors with a live mockup.
