@@ -1055,9 +1055,27 @@ impl SettingsWindow {
             // block can grow a scroll and carry the bar away again
             // (defensive — the page itself no longer scrolls; see
             // `page_toolbar`).
+            //
+            // The clamp-writeback also NORMALIZES the stored offset:
+            // the native wheel application accumulates raw deltas
+            // without clamping (paint clamps visually, nothing writes
+            // back), so overshooting an end parks the handle at, say,
+            // -150px — and the first 150px of reverse scrolling are
+            // DEAD (bar and thumb both refuse to move while the stored
+            // value climbs back through the overshoot). This listener
+            // runs after the application in bubble order; rewriting the
+            // clamped value keeps storage, paint and the thumb locked
+            // together, notch for notch.
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
-                if this.preview_scroll.max_offset().x > px(0.) {
+                let handle = this.preview_scroll.clone();
+                let max = handle.max_offset().x;
+                if max > px(0.) {
                     cx.stop_propagation();
+                }
+                let offset = handle.offset();
+                let clamped = point(offset.x.clamp(px(0.), max), offset.y);
+                if clamped != offset {
+                    handle.set_offset(clamped);
                 }
                 cx.notify();
             }))
