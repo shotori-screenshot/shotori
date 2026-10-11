@@ -1037,6 +1037,21 @@ impl SettingsWindow {
         div()
             .flex()
             .flex_col()
+            // The strip remaps a vertical wheel onto its x axis; when it
+            // cannot apply the delta (at an end, or the remap declines)
+            // the event used to bubble on into the PAGE's vertical
+            // scroll, carrying the whole bar away ("the bar scrolled
+            // off"). Consume wheel events over the strip + rail while
+            // there is x-overflow; when the bar fits, let them pass —
+            // page scrolling is legitimate then.
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                if this.preview_scroll.max_offset().x > px(0.) {
+                    cx.stop_propagation();
+                }
+                // repaint either way so the drawn thumb follows whatever
+                // the container just applied
+                cx.notify();
+            }))
             .child(
                 div()
                     .id("preview-strip")
@@ -1047,12 +1062,6 @@ impl SettingsWindow {
                     .flex_row()
                     .overflow_x_scroll()
                     .track_scroll(&self.preview_scroll)
-                    // observe-only: the native scroll still runs, this
-                    // repaints so the drawn thumb below follows the
-                    // offset the container just applied
-                    .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
-                        cx.notify();
-                    }))
                     .on_drag_move(edge)
                     .child(self.toolbar_preview(cx)),
             )
