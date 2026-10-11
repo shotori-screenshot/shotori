@@ -953,6 +953,13 @@ impl SettingsWindow {
     /// (horizontally, when the bar outgrows the pane); the header, hint,
     /// palette and footer stay put. The page itself keeps a vertical
     /// scroll for genuinely short windows.
+    /// Toolbar: the drag-and-drop editor. The page itself NEVER
+    /// scrolls — the header, the preview strip (+ its scrollbar rail),
+    /// the hint and the footer are pinned, and only the palette below
+    /// pans vertically in its own area. (A scrolling page carried the
+    /// bar away with it — the bar must stay put under any scrolling;
+    /// "only the toolbar scrolls, the rest does not move", horizontally
+    /// AND vertically.)
     fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
         div()
@@ -962,7 +969,6 @@ impl SettingsWindow {
             .gap(px(10.))
             .p(px(PAGE_PAD))
             .size_full()
-            .overflow_y_scroll()
             // header
             .child(page_header(
                 "Toolbar",
@@ -981,9 +987,18 @@ impl SettingsWindow {
                          shortcuts",
                     ),
             )
-            // the palette
-            .child(self.palette(cx))
-            .child(div().flex_1())
+            // the palette — the only vertically scrolling part; `min_h(0)`
+            // lets the flex item shrink below its content (an
+            // overflow:visible flex item refuses to, pushing the footer
+            // off instead)
+            .child(
+                div()
+                    .id("palette-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_y_scroll()
+                    .child(self.palette(cx)),
+            )
             .child(self.footer(cx))
     }
 
@@ -1037,19 +1052,16 @@ impl SettingsWindow {
         div()
             .flex()
             .flex_col()
-            // The strip remaps a vertical wheel onto its x axis; when it
-            // cannot apply the delta (at an end, or the remap declines)
-            // the event used to bubble on into the PAGE's vertical
-            // scroll, carrying the whole bar away ("the bar scrolled
-            // off"). Consume wheel events over the strip + rail while
-            // there is x-overflow; when the bar fits, let them pass —
-            // page scrolling is legitimate then.
+            // Wheel over the strip + rail: notify so the drawn thumb
+            // follows whatever the container applied, and consume the
+            // event while there is x-overflow so nothing above this
+            // block can grow a scroll and carry the bar away again
+            // (defensive — the page itself no longer scrolls; see
+            // `page_toolbar`).
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
                 if this.preview_scroll.max_offset().x > px(0.) {
                     cx.stop_propagation();
                 }
-                // repaint either way so the drawn thumb follows whatever
-                // the container just applied
                 cx.notify();
             }))
             .child(
