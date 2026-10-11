@@ -31,13 +31,17 @@
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::AutoScroll;
 use gpui_kit::base::Button;
 use gpui_kit::base::slider::{
     Slider, SliderEvent, SliderState, SliderThumb, SliderTrack, SliderValue,
 };
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::{Icon, Sizable, Theme, ThemeMode};
+use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::sidebar::{
+    Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
+};
+use gpui_kit::component::{Collapsible, Icon, Sizable, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -141,11 +145,11 @@ fn window_options() -> WindowOptions {
             origin: point(px(0.), px(0.)),
             size: size(px(WINDOW_W), px(WINDOW_H)),
         })),
-        // Compositors that tile new toplevels (niri's default) may
-        // still squeeze below the requested bounds; the min size keeps
-        // the toolbar page usable, and its horizontal scroll is the
-        // floor below that.
-        window_min_size: Some(size(px(940.), px(540.))),
+        // No min size on purpose: compositors that tile (niri's
+        // default) refuse to shrink a window below it, which reads as
+        // the window fighting the user. Narrow windows are legitimate —
+        // the sidebar collapses to an icon rail and the toolbar preview
+        // pans in its own strip.
         focus: true,
         ..Default::default()
     }
@@ -206,6 +210,16 @@ struct SettingsWindow {
     /// The Appearance editor's state (theme.toml working copy + the
     /// picker/slider entities its rows render).
     appearance: AppearanceState,
+    /// Collapsed navigation sidebar (icon-only rail). Session state —
+    /// window-local, intentionally not persisted.
+    sidebar_collapsed: bool,
+    /// Drives the preview strip's horizontal scroll (see
+    /// [`SettingsWindow::preview_strip`]).
+    preview_scroll: ScrollHandle,
+    /// Drag-edge auto-scroll for the preview strip — the shared
+    /// gpui-base manager (ramped speed, ~60fps ticks, `stop()` retires
+    /// it); see [`edge_scroll_delta`] for the curve.
+    edge_scroll: AutoScroll,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -245,6 +259,9 @@ impl SettingsWindow {
             error: warnings.first().cloned(),
             drop_target: None,
             appearance,
+            sidebar_collapsed: false,
+            preview_scroll: ScrollHandle::new(),
+            edge_scroll: AutoScroll::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -279,6 +296,7 @@ impl SettingsWindow {
     /// moving right). The index math lives in the model, tested there.
     fn drop_at(&mut self, i: usize, dragged: &DraggedItem, cx: &mut Context<Self>) {
         let row = Settings::apply_drop(dragged.item, self.settings.row(), i, dragged.from);
+        self.edge_scroll.stop();
         self.commit(row, cx);
     }
 
@@ -357,10 +375,11 @@ impl SettingsWindow {
             },
         );
         let mut bar = toolbar::bar()
-            // hug the row like the real toolbar does — the page column
-            // would otherwise stretch the bar full-width, inflating the
-            // flexible gaps into wide slabs the real bar never shows
-            .self_start()
+            // the strip lays its child out as a flex ROW item: `flex_none`
+            // (no grow, no shrink) keeps the bar at its content width —
+            // wider rows overflow the strip and scroll, they must never
+            // be stretched (gaps inflate) or squeezed (buttons compress)
+            .flex_none()
             .on_drop(bar_fallback)
             .child(grip_end("pv-grip-left").on_drag_move(pin_start));
         for (i, item) in row.iter().enumerate() {
@@ -487,7 +506,10 @@ impl SettingsWindow {
             // drops just return home (no-op)
             .on_drop(move |dragged: &DraggedItem, _, cx| {
                 if let Some(src) = dragged.from {
-                    entity.update(cx, |this, cx| this.remove_at(src, cx));
+                    entity.update(cx, |this, cx| {
+                        this.edge_scroll.stop();
+                        this.remove_at(src, cx)
+                    });
                 }
             })
             .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgba(theme::c().accent)))
@@ -687,6 +709,30 @@ impl Render for SettingsWindow {
     }
 }
 
+/// Ramped auto-scroll delta for a drag parked at the strip's edge:
+/// nothing across the middle of the strip, then speed ramps from
+/// ~6px/frame at the zone boundary to ~36px/frame at the very edge
+/// (the same idea as gpui-base's vertical curve). Positive scrolls
+/// right — toward the end of the row.
+fn edge_scroll_delta(local_x: Pixels, width: Pixels) -> Option<Pixels> {
+    const ZONE: f32 = 48.;
+    const MIN_SPEED: f32 = 6.;
+    const MAX_SPEED: f32 = 36.;
+    let speed = |distance: Pixels| {
+        let t = 1. - (distance / px(ZONE)).clamp(0., 1.);
+        px(MIN_SPEED + t * (MAX_SPEED - MIN_SPEED))
+    };
+    let from_left = local_x;
+    let from_right = width - local_x;
+    if from_left < px(ZONE) {
+        Some(-speed(from_left))
+    } else if from_right < px(ZONE) {
+        Some(speed(from_right))
+    } else {
+        None
+    }
+}
+
 /// One page's heading.
 fn page_header(title: &str, blurb: &str) -> Div {
     let t = theme::c();
@@ -714,6 +760,7 @@ impl SettingsWindow {
     /// the settings window does not need at three sections.
     fn sidebar(&self, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
         let active = self.section;
+        let collapsed = self.sidebar_collapsed;
         let item = |label: &'static str, icon: IconName, target: Section| {
             let selected = active == target;
             let click = cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
@@ -727,12 +774,59 @@ impl SettingsWindow {
                 .active(selected)
                 .on_click(click)
         };
-        Sidebar::new("settings-sidebar").collapsible(false).child(
-            SidebarMenu::new()
-                .child(item("General", IconName::Settings2, Section::General))
-                .child(item("Toolbar", IconName::PanelTop, Section::Toolbar))
-                .child(item("Appearance", IconName::Palette, Section::Appearance)),
-        )
+        // The header/footer/toggle wiring is the component's demo shape:
+        // the Sidebar itself pushes `collapsed` into the menu items, but
+        // the header, footer and toggle button are plain elements — the
+        // app owns the bool and threads it into each of them.
+        let toggle = SidebarToggleButton::new()
+            .collapsed(collapsed)
+            .accessibility_label(if collapsed {
+                "Expand navigation"
+            } else {
+                "Collapse navigation"
+            })
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.sidebar_collapsed = !this.sidebar_collapsed;
+                cx.notify();
+            }));
+        let mut identity = SidebarHeader::new().collapsed(collapsed);
+        if collapsed {
+            // icon-rail width only fits one control — keep the toggle,
+            // drop the identity block
+            identity = identity.child(toggle);
+        } else {
+            identity = identity
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(Icon::new(IconName::Camera).size_4())
+                        .child(div().text_size(px(13.)).child("Shotori")),
+                )
+                .child(toggle);
+        }
+        Sidebar::new("settings-sidebar")
+            .collapsible(true)
+            .collapsed(collapsed)
+            .header(identity)
+            .footer(
+                SidebarFooter::new()
+                    .collapsed(collapsed)
+                    .when(!collapsed, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                        )
+                    }),
+            )
+            .child(
+                SidebarMenu::new()
+                    .child(item("General", IconName::Settings2, Section::General))
+                    .child(item("Toolbar", IconName::PanelTop, Section::Toolbar))
+                    .child(item("Appearance", IconName::Palette, Section::Appearance)),
+            )
     }
 
     /// The content pane: the active section's page. This match is the
@@ -817,9 +911,10 @@ impl SettingsWindow {
             )
     }
 
-    /// Toolbar: the drag-and-drop editor. Both-axis scroll: the preview
-    /// bar hugs its content (703px at the factory row) and a tiled
-    /// window narrower than that must pan, not clip.
+    /// Toolbar: the drag-and-drop editor. Only the preview strip scrolls
+    /// (horizontally, when the bar outgrows the pane); the header, hint,
+    /// palette and footer stay put. The page itself keeps a vertical
+    /// scroll for genuinely short windows.
     fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
         div()
@@ -829,15 +924,15 @@ impl SettingsWindow {
             .gap(px(10.))
             .p(px(PAGE_PAD))
             .size_full()
-            .overflow_scroll()
+            .overflow_y_scroll()
             // header
             .child(page_header(
                 "Toolbar",
                 "Arrange the selection toolbar. Changes apply the next time you take a \
                  screenshot.",
             ))
-            // the live preview
-            .child(self.toolbar_preview(cx))
+            // the live preview, in its own horizontally-scrolling strip
+            .child(self.preview_strip(cx))
             .child(
                 div()
                     .text_size(px(11.))
@@ -852,6 +947,81 @@ impl SettingsWindow {
             .child(self.palette(cx))
             .child(div().flex_1())
             .child(self.footer(cx))
+    }
+
+    /// The preview bar's scroll viewport, with its scrollbar BELOW it —
+    /// outside the scrolled content, never over the icons. The bar hugs
+    /// its content (the factory row is ~703px — the box follows the
+    /// element, never the pane) and pans when the pane is narrower;
+    /// dragging into an edge zone pans with the drag (classic edge
+    /// auto-scroll: park the item at an edge and the strip keeps moving
+    /// under it).
+    fn preview_strip(&self, cx: &Context<Self>) -> Div {
+        let edge = cx.listener(
+            move |this: &mut Self,
+                  event: &DragMoveEvent<DraggedItem>,
+                  _,
+                  cx: &mut Context<Self>| {
+                // on_drag_move has no hover filter (see the grips' note
+                // in `toolbar_preview`) — self-filter by pointer-in-bounds
+                if !event.bounds.contains(&event.event.position) {
+                    this.edge_scroll.stop();
+                    return;
+                }
+                let local_x = event.event.position.x - event.bounds.origin.x;
+                let delta = edge_scroll_delta(local_x, event.bounds.size.width);
+                this.edge_scroll.set(delta, cx, |delta, this, cx| {
+                    // the drag may have ended unseen (cancelled) — skip
+                    // rather than scroll a dead gesture
+                    if !cx.has_active_drag() {
+                        return;
+                    }
+                    let handle = this.preview_scroll.clone();
+                    let offset = handle.offset();
+                    let max = handle.max_offset();
+                    let next = (offset.x + delta).clamp(px(0.), max.x);
+                    if next != offset.x {
+                        handle.set_offset(point(next, offset.y));
+                        cx.notify();
+                    }
+                });
+            },
+        );
+        // The scrollbar lays itself out as an absolute overlay of its
+        // parent (relative(1.) sizing — see its Element impl), so this
+        // row is its mounting box. Always mounted and exactly one thumb
+        // thick: the pill rides flush against the bar's bottom edge —
+        // attached to the OUTSIDE of the toolbar, never over its icons —
+        // and being unconditional, it cannot get out of step with the
+        // layout (a conditionally-mounted row only re-evaluated on the
+        // next unrelated render, so after a resize the scrollbar would
+        // go missing until something else repainted the page).
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("preview-strip")
+                    // row direction: the bar's width is its own content
+                    // width, never stretched to fill the pane (the
+                    // user-reported "box wider than the buttons" bug)
+                    .flex()
+                    .flex_row()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.preview_scroll)
+                    .on_drag_move(edge)
+                    .child(self.toolbar_preview(cx)),
+            )
+            .child(
+                div()
+                    .id("preview-scrollbar-row")
+                    .relative()
+                    .w_full()
+                    .h(px(8.))
+                    // viewport comes from the scroll handle itself (the
+                    // default): exactly the strip above
+                    .child(Scrollbar::horizontal(&self.preview_scroll).id("preview-scrollbar")),
+            )
     }
 
     /// Appearance: theme base + per-field colors with a live mockup.
@@ -899,7 +1069,9 @@ impl SettingsWindow {
             .base
             .clone()
             .unwrap_or_else(|| "auto".into());
-        let mut row = div().flex().items_center().gap(px(6.));
+        // wraps at narrow pane widths — the window has no min size, and
+        // a row of fixed buttons must not stretch the page horizontally
+        let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
         row = row.child(
             div()
                 .w(px(110.))
@@ -1028,7 +1200,8 @@ impl SettingsWindow {
     /// The seven annotation colors (paint order, exported into PNGs).
     fn annotation_row(&self, _: &Context<Self>) -> Div {
         let t = theme::c();
-        let mut row = div().flex().items_center().gap(px(8.));
+        // wraps at narrow pane widths (no window min size)
+        let mut row = div().flex().flex_wrap().items_center().gap(px(8.));
         row = row.child(
             div()
                 .w(px(110.))
