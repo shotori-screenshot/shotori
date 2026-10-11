@@ -1055,10 +1055,6 @@ impl SettingsWindow {
             )
     }
 
-    /// Toolbar: the drag-and-drop editor. Only the preview strip scrolls
-    /// (horizontally, when the bar outgrows the pane); the header, hint,
-    /// palette and footer stay put. The page itself keeps a vertical
-    /// scroll for genuinely short windows.
     /// Toolbar: the drag-and-drop editor. The page itself NEVER
     /// scrolls — the header, the preview strip (+ its scrollbar rail),
     /// the hint and the footer are pinned, and only the palette below
@@ -1068,6 +1064,22 @@ impl SettingsWindow {
     /// AND vertically.)
     fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
+        // Releasing anywhere on the page confirms the PREVIEWED slot:
+        // the gap highlight is a promise, not a hint. Drop targets
+        // that physically sit under the pointer win by bubbling
+        // inner-first (items and the bar land, the palette removes);
+        // this fallback catches every other spot the gap was still
+        // visible from — the rail, the strip around the bar, the
+        // header, the margins — where a release used to be silently
+        // swallowed and the drag died with the preview lit (the
+        // highlight/drop mismatch, user-reported).
+        let page_fallback = cx.listener(
+            move |this: &mut Self, dragged: &DraggedItem, _, cx: &mut Context<Self>| {
+                if let Some(slot) = this.drag.as_ref().map(|d| d.slot) {
+                    this.drop_at(slot, dragged, cx);
+                }
+            },
+        );
         div()
             .id("page-toolbar")
             .flex()
@@ -1075,6 +1087,7 @@ impl SettingsWindow {
             .gap(px(10.))
             .p(px(PAGE_PAD))
             .size_full()
+            .on_drop(page_fallback)
             // header
             .child(page_header(
                 "Toolbar",
@@ -1088,9 +1101,9 @@ impl SettingsWindow {
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
                     .child(
-                        "Drag a control to move it · drop it here or on the palette to remove \
-                         it · click to remove / append · hidden controls keep their keyboard \
-                         shortcuts",
+                        "Drag a control to move it · release anywhere to drop it at the \
+                         highlighted gap · drop it on the palette to remove it · click to \
+                         remove / append · hidden controls keep their keyboard shortcuts",
                     ),
             )
             // the palette — the only vertically scrolling part; `min_h(0)`
