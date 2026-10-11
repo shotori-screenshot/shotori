@@ -1,17 +1,16 @@
 //! # Persistent user settings (`~/.config/shotori/settings.toml`)
 //!
 //! Everything a user can configure that is not a color (colors live in
-//! `theme.toml` — see [`crate::ui::theme::load`]). v1: which buttons the
-//! selection toolbar shows; future sections (theme picker, language)
-//! join the same file.
+//! `theme.toml` — see [`crate::ui::theme::load`]). v1: the selection
+//! toolbar's row-one layout — WHICH controls show and in WHAT order,
+//! edited by dragging in the settings window (`shotori settings`).
 //!
 //! Lifecycle mirrors the theme: loaded once at startup ([`init`]) and
 //! read everywhere via [`current`]. The screenshot overlay is a
 //! run-and-exit process, so there is deliberately no live reload —
-//! `shotori settings` (or the tray menu) opens the editor window,
-//! every toggle writes straight through to the file, and the NEXT
-//! capture picks the change up. A half-edited or wedged editor can
-//! therefore never corrupt a running session.
+//! the settings window writes straight through to the file, and the
+//! NEXT capture picks the change up. A half-edited or wedged editor
+//! can therefore never corrupt a running session.
 //!
 //! Unknown ids and unknown sections are tolerated, not fatal: a file
 //! written by a NEWER shotori (extra buttons, extra sections) degrades
@@ -19,7 +18,6 @@
 //! round-trips the unknown parts so the editor never eats keys it does
 //! not know about.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -29,8 +27,9 @@ use serde::Deserialize;
 pub const FILE_NAME: &str = "settings.toml";
 
 /// One toggleable row-one button of the selection toolbar. Variant
-/// order is the canonical display order; [`ToolbarButton::id`] strings
-/// are the file format — never rename one (files exist in the wild).
+/// order is the canonical order (the factory row, the settings
+/// palette); [`ToolbarButton::id`] strings are the file format — never
+/// rename one (files exist in the wild).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ToolbarButton {
     Select,
@@ -54,10 +53,9 @@ pub enum ToolbarButton {
     Copy,
 }
 
-/// The row-one groups the toolbar draws: the tool cluster, the action
-/// cluster, then the confirm pair. A separator sits between the last
-/// two and disappears when either side is fully hidden (see
-/// [`Settings::row1_separator_visible`]).
+/// The row-one groups the settings palette groups buttons by (the
+/// toolbar itself renders one flat sequence — the factory row's
+/// spacer/separator reproduce the two-cluster look).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarCluster {
     Tools,
@@ -66,8 +64,9 @@ pub enum ToolbarCluster {
 }
 
 impl ToolbarButton {
-    /// Every button, in display order. The settings window lists and
-    /// the toolbar render both iterate this — one order everywhere.
+    /// Every button, in factory/display order. The settings palette
+    /// lists and the factory row both iterate this — one order
+    /// everywhere.
     pub const ALL: [Self; 19] = [
         Self::Select,
         Self::Rectangle,
@@ -119,8 +118,7 @@ impl ToolbarButton {
         Self::ALL.iter().copied().find(|b| b.id() == id)
     }
 
-    /// Which row-one group the button belongs to (drives both the
-    /// settings window's sections and the separator predicate).
+    /// Which palette group the button lists under.
     pub const fn cluster(self) -> ToolbarCluster {
         match self {
             Self::Select
@@ -142,13 +140,87 @@ impl ToolbarButton {
     }
 }
 
-/// User settings. Default = the factory toolbar (nothing hidden).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+/// One slot of the configured toolbar row. A row is an ordered list of
+/// these — the order IS the customization.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolbarItem {
+    Button(ToolbarButton),
+    /// Flexible gap between controls (the factory row uses one between
+    /// the tool cluster and the action cluster). Grows when the bar
+    /// has spare room, never below its minimum width — see the spacer
+    /// pitch notes in `model::placement`.
+    Spacer,
+    /// The thin vertical group break.
+    Separator,
+}
+
+impl ToolbarItem {
+    /// Stable id for the settings file (same vocabulary as button ids).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Button(button) => button.id(),
+            Self::Spacer => "spacer",
+            Self::Separator => "separator",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "spacer" => Some(Self::Spacer),
+            "separator" => Some(Self::Separator),
+            _ => ToolbarButton::from_id(id).map(Self::Button),
+        }
+    }
+
+    /// Human name for the drag ghost / palette chip of a layout item.
+    pub fn layout_name(self) -> Option<&'static str> {
+        match self {
+            Self::Spacer => Some("Flexible gap"),
+            Self::Separator => Some("Separator"),
+            Self::Button(_) => None,
+        }
+    }
+}
+
+/// The factory row: exactly the layout the hardcoded toolbar shipped
+/// before customization existed (tools, gap, actions, break, confirm
+/// pair) — a fresh install and "Reset to defaults" both land here.
+pub const DEFAULT_ROW: [ToolbarItem; 21] = [
+    ToolbarItem::Button(ToolbarButton::Select),
+    ToolbarItem::Button(ToolbarButton::Rectangle),
+    ToolbarItem::Button(ToolbarButton::Ellipse),
+    ToolbarItem::Button(ToolbarButton::Line),
+    ToolbarItem::Button(ToolbarButton::Polyline),
+    ToolbarItem::Button(ToolbarButton::Arrow),
+    ToolbarItem::Button(ToolbarButton::Number),
+    ToolbarItem::Button(ToolbarButton::Pencil),
+    ToolbarItem::Button(ToolbarButton::Highlighter),
+    ToolbarItem::Button(ToolbarButton::Mosaic),
+    ToolbarItem::Button(ToolbarButton::Eraser),
+    ToolbarItem::Button(ToolbarButton::Text),
+    ToolbarItem::Button(ToolbarButton::Clear),
+    ToolbarItem::Spacer,
+    ToolbarItem::Button(ToolbarButton::Ocr),
+    ToolbarItem::Button(ToolbarButton::Save),
+    ToolbarItem::Button(ToolbarButton::Pin),
+    ToolbarItem::Button(ToolbarButton::Scroll),
+    ToolbarItem::Separator,
+    ToolbarItem::Button(ToolbarButton::Cancel),
+    ToolbarItem::Button(ToolbarButton::Copy),
+];
+
+/// User settings. Default = the factory row.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
-    /// Row-one toolbar buttons the user hid; absent = visible. Hidden
-    /// buttons keep their keyboard shortcuts — only the visible row
-    /// changes.
-    hidden: BTreeSet<ToolbarButton>,
+    row: Vec<ToolbarItem>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            row: DEFAULT_ROW.to_vec(),
+        }
+    }
 }
 
 /// The subset of the file this version understands. Unknown keys are
@@ -162,48 +234,103 @@ struct File {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ToolbarFile {
+    /// The ordered row (current format). Absent → fall back to
+    /// `hidden` (the pre-ordering format), then the factory row.
+    items: Option<Vec<String>>,
+    /// Legacy visibility-only format: factory row minus these ids.
     hidden: Vec<String>,
 }
 
 impl Settings {
-    pub fn toolbar_visible(&self, button: ToolbarButton) -> bool {
-        !self.hidden.contains(&button)
-    }
-
-    pub fn set_toolbar_visible(&mut self, button: ToolbarButton, visible: bool) {
-        if visible {
-            self.hidden.remove(&button);
-        } else {
-            self.hidden.insert(button);
-        }
-    }
-
-    /// How many row-one buttons are hidden — the placement width basis
-    /// shrinks by one button footprint per hidden button (all
-    /// configurable buttons live on row one).
-    pub fn hidden_row1_count(&self) -> usize {
-        self.hidden.len()
-    }
-
-    /// The group break between the action cluster and the confirm pair
-    /// stays only while it separates something: it vanishes when
-    /// either side is fully hidden. One predicate for the render and
-    /// the width basis — they cannot drift.
-    pub fn row1_separator_visible(&self) -> bool {
-        let mut actions = false;
-        let mut confirm = false;
-        for button in ToolbarButton::ALL {
-            match button.cluster() {
-                ToolbarCluster::Actions => actions |= self.toolbar_visible(button),
-                ToolbarCluster::Confirm => confirm |= self.toolbar_visible(button),
-                ToolbarCluster::Tools => {}
+    /// Commit a drop into preview slot `slot` (slot i sits before row
+    /// item i; slot n = after the last item). Slots are indexed
+    /// against the row WITH the dragged item still in place, hence
+    /// the -1 when moving right past the source. `from` = `Some(src)`
+    /// reorders an item already on the row; `None` inserts a palette
+    /// item.
+    pub fn apply_drop(
+        item: ToolbarItem,
+        row: &[ToolbarItem],
+        slot: usize,
+        from: Option<usize>,
+    ) -> Vec<ToolbarItem> {
+        let mut row = row.to_vec();
+        let (item, dst) = match from {
+            Some(src) if src < row.len() => {
+                let moved = row.remove(src);
+                (moved, if slot > src { slot - 1 } else { slot })
             }
-        }
-        actions && confirm
+            _ => (item, slot),
+        };
+        row.insert(dst.min(row.len()), item);
+        row
+    }
+    /// The configured row, in display order.
+    pub fn row(&self) -> &[ToolbarItem] {
+        &self.row
     }
 
-    /// Load from `path` (missing file → defaults, silently). Errors are
-    /// returned, never fatal: a broken file must not take the
+    /// Install a new row (the settings editor's commits; rows built by
+    /// the editor are valid by construction — sanitization happens at
+    /// load time).
+    pub fn set_row(&mut self, row: Vec<ToolbarItem>) {
+        self.row = row;
+    }
+
+    /// A button shows iff it has a slot in the row; hidden buttons
+    /// keep their keyboard shortcuts.
+    pub fn toolbar_visible(&self, button: ToolbarButton) -> bool {
+        self.row.contains(&ToolbarItem::Button(button))
+    }
+
+    /// Row composition stats for the placement width basis (see
+    /// `model::placement::row1_basis`).
+    pub fn row1_button_count(&self) -> usize {
+        self.row
+            .iter()
+            .filter(|item| matches!(item, ToolbarItem::Button(_)))
+            .count()
+    }
+
+    pub fn row1_separator_count(&self) -> usize {
+        self.row
+            .iter()
+            .filter(|item| matches!(item, ToolbarItem::Separator))
+            .count()
+    }
+
+    pub fn row1_spacer_count(&self) -> usize {
+        self.row
+            .iter()
+            .filter(|item| matches!(item, ToolbarItem::Spacer))
+            .count()
+    }
+
+    /// Drop a button's duplicate slots (keep the first — a button
+    /// dispatches one action, listing it twice is a hand-edit typo)
+    /// and report each drop.
+    fn sanitize(row: Vec<ToolbarItem>) -> (Vec<ToolbarItem>, Vec<String>) {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut clean = Vec::with_capacity(row.len());
+        let mut errors = Vec::new();
+        for (position, item) in row.into_iter().enumerate() {
+            if let ToolbarItem::Button(button) = item
+                && !seen.insert(button)
+            {
+                errors.push(format!(
+                    "duplicate toolbar button {} at position {} (kept the first)",
+                    button.id(),
+                    position
+                ));
+                continue;
+            }
+            clean.push(item);
+        }
+        (clean, errors)
+    }
+
+    /// Load from `path` (missing file → factory row, silently). Errors
+    /// are returned, never fatal: a broken file must not take the
     /// screenshot session down with it.
     pub fn load(path: Option<&Path>) -> (Self, Vec<String>) {
         let Some(path) = path else {
@@ -220,32 +347,53 @@ impl Settings {
             Ok(file) => file,
             Err(e) => return (Self::default(), vec![format!("{}: {e}", path.display())]),
         };
-        let mut settings = Self::default();
         let mut errors = Vec::new();
-        for id in file.toolbar.hidden {
-            match ToolbarButton::from_id(&id) {
-                Some(button) => {
-                    settings.hidden.insert(button);
+        let row = if let Some(items) = file.toolbar.items {
+            let mut row = Vec::with_capacity(items.len());
+            for id in items {
+                match ToolbarItem::from_id(&id) {
+                    Some(item) => row.push(item),
+                    None => errors.push(format!(
+                        "{}: unknown toolbar item {id:?} (skipped; known ids: {})",
+                        path.display(),
+                        known_ids()
+                    )),
                 }
-                None => errors.push(format!(
-                    "{}: unknown toolbar button {id:?} (skipped; known ids: {})",
-                    path.display(),
-                    ToolbarButton::ALL
-                        .iter()
-                        .map(|b| b.id())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
             }
-        }
-        (settings, errors)
+            row
+        } else if !file.toolbar.hidden.is_empty() {
+            // Legacy `hidden` files (visibility-only customization):
+            // factory row minus the hidden buttons — order untouched.
+            let mut hidden = std::collections::BTreeSet::new();
+            for id in file.toolbar.hidden {
+                match ToolbarButton::from_id(&id) {
+                    Some(button) => {
+                        hidden.insert(button);
+                    }
+                    None => errors.push(format!(
+                        "{}: unknown toolbar button {id:?} (skipped)",
+                        path.display()
+                    )),
+                }
+            }
+            DEFAULT_ROW
+                .into_iter()
+                .filter(|item| !matches!(item, ToolbarItem::Button(b) if hidden.contains(b)))
+                .collect()
+        } else {
+            DEFAULT_ROW.to_vec()
+        };
+        let (row, sanitize_errors) = Self::sanitize(row);
+        errors.extend(sanitize_errors);
+        (Self { row }, errors)
     }
 
     /// Write through to `path`. The existing document is parsed and
     /// re-serialized so unknown keys/sections (written by a newer
     /// shotori) survive the edit; a corrupt existing file is replaced
     /// outright — it was unusable, and the editor is the recovery
-    /// path. Comments do not survive (Value-level round-trip).
+    /// path. Comments do not survive (Value-level round-trip). The
+    /// legacy `hidden` key is removed: `items` supersedes it.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         // toml::from_str, not str::parse: Value's FromStr accepts a
         // single VALUE expression ("[a]\nx=1" parses as an array then
@@ -254,11 +402,10 @@ impl Settings {
             .ok()
             .and_then(|text| toml::from_str(&text).ok())
             .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-        let hidden = toml::Value::Array(
-            ToolbarButton::ALL
+        let items = toml::Value::Array(
+            self.row
                 .iter()
-                .filter(|b| self.hidden.contains(b))
-                .map(|b| toml::Value::from(b.id()))
+                .map(|item| toml::Value::from(item.id()))
                 .collect(),
         );
         let Some(table) = doc.as_table_mut() else {
@@ -276,7 +423,8 @@ impl Settings {
                 path.display()
             ));
         };
-        toolbar.insert("hidden".into(), hidden);
+        toolbar.remove("hidden");
+        toolbar.insert("items".into(), items);
         let body = toml::to_string(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = format!(
             "# Shotori settings — managed by `shotori settings`; unknown keys are preserved.\n{body}"
@@ -286,6 +434,13 @@ impl Settings {
         }
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+/// All valid ids, comma-joined for error messages.
+fn known_ids() -> String {
+    let mut ids: Vec<&str> = ToolbarButton::ALL.iter().map(|b| b.id()).collect();
+    ids.extend(["spacer", "separator"]);
+    ids.join(", ")
 }
 
 /// `~/.config/shotori` (XDG_CONFIG_HOME-aware) — shared by the theme
@@ -304,14 +459,16 @@ pub fn config_path() -> Option<PathBuf> {
 }
 
 static ACTIVE: OnceLock<Settings> = OnceLock::new();
-static DEFAULT: Settings = Settings {
-    hidden: BTreeSet::new(),
-};
+static FACTORY: OnceLock<Settings> = OnceLock::new();
 
 /// The process-wide settings, installed once at startup ([`init`]).
-/// Before/without init: the factory defaults.
+/// Before/without init: the factory row (lazily materialized — a
+/// `Vec`-backed default is not const-constructible with its content).
 pub fn current() -> &'static Settings {
-    ACTIVE.get().unwrap_or(&DEFAULT)
+    match ACTIVE.get() {
+        Some(settings) => settings,
+        None => FACTORY.get_or_init(Settings::default),
+    }
 }
 
 /// Startup pickup: read the config file (unless `--no-config`), report
@@ -329,76 +486,161 @@ pub fn init(args: &crate::args::Cli) {
 mod tests {
     use super::*;
 
-    fn hidden(list: &[ToolbarButton]) -> Settings {
-        let mut s = Settings::default();
-        for b in list {
-            s.set_toolbar_visible(*b, false);
-        }
-        s
-    }
-
     #[test]
-    fn ids_round_trip_and_are_unique() {
+    fn item_ids_round_trip_and_are_unique() {
         let mut seen = std::collections::BTreeSet::new();
         for button in ToolbarButton::ALL {
             assert_eq!(ToolbarButton::from_id(button.id()), Some(button));
             assert!(seen.insert(button.id()), "duplicate id {}", button.id());
         }
-        assert_eq!(ToolbarButton::from_id("translate"), None);
-    }
-
-    #[test]
-    fn defaults_show_everything() {
-        let s = Settings::default();
-        for button in ToolbarButton::ALL {
-            assert!(s.toolbar_visible(button));
+        for id in ["spacer", "separator"] {
+            assert!(seen.insert(id), "duplicate id {id}");
         }
-        assert_eq!(s.hidden_row1_count(), 0);
-        assert!(s.row1_separator_visible());
+        assert_eq!(ToolbarItem::from_id("spacer"), Some(ToolbarItem::Spacer));
+        assert_eq!(
+            ToolbarItem::from_id("separator"),
+            Some(ToolbarItem::Separator)
+        );
+        assert_eq!(ToolbarItem::from_id("translate"), None);
     }
 
     #[test]
-    fn visibility_toggles() {
+    fn factory_row_is_the_historical_layout() {
+        let row = Settings::default().row().to_vec();
+        // the pre-customization toolbar, item for item
+        assert_eq!(row.len(), 21);
+        assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
+        assert_eq!(row[13], ToolbarItem::Spacer);
+        assert_eq!(row[18], ToolbarItem::Separator);
+        assert_eq!(
+            *row.last().unwrap(),
+            ToolbarItem::Button(ToolbarButton::Copy)
+        );
+        // every button placed exactly once
+        for button in ToolbarButton::ALL {
+            assert!(Settings::default().toolbar_visible(button));
+        }
+        assert_eq!(Settings::default().row1_button_count(), 19);
+        assert_eq!(Settings::default().row1_separator_count(), 1);
+        assert_eq!(Settings::default().row1_spacer_count(), 1);
+    }
+
+    #[test]
+    fn row_order_controls_visibility_and_sequence() {
         let mut s = Settings::default();
-        s.set_toolbar_visible(ToolbarButton::Pin, false);
-        s.set_toolbar_visible(ToolbarButton::Scroll, false);
-        assert!(!s.toolbar_visible(ToolbarButton::Pin));
-        assert!(s.toolbar_visible(ToolbarButton::Copy));
-        assert_eq!(s.hidden_row1_count(), 2);
-        s.set_toolbar_visible(ToolbarButton::Pin, true);
-        assert!(s.toolbar_visible(ToolbarButton::Pin));
-        assert_eq!(s.hidden_row1_count(), 1);
-    }
-
-    #[test]
-    fn separator_needs_both_sides() {
-        // default: both sides populated → visible
-        assert!(Settings::default().row1_separator_visible());
-        // every action hidden → nothing on the left of the break
-        let s = hidden(&[
-            ToolbarButton::Ocr,
-            ToolbarButton::Save,
-            ToolbarButton::Pin,
-            ToolbarButton::Scroll,
+        s.set_row(vec![
+            ToolbarItem::Button(ToolbarButton::Copy),
+            ToolbarItem::Button(ToolbarButton::Select),
+            ToolbarItem::Separator,
         ]);
-        assert!(!s.row1_separator_visible());
-        // confirm pair hidden → nothing on the right
-        let s = hidden(&[ToolbarButton::Cancel, ToolbarButton::Copy]);
-        assert!(!s.row1_separator_visible());
-        // one action left, both confirms left → still meaningful
-        let s = hidden(&[ToolbarButton::Scroll]);
-        assert!(s.row1_separator_visible());
+        assert!(s.toolbar_visible(ToolbarButton::Copy));
+        assert!(!s.toolbar_visible(ToolbarButton::Save));
+        assert_eq!(s.row1_button_count(), 2);
+        assert_eq!(s.row1_separator_count(), 1);
+        assert_eq!(s.row1_spacer_count(), 0);
+        // an empty row is a valid "hide everything" toolbar
+        s.set_row(Vec::new());
+        assert_eq!(s.row1_button_count(), 0);
     }
 
     #[test]
-    fn load_missing_file_is_default_silently() {
+    fn load_missing_file_is_factory_silently() {
         let (s, errors) = Settings::load(Some(Path::new("/nonexistent/shotori/settings.toml")));
         assert_eq!(s, Settings::default());
         assert!(errors.is_empty());
     }
 
     #[test]
-    fn load_reads_hidden_and_skips_unknown_ids() {
+    fn load_reads_the_ordered_row_and_skips_unknown_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            "[toolbar]\nitems = [\"copy\", \"spacer\", \"bogus\", \"separator\", \"save\"]\n",
+        )
+        .unwrap();
+        let (s, errors) = Settings::load(Some(&path));
+        assert_eq!(
+            s.row(),
+            &[
+                ToolbarItem::Button(ToolbarButton::Copy),
+                ToolbarItem::Spacer,
+                ToolbarItem::Separator,
+                ToolbarItem::Button(ToolbarButton::Save),
+            ]
+        );
+        assert_eq!(errors.len(), 1, "the unknown id must be reported");
+        assert!(errors[0].contains("bogus"));
+        assert!(
+            errors[0].contains("spacer"),
+            "known ids are listed in the error"
+        );
+    }
+
+    #[test]
+    fn drops_reorder_and_insert_at_the_right_slot() {
+        use ToolbarButton as B;
+        let btn = |b: ToolbarButton| ToolbarItem::Button(b);
+        let row = [btn(B::Copy), btn(B::Save), btn(B::Pin)];
+
+        // palette insert at the front / middle / past-the-end (clamps)
+        assert_eq!(
+            Settings::apply_drop(btn(B::Ocr), &row, 0, None),
+            [btn(B::Ocr), btn(B::Copy), btn(B::Save), btn(B::Pin)]
+        );
+        assert_eq!(
+            Settings::apply_drop(btn(B::Ocr), &row, 2, None),
+            [btn(B::Copy), btn(B::Save), btn(B::Ocr), btn(B::Pin)]
+        );
+        assert_eq!(
+            Settings::apply_drop(btn(B::Ocr), &row, 99, None),
+            [btn(B::Copy), btn(B::Save), btn(B::Pin), btn(B::Ocr)]
+        );
+
+        // reorder: drag Copy (slot 0) to before Pin (slot 2) — the
+        // slot was indexed with Copy still in place, so the insert
+        // lands one to the left of the naive read
+        assert_eq!(
+            Settings::apply_drop(btn(B::Copy), &row, 2, Some(0)),
+            [btn(B::Save), btn(B::Copy), btn(B::Pin)]
+        );
+        // drag Pin (slot 2) to the very front
+        assert_eq!(
+            Settings::apply_drop(btn(B::Pin), &row, 0, Some(2)),
+            [btn(B::Pin), btn(B::Copy), btn(B::Save)]
+        );
+        // drop back onto its own slot: no-op
+        assert_eq!(
+            Settings::apply_drop(btn(B::Save), &row, 1, Some(1)),
+            row.to_vec()
+        );
+        // a stale source (row changed mid-drag) degrades to an insert
+        assert_eq!(
+            Settings::apply_drop(btn(B::Pin), &row, 0, Some(9)),
+            [btn(B::Pin), btn(B::Copy), btn(B::Save), btn(B::Pin)]
+        );
+
+        // layout items stack: a second spacer drops in fine
+        let with_spacer = [btn(B::Copy), ToolbarItem::Spacer];
+        assert_eq!(
+            Settings::apply_drop(ToolbarItem::Spacer, &with_spacer, 2, None),
+            [btn(B::Copy), ToolbarItem::Spacer, ToolbarItem::Spacer]
+        );
+    }
+
+    #[test]
+    fn load_dedupes_repeated_buttons_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "[toolbar]\nitems = [\"copy\", \"copy\", \"save\"]\n").unwrap();
+        let (s, errors) = Settings::load(Some(&path));
+        assert_eq!(s.row1_button_count(), 2);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("duplicate"));
+    }
+
+    #[test]
+    fn legacy_hidden_files_keep_working() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         std::fs::write(
@@ -410,8 +652,10 @@ mod tests {
         assert!(!s.toolbar_visible(ToolbarButton::Pin));
         assert!(!s.toolbar_visible(ToolbarButton::Scroll));
         assert!(s.toolbar_visible(ToolbarButton::Copy));
-        assert_eq!(errors.len(), 1, "the unknown id must be reported");
-        assert!(errors[0].contains("bogus"));
+        // factory order otherwise, spacer and separator intact
+        assert_eq!(s.row1_button_count(), 17);
+        assert_eq!(s.row1_spacer_count(), 1);
+        assert_eq!(errors.len(), 1, "unknown hidden id reported");
     }
 
     #[test]
@@ -428,18 +672,24 @@ mod tests {
     fn save_then_load_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join(FILE_NAME);
-        let s = hidden(&[ToolbarButton::Pin, ToolbarButton::Eraser]);
+        let mut s = Settings::default();
+        s.set_row(vec![
+            ToolbarItem::Button(ToolbarButton::Pin),
+            ToolbarItem::Spacer,
+            ToolbarItem::Button(ToolbarButton::Eraser),
+            ToolbarItem::Separator,
+        ]);
         s.save(&path).expect("save must create parent dirs");
         let (back, errors) = Settings::load(Some(&path));
         assert!(errors.is_empty());
         assert_eq!(back, s);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[toolbar]"));
-        assert!(text.contains("\"pin\""));
+        assert!(text.contains("\"spacer\""));
     }
 
     #[test]
-    fn save_preserves_unknown_keys_and_sections() {
+    fn save_preserves_unknown_keys_and_drops_legacy_hidden() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         std::fs::write(
@@ -447,15 +697,16 @@ mod tests {
             "[toolbar]\nhidden = [\"pin\"]\n[future_section]\nlanguage = \"de\"\n",
         )
         .unwrap();
-        hidden(&[ToolbarButton::Scroll]).save(&path).unwrap();
+        Settings::default().save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.contains("future_section"),
             "unknown sections must survive an edit: {text}"
         );
-        assert!(text.contains("language"));
-        // the edit replaced pin-hidden with scroll-hidden
-        let (back, _) = Settings::load(Some(&path));
-        assert_eq!(back, hidden(&[ToolbarButton::Scroll]));
+        assert!(
+            !text.contains("hidden"),
+            "the legacy key must not survive next to items: {text}"
+        );
+        assert!(text.contains("items"));
     }
 }

@@ -2456,14 +2456,16 @@ mod multi_output_tests {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
 
-        // Single row (no tool active): the bar is TB_W_ROW1 wide and the
-        // flex_1 spacer between the tool cluster and the action cluster
-        // collapses to a small deliberate group break — NOT the ~70px
-        // dead hole a full-TB_W bar showed (user-reported).
+        // Single row (no tool active): the bar hugs the configured
+        // factory row (its basis width) and the spacer between the
+        // tool cluster and the action cluster renders as a small
+        // deliberate group break — NOT the ~70px dead hole a full-TB_W
+        // bar showed (user-reported), and not zero either (the spacer
+        // keeps its minimum width).
         vcx.update(|_, cx| {
             assert_eq!(
                 session.read(cx).toolbar_bounds("main").unwrap().size.width,
-                px(crate::model::placement::TB_W_ROW1)
+                px(crate::model::placement::default_row1_basis())
             );
         });
         let gap = f32::from(
@@ -2471,8 +2473,8 @@ mod multi_output_tests {
                 - vcx.debug_bounds("tb-clear").unwrap().right(),
         );
         assert!(
-            gap <= 10.,
-            "single-row toolbar has a {gap}px hole between the tools and the actions"
+            (crate::model::placement::SPACER_MIN..=24.).contains(&gap),
+            "the tools/actions break must read as a deliberate break, got {gap}px"
         );
         // …and the right edge is intact: the copy button ends far enough
         // from the bar's right edge that the grip strip still fits
@@ -2601,7 +2603,10 @@ mod multi_output_tests {
             // grab (6,19) held, x clamped to the window (narrow single-row bar)
             assert_eq!(
                 b.origin,
-                point(px(800. - crate::model::placement::TB_W_ROW1 - 8.), px(81.))
+                point(
+                    px(800. - crate::model::placement::default_row1_basis() - 8.),
+                    px(81.),
+                )
             );
         });
         vcx.simulate_mouse_up(
@@ -2614,7 +2619,10 @@ mod multi_output_tests {
             assert!(!session.read(cx).toolbar_drag_active());
             assert_eq!(
                 session.read(cx).toolbar_bounds("main").unwrap().origin,
-                point(px(800. - crate::model::placement::TB_W_ROW1 - 8.), px(81.))
+                point(
+                    px(800. - crate::model::placement::default_row1_basis() - 8.),
+                    px(81.),
+                )
             );
             // the press on the grip never became a selection interaction
             let b = session.read(cx).selection().bounds().unwrap();

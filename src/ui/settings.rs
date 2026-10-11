@@ -8,46 +8,66 @@
 //!
 //! Launch: `shotori settings` or the tray menu. The screenshot overlay
 //! is a run-and-exit process, so edits cannot reach a live session:
-//! every toggle writes straight through to `settings.toml`
-//! (see [`crate::model::settings`]) and the NEXT capture picks it up —
+//! every change writes straight through to `settings.toml` (see
+//! [`crate::model::settings`]) and the NEXT capture picks it up —
 //! crash-safe by construction, no OK button, no dirty state.
 //!
-//! v1 section: the selection toolbar's buttons (per-button visibility).
-//! The section list below is data; theme picking and language join as
-//! further sections when they become user-configurable.
+//! v1 section: the selection toolbar's layout, edited by dragging —
+//! a live preview bar (the real render pieces: [`crate::ui::toolbar`])
+//! plus a palette of the controls not currently placed. Drag between
+//! the two in either direction, drag inside the bar to reorder, click
+//! to remove/append. gpui's native drag-and-drop carries the payload;
+//! the drop slots between the preview items only exist while a drag is
+//! in flight, so the bar visibly opens up where an item would land.
 
 use std::path::PathBuf;
 
-use gpui_kit::base::{Button, Switch, SwitchThumb, SwitchTrack};
+use gpui_kit::base::Button;
 use gpui_kit::*;
 
-use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster};
+use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster, ToolbarItem};
 use crate::ui::theme;
-use crate::ui::toolbar::{BUTTONS, ButtonMeta};
+use crate::ui::toolbar;
 
 gpui_kit::actions!([CloseSettings]);
 
-/// The window's sections, in display order. A section lists the row-one
-/// clusters it edits; the confirm pair (Cancel/Copy) shares "Actions"
-/// here — the cluster split only matters to the toolbar's separator.
-const SECTIONS: [(&str, &[ToolbarCluster]); 2] = [
-    ("Annotation tools", &[ToolbarCluster::Tools]),
-    (
-        "Actions",
-        &[ToolbarCluster::Actions, ToolbarCluster::Confirm],
-    ),
-];
-
-const WINDOW_W: f32 = 620.;
-const WINDOW_H: f32 = 660.;
+const WINDOW_W: f32 = 800.;
+const WINDOW_H: f32 = 560.;
 const PAGE_PAD: f32 = 24.;
-const ROW_H: f32 = 38.;
-const ROW_GAP: f32 = 6.;
-/// Two rows side by side; flex-wrap reflows if the window resizes.
-const ROW_W: f32 = (WINDOW_W - 2. * PAGE_PAD - ROW_GAP) / 2.;
-const SWITCH_W: f32 = 36.;
-const SWITCH_H: f32 = 20.;
-const SWITCH_THUMB: f32 = 16.;
+
+/// The drag-and-drop payload: what is being carried and where it came
+/// from (`None` = palette: a fresh insert; `Some(i)` = the preview
+/// bar: a reorder that removes slot i first).
+struct DraggedItem {
+    item: ToolbarItem,
+    from: Option<usize>,
+}
+
+/// The chip that follows the pointer during a drag.
+struct DragGhost {
+    item: ToolbarItem,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::c();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(8.))
+            .h(px(28.))
+            .rounded(px(6.))
+            .bg(rgba(t.toolbar_bg))
+            .border_1()
+            .border_color(rgba(t.accent))
+            .shadow_md()
+            .text_size(px(12.))
+            .text_color(rgba(t.toolbar_text))
+            .child(icon_visual(self.item))
+            .child(item_name(self.item))
+    }
+}
 
 /// Run the settings window; returns when the window closes.
 pub fn run() {
@@ -79,6 +99,8 @@ pub fn run() {
 }
 
 fn window_options() -> WindowOptions {
+    // Wide enough for the factory row (~670px) to preview without
+    // squeezing; the palette below wraps, so height is forgiving.
     WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: Some(TitlebarOptions {
@@ -128,13 +150,11 @@ impl SettingsWindow {
         }
     }
 
-    fn set_button(&mut self, button: ToolbarButton, visible: bool, cx: &mut Context<Self>) {
-        self.settings.set_toolbar_visible(button, visible);
-        self.persist(cx);
-    }
-
-    fn reset(&mut self, cx: &mut Context<Self>) {
-        self.settings = Settings::default();
+    /// Install a row and write it through. Rows built here are valid
+    /// by construction (buttons can only come from the palette, which
+    /// never offers one that is already placed).
+    fn commit(&mut self, row: Vec<ToolbarItem>, cx: &mut Context<Self>) {
+        self.settings.set_row(row);
         self.persist(cx);
     }
 
@@ -147,6 +167,35 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.commit(Settings::default().row().to_vec(), cx);
+    }
+
+    /// A drop landed in preview slot `i` (slot i sits before row item
+    /// i; slot n = after the last item — slots are indexed against the
+    /// row WITH the dragged item still in place, hence the -1 when
+    /// moving right). The index math lives in the model, tested there.
+    fn drop_at(&mut self, i: usize, dragged: &DraggedItem, cx: &mut Context<Self>) {
+        let row = Settings::apply_drop(dragged.item, self.settings.row(), i, dragged.from);
+        self.commit(row, cx);
+    }
+
+    /// Click on a preview item: remove it (drops back into the palette).
+    fn remove_at(&mut self, i: usize, cx: &mut Context<Self>) {
+        let mut row = self.settings.row().to_vec();
+        if i < row.len() {
+            row.remove(i);
+            self.commit(row, cx);
+        }
+    }
+
+    /// Click on a palette chip: append to the row's end.
+    fn append(&mut self, item: ToolbarItem, cx: &mut Context<Self>) {
+        let mut row = self.settings.row().to_vec();
+        row.push(item);
+        self.commit(row, cx);
+    }
+
     fn location(&self) -> String {
         match &self.path {
             Some(path) => format!("Saves to {}", path.display()),
@@ -154,95 +203,193 @@ impl SettingsWindow {
         }
     }
 
-    fn section(&self, title: &'static str, clusters: &[ToolbarCluster], cx: &Context<Self>) -> Div {
-        let mut rows = div().flex().flex_wrap().gap(px(ROW_GAP));
-        for (ix, meta) in BUTTONS
-            .iter()
-            .enumerate()
-            .filter(|(_, meta)| clusters.contains(&meta.button.cluster()))
-        {
-            rows = rows.child(self.button_row(ix, meta, cx));
+    /// The live toolbar: the real bar container and grip textures with
+    /// the configured row inside. Items drag (reorder) and click
+    /// (remove); while a drag is in flight, drop slots appear between
+    /// the items — the bar visibly opens up where an item would land.
+    fn toolbar_preview(&self, cx: &Context<Self>) -> Div {
+        let row: Vec<ToolbarItem> = self.settings.row().to_vec();
+        let dragging = cx.has_active_drag();
+        let mut bar = toolbar::bar().child(grip_end("pv-grip-left"));
+        for (i, item) in row.iter().enumerate() {
+            if dragging {
+                bar = bar.child(self.drop_slot(i, cx));
+            }
+            bar = bar.child(self.preview_item(i, *item, cx));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(ROW_GAP))
-            .child(
-                div()
-                    .pt(px(10.))
-                    .pb(px(2.))
-                    .text_size(px(11.))
-                    .text_color(rgba(theme::c().hint_text))
-                    .child(title),
-            )
-            .child(rows)
+        if dragging {
+            bar = bar.child(self.drop_slot(row.len(), cx));
+        }
+        bar.child(grip_end("pv-grip-right"))
     }
 
-    /// One button's editor row: the toolbar's own icon and name, the
-    /// shortcut that always works (hidden buttons keep their keys),
-    /// and the visibility switch.
-    fn button_row(&self, ix: usize, meta: &ButtonMeta, cx: &Context<Self>) -> Stateful<Div> {
-        let visible = self.settings.toolbar_visible(meta.button);
+    /// One preview item: the real visual, but dragging reorders and
+    /// clicking removes — the action itself never fires here.
+    fn preview_item(&self, i: usize, item: ToolbarItem, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity();
-        let button = meta.button;
-        let toggle = Switch::new((meta.debug_id, ix))
-            .accessibility_label(meta.name)
-            .checked(visible)
-            .on_change(move |checked, _, _, cx| {
-                entity.update(cx, |this, cx| {
-                    this.set_button(button, checked, cx);
-                });
-            })
-            .relative()
-            .w(px(SWITCH_W))
-            .h(px(SWITCH_H))
-            .child(
-                SwitchTrack::new((ElementId::from(meta.debug_id), "track"))
-                    .checked(visible)
-                    .absolute()
-                    .size_full()
-                    .rounded_full()
-                    .bg(rgba(theme::c().toolbar_border))
-                    .styles(|s| s.checked(|s| s.bg(rgba(theme::c().accent))))
-                    .child(
-                        SwitchThumb::new(visible)
-                            .absolute()
-                            .top(px(2.))
-                            .left(px(if visible {
-                                SWITCH_W - SWITCH_THUMB - 2.
-                            } else {
-                                2.
-                            }))
-                            .size(px(SWITCH_THUMB))
-                            .rounded_full()
-                            .bg(rgba(0xFFFFFFFF)),
-                    ),
-            );
+        let payload = DraggedItem {
+            item,
+            from: Some(i),
+        };
+        match item {
+            ToolbarItem::Button(button) => match toolbar::meta_for(button) {
+                Some(meta) => {
+                    let remove = entity.clone();
+                    toolbar::preview_control(meta, &self.focus, move |_, cx| {
+                        remove.update(cx, |this, cx| this.remove_at(i, cx));
+                    })
+                    .on_drag(payload, ghost_constructor())
+                    .into_any_element()
+                }
+                // unreachable: BUTTONS covers every ToolbarButton
+                None => div().into_any_element(),
+            },
+            ToolbarItem::Separator => layout_visual(
+                "pv-separator",
+                payload,
+                entity,
+                i,
+                div()
+                    .w(px(2.))
+                    .h(px(18.))
+                    .bg(rgba(theme::c().toolbar_border)),
+            ),
+            ToolbarItem::Spacer => layout_visual(
+                "pv-spacer",
+                payload,
+                entity,
+                i,
+                div()
+                    .flex_1()
+                    .min_w(px(56.))
+                    .h(px(22.))
+                    .rounded(px(4.))
+                    .bg(rgba(theme::c().toolbar_hover))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgba(theme::c().hint_text))
+                    .child("⟷"),
+            ),
+        }
+    }
+
+    /// An insertion point between preview items. Only rendered while a
+    /// compatible drag is active (otherwise it would take layout space
+    /// and shift the preview); the whole slot tints when the payload
+    /// hovers it — deliberately NOT resized, a hitbox that shrinks
+    /// under the pointer drops the drag — and the drop commits at its
+    /// index.
+    fn drop_slot(&self, i: usize, cx: &Context<Self>) -> impl IntoElement {
+        let entity = cx.entity();
         div()
-            .id(("settings-row", ix))
-            .w(px(ROW_W))
-            .h(px(ROW_H))
+            .id(("pv-drop", i))
+            .w(px(16.))
+            .h(px(crate::model::placement::ROW_H - 8.))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .rounded(px(6.))
-            .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-            .child(meta.icon.svg())
+            .justify_center()
+            .rounded(px(2.))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(13.)).child(meta.name))
-                    .children((!meta.shortcut.is_empty()).then(|| {
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(theme::c().hint_text))
-                            .child(meta.shortcut)
-                    })),
+                    .w(px(3.))
+                    .h(px(20.))
+                    .rounded(px(2.))
+                    .bg(rgba((theme::c().toolbar_border & 0xFFFFFF00) | 0x50)),
             )
-            .child(div().flex_1())
-            .child(toggle)
+            .drag_over::<DraggedItem>(|s, _, _, _| {
+                s.bg(rgba((theme::c().accent & 0xFFFFFF00) | 0x99))
+            })
+            .on_drop(move |dragged: &DraggedItem, _, cx| {
+                entity.update(cx, |this, cx| this.drop_at(i, dragged, cx));
+            })
+    }
+
+    /// The palette: every control not currently on the bar, plus the
+    /// two layout items (any number of those may live on the bar).
+    /// Chips drag onto the bar, click appends. The palette area is
+    /// also the remove target: dropping a bar item here takes it off.
+    fn palette(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let placed: std::collections::BTreeSet<ToolbarButton> = self
+            .settings
+            .row()
+            .iter()
+            .filter_map(|item| match item {
+                ToolbarItem::Button(button) => Some(*button),
+                _ => None,
+            })
+            .collect();
+        let mut chips = div().flex().flex_wrap().gap(px(6.));
+        for cluster in [
+            ToolbarCluster::Tools,
+            ToolbarCluster::Actions,
+            ToolbarCluster::Confirm,
+        ] {
+            for meta in toolbar::BUTTONS
+                .iter()
+                .filter(|meta| meta.button.cluster() == cluster)
+            {
+                if placed.contains(&meta.button) {
+                    continue;
+                }
+                chips = chips.child(self.palette_chip(ToolbarItem::Button(meta.button), cx));
+            }
+        }
+        // layout items are always offered — spacers/separators stack
+        chips = chips.child(self.palette_chip(ToolbarItem::Spacer, cx));
+        chips = chips.child(self.palette_chip(ToolbarItem::Separator, cx));
+
+        let entity = cx.entity();
+        div()
+            .id("pv-palette")
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            // dropping a bar item back here removes it; palette-origin
+            // drops just return home (no-op)
+            .on_drop(move |dragged: &DraggedItem, _, cx| {
+                if let Some(src) = dragged.from {
+                    entity.update(cx, |this, cx| this.remove_at(src, cx));
+                }
+            })
+            .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgba(theme::c().accent)))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(theme::c().toolbar_border))
+            .p(px(10.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(theme::c().hint_text))
+                    .child("Not on the toolbar — drag onto the bar, or click to append"),
+            )
+            .child(chips)
+    }
+
+    fn palette_chip(&self, item: ToolbarItem, cx: &Context<Self>) -> Stateful<Div> {
+        let entity = cx.entity();
+        let payload = DraggedItem { item, from: None };
+        let click_entity = entity.clone();
+        div()
+            .id(SharedString::from(format!("pv-chip-{}", item.id())))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(30.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(theme::c().toolbar_border))
+            .text_size(px(12.))
+            .text_color(rgba(theme::c().toolbar_text))
+            .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
+            .on_drag(payload, ghost_constructor())
+            .on_click(move |_, _, cx| {
+                click_entity.update(cx, |this, cx| this.append(item, cx));
+            })
+            .child(icon_visual(item))
+            .child(item_name(item))
     }
 
     fn footer(&self, cx: &Context<Self>) -> Div {
@@ -284,13 +431,92 @@ impl SettingsWindow {
     }
 }
 
+/// A bar-end grip for the preview: the real texture, non-interactive.
+fn grip_end(id: &'static str) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .px(px(crate::model::placement::BAR_PAD))
+        .child(toolbar::grip_texture())
+}
+
+/// The drag-ghost constructor gpui calls when a drag starts.
+fn ghost_constructor()
+-> impl Fn(&DraggedItem, Point<Pixels>, &mut Window, &mut App) -> gpui_kit::Entity<DragGhost> + 'static
+{
+    |item: &DraggedItem, _, _, cx| cx.new(|_| DragGhost { item: item.item })
+}
+
+/// Wrap a preview layout item (separator / spacer) in the interaction
+/// shell the buttons get from `preview_control`: drag to reorder,
+/// click to remove. The visual sits centered in a wider hit target —
+/// a 2px separator is un-grabbable on its own.
+fn layout_visual(
+    id: &'static str,
+    payload: DraggedItem,
+    entity: gpui_kit::Entity<SettingsWindow>,
+    i: usize,
+    visual: impl IntoElement,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(18.))
+        .h(px(crate::model::placement::ROW_H - 8.))
+        .rounded(px(4.))
+        .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
+        .on_drag(payload, ghost_constructor())
+        .on_click(move |_, _, cx| {
+            entity.update(cx, |this, cx| this.remove_at(i, cx));
+        })
+        .child(visual)
+        .into_any_element()
+}
+
+/// The icon an item shows outside the button chrome (ghost, palette
+/// chip): the toolbar's own glyphs for buttons, simple marks for the
+/// layout items.
+fn icon_visual(item: ToolbarItem) -> AnyElement {
+    match item {
+        ToolbarItem::Button(button) => match toolbar::meta_for(button) {
+            Some(meta) => meta.icon.svg().into_any_element(),
+            None => div().into_any_element(),
+        },
+        ToolbarItem::Spacer => div()
+            .w(px(18.))
+            .h(px(2.))
+            .bg(rgba(theme::c().toolbar_border))
+            .into_any_element(),
+        ToolbarItem::Separator => div()
+            .w(px(2.))
+            .h(px(14.))
+            .bg(rgba(theme::c().toolbar_border))
+            .into_any_element(),
+    }
+}
+
+fn item_name(item: ToolbarItem) -> String {
+    match item {
+        ToolbarItem::Button(button) => match toolbar::meta_for(button) {
+            Some(meta) => meta.name.to_string(),
+            None => button.id().to_string(),
+        },
+        ToolbarItem::Spacer => "Flexible gap".into(),
+        ToolbarItem::Separator => "Separator".into(),
+    }
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::c();
         div()
             .id("settings-root")
             .size_full()
-            .bg(rgba(theme::c().toolbar_bg))
-            .text_color(rgba(theme::c().toolbar_text))
+            .bg(rgba(t.toolbar_bg))
+            .text_color(rgba(t.toolbar_text))
             .track_focus(&self.focus)
             .key_context("ShotoriSettings")
             // Esc mirrors the titlebar close (the binding is registered
@@ -306,34 +532,44 @@ impl Render for SettingsWindow {
                     .flex()
                     .flex_col()
                     .p(px(PAGE_PAD))
-                    .gap(px(ROW_GAP))
-                    // the section list fits the default window; scroll
-                    // keeps a resized-smaller window usable
+                    .gap(px(10.))
                     .overflow_y_scroll()
+                    // header
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .pb(px(8.))
                             .child(
                                 div()
                                     .text_size(px(16.))
-                                    .text_color(rgba(theme::c().btn_text))
-                                    .child("Settings"),
+                                    .text_color(rgba(t.btn_text))
+                                    .child("Toolbar"),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgba(theme::c().hint_text))
-                                    .child("Changes apply the next time you take a screenshot."),
+                                    .text_color(rgba(t.hint_text))
+                                    .child(
+                                        "Arrange the selection toolbar. Changes apply the next \
+                                         time you take a screenshot.",
+                                    ),
                             ),
                     )
-                    .children(
-                        SECTIONS
-                            .iter()
-                            .map(|(title, clusters)| self.section(title, clusters, cx)),
+                    // the live preview
+                    .child(self.toolbar_preview(cx))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgba(t.hint_text))
+                            .child(
+                                "Drag a control to move it · drop it here or on the palette to \
+                                 remove it · click to remove / append · hidden controls keep \
+                                 their keyboard shortcuts",
+                            ),
                     )
+                    // the palette
+                    .child(self.palette(cx))
                     .child(div().flex_1())
                     .child(self.footer(cx)),
             )

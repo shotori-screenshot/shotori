@@ -6,14 +6,22 @@
 # time you take a screenshot.
 
 [toolbar]
-# Row-one buttons hidden from the selection toolbar. Hidden buttons
-# keep their keyboard shortcuts; only the visible row changes.
+# Row one of the selection toolbar, left to right. Buttons not listed
+# are hidden (their keyboard shortcuts keep working).
 #
-# Known ids (display order):
+# Two layout items can be mixed in:
+#   "spacer"    flexible gap between groups (grows when the bar has room)
+#   "separator" the thin vertical group break
+#
+# Known button ids (factory order):
 #   select, rectangle, ellipse, line, polyline, arrow, number,
 #   pencil, highlighter, mosaic, eraser, text, clear,
 #   ocr, save, pin, scroll, cancel, copy
 #
-# Example — a minimal toolbar with just annotate, save and copy:
-#   hidden = ["ocr", "pin", "scroll"]
-hidden = []
+# The value below is the factory layout.
+items = [
+  "select", "rectangle", "ellipse", "line", "polyline", "arrow",
+  "number", "pencil", "highlighter", "mosaic", "eraser", "text",
+  "clear", "spacer", "ocr", "save", "pin", "scroll", "separator",
+  "cancel", "copy",
+]

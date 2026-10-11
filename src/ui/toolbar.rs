@@ -344,54 +344,75 @@ fn selected_state(
     }
 }
 
-/// One cluster's visible row-one buttons, in display order, filtered
-/// by the user's toolbar settings (`shotori settings`). The chain once
-/// spelled every child inline; this filter is what makes the row
-/// configurable — and what a future button (translate) joins: one
-/// table entry plus a settings id.
-fn row_one_buttons(
-    cluster: crate::model::settings::ToolbarCluster,
+/// The metadata entry for a button ([`BUTTONS`] covers every
+/// `ToolbarButton` — enforced by test). Shared with the settings
+/// editor's preview bar.
+pub(crate) fn meta_for(
+    button: crate::model::settings::ToolbarButton,
+) -> Option<&'static ButtonMeta> {
+    BUTTONS.iter().find(|meta| meta.button == button)
+}
+
+impl ButtonMeta {
+    /// The tooltip / accessibility label ("Name · Shortcut").
+    pub(crate) fn tooltip(&self) -> String {
+        if self.shortcut.is_empty() {
+            self.name.to_owned()
+        } else {
+            format!("{} · {}", self.name, self.shortcut)
+        }
+    }
+}
+
+/// The flexible gap between clusters. A plain flex_1 collapses to zero
+/// in the content-hugging bar, so it keeps a minimum width — a group
+/// break must read as a break. The width basis counts the same
+/// minimum (see `model::placement::row1_basis`).
+pub(crate) fn spacer() -> Div {
+    div()
+        .flex_1()
+        .min_w(px(crate::model::placement::SPACER_MIN))
+}
+
+/// Row one, rendered in the configured order (see
+/// `model::settings::Settings::row`): presence in the row IS
+/// visibility, the row's order IS the layout. The factory row
+/// reproduces the historical two-cluster look through its spacer and
+/// separator.
+fn row_one(
     annotations: &crate::annotation::Annotations,
     focus: &FocusHandle,
     settings: &crate::model::settings::Settings,
 ) -> Vec<AnyElement> {
-    use crate::model::settings::ToolbarButton;
-    let mut out = Vec::new();
-    for meta in BUTTONS
+    use crate::model::settings::ToolbarItem;
+    settings
+        .row()
         .iter()
-        .filter(|meta| meta.button.cluster() == cluster)
-    {
-        // The group break between the action cluster and the confirm
-        // pair, right where it always sat (before Cancel). It vanishes
-        // when either side is fully hidden — the SAME predicate the
-        // placement width basis reads (see Settings::row1_separator_visible).
-        if meta.button == ToolbarButton::Cancel && settings.row1_separator_visible() {
-            out.push(separator().into_any_element());
-        }
-        if !settings.toolbar_visible(meta.button) {
-            continue;
-        }
-        let label = if meta.shortcut.is_empty() {
-            meta.name.to_owned()
-        } else {
-            format!("{} · {}", meta.name, meta.shortcut)
-        };
-        let button = meta.button;
-        out.push(
-            control(
-                meta.debug_id.into(),
-                label,
-                focus.clone(),
-                move |window, cx| {
-                    window.dispatch_action(action_for(button), cx);
-                },
-            )
-            .selected(selected_state(meta.button, annotations))
-            .child(meta.icon.svg())
-            .into_any_element(),
-        );
-    }
-    out
+        .map(|item| match item {
+            ToolbarItem::Button(button) => {
+                // owned: the click closure must outlive the borrowed row
+                let button = *button;
+                let Some(meta) = meta_for(button) else {
+                    // unreachable: BUTTONS covers every ToolbarButton
+                    // (button_table_matches_the_settings_vocabulary)
+                    return div().into_any_element();
+                };
+                control(
+                    meta.debug_id.into(),
+                    meta.tooltip(),
+                    focus.clone(),
+                    move |window, cx| {
+                        window.dispatch_action(action_for(button), cx);
+                    },
+                )
+                .selected(selected_state(button, annotations))
+                .child(meta.icon.svg())
+                .into_any_element()
+            }
+            ToolbarItem::Separator => separator().into_any_element(),
+            ToolbarItem::Spacer => spacer().into_any_element(),
+        })
+        .collect()
 }
 
 pub(crate) fn selection_toolbar(
@@ -439,25 +460,7 @@ pub(crate) fn selection_toolbar(
         .child(
             bar()
                 .child(grip("tb-grip-left", output.clone(), session.clone()))
-                .children(row_one_buttons(
-                    crate::model::settings::ToolbarCluster::Tools,
-                    annotations,
-                    &focus,
-                    settings,
-                ))
-                .child(div().flex_1())
-                .children(row_one_buttons(
-                    crate::model::settings::ToolbarCluster::Actions,
-                    annotations,
-                    &focus,
-                    settings,
-                ))
-                .children(row_one_buttons(
-                    crate::model::settings::ToolbarCluster::Confirm,
-                    annotations,
-                    &focus,
-                    settings,
-                ))
+                .children(row_one(annotations, &focus, settings))
                 .child(grip("tb-grip-right", output, session.clone())),
         )
         .children(edit_kind.is_some().then(|| {
@@ -670,8 +673,6 @@ fn grip(
     output: SharedString,
     session: Entity<ScreenshotSession>,
 ) -> impl IntoElement {
-    // toolbar_text at low alpha: visible as texture, quiet as texture
-    let grain = (theme::c().toolbar_text & 0xFFFFFF00) | 0x4D;
     div()
         .id(id)
         // Full row height, and offset only by the bar's side padding —
@@ -681,13 +682,6 @@ fn grip(
         .h(px(ROW_H))
         .w(px(GRIP_W))
         .flex()
-        // gap between the dot COLUMNS — do not lose this again: without
-        // it the three columns pack solid and the airy matte matrix
-        // collapses into tight triple lines (user-noticed regression).
-        // No justify_center either: flush-left is the exact look that
-        // was approved (pixel-verified against the liked build).
-        .gap(px(1.75))
-        .items_center()
         .on_mouse_down(MouseButton::Left, move |ev, _, cx| {
             session.update(cx, |s, cx| {
                 if s.toolbar_drag_begin(&output, ev.position) {
@@ -696,6 +690,25 @@ fn grip(
             });
             cx.stop_propagation(); // the press belongs to the toolbar, not the canvas
         })
+        .child(grip_texture())
+}
+
+/// The grip's matte dot texture — the visual half of [`grip`], reused
+/// by the settings editor's preview bar (which must not drag
+/// anything). Sizing belongs to the wrapper so the editor can grow it
+/// into an easier grab target.
+pub(crate) fn grip_texture() -> impl IntoElement {
+    // toolbar_text at low alpha: visible as texture, quiet as texture
+    let grain = (theme::c().toolbar_text & 0xFFFFFF00) | 0x4D;
+    div()
+        // gap between the dot COLUMNS — do not lose this again: without
+        // it the three columns pack solid and the airy matte matrix
+        // collapses into tight triple lines (user-noticed regression).
+        // No justify_center either: flush-left is the exact look that
+        // was approved (pixel-verified against the liked build).
+        .flex()
+        .gap(px(1.75))
+        .items_center()
         .children((0..3).map(|_| {
             div()
                 .flex()
@@ -705,7 +718,25 @@ fn grip(
         }))
 }
 
-fn bar() -> Div {
+/// A non-dispatching control for the settings editor's preview bar:
+/// the exact 30px look of the real button, but the click belongs to
+/// the editor (remove), never to the action itself.
+pub(crate) fn preview_control(
+    meta: &ButtonMeta,
+    focus: &FocusHandle,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> Button {
+    control(
+        meta.debug_id.into(),
+        meta.tooltip(),
+        focus.clone(),
+        on_click,
+    )
+    .child(meta.icon.svg())
+}
+
+/// The bar container — shared with the settings editor's preview.
+pub(crate) fn bar() -> Div {
     div()
         .flex()
         .items_center()
@@ -719,7 +750,8 @@ fn bar() -> Div {
         .shadow_md()
 }
 
-fn separator() -> Div {
+/// The 1px group break — shared with the settings editor's preview.
+pub(crate) fn separator() -> Div {
     div()
         .w(px(1.))
         .h(px(18.))

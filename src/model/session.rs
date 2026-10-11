@@ -2252,7 +2252,10 @@ mod tests {
         // anchored below the box by default; grips line both edges of ROW ONE
         let anchored = s.toolbar_bounds("right").unwrap();
         assert_eq!(anchored.origin, point(px(50.), px(158.)));
-        assert_eq!(anchored.size.width, px(crate::model::placement::TB_W_ROW1));
+        assert_eq!(
+            anchored.size.width,
+            px(crate::model::placement::default_row1_basis())
+        );
         let (lg, rg) = s.toolbar_grips("right").unwrap();
         let pad = px(crate::model::placement::BAR_PAD);
         // the strips are the grip ELEMENTS' rects: inset by the bar
@@ -2280,7 +2283,7 @@ mod tests {
         assert_eq!(
             s.toolbar_bounds("right").unwrap().origin,
             point(
-                px(1200. - crate::model::placement::TB_W_ROW1 - 8.),
+                px(1200. - crate::model::placement::default_row1_basis() - 8.),
                 px(800. - crate::model::placement::ROW_H - 8.),
             )
         );
