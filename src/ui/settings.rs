@@ -1040,15 +1040,12 @@ impl SettingsWindow {
                 });
             },
         );
-        // The scrollbar lays itself out as an absolute overlay of its
-        // parent (relative(1.) sizing — see its Element impl), so this
-        // row is its mounting box. Always mounted and exactly one thumb
-        // thick: the pill rides flush against the bar's bottom edge —
-        // attached to the OUTSIDE of the toolbar, never over its icons —
-        // and being unconditional, it cannot get out of step with the
-        // layout (a conditionally-mounted row only re-evaluated on the
-        // next unrelated render, so after a resize the scrollbar would
-        // go missing until something else repainted the page).
+        // Wheel over the strip + rail: notify so the drawn thumb
+        // follows whatever the container applied, and consume the
+        // event while there is x-overflow so nothing above this
+        // block can grow a scroll and carry the bar away again
+        // (defensive — the page itself no longer scrolls; see
+        // `page_toolbar`).
         div()
             .flex()
             .flex_col()
@@ -1100,10 +1097,17 @@ impl SettingsWindow {
         let overflow = max_x > px(0.);
         let t = theme::c();
 
-        // display geometry: thumb clamped to a grabbable 24px minimum
+        // display geometry: thumb clamped to a grabbable 24px minimum.
+        // The offset is clamped to [0, max] FIRST: gpui's native wheel
+        // application stores the raw delta without clamping (clamping
+        // happens at paint, never written back), so wheeling past
+        // either end leaves a NEGATIVE or over-max offset in the
+        // handle — an unclamped ratio sent the thumb sliding out of
+        // the rail, over the sidebar ("the scrollbar scrolled away").
         let (thumb_w, usable) = rail_thumb_geometry(handle);
         let thumb_x = if max_x > px(0.) {
-            usable * (handle.offset().x / max_x)
+            let effective = handle.offset().x.clamp(px(0.), max_x);
+            usable * (effective / max_x)
         } else {
             px(0.)
         };
