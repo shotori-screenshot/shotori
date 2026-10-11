@@ -124,13 +124,43 @@ pub(crate) fn toolbar_bounds(
 
 /// The toolbar's (width, height) basis for its two row-count states.
 /// Two-row bars keep the measured TB_W — the color settings row needs
-/// it; single-row bars hug row one's natural width instead.
-pub(crate) fn toolbar_size(annotating: bool) -> (f32, f32) {
+/// it; single-row bars hug row one's configured content instead.
+///
+/// The basis must track the toolbar settings: hidden buttons shrink
+/// the rendered bar, and render, grip hit-tests and the drag clamp all
+/// derive from THIS — a stale basis shows up instantly as "draggable
+/// but not a hand" (the grip/cursor alignment trap).
+pub(crate) fn toolbar_size(
+    annotating: bool,
+    settings: &crate::model::settings::Settings,
+) -> (f32, f32) {
     if annotating {
         (TB_W, TB_H)
     } else {
-        (TB_W_ROW1, ROW_H)
+        let w = TB_W_ROW1 - row1_shrink(settings);
+        (w.max(ROW1_W_MIN), ROW_H)
     }
+}
+
+/// One row-one button's footprint: the 30px control plus the 2px flex
+/// gap that dies with it. Used only as a DELTA from the measured
+/// TB_W_ROW1 — totals must stay probe-measured (see that constant's
+/// comment); per-button geometry is exact.
+const BTN_PITCH: f32 = 32.;
+/// The separator's footprint: 1px stroke + 2×4px margins + one gap.
+const SEP_PITCH: f32 = 11.;
+/// Floor for the degenerate everything-hidden bar (grips + padding +
+/// slack) — the basis must stay positive for the clamps.
+const ROW1_W_MIN: f32 = 48.;
+
+/// How much narrower row one is than the measured full row.
+fn row1_shrink(settings: &crate::model::settings::Settings) -> f32 {
+    let separator = if settings.row1_separator_visible() {
+        0.
+    } else {
+        SEP_PITCH
+    };
+    BTN_PITCH * settings.hidden_row1_count() as f32 + separator
 }
 
 /// Snap a bounds to whole pixels for DISPLAY (dim strips, chrome,
@@ -444,8 +474,49 @@ mod tests {
 
     #[test]
     fn toolbar_size_switches_with_state() {
-        assert_eq!(toolbar_size(false), (TB_W_ROW1, ROW_H));
-        assert_eq!(toolbar_size(true), (TB_W, TB_H));
+        let s = crate::model::settings::Settings::default();
+        assert_eq!(toolbar_size(false, &s), (TB_W_ROW1, ROW_H));
+        assert_eq!(toolbar_size(true, &s), (TB_W, TB_H));
+    }
+
+    #[test]
+    fn toolbar_size_follows_the_configured_row() {
+        use crate::model::settings::{Settings, ToolbarButton};
+        let mut s = Settings::default();
+        for button in [
+            ToolbarButton::Pin,
+            ToolbarButton::Scroll,
+            ToolbarButton::Text,
+        ] {
+            s.set_toolbar_visible(button, false);
+        }
+        // three hidden buttons shrink row one by exactly three pitches;
+        // the separator keeps both sides and stays
+        let (w, h) = toolbar_size(false, &s);
+        assert_eq!(w, TB_W_ROW1 - 3. * super::BTN_PITCH);
+        assert_eq!(h, ROW_H);
+        // annotating is the fixed-width settings row — unaffected
+        assert_eq!(toolbar_size(true, &s), (TB_W, TB_H));
+
+        // separator drops when a whole side hides: + one separator pitch
+        let mut s = Settings::default();
+        for button in [
+            ToolbarButton::Ocr,
+            ToolbarButton::Save,
+            ToolbarButton::Pin,
+            ToolbarButton::Scroll,
+        ] {
+            s.set_toolbar_visible(button, false);
+        }
+        let (w, _) = toolbar_size(false, &s);
+        assert_eq!(w, TB_W_ROW1 - 4. * super::BTN_PITCH - super::SEP_PITCH);
+
+        // everything hidden: the floor keeps the basis positive
+        let mut s = s.clone();
+        for button in ToolbarButton::ALL {
+            s.set_toolbar_visible(button, false);
+        }
+        assert_eq!(toolbar_size(false, &s).0, super::ROW1_W_MIN);
     }
 
     #[test]

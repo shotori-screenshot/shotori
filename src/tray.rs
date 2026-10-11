@@ -7,8 +7,9 @@
 //! the overlay, so `cx.quit()` at the end of a capture cannot tear the
 //! tray down, and a wedged overlay can't take the launcher with it.
 //!
-//! The menu is deliberately minimal: Screenshot, Quit. Every real
-//! interaction lives in the overlay; the tray is only a way in.
+//! The menu is deliberately minimal: Screenshot, Settings, Quit.
+//! Every real interaction lives in the overlay; the tray is only a
+//! way in.
 //!
 //! Quit mode is [`QuitMode::Explicit`]: the app has no windows, so the
 //! default last-window-closed heuristic would exit immediately.
@@ -18,7 +19,7 @@ use std::process::Command;
 use gpui_kit::*;
 use gpui_tray::{Icon, Tray};
 
-actions!(tray, [TakeScreenshot, QuitTray]);
+actions!(tray, [TakeScreenshot, OpenSettings, QuitTray]);
 
 /// Keeps the [`Tray`] alive for the process lifetime (gpui-tray removes
 /// the native item on drop).
@@ -42,7 +43,9 @@ pub fn run() {
 
 fn setup(cx: &mut App) -> gpui_tray::Result<()> {
     cx.set_app_identity(crate::APP_ID, "Shotori");
-    cx.on_action(take_screenshot).on_action(quit_tray);
+    cx.on_action(take_screenshot)
+        .on_action(open_settings)
+        .on_action(quit_tray);
 
     let tray = Tray::builder()
         .icon(icon()?)
@@ -50,6 +53,7 @@ fn setup(cx: &mut App) -> gpui_tray::Result<()> {
         .menu(|_| {
             vec![
                 MenuItem::action("Screenshot", TakeScreenshot),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Quit", QuitTray),
             ]
@@ -62,7 +66,10 @@ fn setup(cx: &mut App) -> gpui_tray::Result<()> {
     Ok(())
 }
 
-fn take_screenshot(_: &TakeScreenshot, _: &mut App) {
+/// Re-exec ourselves with a subcommand, detached: the child outlives
+/// this call; dropping the handle leaves it running (same pattern as
+/// the notify child).
+fn launch(subcommand: &str) {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -71,16 +78,22 @@ fn take_screenshot(_: &TakeScreenshot, _: &mut App) {
         }
     };
     let mut cmd = Command::new(exe);
-    cmd.arg("gui");
-    // Detached: the gui process outlives this call; dropping the handle
-    // leaves it running (same pattern as the notify child).
+    cmd.arg(subcommand);
     match cmd.spawn() {
         Ok(child) => {
             drop(child);
-            println!("[shotori] tray: screenshot launched");
+            println!("[shotori] tray: {subcommand} launched");
         }
-        Err(e) => eprintln!("[shotori] tray: failed to launch screenshot: {e}"),
+        Err(e) => eprintln!("[shotori] tray: failed to launch {subcommand}: {e}"),
     }
+}
+
+fn take_screenshot(_: &TakeScreenshot, _: &mut App) {
+    launch("gui");
+}
+
+fn open_settings(_: &OpenSettings, _: &mut App) {
+    launch("settings");
 }
 
 fn quit_tray(_: &QuitTray, cx: &mut App) {

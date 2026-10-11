@@ -459,6 +459,7 @@ impl ScreenshotSession {
             // selected, so keying on the lit tool would under- or
             // over-reserve the toolbar's height
             self.annotations.edit_kind().is_some(),
+            crate::model::settings::current(),
         );
         let mut b = crate::model::placement::toolbar_bounds(&sel, ws, width, height);
         if let Some(pos) = self.toolbar_pos {
@@ -531,8 +532,10 @@ impl ScreenshotSession {
             return false;
         };
         self.pointer_global = Some(self.to_global(name, local));
-        let (base_w, height) =
-            crate::model::placement::toolbar_size(self.annotations.edit_kind().is_some());
+        let (base_w, height) = crate::model::placement::toolbar_size(
+            self.annotations.edit_kind().is_some(),
+            crate::model::settings::current(),
+        );
         let w = base_w.min((f32::from(ws.width) - 16.).max(1.));
         let next = point(
             px((f32::from(local.x) - f32::from(grab.x))

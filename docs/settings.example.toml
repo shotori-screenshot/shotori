@@ -1,0 +1,19 @@
+# Shotori settings — copy to ~/.config/shotori/settings.toml
+#
+# Managed by the settings window (`shotori settings`, or the tray
+# menu). Hand edits are fine too; unknown keys and sections are
+# preserved by the editor, comments are not. Changes apply the next
+# time you take a screenshot.
+
+[toolbar]
+# Row-one buttons hidden from the selection toolbar. Hidden buttons
+# keep their keyboard shortcuts; only the visible row changes.
+#
+# Known ids (display order):
+#   select, rectangle, ellipse, line, polyline, arrow, number,
+#   pencil, highlighter, mosaic, eraser, text, clear,
+#   ocr, save, pin, scroll, cancel, copy
+#
+# Example — a minimal toolbar with just annotate, save and copy:
+#   hidden = ["ocr", "pin", "scroll"]
+hidden = []

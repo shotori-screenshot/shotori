@@ -101,6 +101,299 @@ pub(crate) struct SizeSlider {
     pub(crate) current: f32,
 }
 
+/// Where a row-one button's glyph comes from: the bundled Lucide
+/// whitelist, or shotori's own `assets/icons` SVG for the concepts
+/// Lucide has no glyph for (see [`OwnIcons`]).
+#[derive(Clone, Copy)]
+pub(crate) enum ButtonIcon {
+    Kit(IconName),
+    Own(&'static str),
+}
+
+impl ButtonIcon {
+    pub(crate) fn svg(self) -> Svg {
+        match self {
+            Self::Kit(name) => svg().path(name.path()),
+            Self::Own(path) => svg().path(path),
+        }
+        .size(px(18.))
+        .text_color(rgba(theme::c().toolbar_text))
+    }
+}
+
+/// Row-one button metadata: ONE source for the bar's own construction
+/// and the settings window's editor list — ids, labels, shortcuts and
+/// icons cannot drift between the two views of the same toolbar.
+/// Order is the display order (tool cluster, then actions, then the
+/// confirm pair).
+pub(crate) struct ButtonMeta {
+    pub(crate) button: crate::model::settings::ToolbarButton,
+    /// Element/debug id (`tb-*`) — e2e probes rely on these.
+    pub(crate) debug_id: &'static str,
+    /// Settings-row name; the toolbar tooltip is "name · shortcut".
+    pub(crate) name: &'static str,
+    /// Shortcut hint ("" when the button has none).
+    pub(crate) shortcut: &'static str,
+    pub(crate) icon: ButtonIcon,
+}
+
+pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::ALL.len()] = [
+    ButtonMeta {
+        // The select tool — first, the Figma position: selection is a
+        // mode you enter, never a side effect of drawing (2026-10-06
+        // flip). Own icon: Lucide's mouse-pointer isn't in
+        // gpui-kit-assets' compiled set.
+        button: crate::model::settings::ToolbarButton::Select,
+        debug_id: "tb-select",
+        name: "Select",
+        shortcut: "V",
+        icon: ButtonIcon::Own("icons/select.svg"),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Rectangle,
+        debug_id: "tb-rectangle",
+        name: "Rectangle",
+        shortcut: "R",
+        icon: ButtonIcon::Kit(IconName::Square),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Ellipse,
+        debug_id: "tb-ellipse",
+        name: "Ellipse",
+        shortcut: "E",
+        icon: ButtonIcon::Kit(IconName::Circle),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Line,
+        debug_id: "tb-line",
+        name: "Line",
+        shortcut: "L",
+        icon: ButtonIcon::Kit(IconName::Slash),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Polyline,
+        debug_id: "tb-polyline",
+        name: "Polyline",
+        shortcut: "P",
+        icon: ButtonIcon::Kit(IconName::Waypoints),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Arrow,
+        debug_id: "tb-arrow",
+        name: "Arrow",
+        shortcut: "A",
+        icon: ButtonIcon::Kit(IconName::ArrowUpRight),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Number,
+        debug_id: "tb-number",
+        name: "Sequence number",
+        shortcut: "N",
+        icon: ButtonIcon::Kit(IconName::ListOrdered),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Pencil,
+        debug_id: "tb-pencil",
+        name: "Pencil",
+        shortcut: "B",
+        icon: ButtonIcon::Kit(IconName::Pencil),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Highlighter,
+        debug_id: "tb-highlighter",
+        name: "Highlighter",
+        shortcut: "H",
+        icon: ButtonIcon::Kit(IconName::Highlighter),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Mosaic,
+        debug_id: "tb-mosaic",
+        name: "Mosaic / Blur",
+        shortcut: "M",
+        icon: ButtonIcon::Own("icons/mosaic.svg"),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Eraser,
+        debug_id: "tb-eraser",
+        name: "Eraser",
+        shortcut: "D",
+        icon: ButtonIcon::Kit(IconName::Eraser),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Text,
+        debug_id: "tb-text",
+        name: "Text",
+        shortcut: "T",
+        icon: ButtonIcon::Kit(IconName::Type),
+    },
+    ButtonMeta {
+        // Wipes every placed mark in one undoable step (issue #15).
+        // Lives at the end of the tool cluster — undo/redo are
+        // keyboard-only, so this is the one history action with a
+        // button. Lucide's plain Trash is the conventional "clear"
+        // glyph (this bundle has no trash-2); an empty-canvas press
+        // is a harmless no-op, like Delete.
+        button: crate::model::settings::ToolbarButton::Clear,
+        debug_id: "tb-clear",
+        name: "Clear annotations",
+        shortcut: "Ctrl+Shift+Del",
+        icon: ButtonIcon::Kit(IconName::Trash),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Ocr,
+        debug_id: "tb-ocr",
+        name: "Recognize text",
+        shortcut: "Ctrl+O",
+        icon: ButtonIcon::Kit(IconName::ScanText),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Save,
+        debug_id: "tb-save",
+        name: "Save",
+        shortcut: "Ctrl+S",
+        icon: ButtonIcon::Kit(IconName::Save),
+    },
+    ButtonMeta {
+        // own icon: the gpui-kit asset whitelist (`icon_assets!`) does
+        // not bundle a pin, and IconName::Pin would render an empty
+        // slot — same situation as the mosaic icon
+        button: crate::model::settings::ToolbarButton::Pin,
+        debug_id: "tb-pin",
+        name: "Pin to screen",
+        shortcut: "Ctrl+P",
+        icon: ButtonIcon::Own("icons/pin.svg"),
+    },
+    ButtonMeta {
+        // own icon: no long-screenshot glyph in the Lucide whitelist
+        // either (document + down arrow)
+        button: crate::model::settings::ToolbarButton::Scroll,
+        debug_id: "tb-scroll",
+        name: "Long screenshot (scroll)",
+        shortcut: "Ctrl+L",
+        icon: ButtonIcon::Own("icons/scroll.svg"),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Cancel,
+        debug_id: "tb-cancel",
+        name: "Cancel",
+        shortcut: "Esc",
+        icon: ButtonIcon::Kit(IconName::X),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Copy,
+        debug_id: "tb-copy",
+        name: "Copy",
+        shortcut: "Enter / Ctrl+C",
+        icon: ButtonIcon::Kit(IconName::Copy),
+    },
+];
+
+/// The action each button dispatches — the exact same actions the
+/// keybindings dispatch (one action, two triggers, one pipeline).
+fn action_for(button: crate::model::settings::ToolbarButton) -> Box<dyn gpui_kit::Action> {
+    use crate::model::settings::ToolbarButton as B;
+    match button {
+        B::Select => Box::new(ToggleSelect),
+        B::Rectangle => Box::new(ToggleRectangle),
+        B::Ellipse => Box::new(ToggleEllipse),
+        B::Line => Box::new(ToggleLine),
+        B::Polyline => Box::new(TogglePolyline),
+        B::Arrow => Box::new(ToggleArrow),
+        B::Number => Box::new(ToggleNumber),
+        B::Pencil => Box::new(TogglePencil),
+        B::Highlighter => Box::new(ToggleHighlighter),
+        B::Mosaic => Box::new(ToggleMosaic),
+        B::Eraser => Box::new(ToggleEraser),
+        B::Text => Box::new(ToggleText),
+        B::Clear => Box::new(ClearAnnotations),
+        B::Ocr => Box::new(OcrSelection),
+        B::Save => Box::new(SaveSelection),
+        B::Pin => Box::new(PinSelection),
+        B::Scroll => Box::new(ScrollSelection),
+        B::Cancel => Box::new(QuitOverlay),
+        B::Copy => Box::new(CopySelection),
+    }
+}
+
+/// The pressed state a button shows. Tool buttons light up from the
+/// annotations state — `tool()` for the shape modes, `edit_kind()` for
+/// the multi-variant ones (mosaic/eraser families, number, text); the
+/// action cluster has no pressed state.
+fn selected_state(
+    button: crate::model::settings::ToolbarButton,
+    annotations: &crate::annotation::Annotations,
+) -> bool {
+    use crate::annotation::ShapeKind as K;
+    use crate::model::settings::ToolbarButton as B;
+    let tool = annotations.tool();
+    let edit = annotations.edit_kind();
+    match button {
+        B::Select => tool == Some(K::Select),
+        B::Rectangle => tool == Some(K::Rectangle),
+        B::Ellipse => tool == Some(K::Ellipse),
+        B::Line => tool == Some(K::Line),
+        B::Polyline => tool == Some(K::Polyline),
+        B::Arrow => tool == Some(K::Arrow),
+        B::Pencil => tool == Some(K::Pencil),
+        B::Highlighter => tool == Some(K::Highlighter),
+        B::Number => edit == Some(K::Number),
+        B::Mosaic => matches!(edit, Some(K::Mosaic | K::Blur)),
+        B::Eraser => matches!(edit, Some(K::Eraser | K::EraserRect)),
+        B::Text => edit == Some(K::Text),
+        _ => false,
+    }
+}
+
+/// One cluster's visible row-one buttons, in display order, filtered
+/// by the user's toolbar settings (`shotori settings`). The chain once
+/// spelled every child inline; this filter is what makes the row
+/// configurable — and what a future button (translate) joins: one
+/// table entry plus a settings id.
+fn row_one_buttons(
+    cluster: crate::model::settings::ToolbarCluster,
+    annotations: &crate::annotation::Annotations,
+    focus: &FocusHandle,
+    settings: &crate::model::settings::Settings,
+) -> Vec<AnyElement> {
+    use crate::model::settings::ToolbarButton;
+    let mut out = Vec::new();
+    for meta in BUTTONS
+        .iter()
+        .filter(|meta| meta.button.cluster() == cluster)
+    {
+        // The group break between the action cluster and the confirm
+        // pair, right where it always sat (before Cancel). It vanishes
+        // when either side is fully hidden — the SAME predicate the
+        // placement width basis reads (see Settings::row1_separator_visible).
+        if meta.button == ToolbarButton::Cancel && settings.row1_separator_visible() {
+            out.push(separator().into_any_element());
+        }
+        if !settings.toolbar_visible(meta.button) {
+            continue;
+        }
+        let label = if meta.shortcut.is_empty() {
+            meta.name.to_owned()
+        } else {
+            format!("{} · {}", meta.name, meta.shortcut)
+        };
+        let button = meta.button;
+        out.push(
+            control(
+                meta.debug_id.into(),
+                label,
+                focus.clone(),
+                move |window, cx| {
+                    window.dispatch_action(action_for(button), cx);
+                },
+            )
+            .selected(selected_state(meta.button, annotations))
+            .child(meta.icon.svg())
+            .into_any_element(),
+        );
+    }
+    out
+}
+
 pub(crate) fn selection_toolbar(
     rect: Bounds<Pixels>,
     output: SharedString,
@@ -122,9 +415,10 @@ pub(crate) fn selection_toolbar(
         edit_kind,
         Some(crate::annotation::ShapeKind::Eraser | crate::annotation::ShapeKind::EraserRect)
     );
-    let number_tool = edit_kind == Some(crate::annotation::ShapeKind::Number);
-    let text_tool = edit_kind == Some(crate::annotation::ShapeKind::Text);
     let settings_focus = focus.clone();
+    // Installed once at startup (settings.toml / `shotori settings`);
+    // row one below reads it, placement's width basis reads the same.
+    let settings = crate::model::settings::current();
 
     div()
         .id("shotori-toolbar")
@@ -145,237 +439,24 @@ pub(crate) fn selection_toolbar(
         .child(
             bar()
                 .child(grip("tb-grip-left", output.clone(), session.clone()))
-                .child(
-                    // The select tool — first, the Figma position:
-                    // selection is a mode you enter, never a side
-                    // effect of drawing (2026-10-06 flip). Its own
-                    // icon: Lucide's mouse-pointer isn't in
-                    // gpui-kit-assets' compiled set (see the svg).
-                    control(
-                        "tb-select".into(),
-                        "Select · V".into(),
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleSelect), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Select))
-                    .child(own_icon("icons/select.svg")),
-                )
-                .child(
-                    icon_button(
-                        "tb-rectangle",
-                        "Rectangle · R",
-                        IconName::Square,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleRectangle), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Rectangle)),
-                )
-                .child(
-                    icon_button(
-                        "tb-ellipse",
-                        "Ellipse · E",
-                        IconName::Circle,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleEllipse), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Ellipse)),
-                )
-                .child(
-                    icon_button(
-                        "tb-line",
-                        "Line · L",
-                        IconName::Slash,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleLine), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Line)),
-                )
-                .child(
-                    icon_button(
-                        "tb-polyline",
-                        "Polyline · P",
-                        IconName::Waypoints,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(TogglePolyline), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Polyline)),
-                )
-                .child(
-                    icon_button(
-                        "tb-arrow",
-                        "Arrow · A",
-                        IconName::ArrowUpRight,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleArrow), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Arrow)),
-                )
-                .child(
-                    icon_button(
-                        "tb-number",
-                        "Sequence number · N",
-                        IconName::ListOrdered,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleNumber), cx);
-                        },
-                    )
-                    .selected(number_tool),
-                )
-                .child(
-                    icon_button(
-                        "tb-pencil",
-                        "Pencil · B",
-                        IconName::Pencil,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(TogglePencil), cx);
-                        },
-                    )
-                    .selected(annotations.tool() == Some(crate::annotation::ShapeKind::Pencil)),
-                )
-                .child(
-                    icon_button(
-                        "tb-highlighter",
-                        "Highlighter · H",
-                        IconName::Highlighter,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleHighlighter), cx);
-                        },
-                    )
-                    .selected(
-                        annotations.tool() == Some(crate::annotation::ShapeKind::Highlighter),
-                    ),
-                )
-                .child(
-                    control(
-                        "tb-mosaic".into(),
-                        "Mosaic / Blur · M".into(),
-                        focus.clone(),
-                        |window, cx| window.dispatch_action(Box::new(ToggleMosaic), cx),
-                    )
-                    .selected(filter_tool)
-                    .child(own_icon("icons/mosaic.svg")),
-                )
-                .child(
-                    icon_button(
-                        "tb-eraser",
-                        "Eraser · D",
-                        IconName::Eraser,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleEraser), cx);
-                        },
-                    )
-                    .selected(eraser_tool),
-                )
-                .child(
-                    icon_button(
-                        "tb-text",
-                        "Text · T",
-                        IconName::Type,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ToggleText), cx);
-                        },
-                    )
-                    .selected(text_tool),
-                )
-                .child(
-                    // Wipes every placed mark in one undoable step
-                    // (issue #15). Lives at the end of the tool cluster —
-                    // undo/redo are keyboard-only, so this is the one
-                    // history action with a button. Lucide's plain Trash
-                    // is the conventional "clear" glyph (this bundle has
-                    // no trash-2); an empty-canvas press is a harmless
-                    // no-op, like Delete.
-                    icon_button(
-                        "tb-clear",
-                        "Clear annotations · Ctrl+Shift+Del",
-                        IconName::Trash,
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ClearAnnotations), cx);
-                        },
-                    ),
-                )
+                .children(row_one_buttons(
+                    crate::model::settings::ToolbarCluster::Tools,
+                    annotations,
+                    &focus,
+                    settings,
+                ))
                 .child(div().flex_1())
-                .child(icon_button(
-                    "tb-ocr",
-                    "Recognize text · Ctrl+O",
-                    IconName::ScanText,
-                    focus.clone(),
-                    |window, cx| {
-                        window.dispatch_action(Box::new(OcrSelection), cx);
-                    },
+                .children(row_one_buttons(
+                    crate::model::settings::ToolbarCluster::Actions,
+                    annotations,
+                    &focus,
+                    settings,
                 ))
-                .child(icon_button(
-                    "tb-save",
-                    "Save · Ctrl+S",
-                    IconName::Save,
-                    focus.clone(),
-                    |window, cx| {
-                        window.dispatch_action(Box::new(SaveSelection), cx);
-                    },
-                ))
-                .child(
-                    // own icon: the gpui-kit asset whitelist (`icon_assets!`)
-                    // does not bundle a pin, and IconName::Pin would render
-                    // an empty slot — same situation as the mosaic icon
-                    control(
-                        "tb-pin".into(),
-                        "Pin to screen · Ctrl+P".into(),
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(PinSelection), cx);
-                        },
-                    )
-                    .child(own_icon("icons/pin.svg")),
-                )
-                .child(
-                    // own icon: no long-screenshot glyph in the Lucide
-                    // whitelist either (document + down arrow)
-                    control(
-                        "tb-scroll".into(),
-                        "Long screenshot (scroll) · Ctrl+L".into(),
-                        focus.clone(),
-                        |window, cx| {
-                            window.dispatch_action(Box::new(ScrollSelection), cx);
-                        },
-                    )
-                    .child(own_icon("icons/scroll.svg")),
-                )
-                .child(separator())
-                .child(icon_button(
-                    "tb-cancel",
-                    "Cancel · Esc",
-                    IconName::X,
-                    focus.clone(),
-                    |window, cx| {
-                        window.dispatch_action(Box::new(QuitOverlay), cx);
-                    },
-                ))
-                .child(icon_button(
-                    "tb-copy",
-                    "Copy · Enter / Ctrl+C",
-                    IconName::Copy,
-                    focus,
-                    |window, cx| {
-                        window.dispatch_action(Box::new(CopySelection), cx);
-                    },
+                .children(row_one_buttons(
+                    crate::model::settings::ToolbarCluster::Confirm,
+                    annotations,
+                    &focus,
+                    settings,
                 ))
                 .child(grip("tb-grip-right", output, session.clone())),
         )
@@ -646,21 +727,6 @@ fn separator() -> Div {
         .bg(rgba(theme::c().toolbar_border))
 }
 
-fn icon_button(
-    id: &'static str,
-    label: &'static str,
-    icon: IconName,
-    focus: FocusHandle,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> Button {
-    control(id.to_owned(), label.to_owned(), focus, on_click).child(
-        svg()
-            .path(icon.path())
-            .size(px(18.))
-            .text_color(rgba(theme::c().toolbar_text)),
-    )
-}
-
 /// Restore the canvas focus BEFORE changing toolbar state. A focused control
 /// may disappear on redraw (e.g. leaving rectangle mode), otherwise scoped
 /// shortcut dispatch no longer has the screenshot root in its focus path.
@@ -742,39 +808,41 @@ mod tests {
     }
     #[test]
     fn toolbar_icons_are_bundled() {
-        use gpui_kit::{AssetSource, assets::IconName};
-        // the app's composed source: own SVGs first, then selected Lucide
-        for icon in [
-            IconName::Type,
-            IconName::MirrorRectangular,
-            IconName::Highlighter,
-            IconName::Pencil,
-            IconName::Square,
-            IconName::Circle,
-            IconName::Slash,
-            IconName::Waypoints,
-            IconName::ArrowUpRight,
-            IconName::ListOrdered,
-            IconName::ScanText,
-            IconName::Save,
-            IconName::Pin,
-            IconName::Trash,
-            IconName::X,
-            IconName::Copy,
-        ] {
+        use gpui_kit::AssetSource;
+        // the app's composed source: own SVGs first, then selected
+        // Lucide — every icon the BUTTONS table references must load,
+        // a missing whitelist entry renders an empty slot
+        for meta in super::BUTTONS {
+            let path = match meta.icon {
+                super::ButtonIcon::Kit(name) => name.path().to_string(),
+                super::ButtonIcon::Own(path) => path.to_string(),
+            };
             assert!(
-                super::ToolbarSource
-                    .load(icon.path().as_ref())
-                    .unwrap()
-                    .is_some()
+                super::ToolbarSource.load(path.as_str()).unwrap().is_some(),
+                "{} ({}) is missing from the asset source",
+                path,
+                meta.debug_id
             );
         }
-        // the self-maintained mosaic icon
-        assert!(
-            super::ToolbarSource
-                .load("icons/mosaic.svg")
-                .unwrap()
-                .is_some()
+    }
+
+    #[test]
+    fn button_table_matches_the_settings_vocabulary() {
+        // the settings window edits exactly the row the toolbar
+        // renders: same buttons, same order, every entry addressable
+        // by its settings id
+        assert_eq!(
+            super::BUTTONS
+                .iter()
+                .map(|meta| meta.button)
+                .collect::<Vec<_>>(),
+            crate::model::settings::ToolbarButton::ALL.to_vec()
         );
+        for meta in super::BUTTONS {
+            assert_eq!(
+                crate::model::settings::ToolbarButton::from_id(meta.button.id()),
+                Some(meta.button)
+            );
+        }
     }
 }

@@ -71,6 +71,17 @@ fn main() {
     // must run before any window opens. --print-theme exits inside.
     shotori::ui::theme::load::init(&args);
 
+    // ⓪" Settings pickup (settings.toml in the config dir; --no-config
+    // skips it, like the theme). Errors are warnings, never fatal.
+    shotori::model::settings::init(&args);
+
+    // ⓪''' The settings window: a regular toplevel, not a capture
+    // session — nothing below (capture, overlays) applies.
+    if matches!(args.command, Some(shotori::args::Command::Settings)) {
+        shotori::ui::settings::run();
+        return;
+    }
+
     // ⓪' Non-interactive full capture (`shotori full`) — no overlay
     if let Some(shotori::args::Command::Full {
         clipboard,

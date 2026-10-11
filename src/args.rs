@@ -59,6 +59,9 @@ pub enum Command {
 
     /// Stay resident as a tray icon; activating it starts a screenshot
     Tray,
+
+    /// Open the settings window (toolbar layout; more sections later)
+    Settings,
 }
 
 #[cfg(test)]
@@ -110,6 +113,14 @@ mod tests {
     #[test]
     fn gui_is_explicit() {
         assert!(matches!(cli(&["gui"]).command, Some(Command::Gui)));
+    }
+
+    #[test]
+    fn settings_is_a_subcommand() {
+        assert!(matches!(
+            cli(&["settings"]).command,
+            Some(Command::Settings)
+        ));
     }
 
     #[test]

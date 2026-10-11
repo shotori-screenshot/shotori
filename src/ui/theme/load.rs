@@ -111,10 +111,8 @@ pub fn load_file(path: &Path) -> Result<ThemeFile, String> {
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("shotori/theme.toml"))
+    // shared with the settings loader (one config dir, two files)
+    crate::model::settings::config_dir().map(|dir| dir.join("theme.toml"))
 }
 
 fn resolve(value: Option<&str>, config: Option<PathBuf>) -> (ThemeFile, Source, Vec<String>) {

@@ -12,6 +12,9 @@
 //! - [`scroll_bar`]: the long-screenshot chrome (region frame + preview
 //!   panel; chrome-free on full-screen single-monitor sessions — see
 //!   that module's docs)
+//! - [`settings`]: the settings toplevel (`shotori settings`) — the
+//!   one non-overlay window; edits the toolbar layout in
+//!   `model::settings`
 //! - [`e2e`]: runtime debug backdoors driving headless tests
 //!   (`SHOTORI_DEBUG_*`)
 //! - [`theme`]: visual constants
@@ -24,6 +27,7 @@ pub mod ocr_setup;
 pub mod overlay;
 pub mod pin;
 pub mod scroll_bar;
+pub mod settings;
 pub mod theme;
 pub mod toolbar;
 

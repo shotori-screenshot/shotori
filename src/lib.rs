@@ -9,8 +9,10 @@
 //! │  ├─ session               state shared by all overlays (multi-monitor
 //! │  │                        selections, hover, click-snap, cropping)
 //! │  ├─ export                crop → PNG → disk/clipboard bytes
-//! │  └─ placement             two-zone chrome geometry (label top,
-//! │                           toolbar bottom — disjoint by construction)
+//! │  ├─ placement             two-zone chrome geometry (label top,
+//! │  │                        toolbar bottom — disjoint by construction)
+//! │  └─ settings              persistent user settings (toolbar layout)
+//!                           in ~/.config/shotori/settings.toml
 //! ├─ platform/                compositor & desktop integration
 //! │  ├─ capture/              screen freeze: wlr-screencopy; pixels is
 //! │  │                        pure format/rotation processing
@@ -22,6 +24,7 @@
 //! │  │                        layer-shell surfaces
 //! │  ├─ hud / toolbar         selection visuals & buttons
 //! │  ├─ ocr_setup             first-run OCR model dialog
+//! │  ├─ settings              the settings toplevel (`shotori settings`)
 //! │  ├─ e2e                   SHOTORI_DEBUG_* backdoors for headless tests
 //! │  └─ theme / image_util    constants; RGBA → RenderImage
 //! ├─ annotation/             in-canvas annotations: arrow / number /
