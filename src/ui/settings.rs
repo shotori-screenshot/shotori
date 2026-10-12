@@ -1212,6 +1212,21 @@ fn page_header(title: &str, blurb: &str) -> Div {
         )
 }
 
+/// The settings sidebar header's logo: the app icon master (the same
+/// 64px asset the tray embeds), decoded once into a RenderImage. An
+/// embedded, tracked asset — a decode failure is a build-time defect,
+/// not a runtime condition to handle.
+static SIDEBAR_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
+    std::sync::LazyLock::new(|| {
+        let png = image::load_from_memory(include_bytes!("../../assets/app/shotori-64.png"))
+            .expect("the embedded app icon (shotori-64.png) must decode");
+        crate::ui::image_util::rgba_to_render_image(
+            png.to_rgba8().into_raw(),
+            png.width(),
+            png.height(),
+        )
+    });
+
 impl SettingsWindow {
     /// The navigation sidebar: one item per section, the active page
     /// highlighted. Fixed-width for now — collapsing is a shell nicety
@@ -1251,10 +1266,24 @@ impl SettingsWindow {
                 cx.notify();
             }));
         let mut identity = SidebarHeader::new().collapsed(collapsed);
+        // The logo: the app icon master (the same 64px asset the tray
+        // embeds), decoded once — 64px stays crisp at the header's 16px
+        // logical size on HiDPI.
+        let logo = || img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4();
         if collapsed {
-            // icon-rail width only fits one control — keep the toggle,
-            // drop the identity block
-            identity = identity.child(toggle);
+            // icon rail: logo (branding survives collapsing) stacked
+            // over the toggle — the header is an h_flex, so wrap the
+            // pair to keep them centered in the narrow rail
+            identity = identity.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.))
+                    .w_full()
+                    .child(logo())
+                    .child(toggle),
+            );
         } else {
             identity = identity
                 .child(
@@ -1262,7 +1291,7 @@ impl SettingsWindow {
                         .flex()
                         .items_center()
                         .gap(px(8.))
-                        .child(Icon::new(IconName::Camera).size_4())
+                        .child(logo())
                         .child(div().text_size(px(13.)).child("Shotori")),
                 )
                 .child(toggle);
