@@ -276,47 +276,135 @@ fn window_options() -> WindowOptions {
     }
 }
 
-/// Align the shell's design-system theme with the active shotori
-/// theme: mode from the system appearance (the component theme ships
-/// light/dark pairs of its own), accent from the shotori palette — the
-/// sidebar then reads as one product with the overlay instead of a
-/// foreign default blue. Shotori-side, [`theme::follow_system`] keeps
-/// the overlay palettes switching in step.
-/// Push the window's appearance into the component design system's
-/// global theme (mode + accent), so component-built surfaces — the
-/// color pickers' popovers — match the shotori palette instead of the
-/// component default (light). Called by the settings window at startup
-/// and by the overlay (its inline swatch editor's popover needs it
-/// too).
+/// Align the component design system (the settings shell — sidebar,
+/// dropdowns, popovers, scrollbars, everything reading `cx.theme()`)
+/// with the ACTIVE shotori palette. The palette's inherent appearance
+/// picks the mode: `auto` already follows the system through
+/// [`theme::follow_system`], and a fixed base (say catppuccin-latte)
+/// must not inherit dark chrome from a dark system. Called by the
+/// settings window at startup and on appearance flips, by the overlay
+/// (its inline swatch editor's popover needs it too) and after every
+/// Appearance edit.
 pub(crate) fn sync_shell_theme(window: &mut Window, cx: &mut App) {
     theme::follow_system(window.appearance());
-    let dark = matches!(
-        window.appearance(),
-        gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
-    );
-    Theme::change(
-        if dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        },
-        None,
-        cx,
-    );
-    // Second `update`, after the mode load replaced the colors — the
-    // documented order (Theme::update's doc).
-    sync_shell_accent(cx);
+    sync_shell_palette(cx);
 }
 
-/// Keep the shell accent in step with the shotori accent — called at
-/// startup by [`sync_shell_theme`] and after every Appearance edit
-/// (the accent may have just changed).
-fn sync_shell_accent(cx: &mut App) {
-    let accent: Hsla = rgba(theme::c().accent).into();
-    let accent_text: Hsla = rgba(theme::c().accent_text()).into();
-    Theme::update(cx, |t| {
-        t.colors.accent = accent;
-        t.colors.accent_foreground = accent_text;
+/// Paint the shotori palette onto the component theme's tokens — the
+/// library ships only "Default Light/Dark", so without this the shell
+/// stays gray while the pages re-skin. Surface roles map directly
+/// (toolbar_* IS our chrome vocabulary); the shadcn-style semantic
+/// roles (primary/accent/muted/…) take the closest palette field.
+/// Status colors (danger/success/warning/info) stay library defaults:
+/// the shotori palette has no equivalents.
+///
+/// `Theme::change` reloads the registered defaults and would wipe this
+/// paint, so it runs only when the mode actually flips — same-mode
+/// edits (picker drags fire per pixel) repaint in place.
+fn sync_shell_palette(cx: &mut App) {
+    let t = theme::c();
+    let mode = if t.is_dark() {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    if Theme::global(cx).mode != mode {
+        Theme::change(mode, None, cx);
+    }
+    // the palette's chrome vocabulary, converted once
+    let bg: Hsla = rgba(t.toolbar_bg).into();
+    let hover: Hsla = rgba(t.toolbar_hover).into();
+    let selected: Hsla = rgba(t.toolbar_selected).into();
+    let text: Hsla = rgba(t.toolbar_text).into();
+    let hint: Hsla = rgba(t.hint_text).into();
+    let border: Hsla = rgba(t.toolbar_border).into();
+    let chip: Hsla = rgba(t.chip_bg).into();
+    let accent: Hsla = rgba(t.accent).into();
+    let accent_text: Hsla = rgba(t.accent_text()).into();
+    let btn_text: Hsla = rgba(t.btn_text).into();
+    let btn_hover: Hsla = rgba(t.btn_hover_bg).into();
+    Theme::update(cx, |theme| {
+        let c = &mut theme.colors;
+        // surfaces & chrome
+        c.background = bg;
+        c.foreground = text;
+        c.border = border;
+        c.title_bar = bg;
+        c.title_bar_border = border;
+        c.status_bar = bg;
+        c.status_bar_border = border;
+        c.sidebar = bg;
+        c.sidebar_foreground = text;
+        c.sidebar_border = border;
+        c.sidebar_accent = selected;
+        c.sidebar_accent_foreground = text;
+        c.sidebar_primary = accent;
+        c.sidebar_primary_foreground = accent_text;
+        c.popover = chip;
+        c.popover_foreground = text;
+        c.group_box = bg;
+        c.group_box_foreground = text;
+        c.accordion = bg;
+        // lists, tables, tabs
+        c.list = bg;
+        c.list_hover = hover;
+        c.list_active = selected;
+        c.list_active_border = border;
+        c.list_head = bg;
+        c.list_even = bg;
+        c.table = bg;
+        c.table_hover = hover;
+        c.table_active = selected;
+        c.table_active_border = border;
+        c.table_even = bg;
+        c.table_head = hover;
+        c.table_head_foreground = text;
+        c.table_foot = bg;
+        c.table_foot_foreground = text;
+        c.table_row_border = border;
+        c.tab = bg;
+        c.tab_active = selected;
+        c.tab_active_foreground = text;
+        c.tab_bar = bg;
+        c.tab_bar_segmented = hover;
+        c.tab_foreground = hint;
+        // the shadcn-style semantic roles
+        c.accent = hover; // shadcn "accent" = menu/list hover, NOT brand
+        c.accent_foreground = text;
+        c.muted = hover;
+        c.muted_foreground = hint;
+        c.secondary = hover;
+        c.secondary_foreground = text;
+        c.secondary_hover = selected;
+        c.secondary_active = selected;
+        c.primary = accent; // the brand color (Switch, links, focus)
+        c.primary_foreground = accent_text;
+        c.primary_hover = accent;
+        c.primary_active = accent;
+        // inputs & controls
+        c.input = border; // shadcn "input" = the input border color
+        c.ring = accent;
+        c.caret = text;
+        c.selection = selected;
+        c.link = accent;
+        c.link_hover = accent;
+        c.link_active = accent;
+        c.button = bg;
+        c.button_foreground = btn_text;
+        c.button_hover = btn_hover;
+        c.button_active = selected;
+        c.switch = hover;
+        c.switch_thumb = text;
+        c.slider_bar = border;
+        c.slider_thumb = text;
+        c.scrollbar = bg;
+        c.scrollbar_thumb = border;
+        c.scrollbar_thumb_hover = selected;
+        c.drop_target = selected;
+        c.drag_border = accent;
+        c.skeleton = hover;
+        c.description_list_label = hint;
+        c.description_list_label_foreground = text;
     });
 }
 
@@ -1944,7 +2032,8 @@ impl SettingsWindow {
     fn appearance_apply(&mut self, cx: &mut Context<Self>) {
         let (dark, light, palette_errors) = self.appearance.file.palettes();
         theme::set(dark, light);
-        sync_shell_accent(cx);
+        // appearance edits re-skin the whole shell, not just accent
+        sync_shell_palette(cx);
         self.appearance.error = match palette_errors.first() {
             Some(error) => Some(error.clone()),
             None => match &self.appearance.path {

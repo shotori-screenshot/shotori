@@ -377,6 +377,14 @@ impl Theme {
         let a = (self.dim_opacity.clamp(0., 1.) * 255.).round() as u32;
         (self.dim_color & 0xFFFFFF00) | a.min(0xFF)
     }
+
+    /// The palette's inherent appearance: dark surfaces → dark. The
+    /// settings shell picks the design-system mode from this, so a
+    /// fixed light base (e.g. catppuccin-latte) gets light component
+    /// chrome even on a dark system.
+    pub fn is_dark(&self) -> bool {
+        luminance(self.toolbar_bg) < 0.5
+    }
 }
 
 /// `..dark()` spelled for const fn (struct-update syntax is not const).
@@ -561,19 +569,21 @@ pub fn follow_system(appearance: gpui_kit::WindowAppearance) {
     );
 }
 
-fn contrast(a: u32, b: u32) -> f32 {
-    let luminance = |color: u32| {
-        let rgb = color.to_be_bytes();
-        let linear = |i: usize| {
-            let v = rgb[i] as f32 / 255.;
-            if v <= 0.04045 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        linear(0) * 0.2126 + linear(1) * 0.7152 + linear(2) * 0.0722
+/// WCAG relative luminance of an 0xRRGGBB(A) color.
+fn luminance(color: u32) -> f32 {
+    let rgb = color.to_be_bytes();
+    let linear = |i: usize| {
+        let v = rgb[i] as f32 / 255.;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
     };
+    linear(0) * 0.2126 + linear(1) * 0.7152 + linear(2) * 0.0722
+}
+
+fn contrast(a: u32, b: u32) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
@@ -581,6 +591,37 @@ fn contrast(a: u32, b: u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_appearance_drives_the_shell_mode() {
+        // `is_dark` picks the design-system mode for the settings
+        // shell (sync_shell_palette): every dark base must read dark,
+        // every light base light — a fixed light base must not inherit
+        // dark chrome from a dark system.
+        let darks = [
+            Theme::dark(),
+            Theme::shotori(),
+            Theme::catppuccin_frappe(),
+            Theme::catppuccin_macchiato(),
+            Theme::catppuccin_mocha(),
+            Theme::dracula(),
+            Theme::gruvbox_dark(),
+            Theme::nord(),
+            Theme::rose_pine(),
+            Theme::tokyo_night(),
+        ];
+        let lights = [
+            Theme::light(),
+            Theme::high_contrast(),
+            Theme::catppuccin_latte(),
+        ];
+        for theme in darks {
+            assert!(theme.is_dark(), "{:08X}", theme.toolbar_bg);
+        }
+        for theme in lights {
+            assert!(!theme.is_dark(), "{:08X}", theme.toolbar_bg);
+        }
+    }
 
     #[test]
     fn custom_accents_keep_all_control_text_readable() {
