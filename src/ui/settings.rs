@@ -128,6 +128,51 @@ impl SearchableListItem for OcrModelItem {
     }
 }
 
+/// One row of the base palette Select: `auto` plus every preinstalled
+/// theme (see [`theme::load::BUILT_INS`]). `title` re-resolves on every
+/// render — the factory rows translate, community palettes are proper
+/// nouns — so a live locale flip relabels the menu like everywhere
+/// else.
+#[derive(Clone)]
+struct BaseItem {
+    /// The `theme.toml` value: "auto" or a built-in name.
+    name: String,
+    display: SharedString,
+    label_key: Option<&'static str>,
+}
+
+impl BaseItem {
+    /// Auto first, then every preinstalled base in registry order.
+    fn all() -> Vec<Self> {
+        std::iter::once(Self {
+            name: "auto".into(),
+            display: "Auto".into(),
+            label_key: Some("settings.appearance.auto"),
+        })
+        .chain(load::BUILT_INS.iter().map(|built_in| Self {
+            name: built_in.name.into(),
+            display: built_in.display.into(),
+            label_key: built_in.label_key,
+        }))
+        .collect()
+    }
+}
+
+impl SearchableListItem for BaseItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        match self.label_key {
+            Some(key) => crate::i18n::t!(key).into(),
+            None => self.display.clone(),
+        }
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.name
+    }
+}
+
 /// An empty drag ghost for the scrollbar scrub — the thumb itself is
 /// the feedback (it re-renders from the handle on every scrub event),
 /// so nothing follows the pointer.
@@ -315,16 +360,19 @@ struct SettingsWindow {
 
 /// The Appearance editor: a working [`ThemeFile`] (base + overrides,
 /// written through to theme.toml on every change) plus the interactive
-/// state each row renders — one picker entity per [`ColorKey`] and one
-/// slider for dim opacity. Picker values are the RESOLVED palette
-/// (what a capture would show), so a base switch re-seeds every
-/// control through [`SettingsWindow::appearance_resync`]. The
-/// annotation swatch board is NOT edited here — it is toolbar
-/// configuration, living in settings.toml (see the Toolbar section).
+/// state each row renders — the base palette selector, one picker
+/// entity per [`ColorKey`] and one slider for dim opacity. Picker
+/// values are the RESOLVED palette (what a capture would show), so a
+/// base switch re-seeds every control through
+/// [`SettingsWindow::appearance_resync`]. The annotation swatch board
+/// is NOT edited here — it is toolbar configuration, living in
+/// settings.toml (see the Toolbar section).
 struct AppearanceState {
     file: ThemeFile,
     path: Option<PathBuf>,
     error: Option<String>,
+    /// The base palette selector (auto + the preinstalled themes).
+    base_select: gpui_kit::Entity<SelectState<SearchableVec<BaseItem>>>,
     pickers: Vec<(ColorKey, Entity<ColorPickerState>)>,
     opacity: Entity<SliderState>,
     _subscriptions: Vec<Subscription>,
@@ -1633,7 +1681,8 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Appearance: theme base + per-field colors with a live mockup.
+    /// Appearance: theme base + per-field colors, live-applied to this
+    /// window's own chrome.
     fn page_appearance(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         div()
             .id("page-appearance")
@@ -1647,81 +1696,37 @@ impl SettingsWindow {
                 crate::i18n::t!("settings.appearance.title").as_ref(),
                 crate::i18n::t!("settings.appearance.blurb").as_ref(),
             ))
-            // the fixed-geometry mockup would otherwise stretch the
-            // column to its own 640px and every text above would lay
-            // out (and clip) at that width — the scroll wrapper caps
-            // its contribution, narrower panes pan (the vertical axis
-            // never actually scrolls: the child is its own height)
-            .child(
-                div()
-                    .id("mockup-wrap")
-                    .self_start()
-                    .overflow_x_scroll()
-                    .child(appearance_mockup()),
-            )
-            .child(self.base_row(cx))
+            .child(self.base_control(cx))
             .child(self.color_grid(cx))
             .child(self.opacity_row(cx))
             .child(self.appearance_footer(cx))
     }
 
-    /// The base palette selector: four mutually exclusive buttons, the
-    /// active one highlighted.
-    fn base_row(&self, cx: &mut Context<Self>) -> Div {
+    /// The base palette selector: Auto plus every preinstalled theme
+    /// (see [`theme::load::BUILT_INS`]). A Confirm writes through and
+    /// re-seeds the rows below — the pickers always show what the
+    /// active base resolves to.
+    fn base_control(&self, _: &Context<Self>) -> Div {
         let t = theme::c();
-        let entity = cx.entity();
-        let current_base = self
-            .appearance
-            .file
-            .base
-            .clone()
-            .unwrap_or_else(|| "auto".into());
-        // wraps at narrow pane widths — the window has no min size, and
-        // a row of fixed buttons must not stretch the page horizontally
-        let mut row = div().flex().flex_wrap().items_center().gap(px(6.));
-        row = row.child(
-            div()
-                .w(px(110.))
-                .text_size(px(12.))
-                .text_color(rgba(t.hint_text))
-                .child(crate::i18n::t!("settings.appearance.base_palette").to_string()),
-        );
-        for (name, label_key) in [
-            ("auto", "settings.appearance.auto"),
-            ("dark", "settings.appearance.dark"),
-            ("light", "settings.appearance.light"),
-            ("high_contrast", "settings.appearance.high_contrast"),
-        ] {
-            let active = current_base == name;
-            let name = name.to_string();
-            let entity = entity.clone();
-            row = row.child(
-                Button::new(SharedString::from(format!("base-{name}")))
-                    .accessibility_label(format!(
-                        "{}: {}",
-                        crate::i18n::t!("settings.appearance.base_palette"),
-                        crate::i18n::t!(label_key)
-                    ))
-                    .px(px(10.))
-                    .py(px(3.))
-                    .rounded(px(6.))
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
                     .text_size(px(12.))
-                    .text_color(rgba(if active { t.accent_text() } else { t.btn_text }))
-                    .when(active, |b| {
-                        b.bg(rgba(t.accent)).border_1().border_color(rgba(t.accent))
-                    })
-                    .when(!active, |b| {
-                        b.border_1().border_color(rgba(t.toolbar_border))
-                    })
-                    .when(!active, |b| b.hover(|s| s.bg(rgba(t.toolbar_hover))))
-                    .focus_visible(|s| s.border_color(rgba(t.accent)))
-                    .on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.appearance_set_base(&name, window, cx));
-                    })
-                    .child(crate::i18n::t!(label_key).to_string()),
-            );
-        }
-        row
+                    .text_color(rgba(t.hint_text))
+                    .child(crate::i18n::t!("settings.appearance.base_palette").to_string()),
+            )
+            .child(
+                div().w(px(280.)).child(
+                    Select::new(&self.appearance.base_select)
+                        .accessibility_label(
+                            crate::i18n::t!("settings.appearance.base_palette").to_string(),
+                        )
+                        .menu_width(px(280.)),
+                ),
+            )
     }
 
     /// One row per [`ColorKey`]: label + picker showing the resolved
@@ -1870,8 +1875,29 @@ impl AppearanceState {
         let (file, errors) = load::load_editable(path.as_deref());
         let current = current_palette(&file);
 
-        let mut pickers = Vec::new();
+        // Base palette selector: seeded from the file (None = auto); a
+        // Confirm swaps the base, re-seeds the pickers below and
+        // writes through (see `appearance_set_base`).
+        let current_base = file.base.clone().unwrap_or_else(|| "auto".into());
+        let items = BaseItem::all();
+        let selected = items
+            .iter()
+            .position(|item| item.name == current_base)
+            .map(IndexPath::new);
+        let base_select =
+            cx.new(|cx| SelectState::new(SearchableVec::new(items), selected, window, cx));
         let mut subs = Vec::new();
+        // subscribe_in (not subscribe): the base swap must re-seed the
+        // pickers, and `set_value` needs the window.
+        subs.push(
+            cx.subscribe_in(&base_select, window, |this, _, event, window, cx| {
+                if let SelectEvent::Confirm(Some(base)) = event {
+                    this.appearance_set_base(base, window, cx);
+                }
+            }),
+        );
+
+        let mut pickers = Vec::new();
         for key in ColorKey::ALL {
             let value = u32_to_hsla(key.get(&current));
             let state = cx.new(|cx| ColorPickerState::new(window, cx).default_value(value));
@@ -1903,6 +1929,7 @@ impl AppearanceState {
             file,
             path,
             error: errors.first().cloned(),
+            base_select,
             pickers,
             opacity,
             _subscriptions: subs,
@@ -1944,6 +1971,9 @@ impl SettingsWindow {
     }
 
     fn appearance_set_base(&mut self, base: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.appearance.file.base.as_deref().unwrap_or("auto") == base {
+            return;
+        }
         self.appearance.file.base = Some(base.to_string());
         self.appearance_resync(window, cx);
         self.appearance_apply(cx);
@@ -1974,225 +2004,3 @@ fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
 }
 
 use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};
-// ── Appearance: the virtual-screenshot mockup ──────────────────────────────
-
-/// The Appearance preview: a hand-drawn capture scene — fake desktop,
-/// dim + selection cutout with accent chrome, sample annotations, a
-/// schematic toolbar with the swatch strip, an OCR chip and a pin —
-/// painted with the ACTIVE (working) palette. Every themed surface of
-/// the overlay appears once, so any picker drag shows up somewhere in
-/// the scene the same frame. Fixed geometry keeps the pickers from
-/// reflowing under the preview while dragging.
-const MOCK_W: f32 = 640.;
-const MOCK_H: f32 = 340.;
-const SEL_X: f32 = 190.;
-const SEL_Y: f32 = 92.;
-const SEL_W: f32 = 250.;
-const SEL_H: f32 = 148.;
-
-fn appearance_mockup() -> Stateful<Div> {
-    let t = theme::c();
-    // The swatch board comes from settings (it is toolbar
-    // configuration, not theme appearance) — the mockup previews both
-    // sources the way a capture would composite them.
-    let palette = crate::model::settings::current().annotation_colors();
-    // absolute helper: a positioned box
-    fn at(x: f32, y: f32, w: f32, h: f32) -> Div {
-        div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h))
-    }
-    // one resize handle: accent square with a hair of contrast rim
-    let handle = |x: f32, y: f32| {
-        at(x, y, 7., 7.)
-            .bg(rgba(t.accent))
-            .border_1()
-            .border_color(rgba(t.toolbar_bg))
-    };
-    div()
-        .id("appearance-mockup")
-        .relative()
-        .self_start()
-        .w(px(MOCK_W))
-        .h(px(MOCK_H))
-        .rounded(px(10.))
-        .overflow_hidden()
-        .border_1()
-        .border_color(rgba(t.toolbar_border))
-        // ── the fake desktop (theme-independent: it is the wallpaper,
-        //    not UI) …
-        .child(
-            div()
-                .absolute()
-                .size_full()
-                .bg(rgb(0x5F6F82FF))
-                .child(at(28., 34., 130., 86.).rounded(px(6.)).bg(rgb(0x748699FF)))
-                .child(
-                    at(28., 34., 130., 16.)
-                        .rounded_t(px(6.))
-                        .bg(rgb(0x445467FF)),
-                )
-                .child(
-                    at(470., 26., 150., 110.)
-                        .rounded(px(6.))
-                        .bg(rgb(0x6B7D90FF))
-                        .border_1()
-                        .border_color(rgb(0x556879FF)),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .bottom_0()
-                        .w_full()
-                        .h(px(24.))
-                        .bg(rgb(0x42515FFF)),
-                ),
-        )
-        // … dimmed outside the selection (theme: dim_color @ dim_opacity)
-        .child(div().absolute().size_full().bg(rgba(t.dim())))
-        // ── the selection: a bright "cutout" with accent chrome …
-        .child(
-            at(SEL_X, SEL_Y, SEL_W, SEL_H)
-                .bg(rgb(0x8CA0B3FF))
-                .border_2()
-                .border_color(rgba(t.accent))
-                // sample annotations: rectangle (green), stroke (orange),
-                // number badge (blue) — three palette colors visible
-                .child(
-                    at(18., 20., 92., 58.)
-                        .border_2()
-                        .border_color(rgba(palette[3])),
-                )
-                .child(at(130., 96., 92., 4.).rounded(px(2.)).bg(rgba(palette[1])))
-                .child(
-                    at(150., 26., 22., 22.)
-                        .rounded_full()
-                        .bg(rgba(palette[4]))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.))
-                        .text_color(rgb(0xFFFFFFFF))
-                        .child("1"),
-                )
-                // eight resize handles on the rim
-                .child(handle(-4., -4.))
-                .child(handle(SEL_W / 2. - 3.5, -4.))
-                .child(handle(SEL_W - 3., -4.))
-                .child(handle(-4., SEL_H / 2. - 3.5))
-                .child(handle(SEL_W - 3., SEL_H / 2. - 3.5))
-                .child(handle(-4., SEL_H - 3.))
-                .child(handle(SEL_W / 2. - 3.5, SEL_H - 3.))
-                .child(handle(SEL_W - 3., SEL_H - 3.)),
-        )
-        // size chip above the selection (accent + accent_text)
-        .child(
-            at(SEL_X, SEL_Y - 22., 76., 18.)
-                .rounded(px(4.))
-                .bg(rgba(t.accent))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(11.))
-                .text_color(rgba(t.accent_text()))
-                .child(format!("{} × {}", SEL_W as u32, SEL_H as u32)),
-        )
-        // schematic toolbar under the selection (toolbar_* + swatches)
-        .child(at(SEL_X, SEL_Y + SEL_H + 10., 430., 38.).child(mock_toolbar()))
-        // OCR setup chip (chip_bg / hint_text / btn_*)
-        .child(
-            div()
-                .absolute()
-                .left(px(24.))
-                .bottom(px(40.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(10.))
-                .py(px(6.))
-                .rounded(px(8.))
-                .bg(rgba(t.chip_bg))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgba(t.hint_text))
-                        .child(crate::i18n::t!("ocr.setup.downloading").to_string()),
-                )
-                .child(
-                    div()
-                        .px(px(8.))
-                        .py(px(2.))
-                        .rounded(px(5.))
-                        .bg(rgba(t.btn_hover_bg))
-                        .text_size(px(11.))
-                        .text_color(rgba(t.btn_text))
-                        .child(crate::i18n::t!("ocr.setup.retry").to_string()),
-                ),
-        )
-        // pin thumbnail (pin_border)
-        .child(
-            at(MOCK_W - 96., 26., 72., 48.)
-                .rounded(px(4.))
-                .bg(rgb(0x8CA0B3FF))
-                .border_1()
-                .border_color(rgba(t.pin_border)),
-        )
-}
-
-/// The mockup's toolbar: schematic chrome, real palette — grips, two
-/// plain buttons, a selected one, a separator, then all seven
-/// annotation swatches with their border.
-fn mock_toolbar() -> Div {
-    let t = theme::c();
-    let dot = |color: u32| div().size(px(8.)).rounded_full().bg(rgba(color));
-    let mut bar = div()
-        .flex()
-        .items_center()
-        .gap(px(7.))
-        .h(px(38.))
-        .px(px(8.))
-        .rounded(px(9.))
-        .bg(rgba(t.toolbar_bg))
-        .border_1()
-        .border_color(rgba(t.toolbar_border))
-        .shadow_md()
-        .child(dot(t.toolbar_border))
-        .child(dot(t.toolbar_border))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(24.))
-                .rounded(px(5.))
-                .child(dot(t.toolbar_text)),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(24.))
-                .rounded(px(5.))
-                .bg(rgba(t.toolbar_selected))
-                .border_1()
-                .border_color(rgba(t.accent))
-                .child(dot(t.accent)),
-        )
-        .child(div().w(px(1.)).h(px(16.)).bg(rgba(t.toolbar_border)));
-    for color in crate::model::settings::current()
-        .annotation_colors()
-        .iter()
-        .copied()
-    {
-        bar = bar.child(
-            div()
-                .size(px(11.))
-                .rounded(px(3.))
-                .bg(rgba(color))
-                .border_1()
-                .border_color(rgba(t.swatch_border)),
-        );
-    }
-    bar.child(dot(t.toolbar_border))
-        .child(dot(t.toolbar_border))
-}

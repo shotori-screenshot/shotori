@@ -125,15 +125,130 @@ pub enum Source {
     File(PathBuf),
 }
 
-pub fn built_in(name: &str) -> Result<Theme, String> {
-    match name {
-        "dark" => Ok(Theme::dark()),
-        "light" => Ok(Theme::light()),
-        "high_contrast" => Ok(Theme::high_contrast()),
-        _ => Err(format!(
-            "unknown theme {name:?} (want auto | dark | light | high_contrast)"
-        )),
+/// One preinstalled base palette: the `theme.toml` / `--theme`
+/// identifier plus what the Appearance editor's base selector needs.
+/// The factory rows carry a translation key; community palettes are
+/// proper nouns, displayed as-is in every locale.
+pub struct BuiltIn {
+    /// The `base` value / `--theme` name (kebab-case, no dot — `resolve`
+    /// routes any value containing `.` or a slash to the file path).
+    pub name: &'static str,
+    /// Display name for untranslated (community) palettes.
+    pub(crate) display: &'static str,
+    /// `t!` key for the factory rows, None for community palettes.
+    pub(crate) label_key: Option<&'static str>,
+    palette: fn() -> Theme,
+}
+
+impl BuiltIn {
+    /// The editor label: translated for the factory rows, the proper
+    /// noun otherwise. Resolved per call, so a live locale flip
+    /// relabels like everywhere else.
+    pub fn label(&self) -> String {
+        self.label_key
+            .map(|key| crate::i18n::t!(key).to_string())
+            .unwrap_or_else(|| self.display.to_string())
     }
+}
+
+/// Every preinstalled base, in editor display order: the factory rows
+/// first, then the house theme, then community palettes dark→light
+/// within each family. `auto` is NOT here — it is not a palette but
+/// the dark/light pair following the system appearance, and lives as a
+/// separate selector row (see the Appearance editor).
+pub const BUILT_INS: &[BuiltIn] = &[
+    BuiltIn {
+        name: "dark",
+        display: "Dark",
+        label_key: Some("settings.appearance.dark"),
+        palette: Theme::dark,
+    },
+    BuiltIn {
+        name: "light",
+        display: "Light",
+        label_key: Some("settings.appearance.light"),
+        palette: Theme::light,
+    },
+    BuiltIn {
+        name: "high_contrast",
+        display: "High contrast",
+        label_key: Some("settings.appearance.high_contrast"),
+        palette: Theme::high_contrast,
+    },
+    BuiltIn {
+        name: "shotori",
+        display: "Shotori",
+        label_key: None,
+        palette: Theme::shotori,
+    },
+    BuiltIn {
+        name: "catppuccin-frappe",
+        display: "Catppuccin Frappé",
+        label_key: None,
+        palette: Theme::catppuccin_frappe,
+    },
+    BuiltIn {
+        name: "catppuccin-macchiato",
+        display: "Catppuccin Macchiato",
+        label_key: None,
+        palette: Theme::catppuccin_macchiato,
+    },
+    BuiltIn {
+        name: "catppuccin-mocha",
+        display: "Catppuccin Mocha",
+        label_key: None,
+        palette: Theme::catppuccin_mocha,
+    },
+    BuiltIn {
+        name: "catppuccin-latte",
+        display: "Catppuccin Latte",
+        label_key: None,
+        palette: Theme::catppuccin_latte,
+    },
+    BuiltIn {
+        name: "dracula",
+        display: "Dracula",
+        label_key: None,
+        palette: Theme::dracula,
+    },
+    BuiltIn {
+        name: "gruvbox-dark",
+        display: "Gruvbox Dark",
+        label_key: None,
+        palette: Theme::gruvbox_dark,
+    },
+    BuiltIn {
+        name: "nord",
+        display: "Nord",
+        label_key: None,
+        palette: Theme::nord,
+    },
+    BuiltIn {
+        name: "rose-pine",
+        display: "Rosé Pine",
+        label_key: None,
+        palette: Theme::rose_pine,
+    },
+    BuiltIn {
+        name: "tokyo-night",
+        display: "Tokyo Night",
+        label_key: None,
+        palette: Theme::tokyo_night,
+    },
+];
+
+pub fn built_in(name: &str) -> Result<Theme, String> {
+    BUILT_INS
+        .iter()
+        .find(|built_in| built_in.name == name)
+        .map(|built_in| (built_in.palette)())
+        .ok_or_else(|| {
+            let names = std::iter::once("auto")
+                .chain(BUILT_INS.iter().map(|b| b.name))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("unknown theme {name:?} (want {names})")
+        })
 }
 
 fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
@@ -484,5 +599,79 @@ mod tests {
         let file = ThemeFile::default();
         save(&path, &file).unwrap();
         assert!(load_file(&path).unwrap().is_base_only());
+    }
+
+    #[test]
+    fn every_preinstalled_base_resolves_and_round_trips() {
+        for built in BUILT_INS {
+            let direct = built_in(built.name).unwrap();
+            // the same name through a theme file resolves to the same
+            // palette (single palette, no auto pair, no errors)
+            let file: ThemeFile = toml::from_str(&format!("base = '{}'", built.name)).unwrap();
+            let (from_file, auto, errors) = file.palettes();
+            assert!(auto.is_none() && errors.is_empty(), "{}", built.name);
+            assert_eq!(from_file.toolbar_bg, direct.toolbar_bg, "{}", built.name);
+            assert_eq!(from_file.accent, direct.accent, "{}", built.name);
+            assert_eq!(
+                from_file.toolbar_selected, direct.toolbar_selected,
+                "{}",
+                built.name
+            );
+        }
+    }
+
+    #[test]
+    fn base_names_cannot_be_mistaken_for_paths() {
+        // resolve() routes any value containing '.' or a slash to the
+        // file-path branch — a name with one would be unreachable via
+        // `--theme` and `base =`.
+        for built in BUILT_INS {
+            assert!(!built.name.contains(['.', '/', '\\']), "{}", built.name);
+        }
+    }
+
+    #[test]
+    fn preinstalled_palettes_are_pairwise_distinct() {
+        // guards the copy-paste slip: two registry rows sharing one
+        // palette (surface + accent identify a theme here)
+        for (i, a) in BUILT_INS.iter().enumerate() {
+            for b in &BUILT_INS[i + 1..] {
+                let palette_a = built_in(a.name).unwrap();
+                let palette_b = built_in(b.name).unwrap();
+                assert!(
+                    palette_a.toolbar_bg != palette_b.toolbar_bg
+                        || palette_a.accent != palette_b.accent,
+                    "{} and {} are the same palette",
+                    a.name,
+                    b.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preinstalled_selected_matches_the_accent_adaptation() {
+        // apply() re-derives toolbar_selected via adapt_accent unless
+        // the file overrides it — a built-in whose literal differs from
+        // the derivation would render differently via `--theme name`
+        // (the direct palette) vs base = "name" (a file load). The
+        // literals ARE the derivation, by construction.
+        for built in BUILT_INS {
+            let mut theme = built_in(built.name).unwrap();
+            let selected = theme.toolbar_selected;
+            theme.adapt_accent();
+            assert_eq!(theme.toolbar_selected, selected, "{}", built.name);
+        }
+    }
+
+    #[test]
+    fn unknown_base_error_lists_the_choices() {
+        let error = match built_in("nope") {
+            Ok(_) => panic!("unknown base resolved"),
+            Err(error) => error,
+        };
+        assert!(error.contains("auto"));
+        assert!(error.contains("catppuccin-mocha"));
+        assert!(error.contains("tokyo-night"));
     }
 }

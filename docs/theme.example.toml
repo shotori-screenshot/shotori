@@ -5,7 +5,7 @@
 # base picks a complete palette (surfaces and control states switch
 # together by construction); every other key is an optional single-field
 # override on top of that base. Colors are opaque #RRGGBB or #RRGGBBAA.
-base = "auto" # auto | dark | light | high_contrast
+base = "auto" # auto | dark | light | high_contrast | shotori | catppuccin-{frappe,macchiato,mocha,latte} | dracula | gruvbox-dark | nord | rose-pine | tokyo-night
 
 # Any subset of the fields below, e.g.:
 # accent = "#FF6A00"

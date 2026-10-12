@@ -4,7 +4,11 @@
 //! [`Theme`] struct instead of loose constants, so the look can be
 //! swapped as a whole. Resolution order (see [`load`]):
 //!
-//! 1. a built-in base theme — `auto` (default) / `dark` / `light` / `high_contrast`
+//! 1. a built-in base theme — `auto` (default, follows the system
+//!    appearance) or one of the preinstalled palettes registered in
+//!    [`load::BUILT_INS`] (the factory `dark`/`light`/`high_contrast`
+//!    plus community palettes: Catppuccin, Dracula, Gruvbox, Nord,
+//!    Rosé Pine, Tokyo Night, and the house `shotori` theme)
 //! 2. an optional TOML settings file — `--theme <file>` or the XDG
 //!    config fallback (`~/.config/shotori/theme.toml`)
 //!
@@ -63,6 +67,9 @@ pub struct Theme {
 
 impl Theme {
     /// The default look since v0.1 — dark chips over a 55% dim.
+    /// (`toolbar_selected` is the exact `adapt_accent` derivation —
+    /// every load path re-derives it, the literal just keeps direct
+    /// `Theme::dark()` users in sync with them.)
     pub const fn dark() -> Self {
         Self {
             dim_color: 0x000000FF,
@@ -77,7 +84,7 @@ impl Theme {
             toolbar_text: 0xE8E8EEFF,
             toolbar_border: 0x3E3E4CFF,
             toolbar_hover: 0x2C2C3AFF,
-            toolbar_selected: 0x453528FF,
+            toolbar_selected: 0x3A2823FF,
             swatch_border: 0xFFFFFF38,
         }
     }
@@ -96,7 +103,7 @@ impl Theme {
             toolbar_text: 0x30343BFF,
             toolbar_border: 0xC3C7CEFF,
             toolbar_hover: 0xEAEDF2FF,
-            toolbar_selected: 0xFFE5D3FF,
+            toolbar_selected: 0xFAE8DDFF,
             swatch_border: 0x00000026,
             ..dark_const()
         }
@@ -112,9 +119,230 @@ impl Theme {
             toolbar_text: 0x000000FF,
             toolbar_border: 0x000000FF,
             toolbar_hover: 0xD9D9D9FF,
-            toolbar_selected: 0xDCDCDCFF,
+            toolbar_selected: 0xFFEDE0FF,
             swatch_border: 0x00000059,
             ..dark_const()
+        }
+    }
+
+    // ── Preinstalled community palettes ────────────────────────────────────
+    // Mapping conventions (kept uniform across the set so a new palette
+    // is mechanical): `toolbar_*` surfaces come from the source's
+    // background/surface ramp (hover = one step lighter than bg,
+    // border = two steps), `chip_bg` = the darkest step at the usual
+    // 0xE6 alpha, text roles from the fg/subtext ramp, `accent` = the
+    // palette's signature color, `pin_border` = accent at 0x99 (the
+    // historical single-knob tint), `toolbar_selected` = accent mixed
+    // 12% into toolbar_bg (the `adapt_accent` ratio), `swatch_border` =
+    // the fg ramp at 0x38/0x26 alpha like the factory rows. Alphas are
+    // baked in as literals — the theme.toml format cannot express them
+    // (opaque hex only), which is why these are code palettes, not
+    // embedded TOML files.
+
+    /// The house theme: deep charcoal-blue surfaces, teal accent —
+    /// shotori's own look, distinct from the historical orange default.
+    pub fn shotori() -> Self {
+        Self {
+            dim_color: 0x0B0E14FF,
+            dim_opacity: 0.55,
+            accent: 0x2DD4BFFF,
+            pin_border: 0x2DD4BF99,
+            chip_bg: 0x10131AE6,
+            hint_text: 0x9AA3B2FF,
+            btn_text: 0xE8ECF1FF,
+            btn_hover_bg: 0xFFFFFF1F,
+            toolbar_bg: 0x15171FFF,
+            toolbar_text: 0xE8ECF1FF,
+            toolbar_border: 0x30343FFF,
+            toolbar_hover: 0x1E212BFF,
+            toolbar_selected: 0x172D32FF,
+            swatch_border: 0xFFFFFF38,
+        }
+    }
+
+    /// Catppuccin Frappé — the lightest of Catppuccin's dark flavors.
+    pub fn catppuccin_frappe() -> Self {
+        Self {
+            dim_color: 0x232634FF,
+            dim_opacity: 0.55,
+            accent: 0xCA9EE6FF,
+            pin_border: 0xCA9EE699,
+            chip_bg: 0x292C3CE6,
+            hint_text: 0xA5ADCEFF,
+            btn_text: 0xC6D0F5FF,
+            btn_hover_bg: 0x51576D4D,
+            toolbar_bg: 0x303446FF,
+            toolbar_text: 0xC6D0F5FF,
+            toolbar_border: 0x51576DFF,
+            toolbar_hover: 0x414559FF,
+            toolbar_selected: 0x424059FF,
+            swatch_border: 0x8993B259,
+        }
+    }
+
+    /// Catppuccin Macchiato — Catppuccin's middle dark flavor.
+    pub fn catppuccin_macchiato() -> Self {
+        Self {
+            dim_color: 0x181926FF,
+            dim_opacity: 0.55,
+            accent: 0xC6A0F6FF,
+            pin_border: 0xC6A0F699,
+            chip_bg: 0x1E2030E6,
+            hint_text: 0xA5ADCBFF,
+            btn_text: 0xCAD3F5FF,
+            btn_hover_bg: 0x494D644D,
+            toolbar_bg: 0x24273AFF,
+            toolbar_text: 0xCAD3F5FF,
+            toolbar_border: 0x494D64FF,
+            toolbar_hover: 0x363A4FFF,
+            toolbar_selected: 0x373550FF,
+            swatch_border: 0x8087A259,
+        }
+    }
+
+    /// Catppuccin Mocha — Catppuccin's darkest flavor.
+    pub fn catppuccin_mocha() -> Self {
+        Self {
+            dim_color: 0x11111BFF,
+            dim_opacity: 0.55,
+            accent: 0xCBA6F7FF,
+            pin_border: 0xCBA6F799,
+            chip_bg: 0x181825E6,
+            hint_text: 0xA6ADC8FF,
+            btn_text: 0xCDD6F4FF,
+            btn_hover_bg: 0x45475A4D,
+            toolbar_bg: 0x1E1E2EFF,
+            toolbar_text: 0xCDD6F4FF,
+            toolbar_border: 0x45475AFF,
+            toolbar_hover: 0x313244FF,
+            toolbar_selected: 0x322E46FF,
+            swatch_border: 0x9399B259,
+        }
+    }
+
+    /// Catppuccin Latte — Catppuccin's light flavor (dim stays dark,
+    /// like the factory light palette: dimming bright wallpapers).
+    pub fn catppuccin_latte() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0x8839EFFF,
+            pin_border: 0x8839EF99,
+            chip_bg: 0xE6E9EFE6,
+            hint_text: 0x6C6F85FF,
+            btn_text: 0x4C4F69FF,
+            btn_hover_bg: 0x00000014,
+            toolbar_bg: 0xEFF1F5FF,
+            toolbar_text: 0x4C4F69FF,
+            toolbar_border: 0xBCC0CCFF,
+            toolbar_hover: 0xE6E9EFFF,
+            toolbar_selected: 0xE2DAF4FF,
+            swatch_border: 0x00000026,
+        }
+    }
+
+    /// Dracula — `toolbar_selected` and friends follow the standard
+    /// accent-into-background mix; hint is the canonical comment color
+    /// lightened just enough to clear 4.5:1 on the chip.
+    pub fn dracula() -> Self {
+        Self {
+            dim_color: 0x21222CFF,
+            dim_opacity: 0.55,
+            accent: 0xBD93F9FF,
+            pin_border: 0xBD93F999,
+            chip_bg: 0x21222CE6,
+            hint_text: 0x8B95CCFF,
+            btn_text: 0xF8F8F2FF,
+            btn_hover_bg: 0xF8F8F21F,
+            toolbar_bg: 0x282A36FF,
+            toolbar_text: 0xF8F8F2FF,
+            toolbar_border: 0x44475AFF,
+            toolbar_hover: 0x363948FF,
+            toolbar_selected: 0x39364DFF,
+            swatch_border: 0xF8F8F238,
+        }
+    }
+
+    /// Gruvbox Dark — warm surfaces, the yellow as the accent (the
+    /// factory orange default would read as "still shotori dark").
+    pub fn gruvbox_dark() -> Self {
+        Self {
+            dim_color: 0x1D2021FF,
+            dim_opacity: 0.55,
+            accent: 0xFABD2FFF,
+            pin_border: 0xFABD2F99,
+            chip_bg: 0x1D2021E6,
+            hint_text: 0xA89984FF,
+            btn_text: 0xEBDBB2FF,
+            btn_hover_bg: 0xFBF1C71A,
+            toolbar_bg: 0x282828FF,
+            toolbar_text: 0xEBDBB2FF,
+            toolbar_border: 0x504945FF,
+            toolbar_hover: 0x3C3836FF,
+            toolbar_selected: 0x413928FF,
+            swatch_border: 0xFBF1C738,
+        }
+    }
+
+    /// Nord — frost accent over nord0 surfaces; the chip steps one
+    /// shade darker than the toolbar for depth (both canonical nord0
+    /// would leave the OCR dialog flat against the toolbar).
+    pub fn nord() -> Self {
+        Self {
+            dim_color: 0x2E3440FF,
+            dim_opacity: 0.55,
+            accent: 0x88C0D0FF,
+            pin_border: 0x88C0D099,
+            chip_bg: 0x242933E6,
+            hint_text: 0x81A1C1FF,
+            btn_text: 0xE5E9F0FF,
+            btn_hover_bg: 0xD8DEE921,
+            toolbar_bg: 0x2E3440FF,
+            toolbar_text: 0xE5E9F0FF,
+            toolbar_border: 0x434C5EFF,
+            toolbar_hover: 0x3B4252FF,
+            toolbar_selected: 0x384451FF,
+            swatch_border: 0xE5E9F038,
+        }
+    }
+
+    /// Rosé Pine — love as the accent over the surface ramp.
+    pub fn rose_pine() -> Self {
+        Self {
+            dim_color: 0x191724FF,
+            dim_opacity: 0.55,
+            accent: 0xEB6F92FF,
+            pin_border: 0xEB6F9299,
+            chip_bg: 0x191724E6,
+            hint_text: 0x908CAAFF,
+            btn_text: 0xE0DEF4FF,
+            btn_hover_bg: 0xE0DEF41A,
+            toolbar_bg: 0x1F1D2EFF,
+            toolbar_text: 0xE0DEF4FF,
+            toolbar_border: 0x403D52FF,
+            toolbar_hover: 0x26233AFF,
+            toolbar_selected: 0x37263AFF,
+            swatch_border: 0xE0DEF438,
+        }
+    }
+
+    /// Tokyo Night — the blue accent over its deep navy ramp.
+    pub fn tokyo_night() -> Self {
+        Self {
+            dim_color: 0x16161EFF,
+            dim_opacity: 0.55,
+            accent: 0x7AA2F7FF,
+            pin_border: 0x7AA2F799,
+            chip_bg: 0x16161EE6,
+            hint_text: 0x737AA2FF,
+            btn_text: 0xC0CAF5FF,
+            btn_hover_bg: 0xC0CAF521,
+            toolbar_bg: 0x1A1B26FF,
+            toolbar_text: 0xC0CAF5FF,
+            toolbar_border: 0x3B4261FF,
+            toolbar_hover: 0x292E42FF,
+            toolbar_selected: 0x252B3FFF,
+            swatch_border: 0xC0CAF538,
         }
     }
 
@@ -158,8 +386,8 @@ const fn dark_const() -> Theme {
 
 /// One addressable solid-color field of [`Theme`] — the registry the
 /// Appearance editor and `theme.toml` both speak. Labels, file keys
-/// and accessors come from here and nowhere else, so the picker grid,
-/// the save format and the mockup cannot drift apart. The derived
+/// and accessors come from here and nowhere else, so the picker grid
+/// and the save format cannot drift apart. The derived
 /// fields (accent → pin_border tint, `adapt_accent` → toolbar_selected
 /// tint) live in `load::apply`'s override logic, not here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -307,8 +535,8 @@ pub fn c() -> Theme {
 }
 
 /// True when the system appearance currently selects the dark palette
-/// (the `auto` base follows it; the Appearance mockup shows whichever
-/// palette this picks, exactly like a capture would).
+/// (the `auto` base follows it; the Appearance editor resolves its
+/// pickers through whichever palette this picks, like a capture would).
 pub fn system_dark() -> bool {
     SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed)
 }

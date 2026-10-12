@@ -129,8 +129,8 @@ settings:
       en: Appearance
       zh-CN: 外观
     blurb:
-      en: Preview the palette a capture would use; edits write to the theme file.
-      zh-CN: 预览截图将使用的配色；修改会写入主题文件。
+      en: Colors the next capture will use; every edit writes to the theme file.
+      zh-CN: 调整截图将使用的配色；每次修改都会写入主题文件。
     base_palette:
       en: Base palette
       zh-CN: 基础配色
