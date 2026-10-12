@@ -361,8 +361,8 @@ impl Annotations {
             self.color_ix
         };
         (
-            crate::ui::theme::c().annotation_colors[ix],
-            crate::ui::theme::PALETTE_NAMES[ix],
+            crate::model::settings::current().annotation_colors()[ix],
+            crate::model::settings::PALETTE_NAMES[ix],
         )
     }
     /// A kind's remembered size (width, strength, diameter or font —
@@ -529,14 +529,14 @@ impl Annotations {
     }
 
     pub(crate) fn set_color(&mut self, ix: usize) {
-        if ix >= crate::ui::theme::c().annotation_colors.len() {
+        if ix >= crate::model::settings::PALETTE {
             return;
         }
         if self.editing_text().is_some() {
             self.color_ix = ix;
         }
         if let Some(shape) = self.editing_text_mut() {
-            shape.color = crate::ui::theme::c().annotation_colors[ix];
+            shape.color = crate::model::settings::current().annotation_colors()[ix];
             return;
         }
         if let Some(selected_ix) = self.selected_index() {
@@ -547,7 +547,7 @@ impl Annotations {
                 self.color_ix = ix;
             }
             if !matches!(kind, ShapeKind::Mosaic | ShapeKind::Blur) {
-                let raw_color = crate::ui::theme::c().annotation_colors[ix];
+                let raw_color = crate::model::settings::current().annotation_colors()[ix];
                 let color = if kind == ShapeKind::Highlighter {
                     (raw_color & 0xffffff00) | 96
                 } else {
@@ -2531,7 +2531,10 @@ mod tests {
         a.set_color(1);
         let new_color = a.visible().next().unwrap().color;
         assert_ne!(new_color, orig_color);
-        assert_eq!(new_color, crate::ui::theme::c().annotation_colors[1]);
+        assert_eq!(
+            new_color,
+            crate::model::settings::current().annotation_colors()[1]
+        );
         a.undo();
         assert_eq!(a.visible().next().unwrap().color, orig_color);
         a.redo();

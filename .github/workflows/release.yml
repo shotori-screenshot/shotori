@@ -33,11 +33,11 @@ jobs:
           strip target/release/shotori
           mkdir dist
           cp target/release/shotori LICENSE dist/
-          mkdir -p dist/assets dist/tools
+          mkdir -p dist/assets dist/scripts
           cp -r assets/app dist/assets/
           cp assets/shotori.desktop dist/assets/
-          cp tools/install-desktop.sh tools/generate-icons.py dist/tools/
-          tar -C dist -czf "shotori-${GITHUB_REF_NAME}-x86_64.tar.gz" shotori LICENSE assets tools
+          cp scripts/install-desktop.sh scripts/generate-icons.py dist/scripts/
+          tar -C dist -czf "shotori-${GITHUB_REF_NAME}-x86_64.tar.gz" shotori LICENSE assets scripts
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,13 +107,17 @@ jobs:
           sed -i "s/^sha256sums=.*/sha256sums=('${SHA}')/" PKGBUILD
           # Preserve the existing binary/license packaging and install the
           # desktop assets carried in the same flat release tarball.
+          # The helper moved tools/ → scripts/ (2026-10): rewrite the
+          # path inside any ALREADY-patched PKGBUILD, or the next bump
+          # would still point at the old tarball layout and fail.
+          sed -i 's#tools/install-desktop\.sh#scripts/install-desktop.sh#g' PKGBUILD
           if ! grep -q '^# shotori-desktop-assets$' PKGBUILD; then
             cat >> PKGBUILD <<'EOF'
           # shotori-desktop-assets
           eval "$(declare -f package | sed '1s/package/package_without_desktop/')"
           package() {
               package_without_desktop
-              DESTDIR="$pkgdir" sh "$srcdir/tools/install-desktop.sh" /usr
+              DESTDIR="$pkgdir" sh "$srcdir/scripts/install-desktop.sh" /usr
           }
           EOF
           fi

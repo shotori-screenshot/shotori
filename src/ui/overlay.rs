@@ -3022,7 +3022,10 @@ mod multi_output_tests {
         let edited_pixels = cx.update(|_, cx| {
             let editor = view.read(cx).text_editing.as_ref().unwrap();
             assert_eq!(editor.font_size, 40.);
-            assert_eq!(editor.color, crate::ui::theme::c().annotation_colors[2]);
+            assert_eq!(
+                editor.color,
+                crate::model::settings::current().annotation_colors()[2]
+            );
             session.read(cx).crop("screen").unwrap()
         });
         cx.simulate_keystrokes("enter");

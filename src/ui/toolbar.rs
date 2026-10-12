@@ -585,8 +585,13 @@ pub(crate) fn selection_toolbar(
                 return options;
             }
             options = options.child(separator()).child(div().flex_1());
-            for (ix, color) in theme::c().annotation_colors.into_iter().enumerate() {
-                let name = theme::PALETTE_NAMES[ix];
+            for (ix, color) in crate::model::settings::current()
+                .annotation_colors()
+                .iter()
+                .copied()
+                .enumerate()
+            {
+                let name = crate::model::settings::PALETTE_NAMES[ix];
                 let session = session.clone();
                 options = options.child(
                     control(

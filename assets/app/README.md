@@ -15,7 +15,7 @@ separate UI vocabulary.
 Regenerate from the repository root with Python 3 and librsvg's `rsvg-convert`:
 
 ```sh
-python3 tools/generate-icons.py
+python3 scripts/generate-icons.py
 ```
 
 Every PNG is rendered directly from the SVG. The ICO embeds the corresponding
@@ -26,9 +26,9 @@ rounded corners have transparent pixels outside the background, with no white bo
 Install desktop metadata and all hicolor sizes from the source/release root:
 
 ```sh
-sh tools/install-desktop.sh
+sh scripts/install-desktop.sh
 # Package staging (the binary must be installed separately):
-DESTDIR=/tmp/shotori-package sh tools/install-desktop.sh /usr
+DESTDIR=/tmp/shotori-package sh scripts/install-desktop.sh /usr
 ```
 
 The installer defaults to `~/.local`, accepts a prefix, and respects `DESTDIR`.

@@ -77,5 +77,5 @@ change per commit.
   mandatory testing for lazy-loading designs; a success-path test
   alone is not enough.
 - App icon assets live in `assets/app/`; after changing the SVG,
-  regenerate the PNG/ICO set with `python3 tools/generate-icons.py`
+  regenerate the PNG/ICO set with `python3 scripts/generate-icons.py`
   (requires `rsvg-convert`).

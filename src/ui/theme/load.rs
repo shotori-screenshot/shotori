@@ -3,7 +3,7 @@
 //! other key is a single-field override on top of that base — the
 //! Appearance editor writes this file, `--theme FILE` / the XDG
 //! fallback read it.
-use super::{ColorKey, PALETTE, Theme};
+use super::{ColorKey, Theme};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,6 +29,10 @@ pub struct ThemeFile {
     pub toolbar_selected: Option<String>,
     pub swatch_border: Option<String>,
     pub dim_opacity: Option<f32>,
+    /// DEPRECATED (2026-10): the swatch board moved to settings.toml
+    /// (`[toolbar] colors`). Parsed so old files keep loading
+    /// (deny_unknown_fields would reject them otherwise) but no longer
+    /// applied — see the migration note in [`super::load::init`].
     pub annotation_colors: Option<Vec<String>>,
 }
 
@@ -89,6 +93,8 @@ impl ThemeFile {
             && self.toolbar_selected.is_none()
             && self.swatch_border.is_none()
             && self.dim_opacity.is_none()
+            // annotation_colors is parsed for compatibility only — it
+            // no longer counts as a theme override (see the field).
             && self.annotation_colors.is_none()
     }
 }
@@ -154,19 +160,8 @@ fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
             errors.push("dim_opacity must be between 0 and 1".into());
         }
     }
-    if let Some(colors) = &file.annotation_colors {
-        if colors.len() != PALETTE {
-            errors.push(format!(
-                "annotation_colors must contain exactly {PALETTE} opaque colors"
-            ));
-        } else {
-            let parsed: Result<Vec<_>, _> = colors.iter().map(|v| hex(v)).collect();
-            match parsed {
-                Ok(colors) => theme.annotation_colors.copy_from_slice(&colors),
-                Err(e) => errors.push(format!("annotation_colors: {e}")),
-            }
-        }
-    }
+    // annotation_colors: deprecated, parsed for compatibility and
+    // reported by `init` — never applied here.
     if file.toolbar_selected.is_none() {
         theme.adapt_accent();
     }
@@ -197,7 +192,7 @@ impl ThemeFile {
 
 pub fn load_file(path: &Path) -> Result<ThemeFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    toml::from_str(&text).map_err(|e| format!("{}: {e}. Use a TOML file with base, per-color overrides (hex), dim_opacity and annotation_colors; see docs/theme.example.toml.", path.display()))
+    toml::from_str(&text).map_err(|e| format!("{}: {e}. Use a TOML file with base and per-color overrides (hex); see docs/theme.example.toml.", path.display()))
 }
 
 /// The Appearance editor's working copy: the config file if there is
@@ -289,6 +284,17 @@ pub fn init(args: &crate::args::Cli) {
         config_path().filter(|p| p.exists())
     };
     let (file, source, mut errors) = resolve(args.theme.as_deref(), config);
+    // Migration note (2026-10): annotation_colors now lives in
+    // settings.toml ([toolbar] colors). Old theme files that still
+    // carry the key load fine — it is silently ignored so a theme file
+    // shared between shotori versions keeps working; this note tells
+    // the owner where the board is configured now.
+    if file.annotation_colors.is_some() {
+        eprintln!(
+            "[shotori] theme: annotation_colors is no longer part of the theme \
+             (moved to settings.toml [toolbar] colors); the key was ignored"
+        );
+    }
     let (dark, light, palette_errors) = file.palettes();
     errors.extend(palette_errors);
     for error in &errors {
@@ -342,13 +348,6 @@ fn print_theme(theme: &Theme, source: &Source) {
     let _ = writeln!(out, "toolbar_hover  {}", to_hex(theme.toolbar_hover));
     let _ = writeln!(out, "toolbar_selected {}", to_hex(theme.toolbar_selected));
     let _ = writeln!(out, "swatch_border   {}", to_hex(theme.swatch_border));
-    let palette = theme
-        .annotation_colors
-        .iter()
-        .map(|c| to_hex(*c))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let _ = writeln!(out, "annotation_colors {palette}");
 }
 
 #[cfg(test)]
@@ -391,12 +390,16 @@ mod tests {
     }
     #[test]
     fn invalid_values_preserve_readable_palettes() {
-        let file: ThemeFile = toml::from_str("base = 'missing'\naccent = '#FFFFFF00'\ndim_opacity = nan\nannotation_colors = ['#123456']").unwrap();
+        let file: ThemeFile = toml::from_str(
+            "base = 'missing'\naccent = '#FFFFFF00'\ndim_opacity = nan\nannotation_colors = ['#123456']",
+        )
+        .unwrap();
         let (theme, light, errors) = file.palettes();
-        assert_eq!(errors.len(), 4);
+        // annotation_colors no longer reports (deprecated, ignored);
+        // the other three bad values still do.
+        assert_eq!(errors.len(), 3);
         assert!(light.is_some());
         assert_eq!(theme.accent, Theme::dark().accent);
-        assert_eq!(theme.annotation_colors, Theme::dark().annotation_colors);
         assert_eq!(theme.dim_opacity, 0.55);
     }
     #[test]
@@ -411,7 +414,8 @@ mod tests {
         assert!(errors.is_empty() && auto.is_none());
         assert_eq!(theme.accent, 0x123456FF);
         assert_eq!(theme.dim_opacity, 0.2);
-        assert_eq!(theme.annotation_colors[6], 0x777777FF);
+        // annotation_colors parsed (old file shape) but no longer
+        // applied by the theme — the board lives in settings now.
         let (file, _, _) = resolve(Some("dark"), Some(path));
         assert_eq!(file.palettes().0.toolbar_bg, Theme::dark().toolbar_bg);
     }

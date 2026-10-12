@@ -20,12 +20,30 @@
 //! not know about.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use serde::Deserialize;
 
 /// Settings file name inside the config dir (see [`config_dir`]).
 pub const FILE_NAME: &str = "settings.toml";
+
+/// How many swatches the annotation palette carries. Lives here (not
+/// in the theme): the swatch board is toolbar configuration — WHICH
+/// colors the brushes offer — not part of the visual appearance. The
+/// built-in themes never disagreed on it either (every palette
+/// inherited dark's board), so the move changed no behavior.
+pub const PALETTE: usize = 7;
+
+/// Swatch display names (UI copy stays in code; settings carry only
+/// colors). Index-aligned with [`DEFAULT_ANNOTATION_COLORS`].
+pub const PALETTE_NAMES: [&str; PALETTE] =
+    ["Red", "Orange", "Yellow", "Green", "Blue", "Black", "White"];
+
+/// The factory swatch board — the historical palette every built-in
+/// theme carried. Opaque on purpose: exported PNGs must be solid.
+pub const DEFAULT_ANNOTATION_COLORS: [u32; PALETTE] = [
+    0xFF4545FF, 0xFF8A32FF, 0xFFD43BFF, 0x40C878FF, 0x409CFFFF, 0x222222FF, 0xFFFFFFFF,
+];
 
 /// One toggleable row-one button of the selection toolbar. Variant
 /// order is the canonical order (the factory row, the settings
@@ -341,6 +359,9 @@ pub struct Settings {
     ocr_assume_upright: bool,
     /// UI language (`language` top-level key; Auto = system locale).
     language: Language,
+    /// The annotation swatch board (`[toolbar] colors`) — the brush
+    /// colors the overlay's row two offers. See [`PALETTE`].
+    annotation_colors: [u32; PALETTE],
 }
 
 impl Default for Settings {
@@ -350,6 +371,7 @@ impl Default for Settings {
             ocr_model: DEFAULT_OCR_MODEL,
             ocr_assume_upright: false,
             language: Language::Auto,
+            annotation_colors: DEFAULT_ANNOTATION_COLORS,
         }
     }
 }
@@ -373,6 +395,9 @@ struct ToolbarFile {
     items: Option<Vec<String>>,
     /// Legacy visibility-only format: factory row minus these ids.
     hidden: Vec<String>,
+    /// The annotation swatch board, as #RRGGBBAA hex strings (exactly
+    /// [`PALETTE`] of them, opaque). Absent → the factory board.
+    colors: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -493,6 +518,11 @@ impl Settings {
         (clean, errors)
     }
 
+    /// The annotation swatch board ([`PALETTE`] colors, opaque).
+    pub fn annotation_colors(&self) -> &[u32; PALETTE] {
+        &self.annotation_colors
+    }
+
     /// Load from `path` (missing file → factory row, silently). Errors
     /// are returned, never fatal: a broken file must not take the
     /// screenshot session down with it.
@@ -567,6 +597,20 @@ impl Settings {
             },
         };
         let ocr_assume_upright = file.ocr.assume_upright.unwrap_or(false);
+        // [toolbar] colors: the swatch board. Same degrade contract as
+        // every other field — any problem (wrong count, bad hex,
+        // translucent color) falls back to the factory board with a
+        // warning, never a fatal error.
+        let mut annotation_colors = DEFAULT_ANNOTATION_COLORS;
+        if let Some(colors) = &file.toolbar.colors {
+            match parse_palette(colors) {
+                Ok(parsed) => annotation_colors = parsed,
+                Err(e) => errors.push(format!(
+                    "{}: toolbar colors: {e} (using the factory board)",
+                    path.display()
+                )),
+            }
+        }
         // Top-level language: unknown value (hand-edit, newer shotori)
         // degrades to Auto with a warning.
         let language = match file.language.as_deref() {
@@ -588,6 +632,7 @@ impl Settings {
                 ocr_model,
                 ocr_assume_upright,
                 language,
+                annotation_colors,
             },
             errors,
         )
@@ -630,6 +675,13 @@ impl Settings {
         };
         toolbar.remove("hidden");
         toolbar.insert("items".into(), items);
+        let colors = toml::Value::Array(
+            self.annotation_colors
+                .iter()
+                .map(|c| toml::Value::from(format!("#{c:08X}")))
+                .collect(),
+        );
+        toolbar.insert("colors".into(), colors);
         table.insert("language".into(), toml::Value::from(self.language.id()));
         let ocr = table
             .entry("ocr")
@@ -678,17 +730,87 @@ pub fn config_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(FILE_NAME))
 }
 
-static ACTIVE: OnceLock<Settings> = OnceLock::new();
+// The installed settings as a leaked box: `current()` hands out
+// &'static Settings (every read site borrows it), so a runtime edit
+// swaps the pointer instead of mutating in place. Each edit leaks one
+// Settings (~a hundred bytes) — the overlay is run-and-exit and the
+// settings window edits at human speed, so this is bounded and
+// deliberate; the alternative (current() returning a clone per read)
+// taxes every render frame to save nothing.
+static ACTIVE: RwLock<Option<&'static Settings>> = RwLock::new(None);
 static FACTORY: OnceLock<Settings> = OnceLock::new();
+
+/// Edit one swatch of the annotation board IN THIS PROCESS and write
+/// it through to settings.toml — the overlay's inline picker and the
+/// settings window both land here. A failed save keeps the in-memory
+/// edit (the running session keeps the color; the next capture falls
+/// back to whatever the file says) and reports on stderr.
+pub fn set_annotation_color(ix: usize, color: u32) {
+    if ix >= PALETTE {
+        return;
+    }
+    let mut next = current().clone();
+    next.annotation_colors[ix] = color;
+    install(next);
+    // FACTORY stays factory — reset paths compare against it.
+    if let Some(path) = config_path()
+        && let Err(e) = current().save(&path)
+    {
+        eprintln!("[shotori] settings: {e}");
+    }
+}
+
+/// Install a settings value as the process's active one.
+fn install(settings: Settings) {
+    let leaked: &'static Settings = Box::leak(Box::new(settings));
+    if let Ok(mut guard) = ACTIVE.write() {
+        *guard = Some(leaked);
+    }
+}
+
+/// Parse the `[toolbar] colors` array: exactly [`PALETTE`] opaque hex
+/// colors (#RRGGBB or #RRGGBBAA with AA=FF — exported PNGs must be
+/// solid). Hand-rolled rather than shared with the theme loader: the
+/// dependency direction is model ← ui, never the other way.
+fn parse_palette(colors: &[String]) -> Result<[u32; PALETTE], String> {
+    if colors.len() != PALETTE {
+        return Err(format!(
+            "expected exactly {PALETTE} colors, got {}",
+            colors.len()
+        ));
+    }
+    let mut parsed = DEFAULT_ANNOTATION_COLORS;
+    for (i, color) in colors.iter().enumerate() {
+        parsed[i] = parse_hex_color(color)
+            .map_err(|e| format!("swatch {} ({:?}): {e}", i + 1, PALETTE_NAMES[i]))?;
+    }
+    Ok(parsed)
+}
+
+fn parse_hex_color(s: &str) -> Result<u32, String> {
+    let digits = s
+        .strip_prefix('#')
+        .ok_or_else(|| format!("{s:?}: expected #RRGGBB or #RRGGBBAA"))?;
+    let value = u32::from_str_radix(digits, 16).map_err(|_| format!("{s:?} is not a hex color"))?;
+    let value = match digits.len() {
+        6 => value << 8 | 255,
+        8 => value,
+        n => return Err(format!("{s:?}: want 6 or 8 hex digits, got {n}")),
+    };
+    if value & 0xFF != 0xFF {
+        return Err(format!("{s:?}: swatches must be opaque (alpha FF)"));
+    }
+    Ok(value)
+}
 
 /// The process-wide settings, installed once at startup ([`init`]).
 /// Before/without init: the factory row (lazily materialized — a
 /// `Vec`-backed default is not const-constructible with its content).
 pub fn current() -> &'static Settings {
-    match ACTIVE.get() {
-        Some(settings) => settings,
-        None => FACTORY.get_or_init(Settings::default),
+    if let Some(settings) = ACTIVE.read().ok().and_then(|guard| *guard) {
+        return settings;
     }
+    FACTORY.get_or_init(Settings::default)
 }
 
 /// Startup pickup: read the config file (unless `--no-config`), report
@@ -699,7 +821,7 @@ pub fn init(args: &crate::args::Cli) {
     for error in &errors {
         eprintln!("[shotori] settings: {error}");
     }
-    let _ = ACTIVE.set(settings);
+    install(settings);
 }
 
 #[cfg(test)]
@@ -1046,5 +1168,38 @@ mod tests {
             "unknown [ocr] keys must survive an edit: {text}"
         );
         assert!(text.contains("ppocrv6-medium"));
+    }
+
+    #[test]
+    fn annotation_colors_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        s.annotation_colors[2] = 0x123456FF;
+        s.save(&path).unwrap();
+        let (loaded, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(loaded.annotation_colors[2], 0x123456FF);
+        // untouched swatches keep the factory values
+        assert_eq!(loaded.annotation_colors[0], DEFAULT_ANNOTATION_COLORS[0]);
+    }
+
+    #[test]
+    fn bad_annotation_colors_degrade_to_the_factory_board() {
+        for body in [
+            // wrong count
+            "[toolbar]\ncolors = [\"#111111\"]\n",
+            // not hex
+            "[toolbar]\ncolors = [\"red\", \"#FF8A32\", \"#FFD43B\", \"#40C878\", \"#409CFF\", \"#222222\", \"#FFFFFF\"]\n",
+            // translucent — exported PNGs must be solid
+            "[toolbar]\ncolors = [\"#FF454580\", \"#FF8A32\", \"#FFD43B\", \"#40C878\", \"#409CFF\", \"#222222\", \"#FFFFFF\"]\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            std::fs::write(&path, body).unwrap();
+            let (loaded, errors) = Settings::load(Some(&path));
+            assert_eq!(loaded.annotation_colors, DEFAULT_ANNOTATION_COLORS);
+            assert_eq!(errors.len(), 1, "body: {body}");
+        }
     }
 }

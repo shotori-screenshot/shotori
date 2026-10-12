@@ -89,10 +89,10 @@ For a launcher entry and desktop icon, run the following from the source tree
 or an extracted release archive, after putting `shotori` on your desktop's PATH:
 
 ```bash
-sh tools/install-desktop.sh   # installs to ~/.local/share; no root needed
+sh scripts/install-desktop.sh   # installs to ~/.local/share; no root needed
 ```
 
-Packagers can use `DESTDIR="$pkgdir" sh tools/install-desktop.sh /usr`.
+Packagers can use `DESTDIR="$pkgdir" sh scripts/install-desktop.sh /usr`.
 Tray and notification icons are embedded and work without this installation.
 AUR packages install the desktop resources automatically.
 

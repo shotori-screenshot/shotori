@@ -18,15 +18,15 @@ use std::sync::RwLock;
 
 pub mod load;
 
-/// How many swatches the annotation palette carries.
-pub const PALETTE: usize = 7;
-
-/// Swatch display names (UI copy stays in code; themes carry only colors).
-pub const PALETTE_NAMES: [&str; PALETTE] =
-    ["Red", "Orange", "Yellow", "Green", "Blue", "Black", "White"];
-
 /// The complete visual vocabulary of the overlay. One struct so a theme
 /// is a value: build it, override it, ship it.
+///
+/// The annotation swatch board is NOT here: it is toolbar
+/// configuration (which brush colors exist), living in
+/// [`crate::model::settings`] — the built-in palettes never disagreed
+/// on it, and theming a user's customized board on top would be
+/// surprising. Swatch chrome (the outline color) stays: that IS
+/// appearance.
 #[derive(Clone, Copy)]
 pub struct Theme {
     /// Dim layer OUTSIDE the selection: color at full opacity + strength.
@@ -59,9 +59,6 @@ pub struct Theme {
     /// swatch fill (a #222222 swatch on a dark toolbar is invisible
     /// without it), so it does not simply reuse `toolbar_border`.
     pub swatch_border: u32,
-
-    /// Annotation swatch palette (opaque — exported PNGs must be solid).
-    pub annotation_colors: [u32; PALETTE],
 }
 
 impl Theme {
@@ -82,9 +79,6 @@ impl Theme {
             toolbar_hover: 0x2C2C3AFF,
             toolbar_selected: 0x453528FF,
             swatch_border: 0xFFFFFF38,
-            annotation_colors: [
-                0xFF4545FF, 0xFF8A32FF, 0xFFD43BFF, 0x40C878FF, 0x409CFFFF, 0x222222FF, 0xFFFFFFFF,
-            ],
         }
     }
 
@@ -407,15 +401,5 @@ mod tests {
         assert_eq!(t.dim() & 0xFF, 0xFF);
         t.dim_opacity = 0.;
         assert_eq!(t.dim(), 0x00000000);
-    }
-
-    /// Annotation colors must stay opaque in every built-in theme:
-    /// they go into exported PNGs.
-    #[test]
-    fn builtin_palette_is_opaque_and_full() {
-        for t in [Theme::dark(), Theme::light(), Theme::high_contrast()] {
-            assert_eq!(t.annotation_colors.len(), PALETTE);
-            assert!(t.annotation_colors.iter().all(|c| c & 0xFF == 0xFF));
-        }
     }
 }

@@ -3244,7 +3244,7 @@ mod tests {
         s.edit_annotation_settings(|a| a.set_color(1));
         assert_eq!(
             s.annotations().selected().unwrap().color,
-            crate::ui::theme::c().annotation_colors[1]
+            crate::model::settings::current().annotation_colors()[1]
         );
 
         s.pointer_down("left", point(px(50.), px(50.)), false);

@@ -61,10 +61,10 @@ paru -S shotori              # AUR（预编译二进制）
 再在源码目录或解压后的发行包目录执行：
 
 ```bash
-sh tools/install-desktop.sh   # 安装到 ~/.local/share，无需 root
+sh scripts/install-desktop.sh   # 安装到 ~/.local/share，无需 root
 ```
 
-打包者可用 `DESTDIR="$pkgdir" sh tools/install-desktop.sh /usr`。
+打包者可用 `DESTDIR="$pkgdir" sh scripts/install-desktop.sh /usr`。
 托盘和通知图标已内嵌，不依赖这一步安装；AUR 包会自动安装桌面资源。
 
 绑到键位上，比如 niri：

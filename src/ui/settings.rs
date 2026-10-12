@@ -309,16 +309,17 @@ struct SettingsWindow {
 
 /// The Appearance editor: a working [`ThemeFile`] (base + overrides,
 /// written through to theme.toml on every change) plus the interactive
-/// state each row renders — one picker entity per [`ColorKey`] and per
-/// annotation swatch, one slider for dim opacity. Picker values are
-/// the RESOLVED palette (what a capture would show), so a base switch
-/// re-seeds every swatch through [`SettingsWindow::appearance_resync`].
+/// state each row renders — one picker entity per [`ColorKey`] and one
+/// slider for dim opacity. Picker values are the RESOLVED palette
+/// (what a capture would show), so a base switch re-seeds every
+/// control through [`SettingsWindow::appearance_resync`]. The
+/// annotation swatch board is NOT edited here — it is toolbar
+/// configuration, living in settings.toml (see the Toolbar section).
 struct AppearanceState {
     file: ThemeFile,
     path: Option<PathBuf>,
     error: Option<String>,
     pickers: Vec<(ColorKey, Entity<ColorPickerState>)>,
-    annotation: Vec<Entity<ColorPickerState>>,
     opacity: Entity<SliderState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -1655,7 +1656,6 @@ impl SettingsWindow {
             .child(self.base_row(cx))
             .child(self.color_grid(cx))
             .child(self.opacity_row(cx))
-            .child(self.annotation_row(cx))
             .child(self.appearance_footer(cx))
     }
 
@@ -1802,40 +1802,6 @@ impl SettingsWindow {
             )
     }
 
-    /// The seven annotation colors (paint order, exported into PNGs).
-    fn annotation_row(&self, _: &Context<Self>) -> Div {
-        let t = theme::c();
-        // wraps at narrow pane widths (no window min size)
-        let mut row = div().flex().flex_wrap().items_center().gap(px(8.));
-        row = row.child(
-            div()
-                .w(px(110.))
-                .text_size(px(12.))
-                .text_color(rgba(t.hint_text))
-                .child(crate::i18n::t!("settings.appearance.annotations").to_string()),
-        );
-        for (name, state) in crate::ui::theme::PALETTE_NAMES
-            .iter()
-            .zip(&self.appearance.annotation)
-        {
-            row = row.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(ColorPicker::new(state).small())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgba(t.hint_text))
-                            .child(*name),
-                    ),
-            );
-        }
-        row
-    }
-
     fn appearance_footer(&self, cx: &mut Context<Self>) -> Div {
         let t = theme::c();
         let entity = cx.entity();
@@ -1899,7 +1865,6 @@ impl AppearanceState {
         let current = current_palette(&file);
 
         let mut pickers = Vec::new();
-        let mut annotation = Vec::new();
         let mut subs = Vec::new();
         for key in ColorKey::ALL {
             let value = u32_to_hsla(key.get(&current));
@@ -1913,18 +1878,6 @@ impl AppearanceState {
                 }
             });
             pickers.push((key, state));
-            subs.push(sub);
-        }
-        for (ix, color) in current.annotation_colors.into_iter().enumerate() {
-            let state =
-                cx.new(|cx| ColorPickerState::new(window, cx).default_value(u32_to_hsla(color)));
-            let sub = cx.subscribe(&state, move |this, _, event, cx| {
-                if let ColorPickerEvent::Change(Some(color)) = event {
-                    this.set_annotation(ix, hsla_to_u32(*color));
-                    this.appearance_apply(cx);
-                }
-            });
-            annotation.push(state);
             subs.push(sub);
         }
         let opacity = cx.new(|_| {
@@ -1945,7 +1898,6 @@ impl AppearanceState {
             path,
             error: errors.first().cloned(),
             pickers,
-            annotation,
             opacity,
             _subscriptions: subs,
         }
@@ -1953,26 +1905,6 @@ impl AppearanceState {
 }
 
 impl SettingsWindow {
-    /// Set one annotation color override. The file format is
-    /// all-or-nothing (a partial list does not load), so the first
-    /// edit seeds the whole array from the resolved palette and this
-    /// edit lands inside it.
-    fn set_annotation(&mut self, ix: usize, color: u32) {
-        let current = current_palette(&self.appearance.file);
-        let list = self
-            .appearance
-            .file
-            .annotation_colors
-            .get_or_insert_with(|| {
-                current
-                    .annotation_colors
-                    .iter()
-                    .map(|c| load::to_hex(*c))
-                    .collect()
-            });
-        list[ix] = load::to_hex(color);
-    }
-
     /// Apply the working theme live — the settings window's own chrome
     /// re-skins, previewing the next capture's palette — and write
     /// theme.toml through.
@@ -1998,11 +1930,6 @@ impl SettingsWindow {
         for (key, state) in &self.appearance.pickers {
             state.update(cx, |state, cx| {
                 state.set_value(u32_to_hsla(key.get(&current)), window, cx)
-            });
-        }
-        for (ix, state) in self.appearance.annotation.iter().enumerate() {
-            state.update(cx, |state, cx| {
-                state.set_value(u32_to_hsla(current.annotation_colors[ix]), window, cx)
             });
         }
         self.appearance.opacity.update(cx, |state, cx| {
@@ -2072,6 +1999,10 @@ const SEL_H: f32 = 148.;
 
 fn appearance_mockup() -> Stateful<Div> {
     let t = theme::c();
+    // The swatch board comes from settings (it is toolbar
+    // configuration, not theme appearance) — the mockup previews both
+    // sources the way a capture would composite them.
+    let palette = crate::model::settings::current().annotation_colors();
     // absolute helper: a positioned box
     fn at(x: f32, y: f32, w: f32, h: f32) -> Div {
         div().absolute().left(px(x)).top(px(y)).w(px(w)).h(px(h))
@@ -2136,17 +2067,13 @@ fn appearance_mockup() -> Stateful<Div> {
                 .child(
                     at(18., 20., 92., 58.)
                         .border_2()
-                        .border_color(rgba(t.annotation_colors[3])),
+                        .border_color(rgba(palette[3])),
                 )
-                .child(
-                    at(130., 96., 92., 4.)
-                        .rounded(px(2.))
-                        .bg(rgba(t.annotation_colors[1])),
-                )
+                .child(at(130., 96., 92., 4.).rounded(px(2.)).bg(rgba(palette[1])))
                 .child(
                     at(150., 26., 22., 22.)
                         .rounded_full()
-                        .bg(rgba(t.annotation_colors[4]))
+                        .bg(rgba(palette[4]))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -2259,7 +2186,11 @@ fn mock_toolbar() -> Div {
                 .child(dot(t.accent)),
         )
         .child(div().w(px(1.)).h(px(16.)).bg(rgba(t.toolbar_border)));
-    for color in t.annotation_colors {
+    for color in crate::model::settings::current()
+        .annotation_colors()
+        .iter()
+        .copied()
+    {
         bar = bar.child(
             div()
                 .size(px(11.))
