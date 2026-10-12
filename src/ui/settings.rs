@@ -2,9 +2,13 @@
 //!
 //! A regular toplevel — the one shotori surface that is NOT a
 //! layer-shell overlay: plain `WindowOptions` (system titlebar, the
-//! compositor places it; the layer-shell rules — display_id pinning,
-//! bare `open_window` — do not apply, and `base::Root` stays banned
-//! regardless).
+//! compositor places it). The layer-shell rules (display_id pinning,
+//! bare `open_window`) do not apply — and unlike the overlays this
+//! window CAN host `Root`: its WindowState plugin is what renders
+//! managed tooltips (the collapsed sidebar's item labels), so the
+//! window wraps its view in one. Root's CSD border decorate is a
+//! layer-shell poison (it insets the surface) but harmless under a
+//! system-decorated toplevel.
 //!
 //! Launch: `shotori settings` or the tray menu. The screenshot overlay
 //! is a run-and-exit process, so edits cannot reach a live session:
@@ -39,10 +43,11 @@ use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPick
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
+    Sidebar, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem,
+    SidebarToggleButton,
 };
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Collapsible, Icon, Sizable, Theme, ThemeMode};
+use gpui_kit::component::{Collapsible, Icon, Root, Sizable, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -66,6 +71,9 @@ enum Section {
     Toolbar,
     Ocr,
     Appearance,
+    /// The identity card — a footer entry, not main navigation (the
+    /// nav is for working sections; About is reference material).
+    About,
 }
 
 /// Which config file an action targets (General page's edit buttons).
@@ -246,7 +254,12 @@ pub fn run() {
             cx.spawn(async move |cx| {
                 cx.update(|cx| {
                     cx.open_window(window_options(), |window, cx| {
-                        cx.new(|cx| SettingsWindow::new(window, cx))
+                        let view = cx.new(|cx| SettingsWindow::new(window, cx));
+                        // Root hosts the WindowState plugin — without it
+                        // managed tooltips (collapsed-sidebar item
+                        // labels) never render. Layer-shell overlays
+                        // must stay bare; a regular toplevel wants this.
+                        cx.new(|cx| Root::new(view, window, cx))
                     })
                     .expect("failed to open the settings window");
                 });
@@ -435,8 +448,8 @@ struct SettingsWindow {
     /// commits through the Confirm subscription; the detail line below
     /// renders from `settings` — the file stays the single truth.
     ocr_select: gpui_kit::Entity<SelectState<SearchableVec<OcrModelItem>>>,
-    /// Collapsed navigation sidebar (icon-only rail). Session state —
-    /// window-local, intentionally not persisted.
+    /// Collapsed navigation sidebar (icon-only rail) — persisted in
+    /// settings.toml, written through on every toggle.
     sidebar_collapsed: bool,
     /// Drives the preview strip's horizontal scroll (see
     /// [`SettingsWindow::preview_strip`]).
@@ -528,6 +541,7 @@ impl SettingsWindow {
         }));
         Self {
             section: Section::Toolbar,
+            sidebar_collapsed: settings.sidebar_collapsed(),
             settings,
             path: crate::model::settings::config_path(),
             error: warnings.first().cloned(),
@@ -535,7 +549,6 @@ impl SettingsWindow {
             appearance,
             language_select,
             ocr_select,
-            sidebar_collapsed: false,
             preview_scroll: ScrollHandle::new(),
             edge_scroll: AutoScroll::default(),
             focus: cx.focus_handle(),
@@ -654,7 +667,7 @@ impl SettingsWindow {
                 return;
             }
         }
-        open_config_file(path);
+        open_external(path.display().to_string());
     }
 
     /// The live toolbar: the real bar container and grip textures with
@@ -1113,7 +1126,7 @@ fn item_name(item: ToolbarItem) -> String {
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::c();
         div()
             .id("settings-root")
@@ -1129,7 +1142,7 @@ impl Render for SettingsWindow {
             .on_action(cx.listener(|_, _: &CloseSettings, window, _| {
                 window.remove_window();
             }))
-            .child(self.sidebar(cx))
+            .child(self.sidebar(window, cx))
             .child(self.page(cx))
     }
 }
@@ -1172,13 +1185,14 @@ fn edge_scroll_delta(local_x: Pixels, width: Pixels) -> Option<Pixels> {
     }
 }
 
-/// Hand a config file to the session's editor (xdg-open), reaped on a
-/// plain thread so the UI never blocks and no zombie lingers. Failures
-/// surface as a notification — the button click has no other natural
-/// error surface, and a silent no-op reads as broken.
-fn open_config_file(path: PathBuf) {
+/// Hand a file path or URL to the session (xdg-open) — the config
+/// editor buttons and the About page's links share this. Reaped on a
+/// plain thread so the UI never blocks and no zombie lingers.
+/// Failures surface as a notification — the click has no other
+/// natural error surface, and a silent no-op reads as broken.
+fn open_external(target: String) {
     std::thread::spawn(move || {
-        let outcome = std::process::Command::new("xdg-open").arg(&path).status();
+        let outcome = std::process::Command::new("xdg-open").arg(&target).status();
         let detail = match outcome {
             Ok(status) if status.success() => return,
             Ok(status) => status.to_string(),
@@ -1212,26 +1226,37 @@ fn page_header(title: &str, blurb: &str) -> Div {
         )
 }
 
+/// Decode an embedded PNG into a RenderImage via the img() BGRA path.
+fn png_render_image(bytes: &'static [u8]) -> std::sync::Arc<RenderImage> {
+    let png = image::load_from_memory(bytes).expect("an embedded PNG asset must decode");
+    crate::ui::image_util::rgba_to_render_image(
+        png.to_rgba8().into_raw(),
+        png.width(),
+        png.height(),
+    )
+}
+
 /// The settings sidebar header's logo: the app icon master (the same
-/// 64px asset the tray embeds), decoded once into a RenderImage. An
-/// embedded, tracked asset — a decode failure is a build-time defect,
-/// not a runtime condition to handle.
+/// 64px asset the tray embeds), decoded once. 64px stays crisp at the
+/// header's 16px logical size on HiDPI.
 static SIDEBAR_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
     std::sync::LazyLock::new(|| {
-        let png = image::load_from_memory(include_bytes!("../../assets/app/shotori-64.png"))
-            .expect("the embedded app icon (shotori-64.png) must decode");
-        crate::ui::image_util::rgba_to_render_image(
-            png.to_rgba8().into_raw(),
-            png.width(),
-            png.height(),
-        )
+        png_render_image(include_bytes!("../../assets/app/shotori-64.png"))
+    });
+
+/// The About page's hero logo (256px master — plenty for a 128px
+/// display size on HiDPI).
+static ABOUT_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
+    std::sync::LazyLock::new(|| {
+        png_render_image(include_bytes!("../../assets/app/shotori-256.png"))
     });
 
 impl SettingsWindow {
     /// The navigation sidebar: one item per section, the active page
-    /// highlighted. Fixed-width for now — collapsing is a shell nicety
-    /// the settings window does not need at three sections.
-    fn sidebar(&self, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
+    /// highlighted, About pinned to the footer. Takes the window:
+    /// SidebarMenuItem only becomes an element through
+    /// [`SidebarItem::render`], which needs one.
+    fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
         let active = self.section;
         let collapsed = self.sidebar_collapsed;
         // `label` is a translation KEY (settings.general.title etc.) —
@@ -1262,8 +1287,10 @@ impl SettingsWindow {
                 crate::i18n::t!("settings.nav.collapse").to_string()
             })
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                // write-through like every other control in this window
                 this.sidebar_collapsed = !this.sidebar_collapsed;
-                cx.notify();
+                this.settings.set_sidebar_collapsed(this.sidebar_collapsed);
+                this.persist(cx);
             }));
         let mut identity = SidebarHeader::new().collapsed(collapsed);
         // The logo: the app icon master (the same 64px asset the tray
@@ -1296,44 +1323,55 @@ impl SettingsWindow {
                 )
                 .child(toggle);
         }
+        // Built BEFORE the sidebar chain: the `item` helper holds a
+        // shared cx borrow (cx.listener), while the footer's
+        // SidebarItem::render below needs cx mutably — the menu must
+        // be done borrowing before the chain evaluates the footer.
+        let menu = SidebarMenu::new()
+            .child(item(
+                "settings.general.title",
+                IconName::Settings2,
+                Section::General,
+            ))
+            .child(item(
+                "settings.toolbar_page.title",
+                IconName::PanelTop,
+                Section::Toolbar,
+            ))
+            .child(item(
+                "settings.ocr_page.title",
+                IconName::ScanText,
+                Section::Ocr,
+            ))
+            .child(item(
+                "settings.appearance.title",
+                IconName::Palette,
+                Section::Appearance,
+            ));
         Sidebar::new("settings-sidebar")
             .collapsible(true)
             .collapsed(collapsed)
             .header(identity)
             .footer(
-                SidebarFooter::new()
-                    .collapsed(collapsed)
-                    .when(!collapsed, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(11.))
-                                .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                        )
-                    }),
+                // About lives in the footer (reference material, not a
+                // working section) — the item is a plain
+                // SidebarMenuItem so it matches the nav styling, and
+                // collapsed it degrades to the icon + managed tooltip.
+                SidebarFooter::new().collapsed(collapsed).child(
+                    SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
+                        .icon(Icon::new(IconName::Info))
+                        .collapsed(collapsed)
+                        .active(active == Section::About)
+                        .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
+                            if this.section != Section::About {
+                                this.section = Section::About;
+                                cx.notify();
+                            }
+                        }))
+                        .render("sidebar-about", window, cx),
+                ),
             )
-            .child(
-                SidebarMenu::new()
-                    .child(item(
-                        "settings.general.title",
-                        IconName::Settings2,
-                        Section::General,
-                    ))
-                    .child(item(
-                        "settings.toolbar_page.title",
-                        IconName::PanelTop,
-                        Section::Toolbar,
-                    ))
-                    .child(item(
-                        "settings.ocr_page.title",
-                        IconName::ScanText,
-                        Section::Ocr,
-                    ))
-                    .child(item(
-                        "settings.appearance.title",
-                        IconName::Palette,
-                        Section::Appearance,
-                    )),
-            )
+            .child(menu)
     }
 
     /// The content pane: the active section's page. This match is the
@@ -1348,6 +1386,7 @@ impl SettingsWindow {
             Section::Toolbar => self.page_toolbar(cx),
             Section::Ocr => self.page_ocr(cx),
             Section::Appearance => self.page_appearance(cx),
+            Section::About => self.page_about(cx),
         };
         page = page.flex_1().min_w(px(0.));
         page
@@ -1357,24 +1396,6 @@ impl SettingsWindow {
     /// language picker (the one control here that changes something).
     fn page_general(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
-        let row = |label: String, value: String| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgba(t.hint_text))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(rgba(t.btn_text))
-                        .child(value),
-                )
-        };
         div()
             .id("page-general")
             .flex()
@@ -1386,10 +1407,6 @@ impl SettingsWindow {
             .child(page_header(
                 crate::i18n::t!("settings.general.title").as_ref(),
                 crate::i18n::t!("settings.general.blurb").as_ref(),
-            ))
-            .child(row(
-                crate::i18n::t!("settings.general.version").to_string(),
-                format!("shotori {}", env!("CARGO_PKG_VERSION")),
             ))
             .child(self.config_files_row(cx))
             .child(self.language_control(cx))
@@ -1903,6 +1920,104 @@ impl SettingsWindow {
             .child(self.color_grid(cx))
             .child(self.opacity_row(cx))
             .child(self.appearance_footer(cx))
+    }
+
+    /// About: the identity card — hero logo, name and version, what
+    /// this is, where it lives, who helped. One calm centered column;
+    /// everything a support conversation needs.
+    fn page_about(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme::c();
+        let entity = cx.entity();
+        // ghost link button — same vocabulary as the config-file
+        // buttons, each handing a URL to the session
+        let link = |label: String, url: String, entity: &gpui_kit::Entity<Self>| {
+            let entity = entity.clone();
+            Button::new(SharedString::from(url.clone()))
+                .accessibility_label(label.clone())
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(rgba(t.btn_text))
+                .border_1()
+                .border_color(rgba(t.toolbar_border))
+                .hover(|s| s.bg(rgba(t.toolbar_hover)))
+                .focus_visible(|s| s.border_color(rgba(t.accent)))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |_, _| {
+                        open_external(url.clone());
+                    });
+                })
+                .child(label)
+        };
+        let repository = env!("CARGO_PKG_REPOSITORY");
+        div()
+            .id("page-about")
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(8.))
+            .pt(px(48.))
+            .p(px(PAGE_PAD))
+            .size_full()
+            .overflow_y_scroll()
+            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size(px(128.)))
+            .child(
+                div()
+                    .text_size(px(22.))
+                    .text_color(rgba(t.btn_text))
+                    .child("Shotori"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgba(t.hint_text))
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgba(t.btn_text))
+                    .max_w(px(440.))
+                    .text_center()
+                    .line_height(relative(1.5))
+                    .child(crate::i18n::t!("settings.about.tagline").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap(px(6.))
+                    .pt(px(6.))
+                    .child(link(
+                        crate::i18n::t!("settings.about.repository").to_string(),
+                        repository.to_string(),
+                        &entity,
+                    ))
+                    .child(link(
+                        crate::i18n::t!("settings.about.issues").to_string(),
+                        format!("{repository}/issues"),
+                        &entity,
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .pt(px(4.))
+                    .child(crate::i18n::t!("settings.about.license").to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .max_w(px(440.))
+                    .text_center()
+                    .line_height(relative(1.5))
+                    .pt(px(6.))
+                    .child(crate::i18n::t!("settings.about.credits").to_string()),
+            )
     }
 
     /// The base palette selector: Auto plus every preinstalled theme

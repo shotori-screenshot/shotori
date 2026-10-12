@@ -51,9 +51,6 @@ settings:
     blurb:
       en: About this installation; the buttons below open its config files for editing.
       zh-CN: 关于本安装；下方按钮可打开配置文件进行编辑。
-    version:
-      en: Version
-      zh-CN: 版本
     config_files:
       en: Config files
       zh-CN: 配置文件
@@ -77,6 +74,25 @@ settings:
       blurb:
         en: Applies immediately, everywhere in this window.
         zh-CN: 立即生效，本窗口内即时切换。
+  about:
+    nav:
+      en: About
+      zh-CN: 关于
+    tagline:
+      en: Wayland-native screenshot tool — select, annotate, pin, long-capture scrolling pages, and read the text back with on-device OCR.
+      zh-CN: Wayland 原生截图工具——框选、标注、贴图、长截图，并通过本地 OCR 识别文字。
+    repository:
+      en: Source repository
+      zh-CN: 源码仓库
+    issues:
+      en: Report an issue
+      zh-CN: 问题反馈
+    license:
+      en: Released under the MIT License.
+      zh-CN: 以 MIT 许可证发布。
+    credits:
+      en: UI hand-drawn with gpui-kit · OCR by RapidOCR (PP-OCR) · Community themes — Catppuccin, Dracula, Gruvbox, Nord, Rosé Pine, Tokyo Night
+      zh-CN: 界面基于 gpui-kit 手绘 · 识别引擎 RapidOCR（PP-OCR）· 社区主题——Catppuccin、Dracula、Gruvbox、Nord、Rosé Pine、Tokyo Night
   toolbar_page:
     title:
       en: Toolbar

@@ -359,6 +359,9 @@ pub struct Settings {
     ocr_assume_upright: bool,
     /// UI language (`language` top-level key; Auto = system locale).
     language: Language,
+    /// Settings-window sidebar collapsed (written through on every
+    /// toggle; the next `shotori settings` restores the rail).
+    sidebar_collapsed: bool,
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
@@ -371,6 +374,7 @@ impl Default for Settings {
             ocr_model: DEFAULT_OCR_MODEL,
             ocr_assume_upright: false,
             language: Language::Auto,
+            sidebar_collapsed: false,
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
         }
     }
@@ -385,6 +389,9 @@ struct File {
     ocr: OcrFile,
     /// Top-level `language = "auto" | "en" | "zh-CN"`.
     language: Option<String>,
+    /// Settings-window sidebar collapsed (`sidebar_collapsed`,
+    /// absent = expanded).
+    sidebar_collapsed: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -471,6 +478,15 @@ impl Settings {
 
     pub fn set_language(&mut self, language: Language) {
         self.language = language;
+    }
+
+    /// Settings-window sidebar collapsed (persisted; absent = expanded).
+    pub fn sidebar_collapsed(&self) -> bool {
+        self.sidebar_collapsed
+    }
+
+    pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        self.sidebar_collapsed = collapsed;
     }
 
     /// A button shows iff it has a slot in the row; hidden buttons
@@ -632,6 +648,7 @@ impl Settings {
                 ocr_model,
                 ocr_assume_upright,
                 language,
+                sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 annotation_colors,
             },
             errors,
@@ -683,6 +700,10 @@ impl Settings {
         );
         toolbar.insert("colors".into(), colors);
         table.insert("language".into(), toml::Value::from(self.language.id()));
+        table.insert(
+            "sidebar_collapsed".into(),
+            toml::Value::from(self.sidebar_collapsed),
+        );
         let ocr = table
             .entry("ocr")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -1133,6 +1154,23 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[ocr]"));
         assert!(text.contains("ppocrv5-en-mobile"));
+    }
+
+    #[test]
+    fn sidebar_collapse_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        s.set_sidebar_collapsed(true);
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert!(back.sidebar_collapsed());
+        // the factory default is expanded, and an absent key loads as
+        // expanded (preference files written before the key existed)
+        assert!(!Settings::default().sidebar_collapsed());
+        let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
+        assert!(!fresh.sidebar_collapsed());
     }
 
     #[test]
