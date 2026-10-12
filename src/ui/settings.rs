@@ -2010,7 +2010,15 @@ impl AppearanceState {
         });
         subs.push(cx.subscribe(&opacity, |this, _, event, cx| {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
-                this.appearance.file.dim_opacity = Some(*value);
+                // The base slider step-snaps AFTER its own clamping —
+                // (value / step).round() * step can land just past max
+                // (0.05 has no exact binary form; the top of the range
+                // yields ~1.0000001), and the loader would reject the
+                // file with "dim_opacity must be between 0 and 1" on
+                // every drag to the end. Clamp at the boundary and round
+                // to the step's two decimals.
+                let value = (value.clamp(0., 1.) * 100.).round() / 100.;
+                this.appearance.file.dim_opacity = Some(value);
                 this.appearance_apply(cx);
             }
         }));

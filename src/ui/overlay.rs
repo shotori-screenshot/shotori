@@ -852,8 +852,12 @@ impl Overlay {
     /// progress and the entity handle — no shared state mutation races with
     /// the UI thread.
     fn ocr_setup_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Retry after a failure needs a fresh progress arc
-        let fresh = std::sync::Arc::new(crate::ocr::DownloadProgress::default());
+        // Retry after a failure needs a fresh progress arc — through
+        // for_selected_set, NOT Default: Default carries file_count = 0
+        // (its doc says it serves lock holders that never render), and
+        // this arc DOES render — a Default here showed "(2/0)" in the
+        // file counter.
+        let fresh = std::sync::Arc::new(crate::ocr::DownloadProgress::for_selected_set());
         if let Some(setup) = self.ocr_setup.as_mut() {
             if !matches!(setup.stage, crate::ui::ocr_setup::Stage::Confirm)
                 && !matches!(setup.stage, crate::ui::ocr_setup::Stage::Failed(_))
