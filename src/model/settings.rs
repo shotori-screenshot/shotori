@@ -4,6 +4,7 @@
 //! `theme.toml` — see [`crate::ui::theme::load`]). v1: the selection
 //! toolbar's row-one layout — WHICH controls show and in WHAT order,
 //! edited by dragging in the settings window (`shotori settings`).
+//! v2: the OCR model set and an "assume upright text" speed toggle.
 //!
 //! Lifecycle mirrors the theme: loaded once at startup ([`init`]) and
 //! read everywhere via [`current`]. The screenshot overlay is a
@@ -214,16 +215,107 @@ pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Cancel),
 ];
 
+/// The curated OCR model sets a user can pick (settings window → OCR).
+/// The `id()` strings are the file format AND rapidocr-core's registry
+/// names — one vocabulary, never rename one. Sets NOT listed here
+/// (rapidocr ships more, e.g. the superseded ppocrv4-en-mobile) stay
+/// accepted on load for forward/backward compat but are not offered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OcrModel {
+    Ppocrv6Tiny,
+    Ppocrv6Small,
+    Ppocrv6Medium,
+    Ppocrv5EnMobile,
+    Ppocrv5ChMobile,
+    Ppocrv5ChServer,
+}
+
+impl OcrModel {
+    /// Every offered model, in settings-display order: the speed/quality
+    /// ladder first (the default sits in the middle), then language
+    /// variants.
+    pub const ALL: [Self; 6] = [
+        Self::Ppocrv6Tiny,
+        Self::Ppocrv6Small,
+        Self::Ppocrv6Medium,
+        Self::Ppocrv5EnMobile,
+        Self::Ppocrv5ChMobile,
+        Self::Ppocrv5ChServer,
+    ];
+
+    /// Stable id for the settings file (= rapidocr's registry name).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Ppocrv6Tiny => "ppocrv6-tiny",
+            Self::Ppocrv6Small => "ppocrv6-small",
+            Self::Ppocrv6Medium => "ppocrv6-medium",
+            Self::Ppocrv5EnMobile => "ppocrv5-en-mobile",
+            Self::Ppocrv5ChMobile => "ppocrv5-ch-mobile",
+            Self::Ppocrv5ChServer => "ppocrv5-ch-server",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.id() == id)
+    }
+
+    /// Human-readable model name (setup dialog, settings rows).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ppocrv6Tiny => "PP-OCRv6 tiny",
+            Self::Ppocrv6Small => "PP-OCRv6 small",
+            Self::Ppocrv6Medium => "PP-OCRv6 medium",
+            Self::Ppocrv5EnMobile => "PP-OCRv5 English (mobile)",
+            Self::Ppocrv5ChMobile => "PP-OCRv5 Chinese/Japanese (mobile)",
+            Self::Ppocrv5ChServer => "PP-OCRv5 Chinese/Japanese (server)",
+        }
+    }
+
+    /// Which scripts the recognition dictionary covers.
+    pub const fn languages(self) -> &'static str {
+        match self {
+            Self::Ppocrv6Tiny | Self::Ppocrv6Small | Self::Ppocrv6Medium => "Chinese + English",
+            Self::Ppocrv5EnMobile => "English",
+            Self::Ppocrv5ChMobile | Self::Ppocrv5ChServer => {
+                "Chinese, English, Japanese, Traditional Chinese"
+            }
+        }
+    }
+
+    /// Speed/accuracy/download positioning, one line for the settings row.
+    pub const fn tier(self) -> &'static str {
+        match self {
+            Self::Ppocrv6Tiny => "Fastest · lower accuracy · smallest download",
+            Self::Ppocrv6Small => "Balanced · the default",
+            Self::Ppocrv6Medium => "Highest accuracy of the v6 line · slower · larger download",
+            Self::Ppocrv5EnMobile => "English-only: faster and sharper on English text",
+            Self::Ppocrv5ChMobile => "Adds Japanese/Traditional · mobile speed",
+            Self::Ppocrv5ChServer => "Adds Japanese/Traditional · top accuracy · big download",
+        }
+    }
+}
+
+/// The factory OCR configuration — deliberately the historical default,
+/// so existing installs see no behavior change until they opt in.
+pub const DEFAULT_OCR_MODEL: OcrModel = OcrModel::Ppocrv6Small;
+
 /// User settings. Default = the factory row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     row: Vec<ToolbarItem>,
+    ocr_model: OcrModel,
+    /// Assume text lines are upright and skip the orientation
+    /// classifier — screenshots almost always are, so this trades a
+    /// rare rotated-line fixup for one inference stage less.
+    ocr_assume_upright: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             row: DEFAULT_ROW.to_vec(),
+            ocr_model: DEFAULT_OCR_MODEL,
+            ocr_assume_upright: false,
         }
     }
 }
@@ -234,6 +326,7 @@ impl Default for Settings {
 #[serde(default)]
 struct File {
     toolbar: ToolbarFile,
+    ocr: OcrFile,
 }
 
 #[derive(Deserialize, Default)]
@@ -244,6 +337,16 @@ struct ToolbarFile {
     items: Option<Vec<String>>,
     /// Legacy visibility-only format: factory row minus these ids.
     hidden: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OcrFile {
+    /// Rapidocr registry name of the model set (see [`OcrModel::id`]).
+    model: Option<String>,
+    /// Skip the text-line orientation classifier (screenshots are
+    /// upright); absent = false.
+    assume_upright: Option<bool>,
 }
 
 impl Settings {
@@ -278,6 +381,26 @@ impl Settings {
     /// load time).
     pub fn set_row(&mut self, row: Vec<ToolbarItem>) {
         self.row = row;
+    }
+
+    /// The selected OCR model set (default: [`DEFAULT_OCR_MODEL`]).
+    pub fn ocr_model(&self) -> OcrModel {
+        self.ocr_model
+    }
+
+    pub fn set_ocr_model(&mut self, model: OcrModel) {
+        self.ocr_model = model;
+    }
+
+    /// Whether the orientation classifier is skipped (upright text
+    /// assumed). Kept alongside the model: together they decide which
+    /// files the OCR engine needs.
+    pub fn ocr_assume_upright(&self) -> bool {
+        self.ocr_assume_upright
+    }
+
+    pub fn set_ocr_assume_upright(&mut self, assume: bool) {
+        self.ocr_assume_upright = assume;
     }
 
     /// A button shows iff it has a slot in the row; hidden buttons
@@ -381,7 +504,32 @@ impl Settings {
         };
         let (row, sanitize_errors) = Self::sanitize(row);
         errors.extend(sanitize_errors);
-        (Self { row }, errors)
+        // [ocr]: an unknown model id (hand-edit, or a file written by a
+        // newer/older shotori) degrades to the default with a warning —
+        // same contract as unknown toolbar ids.
+        let ocr_model = match file.ocr.model.as_deref() {
+            None => DEFAULT_OCR_MODEL,
+            Some(id) => match OcrModel::from_id(id) {
+                Some(model) => model,
+                None => {
+                    errors.push(format!(
+                        "{}: unknown OCR model {id:?} (using {})",
+                        path.display(),
+                        DEFAULT_OCR_MODEL.id()
+                    ));
+                    DEFAULT_OCR_MODEL
+                }
+            },
+        };
+        let ocr_assume_upright = file.ocr.assume_upright.unwrap_or(false);
+        (
+            Self {
+                row,
+                ocr_model,
+                ocr_assume_upright,
+            },
+            errors,
+        )
     }
 
     /// Write through to `path`. The existing document is parsed and
@@ -421,6 +569,20 @@ impl Settings {
         };
         toolbar.remove("hidden");
         toolbar.insert("items".into(), items);
+        let ocr = table
+            .entry("ocr")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let Some(ocr) = ocr.as_table_mut() else {
+            return Err(format!(
+                "{}: [ocr] is not a table — refusing to overwrite",
+                path.display()
+            ));
+        };
+        ocr.insert("model".into(), toml::Value::from(self.ocr_model.id()));
+        ocr.insert(
+            "assume_upright".into(),
+            toml::Value::from(self.ocr_assume_upright),
+        );
         let body = toml::to_string(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = format!(
             "# Shotori settings — managed by `shotori settings`; unknown keys are preserved.\n{body}"
@@ -704,5 +866,74 @@ mod tests {
             "the legacy key must not survive next to items: {text}"
         );
         assert!(text.contains("items"));
+    }
+
+    #[test]
+    fn ocr_model_ids_round_trip_and_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for model in OcrModel::ALL {
+            assert_eq!(OcrModel::from_id(model.id()), Some(model));
+            assert!(seen.insert(model.id()), "duplicate id {}", model.id());
+            // the curated ids must all exist in rapidocr's registry —
+            // ocr.rs resolves them by name at engine init
+            assert!(
+                rapidocr_core::model::model_set_by_name(model.id()).is_some(),
+                "{} is not a registered rapidocr model set",
+                model.id()
+            );
+        }
+        assert_eq!(OcrModel::from_id("ppocrv4-en-mobile"), None);
+        assert_eq!(Settings::default().ocr_model(), DEFAULT_OCR_MODEL);
+        assert!(!Settings::default().ocr_assume_upright());
+    }
+
+    #[test]
+    fn ocr_settings_round_trip_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        s.set_ocr_model(OcrModel::Ppocrv5EnMobile);
+        s.set_ocr_assume_upright(true);
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(back.ocr_model(), OcrModel::Ppocrv5EnMobile);
+        assert!(back.ocr_assume_upright());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[ocr]"));
+        assert!(text.contains("ppocrv5-en-mobile"));
+    }
+
+    #[test]
+    fn unknown_ocr_model_degrades_to_the_default_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            "[ocr]\nmodel = \"ppocrv4-en-mobile\"\nassume_upright = true\n",
+        )
+        .unwrap();
+        let (s, errors) = Settings::load(Some(&path));
+        assert_eq!(s.ocr_model(), DEFAULT_OCR_MODEL);
+        // the toggle is independent of the model id — it survives
+        assert!(s.ocr_assume_upright());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("ppocrv4-en-mobile"));
+    }
+
+    #[test]
+    fn ocr_save_preserves_unknown_keys_in_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "[ocr]\nmodel = \"ppocrv6-tiny\"\ntext_score = 0.7\n").unwrap();
+        let mut s = Settings::default();
+        s.set_ocr_model(OcrModel::Ppocrv6Medium);
+        s.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("text_score"),
+            "unknown [ocr] keys must survive an edit: {text}"
+        );
+        assert!(text.contains("ppocrv6-medium"));
     }
 }

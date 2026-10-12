@@ -1,4 +1,11 @@
-//! # OCR: selection → PP-OCRv6 (rapidocr-core + ONNX Runtime) → text
+//! # OCR: selection → configurable PP-OCR model set (rapidocr-core +
+//! ONNX Runtime) → text
+//!
+//! Which model set runs (and whether the orientation-classifier stage
+//! is skipped) comes from `settings.toml`'s `[ocr]` section — see
+//! [`crate::model::settings`]. The overlay is a run-and-exit process
+//! that reads settings once at startup, so the engine cache never sees
+//! a mid-process model switch; the settings window never runs OCR.
 //!
 //! Engine loading pre-warms cached models in the background. Missing models
 //! are downloaded only through the setup workflow, with progress and cancellation.
@@ -12,7 +19,51 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use rapidocr_core::model::{ModelAssetSpec, PPOCRV6_SMALL};
+use rapidocr_core::config::PipelineConfig;
+use rapidocr_core::model::{self, ModelAssetSpec, ModelSetSpec, PPOCRV6_SMALL};
+
+use crate::model::settings::{self, OcrModel};
+
+/// Resolve the user's model-set choice to rapidocr's registry entry.
+/// The settings loader already degrades unknown ids to the default, so
+/// the fallback here only covers a non-initialized [`Settings`]
+/// (`--no-config` tests, unit tests): the factory default, same thing.
+fn selected_set() -> &'static ModelSetSpec {
+    let id = settings::current().ocr_model().id();
+    model::model_set_by_name(id).unwrap_or(&PPOCRV6_SMALL)
+}
+
+/// Which pipeline stages run: "assume upright" (settings) skips the
+/// orientation classifier — screenshot text is almost always upright,
+/// and the stage's model file is then never loaded or downloaded.
+fn selected_pipeline() -> PipelineConfig {
+    if settings::current().ocr_assume_upright() {
+        PipelineConfig::without_cls()
+    } else {
+        PipelineConfig::full()
+    }
+}
+
+/// The files the current settings combination actually needs, in
+/// download/progress order.
+fn selected_assets() -> Vec<ModelAssetSpec> {
+    selected_set().assets_for_pipeline(selected_pipeline())
+}
+
+/// Explicit variant of [`selected_assets`] for callers that preview a
+/// not-yet-committed choice (the settings page's readiness chips):
+/// "would this model + this toggle run without a download?"
+pub fn assets_needed_for(model: OcrModel, assume_upright: bool) -> Vec<ModelAssetSpec> {
+    let pipeline = if assume_upright {
+        PipelineConfig::without_cls()
+    } else {
+        PipelineConfig::full()
+    };
+    match model::model_set_by_name(model.id()) {
+        Some(set) => set.assets_for_pipeline(pipeline),
+        None => Vec::new(),
+    }
+}
 
 /// Model cache directory (XDG-aware)
 fn model_dir() -> anyhow::Result<PathBuf> {
@@ -39,14 +90,22 @@ fn init_engine() -> anyhow::Result<Mutex<rapidocr_core::RapidOcr>> {
         "OCR models are missing; reopen OCR setup to download them"
     );
 
-    let cfg = PPOCRV6_SMALL.config(&dir);
+    let set = selected_set();
+    let mut cfg = set.config(&dir);
+    // `config()` always builds the full pipeline; the upright-assume
+    // toggle removes the classifier stage here (RapidOcr::new skips
+    // loading the cls model entirely when use_cls is false).
+    cfg.pipeline = selected_pipeline();
     match rapidocr_core::RapidOcr::new(cfg) {
         Ok(eng) => Ok(Mutex::new(eng)),
         Err(e) => {
             // A runtime/session error is not proof that every model is corrupt.
             // Remove only files with a confirmed checksum mismatch, under the
             // same lock used by installers. The next OCR action offers setup.
-            for asset in PPOCRV6_SMALL.assets() {
+            // The whole SET is checked (not just the pipeline's files): a
+            // corrupt cls model only matters once the toggle goes off, but
+            // repairing it now spares that future run the failure.
+            for asset in set.assets() {
                 let path = dir.join(asset.filename);
                 if let Some(expected) = asset.sha256
                     && sha256_file(&path).is_ok_and(|actual| actual != expected)
@@ -60,10 +119,11 @@ fn init_engine() -> anyhow::Result<Mutex<rapidocr_core::RapidOcr>> {
     }
 }
 
-/// How many of the model-set files are absent from `dir`
+/// How many of the needed model files are absent from `dir` (the
+/// pipeline's files — an upright-assume user is not blocked by a
+/// missing classifier they will never run).
 fn assets_missing(dir: &std::path::Path) -> usize {
-    PPOCRV6_SMALL
-        .assets()
+    selected_assets()
         .iter()
         .filter(|a| !dir.join(a.filename).exists())
         .count()
@@ -73,6 +133,18 @@ fn assets_missing(dir: &std::path::Path) -> usize {
 /// decide between "run OCR" and "show the setup dialog")
 pub fn models_missing() -> bool {
     model_dir().map(|d| assets_missing(&d) > 0).unwrap_or(true)
+}
+
+/// Whether every file `model` + `assume_upright` would need is already
+/// cached (the settings page's per-row readiness chip). Shares and
+/// files between sets are naturally accounted for — the check is per
+/// FILE, and sets with distinct variants reuse each other's assets.
+pub fn set_ready(model: OcrModel, assume_upright: bool) -> bool {
+    let Ok(dir) = model_dir() else {
+        return false;
+    };
+    let needed = assets_needed_for(model, assume_upright);
+    !needed.is_empty() && needed.iter().all(|a| dir.join(a.filename).is_file())
 }
 
 /// Human-readable model cache path (shown in the setup dialog)
@@ -88,8 +160,7 @@ pub fn asset_name(idx: u8) -> &'static str {
     let Some(index) = usize::from(idx).checked_sub(1) else {
         return "?";
     };
-    PPOCRV6_SMALL
-        .assets()
+    selected_assets()
         .get(index)
         .map(|a| a.filename)
         .unwrap_or("?")
@@ -115,13 +186,16 @@ pub struct DownloadProgress {
 }
 
 impl Default for DownloadProgress {
+    /// file_count is UNKNOWN here — `Default` only serves lock/cancel
+    /// holders that never render progress (`init_engine`, tests). The
+    /// UI must construct through [`DownloadProgress::for_selected_set`].
     fn default() -> Self {
         Self {
             cancel: AtomicBool::new(false),
             bytes: AtomicU64::new(0),
             total: AtomicU64::new(0),
             file_idx: AtomicU8::new(0),
-            file_count: PPOCRV6_SMALL.assets().len() as u8,
+            file_count: 0,
             status: AtomicU8::new(0),
             error: Mutex::new(String::new()),
         }
@@ -129,6 +203,15 @@ impl Default for DownloadProgress {
 }
 
 impl DownloadProgress {
+    /// A progress carrier for the settings-selected model set — the
+    /// one construction path that knows how many files will download.
+    pub fn for_selected_set() -> Self {
+        Self {
+            file_count: selected_assets().len() as u8,
+            ..Self::default()
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.status.load(Ordering::Relaxed) == 0
     }
@@ -207,7 +290,7 @@ fn download_models(progress: &DownloadProgress) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(10))
         .build()
         .context("building HTTP client")?;
-    download_models_in(&model_dir()?, &PPOCRV6_SMALL.assets(), progress, &client)
+    download_models_in(&model_dir()?, &selected_assets(), progress, &client)
 }
 
 fn download_models_in(
@@ -380,9 +463,10 @@ pub fn run_ocr(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadProgress, PPOCRV6_SMALL, asset_name, cache_lock, download_models_in,
-        install_download,
+        DownloadProgress, PPOCRV6_SMALL, asset_name, assets_needed_for, cache_lock,
+        download_models_in, install_download,
     };
+    use crate::model::settings::OcrModel;
     use std::io::{self, Read};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};
@@ -408,6 +492,9 @@ mod tests {
 
     #[test]
     fn asset_names_use_one_based_indices() {
+        // tests run against the factory settings (no settings::init):
+        // v6-small with the full pipeline — exactly PPOCRV6_SMALL's
+        // four assets, cls included
         for (index, asset) in PPOCRV6_SMALL.assets().iter().enumerate() {
             assert_eq!(asset_name((index + 1) as u8), asset.filename);
         }
@@ -417,6 +504,30 @@ mod tests {
     fn out_of_range_asset_index_has_no_name() {
         let index = u8::try_from(PPOCRV6_SMALL.assets().len() + 1).unwrap();
         assert_eq!(asset_name(index), "?");
+    }
+
+    #[test]
+    fn assume_upright_drops_the_classifier_asset() {
+        // the upright-assume toggle must remove the cls model from the
+        // needed set — that is what makes it save a download
+        let full = assets_needed_for(OcrModel::Ppocrv6Small, false);
+        let upright = assets_needed_for(OcrModel::Ppocrv6Small, true);
+        assert_eq!(full.len(), 4);
+        assert_eq!(upright.len(), 3);
+        assert!(full.iter().any(|a| a.filename.contains("cls")));
+        assert!(!upright.iter().any(|a| a.filename.contains("cls")));
+        // det/rec/dict survive the toggle
+        for a in &upright {
+            assert!(full.contains(a));
+        }
+    }
+
+    #[test]
+    fn tiny_also_drops_cls_when_upright() {
+        // every curated set carries a classifier; the toggle must
+        // remove it from any of them, not just the default
+        assert_eq!(assets_needed_for(OcrModel::Ppocrv6Tiny, true).len(), 3);
+        assert_eq!(assets_needed_for(OcrModel::Ppocrv6Tiny, false).len(), 4);
     }
 
     #[test]

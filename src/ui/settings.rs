@@ -44,7 +44,7 @@ use gpui_kit::component::{Collapsible, Icon, Sizable, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster, ToolbarItem};
+use crate::model::settings::{OcrModel, Settings, ToolbarButton, ToolbarCluster, ToolbarItem};
 use crate::ui::theme::load::{self, ThemeFile};
 use crate::ui::theme::{self, ColorKey};
 use crate::ui::toolbar;
@@ -62,6 +62,7 @@ const PAGE_PAD: f32 = 24.;
 enum Section {
     General,
     Toolbar,
+    Ocr,
     Appearance,
 }
 
@@ -327,6 +328,25 @@ impl SettingsWindow {
 
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
+    }
+
+    /// OCR page: pick a model set and write through. Distinct from the
+    /// toolbar commits — it must not retire a toolbar drag (none can be
+    /// active on this page anyway).
+    fn select_ocr_model(&mut self, model: OcrModel, cx: &mut Context<Self>) {
+        if self.settings.ocr_model() == model {
+            return;
+        }
+        self.settings.set_ocr_model(model);
+        self.persist(cx);
+    }
+
+    /// OCR page: flip the upright-assume toggle. Flipping re-renders the
+    /// readiness chips (the classifier file counts as needed or not).
+    fn toggle_ocr_upright(&mut self, cx: &mut Context<Self>) {
+        let next = !self.settings.ocr_assume_upright();
+        self.settings.set_ocr_assume_upright(next);
+        self.persist(cx);
     }
 
     /// A drop landed in preview slot `i` (slot i sits before row item
@@ -877,6 +897,25 @@ fn edge_scroll_delta(local_x: Pixels, width: Pixels) -> Option<Pixels> {
     }
 }
 
+/// The radio circle of an OCR model row: ring always, center dot only
+/// when selected (hand-drawn like the scrollbar rail — a 14px visual
+/// with explicit geometry cannot drift).
+fn radio_dot(selected: bool) -> Div {
+    let t = theme::c();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(14.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
+        .when(selected, |s| {
+            s.child(div().size(px(6.)).rounded_full().bg(rgba(t.accent)))
+        })
+}
+
 /// One page's heading.
 fn page_header(title: &str, blurb: &str) -> Div {
     let t = theme::c();
@@ -969,6 +1008,7 @@ impl SettingsWindow {
                 SidebarMenu::new()
                     .child(item("General", IconName::Settings2, Section::General))
                     .child(item("Toolbar", IconName::PanelTop, Section::Toolbar))
+                    .child(item("OCR", IconName::ScanText, Section::Ocr))
                     .child(item("Appearance", IconName::Palette, Section::Appearance)),
             )
     }
@@ -983,6 +1023,7 @@ impl SettingsWindow {
         let mut page = match self.section {
             Section::General => self.page_general(cx),
             Section::Toolbar => self.page_toolbar(cx),
+            Section::Ocr => self.page_ocr(cx),
             Section::Appearance => self.page_appearance(cx),
         };
         page = page.flex_1().min_w(px(0.));
@@ -1051,6 +1092,167 @@ impl SettingsWindow {
                     .child(
                         "Edits anywhere in this window write straight through to the files above — \
                      the next screenshot picks them up.",
+                    ),
+            )
+    }
+
+    /// OCR: the model-set picker + the upright-assume toggle. Readiness
+    /// chips are computed from the cache directory per render (a few
+    /// stat calls — cheap), so they track downloads other processes
+    /// make. Selecting a model without its files is allowed: the next
+    /// OCR run offers the existing setup dialog with progress and
+    /// cancellation (that hardened flow is reused, not duplicated).
+    fn page_ocr(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme::c();
+        let mut list = div().flex().flex_col().gap(px(6.));
+        for model in OcrModel::ALL {
+            list = list.child(self.ocr_model_row(model, cx));
+        }
+        div()
+            .id("page-ocr")
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .p(px(PAGE_PAD))
+            .size_full()
+            .overflow_y_scroll()
+            .child(page_header(
+                "OCR",
+                "Trade recognition speed, accuracy and language coverage. \
+                 Applies to the next screenshot.",
+            ))
+            .child(list)
+            .child(self.ocr_upright_row(cx))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .child(format!(
+                        "Models cache in {}. A newly selected model downloads the \
+                         first time you OCR (with a confirmation dialog); files \
+                         shared between models are reused.",
+                        crate::ocr::model_dir_display()
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_right()
+                    .text_color(if self.error.is_some() {
+                        rgba(t.accent)
+                    } else {
+                        rgba(t.hint_text)
+                    })
+                    .child(self.error.clone().unwrap_or_else(|| self.location())),
+            )
+    }
+
+    /// One selectable model row: radio dot, name, languages · tier, and
+    /// the readiness chip under the CURRENT upright toggle (a set that
+    /// only lacks the classifier counts as ready when the toggle is on).
+    fn ocr_model_row(&self, model: OcrModel, cx: &Context<Self>) -> Stateful<Div> {
+        let selected = self.settings.ocr_model() == model;
+        let ready = crate::ocr::set_ready(model, self.settings.ocr_assume_upright());
+        let t = theme::c();
+        let entity = cx.entity();
+        div()
+            .id(SharedString::from(format!("ocr-model-{}", model.id())))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
+            .when(selected, |s| s.bg(rgba(t.toolbar_hover)))
+            .hover(|s| s.bg(rgba(t.toolbar_hover)))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.select_ocr_model(model, cx));
+            })
+            .child(radio_dot(selected))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgba(t.btn_text))
+                            .child(model.label()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgba(t.hint_text))
+                            .child(format!("{} · {}", model.languages(), model.tier())),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(rgba(if ready { t.hint_text } else { t.accent }))
+                    .child(if ready {
+                        "Ready".to_string()
+                    } else {
+                        "Downloads on first OCR".to_string()
+                    }),
+            )
+    }
+
+    /// The upright-assume toggle row (checkbox visual, click to flip).
+    fn ocr_upright_row(&self, cx: &Context<Self>) -> Stateful<Div> {
+        let on = self.settings.ocr_assume_upright();
+        let t = theme::c();
+        let entity = cx.entity();
+        div()
+            .id("ocr-upright")
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(t.toolbar_border))
+            .hover(|s| s.bg(rgba(t.toolbar_hover)))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.toggle_ocr_upright(cx));
+            })
+            .child(
+                Icon::new(if on {
+                    IconName::SquareCheckBig
+                } else {
+                    IconName::Square
+                })
+                .size_4()
+                .text_color(rgba(if on { t.accent } else { t.hint_text })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgba(t.btn_text))
+                            .child("Assume upright text (faster)"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgba(t.hint_text))
+                            .child(
+                                "Skip the orientation check — screenshot text is \
+                                 almost always upright. Saves one inference stage \
+                                 and one model download; rotated text (photo of a \
+                                 page) is then read garbled.",
+                            ),
                     ),
             )
     }

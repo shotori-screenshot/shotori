@@ -83,7 +83,7 @@ impl OcrSetup {
         Self {
             stage: Stage::Confirm,
             snapshot,
-            progress: Arc::new(DownloadProgress::default()),
+            progress: Arc::new(crate::ocr::DownloadProgress::for_selected_set()),
         }
     }
 
@@ -147,8 +147,9 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
         Stage::Confirm => (
             "OCR needs models",
             vec![text_line(&format!(
-                "First OCR use: download PP-OCRv6 small models (~31 MB, from \
-                 ModelScope)? Stored in {}\nOne-time only.",
+                "First use of the selected OCR model ({}): download it from \
+                 ModelScope? Stored in {}\nOne-time only.",
+                crate::model::settings::current().ocr_model().label(),
                 crate::ocr::model_dir_display()
             ))],
             vec![

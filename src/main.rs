@@ -8,7 +8,8 @@
 //! - `overlay`: overlay assembly (one window per screen)
 //! - `hud` / `toolbar`: the overlay's visual pieces
 //! - `selection` / `export` / `image_util`: pure logic
-//! - `ocr`: selection OCR (rapidocr-core + PP-OCRv6 models)
+//! - `ocr`: selection OCR (rapidocr-core; model set configurable in
+//!   settings.toml)
 //! - `theme`: visual constants
 
 use gpui_kit::*;
