@@ -1165,6 +1165,33 @@ fn rail_thumb_geometry(handle: &ScrollHandle) -> (Pixels, Pixels) {
     (thumb, usable)
 }
 
+/// The preview strip's scroll position in THIS file's domain: the
+/// distance from the start, `0..=max_offset().x`, positive toward
+/// the end of the row.
+///
+/// gpui stores a scroll container's offset as the ELEMENT offset —
+/// `0` at the start and NEGATIVE `max_offset()` at the end (content
+/// shifts left; paint clamps into `[-max, 0]`). The library's own
+/// scrollbar negates on both sides of that boundary
+/// (`ThumbGeometry::start` reads `-offset`; its drag write-back is
+/// `-extent * fraction`). These helpers are the single place the
+/// sign flips: every read/write of `preview_scroll` must go through
+/// them. Writing a positive-domain value straight into the handle is
+/// a silent no-op — paint clamps it back to "start" — which is how
+/// the strip once lost every horizontal scroll path at once (wheel,
+/// thumb, scrub, edge auto-scroll; the sign-domain bug).
+fn strip_scroll_pos(handle: &ScrollHandle) -> Pixels {
+    -handle.offset().x
+}
+
+/// Write `pos` (this file's positive domain; the CALLER clamps to
+/// `[0, max]` — a bare handle cannot seed `max_offset` for a unit
+/// test, and every call site already owns a max) back into the
+/// handle, negated into gpui's element-offset domain.
+fn set_strip_scroll_pos(handle: &ScrollHandle, pos: Pixels) {
+    handle.set_offset(point(-pos, handle.offset().y));
+}
+
 /// Ramped auto-scroll delta for a drag parked at the strip's edge:
 /// nothing across the middle of the strip, then speed ramps from
 /// ~6px/frame at the zone boundary to ~36px/frame at the very edge
@@ -1732,11 +1759,11 @@ impl SettingsWindow {
                         return;
                     }
                     let handle = this.preview_scroll.clone();
-                    let offset = handle.offset();
-                    let max = handle.max_offset();
-                    let next = (offset.x + delta).clamp(px(0.), max.x);
-                    if next != offset.x {
-                        handle.set_offset(point(next, offset.y));
+                    let pos = strip_scroll_pos(&handle);
+                    let max = handle.max_offset().x;
+                    let next = (pos + delta).clamp(px(0.), max);
+                    if next != pos {
+                        set_strip_scroll_pos(&handle, next);
                         cx.notify();
                     }
                 });
@@ -1751,33 +1778,24 @@ impl SettingsWindow {
         div()
             .flex()
             .flex_col()
-            // Wheel over the strip + rail: notify so the drawn thumb
-            // follows whatever the container applied, and consume the
-            // event while there is x-overflow so nothing above this
-            // block can grow a scroll and carry the bar away again
-            // (defensive — the page itself no longer scrolls; see
-            // `page_toolbar`).
-            //
-            // The clamp-writeback also NORMALIZES the stored offset:
-            // the native wheel application accumulates raw deltas
-            // without clamping (paint clamps visually, nothing writes
-            // back), so overshooting an end parks the handle at, say,
-            // -150px — and the first 150px of reverse scrolling are
-            // DEAD (bar and thumb both refuse to move while the stored
-            // value climbs back through the overshoot). This listener
-            // runs after the application in bubble order; rewriting the
-            // clamped value keeps storage, paint and the thumb locked
-            // together, notch for notch.
+            // The clamp-writeback runs in OUR positive domain through
+            // the boundary helpers (`strip_scroll_pos`): clamping the
+            // RAW stored offset against [0, max] rewrote every real
+            // scroll position (which gpui stores negated) back to 0 —
+            // the strip could not be wheel-scrolled at all. Clamped in
+            // the right domain it also normalizes any overshoot the
+            // native application leaves behind before paint's own
+            // clamp-writeback lands on the next frame.
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
                 let handle = this.preview_scroll.clone();
                 let max = handle.max_offset().x;
                 if max > px(0.) {
                     cx.stop_propagation();
                 }
-                let offset = handle.offset();
-                let clamped = point(offset.x.clamp(px(0.), max), offset.y);
-                if clamped != offset {
-                    handle.set_offset(clamped);
+                let pos = strip_scroll_pos(&handle);
+                let clamped = pos.clamp(px(0.), max);
+                if clamped != pos {
+                    set_strip_scroll_pos(&handle, clamped);
                 }
                 cx.notify();
             }))
@@ -1818,15 +1836,18 @@ impl SettingsWindow {
         let t = theme::c();
 
         // display geometry: thumb clamped to a grabbable 24px minimum.
-        // The offset is clamped to [0, max] FIRST: gpui's native wheel
-        // application stores the raw delta without clamping (clamping
-        // happens at paint, never written back), so wheeling past
-        // either end leaves a NEGATIVE or over-max offset in the
-        // handle — an unclamped ratio sent the thumb sliding out of
-        // the rail, over the sidebar ("the scrollbar scrolled away").
+        // The position goes through `strip_scroll_pos` (negated out of
+        // gpui's element-offset domain) and is clamped to [0, max]
+        // FIRST — before paint's own clamp-writeback lands, the stored
+        // value can sit outside [-max, 0], and an unclamped ratio sent
+        // the thumb sliding out of the rail, over the sidebar ("the
+        // scrollbar scrolled away").
         let (thumb_w, usable) = rail_thumb_geometry(handle);
         let thumb_x = if max_x > px(0.) {
-            let effective = handle.offset().x.clamp(px(0.), max_x);
+            // negated into the positive domain first: the stored
+            // offset is <= 0, so clamping the raw value against
+            // [0, max] pinned the thumb to the rail's left end
+            let effective = strip_scroll_pos(handle).clamp(px(0.), max_x);
             usable * (effective / max_x)
         } else {
             px(0.)
@@ -1900,8 +1921,7 @@ impl SettingsWindow {
         let (thumb_w, usable) = rail_thumb_geometry(&handle);
         let local_x = pointer.x - rail.origin.x;
         let fraction = ((local_x - thumb_w / 2.) / usable).clamp(0., 1.);
-        let next = px(fraction * max_x.as_f32());
-        handle.set_offset(point(next, handle.offset().y));
+        set_strip_scroll_pos(&handle, px(fraction * max_x.as_f32()));
         cx.notify();
     }
 
@@ -2332,3 +2352,31 @@ fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
 }
 
 use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};
+
+#[cfg(test)]
+mod tests {
+    // NOT `use super::*` — the parent's `use gpui_kit::*` glob pulls in
+    // gpui's test-support `test` macro, and re-globbing it here shadows
+    // Rust's built-in #[test] and expands to the recursion limit (the
+    // #[gpui_kit::test] trap; the kit's own docs say to import test
+    // modules' types explicitly). ui/toolbar.rs dodges this the same way.
+    use super::{set_strip_scroll_pos, strip_scroll_pos};
+    use gpui_kit::{ScrollHandle, point, px};
+
+    /// gpui stores a scroll container's offset NEGATED (0 = start,
+    /// -max = end); the strip's wheel/thumb/scrub/edge-scroll code all
+    /// reason in the positive domain. Pin the boundary helpers so a
+    /// future refactor cannot quietly drop the sign flip — the strip
+    /// once lost every horizontal scroll path at once that way.
+    #[test]
+    fn strip_scroll_helpers_flip_the_sign_domain() {
+        let handle = ScrollHandle::new();
+        // what the container natively holds after scrolling 120px in
+        handle.set_offset(point(px(-120.), px(0.)));
+        assert_eq!(strip_scroll_pos(&handle), px(120.));
+        // and what a scrub/edge-scroll writes back out of 60px in
+        set_strip_scroll_pos(&handle, px(60.));
+        assert_eq!(handle.offset().x, px(-60.));
+        assert_eq!(handle.offset().y, px(0.));
+    }
+}
