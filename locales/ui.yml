@@ -102,6 +102,9 @@ settings:
     title:
       en: OCR
       zh-CN: 文字识别
+    model:
+      en: Model set
+      zh-CN: 模型集
     blurb:
       en: Trade recognition speed, accuracy and language coverage. Applies to the next screenshot.
       zh-CN: 在识别速度、精度与语言覆盖之间取舍。下次截图时生效。

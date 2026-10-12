@@ -31,13 +31,17 @@ use std::path::PathBuf;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::AutoScroll;
 use gpui_kit::base::Button;
+use gpui_kit::base::IndexPath;
 use gpui_kit::base::slider::{
     Slider, SliderEvent, SliderState, SliderThumb, SliderTrack, SliderValue,
 };
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Collapsible, Icon, Sizable, Theme, ThemeMode};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -88,6 +92,41 @@ struct DragPreview {
 
 /// The drag payload marking a scrollbar-rail scrub in flight.
 struct RailScrub;
+
+/// One row of the language Select. `title` resolves through `t!` on
+/// every render, so a live locale flip re-renders the menu (and the
+/// trigger) without rebuilding the state.
+#[derive(Clone)]
+struct LanguageItem(crate::model::settings::Language);
+
+impl SearchableListItem for LanguageItem {
+    type Value = crate::model::settings::Language;
+
+    fn title(&self) -> SharedString {
+        self.0.label().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
+/// One row of the OCR model Select (title = the model's localized
+/// label; the langs/tier detail line renders outside the dropdown).
+#[derive(Clone)]
+struct OcrModelItem(OcrModel);
+
+impl SearchableListItem for OcrModelItem {
+    type Value = OcrModel;
+
+    fn title(&self) -> SharedString {
+        self.0.label().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
 
 /// An empty drag ghost for the scrollbar scrub — the thumb itself is
 /// the feedback (it re-renders from the handle on every scrub event),
@@ -248,6 +287,12 @@ struct SettingsWindow {
     /// The Appearance editor's state (theme.toml working copy + the
     /// picker/slider entities its rows render).
     appearance: AppearanceState,
+    /// The language picker's Select state (General page).
+    language_select: gpui_kit::Entity<SelectState<SearchableVec<LanguageItem>>>,
+    /// The OCR model picker's Select state (OCR page). Selection
+    /// commits through the Confirm subscription; the detail line below
+    /// renders from `settings` — the file stays the single truth.
+    ocr_select: gpui_kit::Entity<SelectState<SearchableVec<OcrModelItem>>>,
     /// Collapsed navigation sidebar (icon-only rail). Session state —
     /// window-local, intentionally not persisted.
     sidebar_collapsed: bool,
@@ -290,6 +335,51 @@ impl SettingsWindow {
             cx.refresh_windows();
         })];
         let appearance = AppearanceState::new(window, cx);
+        // Language picker: seeds from the loaded settings; a Confirm
+        // writes through, flips the process-global locale and
+        // refreshes (see `select_language`).
+        let language_select = cx.new(|cx| {
+            let current = settings.language();
+            let selected = crate::model::settings::Language::ALL
+                .iter()
+                .position(|l| *l == current)
+                .map(IndexPath::new);
+            SelectState::new(
+                SearchableVec::new(
+                    crate::model::settings::Language::ALL
+                        .map(LanguageItem)
+                        .to_vec(),
+                ),
+                selected,
+                window,
+                cx,
+            )
+        });
+        let mut subscriptions = subscriptions;
+        subscriptions.push(cx.subscribe(&language_select, |this, _, event, cx| {
+            if let SelectEvent::Confirm(Some(language)) = event {
+                this.select_language(*language, cx);
+            }
+        }));
+        // OCR model picker: same shape, without the locale flip.
+        let ocr_current = settings.ocr_model();
+        let ocr_select = cx.new(|cx| {
+            let selected = OcrModel::ALL
+                .iter()
+                .position(|m| *m == ocr_current)
+                .map(IndexPath::new);
+            SelectState::new(
+                SearchableVec::new(OcrModel::ALL.map(OcrModelItem).to_vec()),
+                selected,
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe(&ocr_select, |this, _, event, cx| {
+            if let SelectEvent::Confirm(Some(model)) = event {
+                this.select_ocr_model(*model, cx);
+            }
+        }));
         Self {
             section: Section::Toolbar,
             settings,
@@ -297,6 +387,8 @@ impl SettingsWindow {
             error: warnings.first().cloned(),
             drag: None,
             appearance,
+            language_select,
+            ocr_select,
             sidebar_collapsed: false,
             preview_scroll: ScrollHandle::new(),
             edge_scroll: AutoScroll::default(),
@@ -338,15 +430,6 @@ impl SettingsWindow {
         self.settings.set_ocr_model(model);
         self.persist(cx);
     }
-
-    /// OCR page: flip the upright-assume toggle. Flipping re-renders the
-    /// readiness chips (the classifier file counts as needed or not).
-    fn toggle_ocr_upright(&mut self, cx: &mut Context<Self>) {
-        let next = !self.settings.ocr_assume_upright();
-        self.settings.set_ocr_assume_upright(next);
-        self.persist(cx);
-    }
-
     /// General page: pick the UI language. Writes through, flips the
     /// process-global locale (our table and gpui-component's switch
     /// together) and refreshes every window — `t!` resolves on render,
@@ -915,25 +998,6 @@ fn edge_scroll_delta(local_x: Pixels, width: Pixels) -> Option<Pixels> {
     }
 }
 
-/// The radio circle of an OCR model row: ring always, center dot only
-/// when selected (hand-drawn like the scrollbar rail — a 14px visual
-/// with explicit geometry cannot drift).
-fn radio_dot(selected: bool) -> Div {
-    let t = theme::c();
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .size(px(14.))
-        .rounded_full()
-        .border_1()
-        .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
-        .when(selected, |s| {
-            s.child(div().size(px(6.)).rounded_full().bg(rgba(t.accent)))
-        })
-}
-
 /// One page's heading.
 fn page_header(title: &str, blurb: &str) -> Div {
     let t = theme::c();
@@ -1122,7 +1186,7 @@ impl SettingsWindow {
                         crate::i18n::t!("settings.general.theme_builtin").to_string()
                     }),
             ))
-            .child(self.language_rows(cx))
+            .child(self.language_control(cx))
             .child(
                 div()
                     .text_size(px(11.))
@@ -1131,43 +1195,12 @@ impl SettingsWindow {
             )
     }
 
-    /// The language picker: one radio row per [`Language`]. Picking one
-    /// writes through AND flips this window's locale live — `t!` reads
-    /// the process-global locale on every call, so the re-render alone
-    /// switches every label (including the sidebar and the
-    /// component-library texts gpui-component translates itself).
-    fn language_rows(&self, cx: &Context<Self>) -> Div {
+    /// The language picker (General page). A Confirm writes through,
+    /// flips the process-global locale and refreshes every window —
+    /// `t!` resolves on render, so the whole window including the
+    /// component-library texts switches live, no restart.
+    fn language_control(&self, _: &Context<Self>) -> Div {
         let t = theme::c();
-        let mut rows = div().flex().flex_col().gap(px(6.));
-        for language in crate::model::settings::Language::ALL {
-            let selected = self.settings.language() == language;
-            let entity = cx.entity();
-            rows = rows.child(
-                div()
-                    .id(SharedString::from(format!("lang-{}", language.id())))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .p(px(10.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
-                    .when(selected, |s| s.bg(rgba(t.toolbar_hover)))
-                    .hover(|s| s.bg(rgba(t.toolbar_hover)))
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.select_language(language, cx));
-                    })
-                    .child(radio_dot(selected))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_size(px(13.))
-                            .text_color(rgba(t.btn_text))
-                            .child(language.label()),
-                    ),
-            );
-        }
         div()
             .flex()
             .flex_col()
@@ -1178,7 +1211,15 @@ impl SettingsWindow {
                     .text_color(rgba(t.hint_text))
                     .child(crate::i18n::t!("settings.general.language.label").to_string()),
             )
-            .child(rows)
+            .child(
+                div().w(px(280.)).child(
+                    Select::new(&self.language_select)
+                        .accessibility_label(
+                            crate::i18n::t!("settings.general.language.label").to_string(),
+                        )
+                        .menu_width(px(280.)),
+                ),
+            )
             .child(
                 div()
                     .text_size(px(11.))
@@ -1186,19 +1227,16 @@ impl SettingsWindow {
                     .child(crate::i18n::t!("settings.general.language.blurb").to_string()),
             )
     }
-
-    /// OCR: the model-set picker + the upright-assume toggle. Readiness
-    /// chips are computed from the cache directory per render (a few
-    /// stat calls — cheap), so they track downloads other processes
-    /// make. Selecting a model without its files is allowed: the next
-    /// OCR run offers the existing setup dialog with progress and
-    /// cancellation (that hardened flow is reused, not duplicated).
+    /// OCR: the model-set dropdown + the upright-assume switch. The
+    /// dropdown rows stay single-line (the model's localized label);
+    /// the current choice's langs · tier · readiness render as one
+    /// detail line under it, from `settings` — the file stays the
+    /// single truth, the Select is just the picker.
     fn page_ocr(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
-        let mut list = div().flex().flex_col().gap(px(6.));
-        for model in OcrModel::ALL {
-            list = list.child(self.ocr_model_row(model, cx));
-        }
+        let model = self.settings.ocr_model();
+        let ready = crate::ocr::set_ready(model, self.settings.ocr_assume_upright());
+        let entity = cx.entity();
         div()
             .id("page-ocr")
             .flex()
@@ -1208,11 +1246,99 @@ impl SettingsWindow {
             .size_full()
             .overflow_y_scroll()
             .child(page_header(
-                "OCR",
+                crate::i18n::t!("settings.ocr_page.title").as_ref(),
                 crate::i18n::t!("settings.ocr_page.blurb").as_ref(),
             ))
-            .child(list)
-            .child(self.ocr_upright_row(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgba(t.hint_text))
+                            .child(crate::i18n::t!("settings.ocr_page.model").to_string()),
+                    )
+                    .child(
+                        div().w(px(360.)).child(
+                            Select::new(&self.ocr_select)
+                                .accessibility_label(
+                                    crate::i18n::t!("settings.ocr_page.model").to_string(),
+                                )
+                                .menu_width(px(420.)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .text_size(px(11.))
+                                    .text_color(rgba(t.hint_text))
+                                    .child(format!("{} · {}", model.languages(), model.tier())),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(if ready { t.hint_text } else { t.accent }))
+                                    .child(if ready {
+                                        crate::i18n::t!("settings.ocr_page.ready").to_string()
+                                    } else {
+                                        crate::i18n::t!("settings.ocr_page.downloads_first")
+                                            .to_string()
+                                    }),
+                            ),
+                    ),
+            )
+            // upright toggle: a real Switch (controlled — the owner
+            // writes the requested value back and notifies)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(10.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgba(t.toolbar_border))
+                    .child(
+                        Switch::new("ocr-upright")
+                            .checked(self.settings.ocr_assume_upright())
+                            .on_click(move |checked, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.settings.set_ocr_assume_upright(*checked);
+                                    this.persist(cx);
+                                });
+                            })
+                            .color(rgba(t.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(div().text_size(px(13.)).text_color(rgba(t.btn_text)).child(
+                                crate::i18n::t!("settings.ocr_page.upright.title").to_string(),
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgba(t.hint_text))
+                                    .child(
+                                        crate::i18n::t!("settings.ocr_page.upright.body")
+                                            .to_string(),
+                                    ),
+                            ),
+                    ),
+            )
             .child(
                 div()
                     .text_size(px(11.))
@@ -1235,111 +1361,6 @@ impl SettingsWindow {
                         rgba(t.hint_text)
                     })
                     .child(self.error.clone().unwrap_or_else(|| self.location())),
-            )
-    }
-
-    /// One selectable model row: radio dot, name, languages · tier, and
-    /// the readiness chip under the CURRENT upright toggle (a set that
-    /// only lacks the classifier counts as ready when the toggle is on).
-    fn ocr_model_row(&self, model: OcrModel, cx: &Context<Self>) -> Stateful<Div> {
-        let selected = self.settings.ocr_model() == model;
-        let ready = crate::ocr::set_ready(model, self.settings.ocr_assume_upright());
-        let t = theme::c();
-        let entity = cx.entity();
-        div()
-            .id(SharedString::from(format!("ocr-model-{}", model.id())))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .p(px(10.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
-            .when(selected, |s| s.bg(rgba(t.toolbar_hover)))
-            .hover(|s| s.bg(rgba(t.toolbar_hover)))
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| this.select_ocr_model(model, cx));
-            })
-            .child(radio_dot(selected))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgba(t.btn_text))
-                            .child(model.label()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(t.hint_text))
-                            .child(format!("{} · {}", model.languages(), model.tier())),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.))
-                    .text_color(rgba(if ready { t.hint_text } else { t.accent }))
-                    .child(if ready {
-                        crate::i18n::t!("settings.ocr_page.ready").to_string()
-                    } else {
-                        crate::i18n::t!("settings.ocr_page.downloads_first").to_string()
-                    }),
-            )
-    }
-
-    /// The upright-assume toggle row (checkbox visual, click to flip).
-    fn ocr_upright_row(&self, cx: &Context<Self>) -> Stateful<Div> {
-        let on = self.settings.ocr_assume_upright();
-        let t = theme::c();
-        let entity = cx.entity();
-        div()
-            .id("ocr-upright")
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .p(px(10.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(rgba(t.toolbar_border))
-            .hover(|s| s.bg(rgba(t.toolbar_hover)))
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| this.toggle_ocr_upright(cx));
-            })
-            .child(
-                Icon::new(if on {
-                    IconName::SquareCheckBig
-                } else {
-                    IconName::Square
-                })
-                .size_4()
-                .text_color(rgba(if on { t.accent } else { t.hint_text })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgba(t.btn_text))
-                            .child(crate::i18n::t!("settings.ocr_page.upright.title").to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(t.hint_text))
-                            .child(crate::i18n::t!("settings.ocr_page.upright.body").to_string()),
-                    ),
             )
     }
 
