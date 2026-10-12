@@ -27,6 +27,13 @@ impl Global for TrayGlobal {}
 
 /// Run the tray app. Returns when the user quits from the menu.
 pub fn run() {
+    // The desktop launcher starts the tray, so a second launch (impatient
+    // double-click, autostart race) would stack a second SNI icon —
+    // hold the single-instance lock for the whole tray lifetime instead.
+    let Some(_instance_lock) = instance_lock::acquire() else {
+        eprintln!("[shotori] tray already running");
+        return;
+    };
     application().with_quit_mode(QuitMode::Explicit).run(|cx| {
         if let Err(e) = setup(cx) {
             eprintln!("[shotori] tray unavailable: {e:#}");
@@ -97,4 +104,64 @@ fn icon() -> gpui_tray::Result<Icon> {
     .into_rgba8();
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height)
+}
+
+mod instance_lock {
+    //! Single-instance guard for tray mode. `flock` semantics: the lock
+    //! belongs to the open file description, so the kernel releases it on
+    //! process exit — crash-safe, no stale PID file to clean up.
+
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    /// Lock file lives in XDG_RUNTIME_DIR — user-private tmpfs, cleared
+    /// on logout — with the portable temp dir as a fallback.
+    fn default_path() -> PathBuf {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("shotori-tray.lock")
+    }
+
+    fn acquire_at(path: &Path) -> Option<File> {
+        let lock = File::create(path).ok()?;
+        // try_lock is an inherent File method in edition 2024 (the
+        // FileExt import would be flagged unused).
+        lock.try_lock().ok()?;
+        Some(lock)
+    }
+
+    pub fn acquire() -> Option<File> {
+        acquire_at(&default_path())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn temp_lock_path(name: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("shotori-test-{name}-{}.lock", std::process::id()))
+        }
+
+        #[test]
+        fn second_acquire_fails_while_first_is_held() {
+            let path = temp_lock_path("mutex");
+            let first = acquire_at(&path).expect("first acquire must succeed");
+            assert!(
+                acquire_at(&path).is_none(),
+                "a second lock on the same file must be refused"
+            );
+            // Dropping the holder must free the lock for the next caller.
+            drop(first);
+            assert!(acquire_at(&path).is_some(), "lock must free after drop");
+            std::fs::remove_file(&path).ok();
+        }
+
+        #[test]
+        fn independent_files_do_not_conflict() {
+            let a = acquire_at(&temp_lock_path("a")).expect("lock a");
+            let b = acquire_at(&temp_lock_path("b")).expect("lock b must be independent");
+            drop((a, b));
+        }
+    }
 }
