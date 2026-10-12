@@ -100,8 +100,8 @@ mod tests {
         // the syntax: substituted in, no placeholder left behind.
         let _guard = LOCALE_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
-        let line = t!("settings.location", path = "/tmp/theme.toml").to_string();
-        assert!(line.contains("/tmp/theme.toml"), "{line}");
+        let line = t!("ocr.setup.confirm", model = "PP-OCRv5").to_string();
+        assert!(line.contains("PP-OCRv5"), "{line}");
         assert!(!line.contains('{'), "{line}");
     }
 

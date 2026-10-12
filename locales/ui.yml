@@ -34,9 +34,6 @@ settings:
   title:
     en: Shotori Settings
     zh-CN: Shotori 设置
-  location:
-    en: "Saves to %{path}"
-    zh-CN: "保存至 %{path}"
   no_config_dir:
     en: "no config directory (is HOME set?)"
     zh-CN: "找不到配置目录（HOME 未设置？）"
@@ -52,23 +49,24 @@ settings:
       en: General
       zh-CN: 通用
     blurb:
-      en: About this installation and where its configuration lives.
-      zh-CN: 关于本安装及其配置文件的位置。
+      en: About this installation; the buttons below open its config files for editing.
+      zh-CN: 关于本安装；下方按钮可打开配置文件进行编辑。
     version:
       en: Version
       zh-CN: 版本
-    settings_file:
-      en: Settings file
-      zh-CN: 设置文件
-    theme_file:
-      en: Theme file
-      zh-CN: 主题文件
-    theme_builtin:
-      en: built-in theme (no file)
-      zh-CN: 内置主题（无文件）
+    config_files:
+      en: Config files
+      zh-CN: 配置文件
+    open_failed:
+      title:
+        en: Couldn't open the config file
+        zh-CN: 无法打开配置文件
+      body:
+        en: "xdg-open: %{error}"
+        zh-CN: "xdg-open：%{error}"
     write_through:
-      en: Edits anywhere in this window write straight through to the files above — the next screenshot picks them up.
-      zh-CN: 本窗口中的任何修改都会立即写入上述文件——下次截图即生效。
+      en: Edits anywhere in this window write straight through to the config files — the next screenshot picks them up.
+      zh-CN: 本窗口中的任何修改都会立即写入配置文件——下次截图即生效。
     language:
       label:
         en: Language

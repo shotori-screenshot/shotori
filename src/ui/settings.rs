@@ -68,6 +68,13 @@ enum Section {
     Appearance,
 }
 
+/// Which config file an action targets (General page's edit buttons).
+#[derive(Clone, Copy)]
+enum ConfigFile {
+    Settings,
+    Theme,
+}
+
 /// The drag-and-drop payload: what is being carried and where it came
 /// from (`None` = palette: a fresh insert; `Some(i)` = the preview
 /// bar: a reorder that removes slot i first).
@@ -613,13 +620,41 @@ impl SettingsWindow {
         self.commit(row, cx);
     }
 
-    fn location(&self) -> String {
-        match &self.path {
-            Some(path) => {
-                crate::i18n::t!("settings.location", path = path.display().to_string()).to_string()
+    /// Open a config file in the system editor. A MISSING file is
+    /// materialized first — settings gets the current state written
+    /// out, theme a base-only shotori file — so "edit my config" never
+    /// hands the editor a void. Materialization failures land in the
+    /// usual error slot; opening failures surface as a notification
+    /// from [`open_config_file`]'s thread.
+    fn open_config(&mut self, file: ConfigFile, cx: &mut Context<Self>) {
+        let Some(path) = (match file {
+            ConfigFile::Settings => self.path.clone(),
+            ConfigFile::Theme => self.appearance.path.clone(),
+        }) else {
+            crate::notify::send(
+                crate::i18n::t!("settings.general.open_failed.title").as_ref(),
+                crate::i18n::t!("settings.no_config_dir").as_ref(),
+            );
+            return;
+        };
+        if !path.exists() {
+            let materialized = match file {
+                ConfigFile::Settings => self.settings.save(&path),
+                ConfigFile::Theme => load::save(
+                    &path,
+                    &ThemeFile {
+                        base: Some("shotori".into()),
+                        ..Default::default()
+                    },
+                ),
+            };
+            if let Err(error) = materialized {
+                self.error = Some(error);
+                cx.notify();
+                return;
             }
-            None => crate::i18n::t!("settings.no_config_dir").to_string(),
         }
+        open_config_file(path);
     }
 
     /// The live toolbar: the real bar container and grip textures with
@@ -945,12 +980,12 @@ impl SettingsWindow {
                     .flex_1()
                     .text_right()
                     .text_size(px(11.))
-                    .text_color(if self.error.is_some() {
-                        rgba(theme::c().accent)
-                    } else {
-                        rgba(theme::c().hint_text)
-                    })
-                    .child(self.error.clone().unwrap_or_else(|| self.location())),
+                    // errors only — where the file lives is one click
+                    // away (General's config buttons); an always-on
+                    // path line was clutter
+                    .when_some(self.error.clone(), |el, error| {
+                        el.text_color(rgba(theme::c().accent)).child(error)
+                    }),
             )
     }
 }
@@ -1137,6 +1172,25 @@ fn edge_scroll_delta(local_x: Pixels, width: Pixels) -> Option<Pixels> {
     }
 }
 
+/// Hand a config file to the session's editor (xdg-open), reaped on a
+/// plain thread so the UI never blocks and no zombie lingers. Failures
+/// surface as a notification — the button click has no other natural
+/// error surface, and a silent no-op reads as broken.
+fn open_config_file(path: PathBuf) {
+    std::thread::spawn(move || {
+        let outcome = std::process::Command::new("xdg-open").arg(&path).status();
+        let detail = match outcome {
+            Ok(status) if status.success() => return,
+            Ok(status) => status.to_string(),
+            Err(error) => error.to_string(),
+        };
+        crate::notify::send(
+            crate::i18n::t!("settings.general.open_failed.title").as_ref(),
+            crate::i18n::t!("settings.general.open_failed.body", error = detail).as_ref(),
+        );
+    });
+}
+
 /// One page's heading.
 fn page_header(title: &str, blurb: &str) -> Div {
     let t = theme::c();
@@ -1274,7 +1328,6 @@ impl SettingsWindow {
     /// language picker (the one control here that changes something).
     fn page_general(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
-        let theme_path = theme::load::config_path();
         let row = |label: String, value: String| {
             div()
                 .flex()
@@ -1309,28 +1362,64 @@ impl SettingsWindow {
                 crate::i18n::t!("settings.general.version").to_string(),
                 format!("shotori {}", env!("CARGO_PKG_VERSION")),
             ))
-            .child(row(
-                crate::i18n::t!("settings.general.settings_file").to_string(),
-                self.path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| crate::i18n::t!("settings.no_config_dir").to_string()),
-            ))
-            .child(row(
-                crate::i18n::t!("settings.general.theme_file").to_string(),
-                theme_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| {
-                        crate::i18n::t!("settings.general.theme_builtin").to_string()
-                    }),
-            ))
+            .child(self.config_files_row(cx))
             .child(self.language_control(cx))
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
                     .child(crate::i18n::t!("settings.general.write_through").to_string()),
+            )
+    }
+
+    /// The config-file row (General page): one compact button per
+    /// file, opening it in the system editor. Replaces the old
+    /// read-only path rows — the location is discovered by opening the
+    /// file, and always-on paths everywhere was clutter.
+    fn config_files_row(&self, cx: &mut Context<Self>) -> Div {
+        let t = theme::c();
+        let entity = cx.entity();
+        let button = |label: &'static str, file: ConfigFile| {
+            Button::new(SharedString::from(label))
+                .accessibility_label(format!(
+                    "{}: {label}",
+                    crate::i18n::t!("settings.general.config_files")
+                ))
+                .px(px(10.))
+                .py(px(3.))
+                .rounded(px(6.))
+                .text_size(px(12.))
+                .text_color(rgba(t.btn_text))
+                .border_1()
+                .border_color(rgba(t.toolbar_border))
+                .hover(|s| s.bg(rgba(t.toolbar_hover)))
+                .focus_visible(|s| s.border_color(rgba(t.accent)))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.open_config(file, cx));
+                    }
+                })
+                .child(label)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgba(t.hint_text))
+                    .child(crate::i18n::t!("settings.general.config_files").to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(button("settings.toml", ConfigFile::Settings))
+                    .child(button("theme.toml", ConfigFile::Theme)),
             )
     }
 
@@ -1490,17 +1579,18 @@ impl SettingsWindow {
                         .to_string(),
                     ),
             )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_right()
-                    .text_color(if self.error.is_some() {
-                        rgba(t.accent)
-                    } else {
-                        rgba(t.hint_text)
-                    })
-                    .child(self.error.clone().unwrap_or_else(|| self.location())),
-            )
+            .when_some(self.error.clone(), |el, error| {
+                // errors only — the file's location is a button away
+                // on the General page, an always-on path line was
+                // clutter
+                el.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_right()
+                        .text_color(rgba(t.accent))
+                        .child(error),
+                )
+            })
     }
 
     /// Toolbar: the drag-and-drop editor. The page itself NEVER
@@ -1927,20 +2017,12 @@ impl SettingsWindow {
                     .flex_1()
                     .text_right()
                     .text_size(px(11.))
-                    .text_color(if self.appearance.error.is_some() {
-                        rgba(t.accent)
-                    } else {
-                        rgba(t.hint_text)
-                    })
-                    .child(self.appearance.error.clone().unwrap_or_else(|| {
-                        match &self.appearance.path {
-                            Some(p) => {
-                                crate::i18n::t!("settings.location", path = p.display().to_string())
-                                    .to_string()
-                            }
-                            None => crate::i18n::t!("settings.no_config_dir").to_string(),
-                        }
-                    })),
+                    // errors only — where the file lives is one click
+                    // away (General's config buttons); an always-on
+                    // path line was clutter
+                    .when_some(self.appearance.error.clone(), |el, error| {
+                        el.text_color(rgba(t.accent)).child(error)
+                    }),
             )
     }
 }
