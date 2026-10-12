@@ -134,9 +134,6 @@ settings:
     base_palette:
       en: Base palette
       zh-CN: 基础配色
-    auto:
-      en: Shotori (auto)
-      zh-CN: Shotori（自动）
     dim_opacity:
       en: Dim opacity
       zh-CN: 遮罩不透明度

@@ -128,18 +128,17 @@ impl SearchableListItem for OcrModelItem {
     }
 }
 
-/// One row of the base palette Select: the shotori default (auto pair,
-/// orange — the product's own theme) plus every preinstalled community
-/// palette (see [`theme::load::BUILT_INS`]). `title` re-resolves on
-/// every render — the shotori row translates, community palettes are
-/// proper nouns — so a live locale flip relabels the menu like
-/// everywhere else.
+/// One row of the base palette Select: the shotori default (the orange
+/// dark/light pair following the system — the product's own theme)
+/// plus every preinstalled community palette (see
+/// [`theme::load::BUILT_INS`]). All labels are proper nouns resolved
+/// per render, so a live locale flip relabels the menu like everywhere
+/// else.
 #[derive(Clone)]
 struct BaseItem {
-    /// The `theme.toml` value: "auto" or a built-in name.
+    /// The `theme.toml` value: "shotori" or a built-in name.
     name: String,
     display: SharedString,
-    label_key: Option<&'static str>,
 }
 
 impl BaseItem {
@@ -147,14 +146,12 @@ impl BaseItem {
     /// registry order.
     fn all() -> Vec<Self> {
         std::iter::once(Self {
-            name: "auto".into(),
+            name: "shotori".into(),
             display: "Shotori".into(),
-            label_key: Some("settings.appearance.auto"),
         })
         .chain(load::BUILT_INS.iter().map(|built_in| Self {
             name: built_in.name.into(),
             display: built_in.display.into(),
-            label_key: None,
         }))
         .collect()
     }
@@ -164,10 +161,7 @@ impl SearchableListItem for BaseItem {
     type Value = String;
 
     fn title(&self) -> SharedString {
-        match self.label_key {
-            Some(key) => crate::i18n::t!(key).into(),
-            None => self.display.clone(),
-        }
+        self.display.clone()
     }
 
     fn value(&self) -> &Self::Value {
@@ -1965,13 +1959,13 @@ impl AppearanceState {
         let (file, errors) = load::load_editable(path.as_deref());
         let current = current_palette(&file);
 
-        // Base palette selector: seeded from the file (None = auto); a
-        // Confirm swaps the base, re-seeds the pickers below and
-        // writes through (see `appearance_set_base`). "shotori" seeds
-        // as "auto" — the alias of the same pair, and the first row is
-        // what the editor writes back.
+        // Base palette selector: seeded from the file (None = shotori);
+        // a Confirm swaps the base, re-seeds the pickers below and
+        // writes through (see `appearance_set_base`). The legacy
+        // "auto" spelling seeds as "shotori" — the same pair, and
+        // "shotori" is what the editor writes back.
         let current_base = match file.base.as_deref() {
-            None | Some("auto") | Some("shotori") => "auto".to_string(),
+            None | Some("shotori") | Some("auto") => "shotori".to_string(),
             Some(base) => base.to_string(),
         };
         let items = BaseItem::all();
@@ -2067,7 +2061,7 @@ impl SettingsWindow {
     }
 
     fn appearance_set_base(&mut self, base: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.appearance.file.base.as_deref().unwrap_or("auto") == base {
+        if self.appearance.file.base.as_deref().unwrap_or("shotori") == base {
             return;
         }
         self.appearance.file.base = Some(base.to_string());

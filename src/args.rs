@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// Preinstalled theme (auto/shotori, catppuccin-*, dracula, gruvbox-dark,
+    /// Preinstalled theme (shotori, catppuccin-*, dracula, gruvbox-dark,
     /// nord, rose-pine, tokyo-night) or a TOML theme file
     #[arg(long, value_name = "NAME|FILE")]
     pub theme: Option<String>,

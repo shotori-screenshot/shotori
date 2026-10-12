@@ -4,11 +4,11 @@
 //! [`Theme`] struct instead of loose constants, so the look can be
 //! swapped as a whole. Resolution order (see [`load`]):
 //!
-//! 1. the shotori theme — `auto` (default, the dark/light orange pair
-//!    following the system appearance; `shotori` is its brand alias) or
-//!    one of the preinstalled community palettes registered in
-//!    [`load::BUILT_INS`] (Catppuccin, Dracula, Gruvbox, Nord,
-//!    Rosé Pine, Tokyo Night)
+//! 1. the shotori theme — `shotori` (default, the dark/light orange
+//!    pair following the system appearance; `auto` is its legacy
+//!    spelling) or one of the preinstalled community palettes
+//!    registered in [`load::BUILT_INS`] (Catppuccin, Dracula, Gruvbox,
+//!    Nord, Rosé Pine, Tokyo Night)
 //! 2. an optional TOML settings file — `--theme <file>` or the XDG
 //!    config fallback (`~/.config/shotori/theme.toml`)
 //!

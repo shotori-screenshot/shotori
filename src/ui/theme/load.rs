@@ -138,11 +138,12 @@ pub struct BuiltIn {
 }
 
 /// The selectable presets, in editor display order — community
-/// palettes only. The shotori look (`auto`, the orange dark/light
-/// pair) is the selector's first row, not an entry here: it is a
-/// palette PAIR following the system, not a fixed palette. The
-/// factory `dark`/`light`/`high_contrast` are not selectable anymore
-/// either but still resolve in [`built_in`] for old theme files.
+/// palettes only. The shotori look (the orange dark/light pair) is
+/// the selector's first row, not an entry here: it is a palette PAIR
+/// following the system, not a fixed palette. The factory
+/// `dark`/`light`/`high_contrast` and the legacy `auto` spelling are
+/// not selectable anymore either but still resolve (in [`built_in`]
+/// and [`ThemeFile::palettes`]) for old theme files.
 pub const BUILT_INS: &[BuiltIn] = &[
     BuiltIn {
         name: "catppuccin-frappe",
@@ -206,8 +207,7 @@ pub fn built_in(name: &str) -> Result<Theme, String> {
             .map(|built_in| (built_in.palette)()),
     };
     theme.ok_or_else(|| {
-        let names = ["auto", "shotori"]
-            .into_iter()
+        let names = std::iter::once("shotori")
             .chain(BUILT_INS.iter().map(|b| b.name))
             .collect::<Vec<_>>()
             .join(" | ");
@@ -248,15 +248,15 @@ fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
 }
 
 impl ThemeFile {
-    /// The resolved palettes this file describes (`auto` and its brand
-    /// alias `shotori` = the dark/light pair; a fixed base = one
-    /// palette). Errors are the per-field override problems, shared by
-    /// both palettes' applies.
+    /// The resolved palettes this file describes (`shotori` — the
+    /// default — and its legacy alias `auto` = the dark/light pair; a
+    /// fixed base = one palette). Errors are the per-field override
+    /// problems, shared by both palettes' applies.
     pub(crate) fn palettes(&self) -> (Theme, Option<Theme>, Vec<String>) {
-        let base = self.base.as_deref().unwrap_or("auto");
-        // "shotori" IS the auto pair — the orange default look is the
-        // product's own theme, not a fixed variant of it.
-        let (mut dark, mut light, mut errors) = if matches!(base, "auto" | "shotori") {
+        let base = self.base.as_deref().unwrap_or("shotori");
+        // "auto" is the legacy spelling of the shotori pair — every
+        // theme.toml written before the rename carries it.
+        let (mut dark, mut light, mut errors) = if matches!(base, "shotori" | "auto") {
             (Theme::dark(), Some(Theme::light()), Vec::new())
         } else {
             match built_in(base) {
@@ -301,7 +301,7 @@ pub fn save(path: &Path, file: &ThemeFile) -> Result<(), String> {
     let mut table = toml::Table::new();
     table.insert(
         "base".into(),
-        toml::Value::String(file.base.clone().unwrap_or_else(|| "auto".into())),
+        toml::Value::String(file.base.clone().unwrap_or_else(|| "shotori".into())),
     );
     for key in ColorKey::ALL {
         if let Some(value) = file.color(key) {
@@ -320,7 +320,7 @@ pub fn save(path: &Path, file: &ThemeFile) -> Result<(), String> {
     let body = table.to_string();
     let text = format!(
         "# Shotori theme — managed by `shotori settings`; base + overrides.\n\
-         # base = auto | dark | light | high_contrast, every other key is optional.\n{body}"
+         # base = shotori (follows the system) or a preinstalled palette, every other key is optional.\n{body}"
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -386,7 +386,7 @@ pub fn init(args: &crate::args::Cli) {
         if let Some(light) = &light {
             let _ = writeln!(
                 std::io::stdout(),
-                "auto: follows the system; both complete palettes are shown below"
+                "shotori follows the system appearance; both complete palettes are shown below"
             );
             let _ = writeln!(std::io::stdout(), "[dark appearance]");
             print_theme(&dark, &source);
@@ -407,7 +407,7 @@ fn print_theme(theme: &Theme, source: &Source) {
     // broken pipe, a truncated dump is the expected outcome there
     let mut out = std::io::stdout().lock();
     let src = match source {
-        Source::Default => "default (auto)".to_string(),
+        Source::Default => "default (shotori)".to_string(),
         Source::BuiltIn(n) => format!("built-in {n}"),
         Source::File(p) => p.display().to_string(),
     };
@@ -447,10 +447,12 @@ mod tests {
             assert!(auto.is_none() && errors.is_empty());
             assert_eq!(theme.toolbar_bg, built_in(base).unwrap().toolbar_bg);
         }
-        // the brand alias resolves to the same auto pair
-        let file: ThemeFile = toml::from_str("base = 'shotori'").unwrap();
-        let (_, light, errors) = file.palettes();
-        assert!(light.is_some() && errors.is_empty());
+        // the legacy spellings resolve to the same auto pair
+        for base in ["shotori", "auto"] {
+            let file: ThemeFile = toml::from_str(&format!("base = '{base}'")).unwrap();
+            let (_, light, errors) = file.palettes();
+            assert!(light.is_some() && errors.is_empty(), "{base}");
+        }
     }
     #[test]
     fn unknown_fields_are_still_rejected() {
@@ -653,9 +655,10 @@ mod tests {
             Ok(_) => panic!("unknown base resolved"),
             Err(error) => error,
         };
-        assert!(error.contains("auto"));
         assert!(error.contains("shotori"));
         assert!(error.contains("catppuccin-mocha"));
         assert!(error.contains("tokyo-night"));
+        // "auto" still resolves (legacy) but is no longer advertised
+        assert!(!error.contains("auto"));
     }
 }
