@@ -10,6 +10,8 @@ use gpui_kit::{
         Button,
         slider::{Slider, SliderIndicator, SliderState, SliderThumb, SliderTrack},
     },
+    component::Sizable,
+    component::color_picker::{ColorPicker, ColorPickerState},
     *,
 };
 
@@ -437,6 +439,7 @@ pub(crate) fn selection_toolbar(
     session: Entity<ScreenshotSession>,
     focus: FocusHandle,
     size_slider: Option<SizeSlider>,
+    swatch_picker: Option<Entity<ColorPickerState>>,
 ) -> impl IntoElement {
     let edit_kind = annotations.edit_kind();
     let selected_color = annotations
@@ -585,6 +588,7 @@ pub(crate) fn selection_toolbar(
                 return options;
             }
             options = options.child(separator()).child(div().flex_1());
+            let active_ix = annotations.color_index();
             for (ix, color) in crate::model::settings::current()
                 .annotation_colors()
                 .iter()
@@ -592,6 +596,40 @@ pub(crate) fn selection_toolbar(
                 .enumerate()
             {
                 let name = crate::model::settings::PALETTE_NAMES[ix];
+                if ix == active_ix
+                    && let Some(picker) = &swatch_picker
+                {
+                    // The SELECTED swatch becomes the inline color
+                    // editor: clicking it again opens the picker's
+                    // popover (palette + HSLA sliders + hex). Edits
+                    // land in settings.toml through
+                    // `settings::set_annotation_color` (the Overlay
+                    // owns the state and the subscription — see its
+                    // `swatch_picker`). Non-selected swatches stay
+                    // plain one-click selectors, so "pick a color" and
+                    // "edit a color" never fight over the same click.
+                    // The wrap carries the SELECTED affordance (accent
+                    // ring + selected surface, same vocabulary as a
+                    // lit control) — the picker's own trigger has no
+                    // selected state, and without the ring the active
+                    // cell reads as just another swatch
+                    // (user-reported).
+                    options = options.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(rgba(theme::c().accent))
+                            .bg(rgba(theme::c().toolbar_selected))
+                            .child(
+                                ColorPicker::new(picker)
+                                    .small()
+                                    .accessibility_label(format!("Edit color: {name}")),
+                            ),
+                    );
+                    continue;
+                }
                 let session = session.clone();
                 options = options.child(
                     control(
@@ -619,6 +657,20 @@ pub(crate) fn selection_toolbar(
             }
             options
         }))
+}
+
+/// gpui's 0xRRGGBBAA → picker color.
+pub(crate) fn u32_to_hsla(color: u32) -> Hsla {
+    rgba(color).into()
+}
+
+/// Picker color → storage. Alpha forced opaque: swatches become
+/// exported PNG ink, which must be solid — the pickers cannot
+/// meaningfully edit a swatch alpha.
+pub(crate) fn hsla_to_u32(color: Hsla) -> u32 {
+    let c: Rgba = color.into();
+    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+    (byte(c.r) << 24) | (byte(c.g) << 16) | (byte(c.b) << 8) | 0xFF
 }
 
 /// A drag strip at the toolbar's edge: press and the whole toolbar

@@ -351,15 +351,23 @@ impl Annotations {
     pub(crate) fn enabled(&self) -> bool {
         self.tool.is_some_and(|k| k != ShapeKind::Select)
     }
+    /// The swatch-board index the ACTIVE tool would paint with —
+    /// highlighter keeps its own slot. The toolbar's inline color
+    /// editor (the picker replacing the selected swatch) binds to
+    /// this index.
+    pub(crate) fn color_index(&self) -> usize {
+        if self.tool == Some(ShapeKind::Highlighter) {
+            self.highlighter_color_ix
+        } else {
+            self.color_ix
+        }
+    }
+
     pub(crate) fn color(&self) -> (u32, &'static str) {
         if let Some(shape) = self.editing_text() {
             return (shape.color, "Text");
         }
-        let ix = if self.tool == Some(ShapeKind::Highlighter) {
-            self.highlighter_color_ix
-        } else {
-            self.color_ix
-        };
+        let ix = self.color_index();
         (
             crate::model::settings::current().annotation_colors()[ix],
             crate::model::settings::PALETTE_NAMES[ix],

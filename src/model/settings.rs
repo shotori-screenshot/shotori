@@ -740,11 +740,10 @@ pub fn config_path() -> Option<PathBuf> {
 static ACTIVE: RwLock<Option<&'static Settings>> = RwLock::new(None);
 static FACTORY: OnceLock<Settings> = OnceLock::new();
 
-/// Edit one swatch of the annotation board IN THIS PROCESS and write
-/// it through to settings.toml — the overlay's inline picker and the
-/// settings window both land here. A failed save keeps the in-memory
-/// edit (the running session keeps the color; the next capture falls
-/// back to whatever the file says) and reports on stderr.
+/// The overlay path: update the ACTIVE annotation board in-process
+/// and write the file through. A failed save keeps the in-memory edit
+/// (the running session keeps the color; the next capture falls back
+/// to whatever the file says) and reports on stderr.
 pub fn set_annotation_color(ix: usize, color: u32) {
     if ix >= PALETTE {
         return;
@@ -752,7 +751,6 @@ pub fn set_annotation_color(ix: usize, color: u32) {
     let mut next = current().clone();
     next.annotation_colors[ix] = color;
     install(next);
-    // FACTORY stays factory — reset paths compare against it.
     if let Some(path) = config_path()
         && let Err(e) = current().save(&path)
     {

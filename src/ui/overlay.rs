@@ -30,7 +30,8 @@ use crate::ui::hud::{
     selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::image_util;
-use crate::ui::toolbar::selection_toolbar;
+use crate::ui::toolbar::{hsla_to_u32, selection_toolbar, u32_to_hsla};
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 
 pub struct Overlay {
     focus_handle: FocusHandle,
@@ -66,6 +67,10 @@ pub struct Overlay {
     /// boot trace: this instance's first render not yet reported
     /// (per-instance — the warm-window suite opens several overlays)
     perf_first_render_pending: bool,
+    /// The inline swatch editor's state (see [`Overlay::new`]); None
+    /// only in hand-built test instances, where the selected cell
+    /// degrades to a plain swatch.
+    swatch_picker: Option<Entity<gpui_kit::component::color_picker::ColorPickerState>>,
     /// The toolbar's size slider, rebuilt when the active tool (its
     /// spec) changes; `SliderEvent::Change` writes through to the
     /// session. UI state, never crosses to the model.
@@ -85,6 +90,10 @@ impl Overlay {
     ) -> Self {
         crate::boot_mark("overlay constructed (window created)");
         crate::ui::theme::follow_system(window.appearance());
+        // The inline swatch editor's popover (gpui-component) must
+        // follow the shotori palette, not the component default —
+        // same push the settings window does at startup.
+        crate::ui::settings::sync_shell_theme(window, cx);
         let frozen =
             image_util::rgba_to_render_image(capture.rgba.clone(), capture.width, capture.height);
 
@@ -125,15 +134,64 @@ impl Overlay {
             slider: None,
             slider_sub: None,
             size_scroll_acc: 0.0,
+            swatch_picker: None,
         };
         overlay.attach_observers(window, cx);
+        // The inline swatch editor: the SELECTED color cell in row two
+        // renders as this picker; its popover (preset palette + HSLA
+        // sliders + hex) edits the board through
+        // `settings::set_annotation_color`, which also persists. The
+        // state must live on the Overlay (a render-built picker would
+        // reset the popover on every frame).
+        let swatch_picker = cx.new(|cx| {
+            let seed = overlay.session.read(cx).annotations().color().0;
+            ColorPickerState::new(window, cx).default_value(u32_to_hsla(seed))
+        });
+        overlay.swatch_picker = Some(swatch_picker.clone());
+        let sub = cx.subscribe(&swatch_picker, |this, _, event, cx| {
+            if let ColorPickerEvent::Change(Some(hsla)) = event {
+                // The edit lands on the ACTIVE swatch index — the
+                // picker renders exactly there — and writes through
+                // to settings.toml; the repaint picks the new color
+                // up everywhere.
+                let ix = this.session.read(cx).annotations().color_index();
+                crate::model::settings::set_annotation_color(ix, hsla_to_u32(*hsla));
+                cx.notify();
+            }
+        });
+        overlay._subscriptions.push(sub);
         overlay
+    }
+
+    /// The inline swatch editor's state, seeded on the active color.
+    /// While the popover is CLOSED the value tracks the active swatch
+    /// (a switch must re-seed it, or the next open would edit the
+    /// previous color); while OPEN it is the user's working draft and
+    /// is left alone. `set_value` emits nothing, so this cannot loop.
+    fn swatch_editor_seed(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<gpui_kit::component::color_picker::ColorPickerState>> {
+        let picker = self.swatch_picker.clone()?;
+        let target = u32_to_hsla(self.session.read(cx).annotations().color().0);
+        let stale = {
+            let state = picker.read(cx);
+            !state.is_open() && state.value() != Some(target)
+        };
+        if stale {
+            picker.update(cx, |state, cx| state.set_value(target, window, cx));
+        }
+        Some(picker)
     }
 
     fn attach_observers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._subscriptions = vec![
             window.observe_window_appearance(|window, cx| {
                 crate::ui::theme::follow_system(window.appearance());
+                // the component theme tracks the flip too — the picker
+                // popover must not stay light when the system goes dark
+                crate::ui::settings::sync_shell_theme(window, cx);
                 cx.refresh_windows();
             }),
             cx.observe_in(&self.session, window, |this, _, window, cx| {
@@ -1562,6 +1620,7 @@ impl Render for Overlay {
                     && (!self.session.read(cx).blocked() || self.text_editing.is_some())
                     && let Some(rect) = shared.toolbar_bounds(&self.capture.output_name)
                 {
+                    let swatch_picker = self.swatch_editor_seed(window, cx);
                     Some(selection_toolbar(
                         rect,
                         self.capture.output_name.clone().into(),
@@ -1569,6 +1628,7 @@ impl Render for Overlay {
                         self.session.clone(),
                         self.text_editing.as_ref().map(|e|e.focus_handle(cx)).unwrap_or_else(||self.focus_handle.clone()),
                         size_slider,
+                        swatch_picker,
                     ))
                 } else {
                     None
@@ -1791,6 +1851,7 @@ mod multi_output_tests {
     fn all_image_annotation_tools_release_replaced_previews(cx: &mut TestAppContext) {
         use crate::annotation::ShapeKind;
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "screen".into();
         capture.width = 200;
@@ -1855,6 +1916,7 @@ mod multi_output_tests {
     #[gpui_kit::test]
     fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppContext) {
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "screen".into();
         capture.width = 200;
@@ -1910,6 +1972,7 @@ mod multi_output_tests {
     #[gpui_kit::test]
     fn pointer_events_share_selection_and_handle_release_outside_window(cx: &mut TestAppContext) {
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let make_capture = |name: &str, x| {
             let mut capture = Capture::for_test((x, 0), 1.);
             capture.output_name = name.into();
@@ -2015,6 +2078,7 @@ mod multi_output_tests {
     #[gpui_kit::test]
     fn chrome_follows_a_cross_output_move_through_the_event_pipeline(cx: &mut TestAppContext) {
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let make_capture = |name: &str, x| {
             let mut capture = Capture::for_test((x, 0), 1.);
             capture.output_name = name.into();
@@ -2141,6 +2205,7 @@ mod multi_output_tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "main".into();
         capture.width = 400;
@@ -2228,6 +2293,7 @@ mod multi_output_tests {
     #[gpui_kit::test]
     fn cursor_reflects_interior_handles_and_the_inset_toolbar(cx: &mut TestAppContext) {
         cx.update(gpui_kit::base::init);
+        cx.update(gpui_kit::component::init);
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "main".into();
         capture.width = 400;
@@ -2310,6 +2376,7 @@ mod multi_output_tests {
     fn annotation_hover_cursor_picks_then_grabs(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
             crate::actions::bind_keys(cx);
         });
@@ -2435,9 +2502,73 @@ mod multi_output_tests {
     }
 
     #[gpui_kit::test]
+    fn selected_swatch_becomes_the_inline_color_editor(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "main".into();
+        capture.width = 800;
+        capture.height = 600;
+        capture.rgba = vec![255; 800 * 600 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (_overlay, vcx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        vcx.simulate_resize(size(px(800.), px(600.)));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+        vcx.simulate_mouse_down(
+            point(px(100.), px(200.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.simulate_mouse_move(
+            point(px(600.), px(560.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.simulate_mouse_up(
+            point(px(600.), px(560.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.simulate_keystrokes("r");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // The board's SELECTED cell renders as the inline picker (no
+        // tb-color-{n} control there — the picker component owns that
+        // slot); every other cell stays a plain one-click selector, so
+        // picking and editing never fight over the same click.
+        let active = vcx.update(|_, cx| session.read(cx).annotations().color_index());
+        // debug_bounds wants &'static — the board is fixed at seven.
+        const SWATCH_IDS: [&str; crate::model::settings::PALETTE] = [
+            "tb-color-0",
+            "tb-color-1",
+            "tb-color-2",
+            "tb-color-3",
+            "tb-color-4",
+            "tb-color-5",
+            "tb-color-6",
+        ];
+        for (ix, id) in SWATCH_IDS.iter().enumerate() {
+            let present = vcx.debug_bounds(id).is_some();
+            assert_eq!(
+                present,
+                ix != active,
+                "swatch {ix}: expected the selected cell to be the picker"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
     fn toolbar_hugs_its_content(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
         });
         let mut capture = Capture::for_test((0, 0), 1.);
@@ -2575,6 +2706,7 @@ mod multi_output_tests {
     fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
         });
         let mut capture = Capture::for_test((0, 0), 1.);
@@ -2805,6 +2937,7 @@ mod multi_output_tests {
     fn text_input_workflow(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
             crate::actions::bind_keys(cx);
         });
@@ -3077,6 +3210,7 @@ mod multi_output_tests {
         use crate::annotation::ShapeKind;
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
             cx.bind_keys([gpui_kit::KeyBinding::new(
                 "escape",
@@ -3227,6 +3361,7 @@ mod multi_output_tests {
     fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotation::ShapeKind) {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
             cx.bind_keys([gpui_kit::KeyBinding::new(
                 "escape",
@@ -3479,6 +3614,7 @@ mod multi_output_tests {
         let key = if is_rectangle { "r" } else { "e" };
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
             cx.bind_keys([gpui_kit::KeyBinding::new(
                 "escape",

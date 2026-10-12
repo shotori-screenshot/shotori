@@ -237,7 +237,13 @@ fn window_options() -> WindowOptions {
 /// sidebar then reads as one product with the overlay instead of a
 /// foreign default blue. Shotori-side, [`theme::follow_system`] keeps
 /// the overlay palettes switching in step.
-fn sync_shell_theme(window: &mut Window, cx: &mut App) {
+/// Push the window's appearance into the component design system's
+/// global theme (mode + accent), so component-built surfaces — the
+/// color pickers' popovers — match the shotori palette instead of the
+/// component default (light). Called by the settings window at startup
+/// and by the overlay (its inline swatch editor's popover needs it
+/// too).
+pub(crate) fn sync_shell_theme(window: &mut Window, cx: &mut App) {
     theme::follow_system(window.appearance());
     let dark = matches!(
         window.appearance(),
@@ -1967,20 +1973,7 @@ fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
     }
 }
 
-/// gpui's 0xRRGGBBAA → picker color.
-fn u32_to_hsla(color: u32) -> Hsla {
-    rgba(color).into()
-}
-
-/// Picker color → theme storage. Alpha forced opaque: the file format
-/// demands opaque colors and the pickers cannot meaningfully edit a
-/// theme alpha (only dim_opacity is a knob, and it has its own slider).
-fn hsla_to_u32(color: Hsla) -> u32 {
-    let c: Rgba = color.into();
-    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
-    (byte(c.r) << 24) | (byte(c.g) << 16) | (byte(c.b) << 8) | 0xFF
-}
-
+use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};
 // ── Appearance: the virtual-screenshot mockup ──────────────────────────────
 
 /// The Appearance preview: a hand-drawn capture scene — fake desktop,

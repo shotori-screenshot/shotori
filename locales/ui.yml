@@ -149,9 +149,6 @@ settings:
     dim_opacity:
       en: Dim opacity
       zh-CN: 遮罩不透明度
-    annotations:
-      en: Annotations
-      zh-CN: 标注颜色
     reset_colors:
       en: Reset to base
       zh-CN: 重置为基础色

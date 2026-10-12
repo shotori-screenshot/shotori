@@ -151,6 +151,10 @@ fn main() {
             shotori::boot_mark("gpui run entered");
             cx.set_app_identity(shotori::APP_ID, "Shotori");
             gpui_kit::base::init(cx);
+            // The component design system's global state: the inline
+            // color picker (the selected swatch's editor) comes from
+            // gpui-component and needs its theme registry.
+            gpui_kit::component::init(cx);
             shotori::ui::ocr_setup::init(cx);
             shotori::actions::init_annotation_keybindings(cx);
 
