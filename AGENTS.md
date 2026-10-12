@@ -159,6 +159,12 @@ libwayland-dev` (see CI).
 - `cargo test` covers pure logic (model/, annotation geometry, args) —
   no compositor required. New interactive logic should be extractable
   and tested there.
+- Do NOT use the `#[gpui_kit::test]` attribute (the `test-support`
+  dev-dependency invites it): its proc macro recurses infinitely
+  inside `gpui_macros` and crashes rustc with SIGSEGV — minutes of
+  "my code segfaulted the compiler" before you look at the backtrace.
+  Keep tests pure-logic; verify shell/widget wiring by running the
+  real window.
 - Headless e2e drives the real pipeline through the `ui/e2e.rs`
   backdoors: `SHOTORI_DEBUG_TARGET=<output>` (restrict to one overlay —
   several firing fight each other), `SHOTORI_DEBUG_SELECTION=x,y,w,h`,
