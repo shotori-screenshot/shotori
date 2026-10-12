@@ -137,8 +137,9 @@ pub(crate) struct ButtonMeta {
     pub(crate) button: crate::model::settings::ToolbarButton,
     /// Element/debug id (`tb-*`) — e2e probes rely on these.
     pub(crate) debug_id: &'static str,
-    /// Settings-row name; the toolbar tooltip is "name · shortcut".
-    pub(crate) name: &'static str,
+    /// Translation key (`toolbar.*` in locales/ui.yml). Labels are
+    /// locale-dependent; the key (and `debug_id`) stay stable.
+    pub(crate) label_key: &'static str,
     /// Shortcut hint ("" when the button has none).
     pub(crate) shortcut: &'static str,
     pub(crate) icon: ButtonIcon,
@@ -152,84 +153,84 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // gpui-kit-assets' compiled set.
         button: crate::model::settings::ToolbarButton::Select,
         debug_id: "tb-select",
-        name: "Select",
+        label_key: "toolbar.select",
         shortcut: "V",
         icon: ButtonIcon::Own("icons/select.svg"),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Rectangle,
         debug_id: "tb-rectangle",
-        name: "Rectangle",
+        label_key: "toolbar.rectangle",
         shortcut: "R",
         icon: ButtonIcon::Kit(IconName::Square),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Ellipse,
         debug_id: "tb-ellipse",
-        name: "Ellipse",
+        label_key: "toolbar.ellipse",
         shortcut: "E",
         icon: ButtonIcon::Kit(IconName::Circle),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Line,
         debug_id: "tb-line",
-        name: "Line",
+        label_key: "toolbar.line",
         shortcut: "L",
         icon: ButtonIcon::Kit(IconName::Slash),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Polyline,
         debug_id: "tb-polyline",
-        name: "Polyline",
+        label_key: "toolbar.polyline",
         shortcut: "P",
         icon: ButtonIcon::Kit(IconName::Waypoints),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Arrow,
         debug_id: "tb-arrow",
-        name: "Arrow",
+        label_key: "toolbar.arrow",
         shortcut: "A",
         icon: ButtonIcon::Kit(IconName::ArrowUpRight),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Number,
         debug_id: "tb-number",
-        name: "Sequence number",
+        label_key: "toolbar.number",
         shortcut: "N",
         icon: ButtonIcon::Kit(IconName::ListOrdered),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Pencil,
         debug_id: "tb-pencil",
-        name: "Pencil",
+        label_key: "toolbar.pencil",
         shortcut: "B",
         icon: ButtonIcon::Kit(IconName::Pencil),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Highlighter,
         debug_id: "tb-highlighter",
-        name: "Highlighter",
+        label_key: "toolbar.highlighter",
         shortcut: "H",
         icon: ButtonIcon::Kit(IconName::Highlighter),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Mosaic,
         debug_id: "tb-mosaic",
-        name: "Mosaic / Blur",
+        label_key: "toolbar.mosaic",
         shortcut: "M",
         icon: ButtonIcon::Own("icons/mosaic.svg"),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Eraser,
         debug_id: "tb-eraser",
-        name: "Eraser",
+        label_key: "toolbar.eraser",
         shortcut: "D",
         icon: ButtonIcon::Kit(IconName::Eraser),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Text,
         debug_id: "tb-text",
-        name: "Text",
+        label_key: "toolbar.text",
         shortcut: "T",
         icon: ButtonIcon::Kit(IconName::Type),
     },
@@ -242,14 +243,14 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // is a harmless no-op, like Delete.
         button: crate::model::settings::ToolbarButton::Clear,
         debug_id: "tb-clear",
-        name: "Clear annotations",
+        label_key: "toolbar.clear",
         shortcut: "Ctrl+Shift+Del",
         icon: ButtonIcon::Kit(IconName::Trash),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Ocr,
         debug_id: "tb-ocr",
-        name: "Recognize text",
+        label_key: "toolbar.ocr",
         shortcut: "Ctrl+O",
         icon: ButtonIcon::Kit(IconName::ScanText),
     },
@@ -259,7 +260,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // slot — same situation as the mosaic icon
         button: crate::model::settings::ToolbarButton::Pin,
         debug_id: "tb-pin",
-        name: "Pin to screen",
+        label_key: "toolbar.pin",
         shortcut: "Ctrl+P",
         icon: ButtonIcon::Own("icons/pin.svg"),
     },
@@ -268,21 +269,21 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // either (document + down arrow)
         button: crate::model::settings::ToolbarButton::Scroll,
         debug_id: "tb-scroll",
-        name: "Long screenshot (scroll)",
+        label_key: "toolbar.scroll",
         shortcut: "Ctrl+L",
         icon: ButtonIcon::Own("icons/scroll.svg"),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Save,
         debug_id: "tb-save",
-        name: "Save",
+        label_key: "toolbar.save",
         shortcut: "Ctrl+S",
         icon: ButtonIcon::Kit(IconName::Save),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Copy,
         debug_id: "tb-copy",
-        name: "Copy",
+        label_key: "toolbar.copy",
         shortcut: "Enter / Ctrl+C",
         icon: ButtonIcon::Kit(IconName::Copy),
     },
@@ -295,14 +296,14 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         // (user-reported).
         button: crate::model::settings::ToolbarButton::Settings,
         debug_id: "tb-settings",
-        name: "Settings",
+        label_key: "toolbar.settings",
         shortcut: "Ctrl+,",
         icon: ButtonIcon::Kit(IconName::Settings),
     },
     ButtonMeta {
         button: crate::model::settings::ToolbarButton::Cancel,
         debug_id: "tb-cancel",
-        name: "Cancel",
+        label_key: "toolbar.cancel",
         shortcut: "Esc",
         icon: ButtonIcon::Kit(IconName::X),
     },
@@ -375,12 +376,17 @@ pub(crate) fn meta_for(
 }
 
 impl ButtonMeta {
+    /// The localized button name (settings palette, drag ghost).
+    pub(crate) fn label(&self) -> std::borrow::Cow<'static, str> {
+        crate::i18n::t!(self.label_key)
+    }
+
     /// The tooltip / accessibility label ("Name · Shortcut").
     pub(crate) fn tooltip(&self) -> String {
         if self.shortcut.is_empty() {
-            self.name.to_owned()
+            self.label().to_string()
         } else {
-            format!("{} · {}", self.name, self.shortcut)
+            format!("{} · {}", self.label(), self.shortcut)
         }
     }
 }

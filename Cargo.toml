@@ -67,6 +67,14 @@ toml = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
+# UI strings: the same i18n engine gpui-component already embeds (its
+# calendar/table/dialog texts), so one set_locale switches our strings
+# and the component library's together. Translations live in locales/.
+rust-i18n = "4"
+# Resolve `language = "auto"` to the user's system locale (already in
+# the tree via the font stack, no extra compilation)
+sys-locale = "0.3"
+
 # ── Linux (Wayland): screencopy capture, wlr-data-control clipboard,
 #    D-Bus notifications, compositor IPC for window snapping ──────────
 [target.'cfg(target_os = "linux")'.dependencies]

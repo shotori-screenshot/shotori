@@ -190,8 +190,8 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
             entity.update(cx, |f, cx| f.host_engine(controls, events, host_window, cx));
         }
         crate::notify::send(
-            "Long screenshot running",
-            "Scroll the content to capture. Enter or Ctrl+C copies, Ctrl+S saves, Esc cancels.",
+            crate::i18n::t!("scroll.notify.running.title").as_ref(),
+            crate::i18n::t!("scroll.notify.running.body").as_ref(),
         );
         return Ok(());
     }
@@ -425,8 +425,12 @@ impl FrameView {
                 // the good rows above it.
                 if let Some((w, h, rgba)) = partial {
                     crate::notify::send(
-                        "Long screenshot stopped early",
-                        &format!("{reason}\nThe partial image was copied."),
+                        crate::i18n::t!("scroll.notify.stopped_early.title").as_ref(),
+                        crate::i18n::t!(
+                            "scroll.notify.stopped_early.partial",
+                            reason = reason.clone()
+                        )
+                        .as_ref(),
                     );
                     if saving {
                         scroll_save_exit(&rgba, w, h, *window, None, cx);
@@ -435,7 +439,10 @@ impl FrameView {
                     }
                 } else {
                     eprintln!("[shotori] scroll failed: {reason}");
-                    crate::notify::send("Long screenshot failed", &reason);
+                    crate::notify::send(
+                        crate::i18n::t!("scroll.notify.failed.title").as_ref(),
+                        &reason,
+                    );
                     let _ = window.update(cx, |_, window, _| window.remove_window());
                 }
             }
@@ -593,8 +600,18 @@ impl FrameView {
                     .border_1()
                     .border_color(rgba(theme::c().pin_border))
                     .child(hold_button("frame-tb-grab", "⇕", 34., grab))
-                    .child(hold_button("frame-tb-copy", "Copy", 52., copy))
-                    .child(hold_button("frame-tb-save", "Save", 52., save))
+                    .child(hold_button(
+                        "frame-tb-copy",
+                        crate::i18n::t!("common.copy").as_ref(),
+                        52.,
+                        copy,
+                    ))
+                    .child(hold_button(
+                        "frame-tb-save",
+                        crate::i18n::t!("common.save").as_ref(),
+                        52.,
+                        save,
+                    ))
                     .child(hold_button("frame-tb-cancel", "✕", 26., cancel))
             }))
     }
@@ -605,7 +622,7 @@ impl FrameView {
 /// window listeners).
 fn hold_button<F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>(
     id: &'static str,
-    label: &'static str,
+    label: &str,
     w: f32,
     on_press: F,
 ) -> impl IntoElement {
@@ -622,7 +639,7 @@ fn hold_button<F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>(
         .text_color(rgba(theme::c().btn_text))
         .hover(|s| s.bg(rgba(theme::c().btn_hover_bg)))
         .on_mouse_down(MouseButton::Left, on_press)
-        .child(label)
+        .child(label.to_string())
 }
 
 /// The invisible canvas that owns the frame window's pointer listeners.
@@ -906,8 +923,12 @@ impl PreviewPanel {
                 let sibling = self.sibling.take();
                 if let Some((w, h, rgba)) = partial {
                     crate::notify::send(
-                        "Long screenshot stopped early",
-                        &format!("{reason}\nThe partial image was copied."),
+                        crate::i18n::t!("scroll.notify.stopped_early.title").as_ref(),
+                        crate::i18n::t!(
+                            "scroll.notify.stopped_early.partial",
+                            reason = reason.clone()
+                        )
+                        .as_ref(),
                     );
                     if self.saving {
                         scroll_save_exit(&rgba, w, h, *window, sibling, cx);
@@ -916,7 +937,10 @@ impl PreviewPanel {
                     }
                 } else {
                     eprintln!("[shotori] scroll failed: {reason}");
-                    crate::notify::send("Long screenshot failed", &reason);
+                    crate::notify::send(
+                        crate::i18n::t!("scroll.notify.failed.title").as_ref(),
+                        &reason,
+                    );
                     self.close(window, cx);
                 }
             }
@@ -924,8 +948,8 @@ impl PreviewPanel {
                 // Engine-sent once: nothing has moved since it started.
                 // The wheel may simply be going to another surface.
                 crate::notify::send(
-                    "Long screenshot waiting",
-                    "Scroll the content inside the selection to capture. Esc cancels.",
+                    crate::i18n::t!("scroll.notify.waiting.title").as_ref(),
+                    crate::i18n::t!("scroll.notify.waiting.body").as_ref(),
                 );
             }
             ScrollEvent::Cancelled => {
@@ -1010,8 +1034,8 @@ fn scroll_copy_exit(
             Err(e) => {
                 eprintln!("[shotori] long screenshot copy failed: {e:#}");
                 crate::notify::send(
-                    "Couldn’t copy the long screenshot",
-                    "The clipboard refused the image.",
+                    crate::i18n::t!("scroll.notify.copy_failed.title").as_ref(),
+                    crate::i18n::t!("scroll.notify.copy_failed.body").as_ref(),
                 );
             }
         }

@@ -634,8 +634,8 @@ impl Overlay {
         let Some(rect) = session.scroll_region(&self.capture.output_name) else {
             println!("[shotori] scroll: the selection must sit fully inside one screen");
             crate::notify::send(
-                "Can’t start a long screenshot",
-                "The selection must sit fully inside a single screen.",
+                crate::i18n::t!("notify.scroll.start_failed.title").as_ref(),
+                crate::i18n::t!("notify.scroll.cross_screen").as_ref(),
             );
             return;
         };
@@ -672,8 +672,8 @@ impl Overlay {
         if let Err(e) = crate::ui::scroll_bar::launch(spec, chrome, cx) {
             eprintln!("[shotori] scroll: could not open the control bar: {e:#}");
             crate::notify::send(
-                "Can’t start a long screenshot",
-                "The control bar failed to open.",
+                crate::i18n::t!("notify.scroll.start_failed.title").as_ref(),
+                crate::i18n::t!("notify.scroll.no_bar").as_ref(),
             );
             return;
         }
@@ -729,8 +729,8 @@ impl Overlay {
                     Err(error) => {
                         eprintln!("[shotori] pin failed: {error:#}");
                         crate::notify::send(
-                            "Couldn’t pin image",
-                            "Try pinning the selection again.",
+                            crate::i18n::t!("notify.pin.failed.title").as_ref(),
+                            crate::i18n::t!("notify.pin.failed.body").as_ref(),
                         );
                     }
                 }
@@ -937,8 +937,8 @@ async fn copy_to_clipboard(
             eprintln!("[shotori] copy failed: {e:#}");
             entity.update(cx, |_, cx| cx.notify());
             crate::notify::send(
-                "Couldn’t copy screenshot",
-                "Try again, or save the image to a file.",
+                crate::i18n::t!("notify.copy.failed.title").as_ref(),
+                crate::i18n::t!("notify.copy.failed.body").as_ref(),
             );
         }
     }
@@ -966,16 +966,16 @@ async fn ocr_to_clipboard(
     let _ = window_handle.update(cx, |_, _, cx| match &result {
         Ok(t) if t.trim().is_empty() => {
             crate::notify::send(
-                "No text found",
-                "Try selecting a clearer area containing text.",
+                crate::i18n::t!("notify.ocr.empty.title").as_ref(),
+                crate::i18n::t!("notify.ocr.empty.body").as_ref(),
             );
         }
         Ok(t) => {
             if let Err(e) = crate::clipboard::copy_text(t.clone()) {
                 eprintln!("[shotori] OCR copy failed: {e:#}");
                 crate::notify::send(
-                    "Couldn’t copy text",
-                    "The clipboard is unavailable. Try again.",
+                    crate::i18n::t!("notify.ocr.copy_failed.title").as_ref(),
+                    crate::i18n::t!("notify.ocr.copy_failed.body").as_ref(),
                 );
                 return;
             }
@@ -989,7 +989,10 @@ async fn ocr_to_clipboard(
             println!(
                 "[shotori] OCR done {w}x{h} → {lines} line(s) → clipboard (preview: {preview})"
             );
-            crate::notify::send("Text copied", &preview);
+            crate::notify::send(
+                crate::i18n::t!("notify.ocr.copied.title").as_ref(),
+                &preview,
+            );
             cx.quit();
         }
         Err(e) => {
@@ -997,8 +1000,8 @@ async fn ocr_to_clipboard(
             // The overlay stays open with no in-UI error display yet —
             // without this notification a keybinding user sees nothing
             crate::notify::send(
-                "Couldn’t recognize text",
-                "Try again or select a clearer area.",
+                crate::i18n::t!("notify.ocr.failed.title").as_ref(),
+                crate::i18n::t!("notify.ocr.failed.body").as_ref(),
             );
         }
     });

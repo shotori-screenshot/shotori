@@ -29,9 +29,11 @@
 //! │  └─ theme / image_util    constants; RGBA → RenderImage
 //! ├─ annotation/             in-canvas annotations: arrow / number /
 //! │                          pencil / highlighter / mosaic+blur
-//! └─ clipboard / notify / ocr / save_dialog
+//! └─ clipboard / notify / ocr / save_dialog / i18n
 //!      the four post-selection exits: clipboard (resident daemon),
-//!      notifications (D-Bus), OCR engine, native save dialog
+//!      notifications (D-Bus), OCR engine, native save dialog — plus
+//!      the UI string tables (rust-i18n, shared engine with
+//!      gpui-component)
 //! ```
 //!
 //! Dependency direction: `ui → model`, `model → platform` (session holds
@@ -43,6 +45,12 @@
 //! The pin (floating image) feature lives on the `pin` branch (it depends
 //! on the vendored set_layer_margin patch; can't ship on crates.io until
 //! upstream merges it).
+
+// The i18n table lives at the CRATE ROOT (lib.rs) — rust-i18n's `t!`
+// expands to `crate::_rust_i18n_translate`, so the declaration must be
+// in the root module for every `crate::i18n::t!` / `use ...::t` caller
+// to resolve. Same shape as gpui-component's own lib.rs.
+rust_i18n::i18n!("locales", fallback = "en");
 
 /// Matches the desktop file basename and the installed hicolor icon name.
 pub const APP_ID: &str = "shotori";
@@ -67,6 +75,7 @@ pub mod ui;
 mod annotation;
 
 pub mod clipboard;
+pub mod i18n;
 pub mod notify;
 pub mod ocr;
 pub mod save_dialog;

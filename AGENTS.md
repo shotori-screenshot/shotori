@@ -140,8 +140,11 @@ libwayland-dev` (see CI).
 
 ## Code Style
 
-- English everywhere: doc comments, inline comments, UI strings, test
-  names (the repo is published internationally).
+- English everywhere: doc comments, inline comments, test names (the
+  repo is published internationally). The one exception is UI strings:
+  they live in `locales/ui.yml` (rust-i18n, en + zh-CN, missing columns
+  fall back to English) and are resolved via `crate::i18n::t!` — write
+  the English text as a new yml column entry, never inline.
 - Comments explain **why**, not what — the war stories stay. Don't strip
   context when refactoring.
 - No `unwrap()`/`expect()` on runtime paths; no `let _ =` on fallible

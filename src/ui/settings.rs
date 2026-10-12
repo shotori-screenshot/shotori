@@ -19,14 +19,12 @@
 //! palette; the pages' preview surfaces (the toolbar editor) render
 //! with overlay colors, so what you edit is what the overlay shows.
 //!
-//! v1 sections: General (read-only facts) and the selection toolbar's
-//! layout, edited by dragging — a live preview bar (the real render
-//! pieces: [`crate::ui::toolbar`]) plus a palette of the controls not
-//! currently placed. Drag between the two in either direction, drag
-//! inside the bar to reorder, click to remove/append. gpui's native
-//! drag-and-drop carries the payload; the drop slots between the
-//! preview items only exist while a drag is in flight, so the bar
-//! visibly opens up where an item would land.
+//! v1 sections: General (installation facts + the UI language picker),
+//! the toolbar layout (drag-and-drop), OCR (model set + speed toggle)
+//! and Appearance (theme editor). UI strings resolve through
+//! [`crate::i18n`] — the language picker flips the process-global
+//! locale and refreshes, so the whole window (including
+//! gpui-component's own texts) re-renders translated.
 
 use std::path::PathBuf;
 
@@ -177,7 +175,7 @@ fn window_options() -> WindowOptions {
     WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: Some(TitlebarOptions {
-            title: Some("Shotori Settings".into()),
+            title: Some(crate::i18n::t!("settings.title").to_string().into()),
             ..Default::default()
         }),
         window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -321,7 +319,7 @@ impl SettingsWindow {
     fn persist(&mut self, cx: &mut Context<Self>) {
         self.error = match &self.path {
             Some(path) => self.settings.save(path).err(),
-            None => Some("no config directory (is HOME set?)".into()),
+            None => Some(crate::i18n::t!("settings.no_config_dir").to_string()),
         };
         cx.notify();
     }
@@ -347,6 +345,24 @@ impl SettingsWindow {
         let next = !self.settings.ocr_assume_upright();
         self.settings.set_ocr_assume_upright(next);
         self.persist(cx);
+    }
+
+    /// General page: pick the UI language. Writes through, flips the
+    /// process-global locale (our table and gpui-component's switch
+    /// together) and refreshes every window — `t!` resolves on render,
+    /// so no restart, no per-element invalidation.
+    fn select_language(
+        &mut self,
+        language: crate::model::settings::Language,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.language() == language {
+            return;
+        }
+        self.settings.set_language(language);
+        self.persist(cx);
+        crate::i18n::set(language);
+        cx.refresh_windows();
     }
 
     /// A drop landed in preview slot `i` (slot i sits before row item
@@ -377,8 +393,10 @@ impl SettingsWindow {
 
     fn location(&self) -> String {
         match &self.path {
-            Some(path) => format!("Saves to {}", path.display()),
-            None => "no config directory (is HOME set?)".into(),
+            Some(path) => {
+                crate::i18n::t!("settings.location", path = path.display().to_string()).to_string()
+            }
+            None => crate::i18n::t!("settings.no_config_dir").to_string(),
         }
     }
 
@@ -646,7 +664,7 @@ impl SettingsWindow {
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(theme::c().hint_text))
-                    .child("Not on the toolbar — drag onto the bar, or click to append"),
+                    .child(crate::i18n::t!("settings.toolbar_page.palette_hint").to_string()),
             )
             .child(chips)
     }
@@ -685,7 +703,7 @@ impl SettingsWindow {
             .pt(px(12.))
             .child(
                 Button::new("settings-reset")
-                    .accessibility_label("Reset to defaults")
+                    .accessibility_label(crate::i18n::t!("settings.toolbar_page.reset").to_string())
                     .px(px(12.))
                     .py(px(4.))
                     .rounded(px(6.))
@@ -698,7 +716,7 @@ impl SettingsWindow {
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| this.reset(cx));
                     })
-                    .child("Reset to defaults"),
+                    .child(crate::i18n::t!("settings.toolbar_page.reset").to_string()),
             )
             .child(
                 div()
@@ -830,10 +848,10 @@ fn icon_visual(item: ToolbarItem) -> AnyElement {
 fn item_name(item: ToolbarItem) -> String {
     match item {
         ToolbarItem::Button(button) => match toolbar::meta_for(button) {
-            Some(meta) => meta.name.to_string(),
+            Some(meta) => meta.label().to_string(),
             None => button.id().to_string(),
         },
-        ToolbarItem::Separator => "Separator".into(),
+        ToolbarItem::Separator => crate::i18n::t!("settings.toolbar_page.separator").to_string(),
     }
 }
 
@@ -944,7 +962,10 @@ impl SettingsWindow {
     fn sidebar(&self, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
         let active = self.section;
         let collapsed = self.sidebar_collapsed;
-        let item = |label: &'static str, icon: IconName, target: Section| {
+        // `label` is a translation KEY (settings.general.title etc.) —
+        // the sidebar translates on render, so a live locale flip
+        // relabels the navigation with everything else.
+        let item = |key: &'static str, icon: IconName, target: Section| {
             let selected = active == target;
             let click = cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                 if this.section != target {
@@ -952,7 +973,7 @@ impl SettingsWindow {
                     cx.notify();
                 }
             });
-            SidebarMenuItem::new(label)
+            SidebarMenuItem::new(crate::i18n::t!(key).to_string())
                 .icon(Icon::new(icon))
                 .active(selected)
                 .on_click(click)
@@ -964,9 +985,9 @@ impl SettingsWindow {
         let toggle = SidebarToggleButton::new()
             .collapsed(collapsed)
             .accessibility_label(if collapsed {
-                "Expand navigation"
+                crate::i18n::t!("settings.nav.expand").to_string()
             } else {
-                "Collapse navigation"
+                crate::i18n::t!("settings.nav.collapse").to_string()
             })
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
@@ -1006,10 +1027,26 @@ impl SettingsWindow {
             )
             .child(
                 SidebarMenu::new()
-                    .child(item("General", IconName::Settings2, Section::General))
-                    .child(item("Toolbar", IconName::PanelTop, Section::Toolbar))
-                    .child(item("OCR", IconName::ScanText, Section::Ocr))
-                    .child(item("Appearance", IconName::Palette, Section::Appearance)),
+                    .child(item(
+                        "settings.general.title",
+                        IconName::Settings2,
+                        Section::General,
+                    ))
+                    .child(item(
+                        "settings.toolbar_page.title",
+                        IconName::PanelTop,
+                        Section::Toolbar,
+                    ))
+                    .child(item(
+                        "settings.ocr_page.title",
+                        IconName::ScanText,
+                        Section::Ocr,
+                    ))
+                    .child(item(
+                        "settings.appearance.title",
+                        IconName::Palette,
+                        Section::Appearance,
+                    )),
             )
     }
 
@@ -1030,14 +1067,12 @@ impl SettingsWindow {
         page
     }
 
-    /// General: read-only facts about this installation. No toggles
-    /// yet — every behavior shotori has lives in a real file with a
-    /// purpose-built editor elsewhere in this window; placeholders
-    /// pretending to be settings would be worse than none.
-    fn page_general(&self, _: &mut Context<Self>) -> Stateful<Div> {
+    /// General: read-only facts about this installation plus the UI
+    /// language picker (the one control here that changes something).
+    fn page_general(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
         let theme_path = theme::load::config_path();
-        let row = |label: &str, value: String| {
+        let row = |label: String, value: String| {
             div()
                 .flex()
                 .flex_col()
@@ -1046,7 +1081,7 @@ impl SettingsWindow {
                     div()
                         .text_size(px(12.))
                         .text_color(rgba(t.hint_text))
-                        .child(label.to_string()),
+                        .child(label),
                 )
                 .child(
                     div()
@@ -1064,35 +1099,91 @@ impl SettingsWindow {
             .size_full()
             .overflow_y_scroll()
             .child(page_header(
-                "General",
-                "About this installation and where its configuration lives.",
+                crate::i18n::t!("settings.general.title").as_ref(),
+                crate::i18n::t!("settings.general.blurb").as_ref(),
             ))
             .child(row(
-                "Version",
+                crate::i18n::t!("settings.general.version").to_string(),
                 format!("shotori {}", env!("CARGO_PKG_VERSION")),
             ))
             .child(row(
-                "Settings file",
+                crate::i18n::t!("settings.general.settings_file").to_string(),
                 self.path
                     .as_ref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "no config directory (is HOME set?)".into()),
+                    .unwrap_or_else(|| crate::i18n::t!("settings.no_config_dir").to_string()),
             ))
             .child(row(
-                "Theme file",
+                crate::i18n::t!("settings.general.theme_file").to_string(),
                 theme_path
                     .as_ref()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "built-in theme (no file)".into()),
+                    .unwrap_or_else(|| {
+                        crate::i18n::t!("settings.general.theme_builtin").to_string()
+                    }),
             ))
+            .child(self.language_rows(cx))
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
+                    .child(crate::i18n::t!("settings.general.write_through").to_string()),
+            )
+    }
+
+    /// The language picker: one radio row per [`Language`]. Picking one
+    /// writes through AND flips this window's locale live — `t!` reads
+    /// the process-global locale on every call, so the re-render alone
+    /// switches every label (including the sidebar and the
+    /// component-library texts gpui-component translates itself).
+    fn language_rows(&self, cx: &Context<Self>) -> Div {
+        let t = theme::c();
+        let mut rows = div().flex().flex_col().gap(px(6.));
+        for language in crate::model::settings::Language::ALL {
+            let selected = self.settings.language() == language;
+            let entity = cx.entity();
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("lang-{}", language.id())))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(10.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgba(if selected { t.accent } else { t.toolbar_border }))
+                    .when(selected, |s| s.bg(rgba(t.toolbar_hover)))
+                    .hover(|s| s.bg(rgba(t.toolbar_hover)))
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.select_language(language, cx));
+                    })
+                    .child(radio_dot(selected))
                     .child(
-                        "Edits anywhere in this window write straight through to the files above — \
-                     the next screenshot picks them up.",
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(13.))
+                            .text_color(rgba(t.btn_text))
+                            .child(language.label()),
                     ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgba(t.hint_text))
+                    .child(crate::i18n::t!("settings.general.language.label").to_string()),
+            )
+            .child(rows)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .child(crate::i18n::t!("settings.general.language.blurb").to_string()),
             )
     }
 
@@ -1118,8 +1209,7 @@ impl SettingsWindow {
             .overflow_y_scroll()
             .child(page_header(
                 "OCR",
-                "Trade recognition speed, accuracy and language coverage. \
-                 Applies to the next screenshot.",
+                crate::i18n::t!("settings.ocr_page.blurb").as_ref(),
             ))
             .child(list)
             .child(self.ocr_upright_row(cx))
@@ -1127,12 +1217,13 @@ impl SettingsWindow {
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
-                    .child(format!(
-                        "Models cache in {}. A newly selected model downloads the \
-                         first time you OCR (with a confirmation dialog); files \
-                         shared between models are reused.",
-                        crate::ocr::model_dir_display()
-                    )),
+                    .child(
+                        crate::i18n::t!(
+                            "settings.ocr_page.cache_hint",
+                            dir = crate::ocr::model_dir_display()
+                        )
+                        .to_string(),
+                    ),
             )
             .child(
                 div()
@@ -1196,9 +1287,9 @@ impl SettingsWindow {
                     .text_size(px(11.))
                     .text_color(rgba(if ready { t.hint_text } else { t.accent }))
                     .child(if ready {
-                        "Ready".to_string()
+                        crate::i18n::t!("settings.ocr_page.ready").to_string()
                     } else {
-                        "Downloads on first OCR".to_string()
+                        crate::i18n::t!("settings.ocr_page.downloads_first").to_string()
                     }),
             )
     }
@@ -1241,18 +1332,13 @@ impl SettingsWindow {
                         div()
                             .text_size(px(13.))
                             .text_color(rgba(t.btn_text))
-                            .child("Assume upright text (faster)"),
+                            .child(crate::i18n::t!("settings.ocr_page.upright.title").to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(rgba(t.hint_text))
-                            .child(
-                                "Skip the orientation check — screenshot text is \
-                                 almost always upright. Saves one inference stage \
-                                 and one model download; rotated text (photo of a \
-                                 page) is then read garbled.",
-                            ),
+                            .child(crate::i18n::t!("settings.ocr_page.upright.body").to_string()),
                     ),
             )
     }
@@ -1293,8 +1379,7 @@ impl SettingsWindow {
             // header
             .child(page_header(
                 "Toolbar",
-                "Arrange the selection toolbar. Changes apply the next time you take a \
-                 screenshot.",
+                crate::i18n::t!("settings.toolbar_page.blurb").as_ref(),
             ))
             // the live preview, in its own horizontally-scrolling strip
             .child(self.preview_strip(cx))
@@ -1302,11 +1387,7 @@ impl SettingsWindow {
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
-                    .child(
-                        "Drag a control to move it · release anywhere to drop it at the \
-                         highlighted gap · drop it on the palette to remove it · click to \
-                         remove / append · hidden controls keep their keyboard shortcuts",
-                    ),
+                    .child(crate::i18n::t!("settings.toolbar_page.hint").to_string()),
             )
             // the palette — the only vertically scrolling part; `min_h(0)`
             // lets the flex item shrink below its content (an
@@ -1535,9 +1616,8 @@ impl SettingsWindow {
             .size_full()
             .overflow_y_scroll()
             .child(page_header(
-                "Appearance",
-                "Color the capture overlay — the mockup previews the palette a screenshot \
-                 would use; every change applies live and writes theme.toml.",
+                crate::i18n::t!("settings.appearance.title").as_ref(),
+                crate::i18n::t!("settings.appearance.blurb").as_ref(),
             ))
             // the fixed-geometry mockup would otherwise stretch the
             // column to its own 640px and every text above would lay
@@ -1577,20 +1657,24 @@ impl SettingsWindow {
                 .w(px(110.))
                 .text_size(px(12.))
                 .text_color(rgba(t.hint_text))
-                .child("Base palette"),
+                .child(crate::i18n::t!("settings.appearance.base_palette").to_string()),
         );
-        for (name, label) in [
-            ("auto", "Auto"),
-            ("dark", "Dark"),
-            ("light", "Light"),
-            ("high_contrast", "High contrast"),
+        for (name, label_key) in [
+            ("auto", "settings.appearance.auto"),
+            ("dark", "settings.appearance.dark"),
+            ("light", "settings.appearance.light"),
+            ("high_contrast", "settings.appearance.high_contrast"),
         ] {
             let active = current_base == name;
             let name = name.to_string();
             let entity = entity.clone();
             row = row.child(
                 Button::new(SharedString::from(format!("base-{name}")))
-                    .accessibility_label(format!("Base palette: {label}"))
+                    .accessibility_label(format!(
+                        "{}: {}",
+                        crate::i18n::t!("settings.appearance.base_palette"),
+                        crate::i18n::t!(label_key)
+                    ))
                     .px(px(10.))
                     .py(px(3.))
                     .rounded(px(6.))
@@ -1607,7 +1691,7 @@ impl SettingsWindow {
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |this, cx| this.appearance_set_base(&name, window, cx));
                     })
-                    .child(label),
+                    .child(crate::i18n::t!(label_key).to_string()),
             );
         }
         row
@@ -1658,7 +1742,7 @@ impl SettingsWindow {
                     .w(px(110.))
                     .text_size(px(12.))
                     .text_color(rgba(t.hint_text))
-                    .child("Dim opacity"),
+                    .child(crate::i18n::t!("settings.appearance.dim_opacity").to_string()),
             )
             .child(
                 div().relative().w(px(TRACK_W)).h(px(18.)).child(
@@ -1707,7 +1791,7 @@ impl SettingsWindow {
                 .w(px(110.))
                 .text_size(px(12.))
                 .text_color(rgba(t.hint_text))
-                .child("Annotations"),
+                .child(crate::i18n::t!("settings.appearance.annotations").to_string()),
         );
         for (name, state) in crate::ui::theme::PALETTE_NAMES
             .iter()
@@ -1754,7 +1838,7 @@ impl SettingsWindow {
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |this, cx| this.appearance_reset(window, cx));
                     })
-                    .child("Reset to base"),
+                    .child(crate::i18n::t!("settings.appearance.reset_colors").to_string()),
             )
             .child(
                 div()
@@ -1768,8 +1852,11 @@ impl SettingsWindow {
                     })
                     .child(self.appearance.error.clone().unwrap_or_else(|| {
                         match &self.appearance.path {
-                            Some(p) => format!("Saves to {}", p.display()),
-                            None => "no config directory (is HOME set?)".into(),
+                            Some(p) => {
+                                crate::i18n::t!("settings.location", path = p.display().to_string())
+                                    .to_string()
+                            }
+                            None => crate::i18n::t!("settings.no_config_dir").to_string(),
                         }
                     })),
             )
@@ -1876,7 +1963,7 @@ impl SettingsWindow {
             Some(error) => Some(error.clone()),
             None => match &self.appearance.path {
                 Some(path) => load::save(path, &self.appearance.file).err(),
-                None => Some("no config directory (is HOME set?)".into()),
+                None => Some(crate::i18n::t!("settings.no_config_dir").to_string()),
             },
         };
         cx.notify();
@@ -2087,7 +2174,7 @@ fn appearance_mockup() -> Stateful<Div> {
                     div()
                         .text_size(px(11.))
                         .text_color(rgba(t.hint_text))
-                        .child("Downloading OCR model…"),
+                        .child(crate::i18n::t!("ocr.setup.downloading").to_string()),
                 )
                 .child(
                     div()
@@ -2097,7 +2184,7 @@ fn appearance_mockup() -> Stateful<Div> {
                         .bg(rgba(t.btn_hover_bg))
                         .text_size(px(11.))
                         .text_color(rgba(t.btn_text))
-                        .child("Retry"),
+                        .child(crate::i18n::t!("ocr.setup.retry").to_string()),
                 ),
         )
         // pin thumbnail (pin_border)

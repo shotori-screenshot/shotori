@@ -60,6 +60,11 @@ fn main() {
     // flag-parsed). clap handles --help/--version and bad arguments.
     let args = shotori::args::Cli::parse();
 
+    // Locale pickup runs before EVERY later branch (tray, settings
+    // window, overlay) — they all return before `settings::init` would
+    // run, so the language gets its own early read of the file.
+    shotori::i18n::init(args.no_config);
+
     // Tray mode: a resident launcher, not a screenshot session — bail
     // out before theme init / capture. Returns when the user quits the
     // tray.

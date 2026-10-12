@@ -143,18 +143,30 @@ pub(crate) fn setup_card(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoEleme
 fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
     const CARD_W: f32 = 460.;
 
-    let (title, body, buttons): (&str, Vec<AnyElement>, Vec<AnyElement>) = match &setup.stage {
+    let (title, body, buttons): (String, Vec<AnyElement>, Vec<AnyElement>) = match &setup.stage {
         Stage::Confirm => (
-            "OCR needs models",
+            crate::i18n::t!("ocr.setup.title").to_string(),
             vec![text_line(&format!(
-                "First use of the selected OCR model ({}): download it from \
-                 ModelScope? Stored in {}\nOne-time only.",
-                crate::model::settings::current().ocr_model().label(),
-                crate::ocr::model_dir_display()
+                "{}\n{}",
+                crate::i18n::t!(
+                    "ocr.setup.confirm",
+                    model = crate::model::settings::current().ocr_model().label()
+                ),
+                crate::i18n::t!("ocr.setup.stored_at", dir = crate::ocr::model_dir_display())
             ))],
             vec![
-                action_button("ocr-setup-go", "Download", OcrSetupConfirm, &focus.confirm),
-                action_button("ocr-setup-no", "Cancel", OcrSetupCancel, &focus.cancel),
+                action_button(
+                    "ocr-setup-go",
+                    crate::i18n::t!("ocr.setup.download").as_ref(),
+                    OcrSetupConfirm,
+                    &focus.confirm,
+                ),
+                action_button(
+                    "ocr-setup-no",
+                    crate::i18n::t!("ocr.setup.cancel").as_ref(),
+                    OcrSetupCancel,
+                    &focus.cancel,
+                ),
             ],
         ),
         Stage::Downloading => {
@@ -170,7 +182,7 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
             };
             let mb = |v: u64| format!("{:.1} MB", v as f64 / 1e6);
             (
-                "Downloading models…",
+                crate::i18n::t!("ocr.setup.downloading").to_string(),
                 vec![
                     text_line(&format!("{file} ({idx}/{})", p.file_count)),
                     progress_bar(pct, CARD_W - 64.),
@@ -182,18 +194,28 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
                 ],
                 vec![action_button(
                     "ocr-setup-abort",
-                    "Cancel",
+                    crate::i18n::t!("ocr.setup.cancel").as_ref(),
                     OcrSetupCancel,
                     &focus.cancel,
                 )],
             )
         }
         Stage::Failed(msg) => (
-            "OCR setup failed",
+            crate::i18n::t!("ocr.setup.failed").to_string(),
             vec![text_line(&truncate(msg, 320))],
             vec![
-                action_button("ocr-setup-retry", "Retry", OcrSetupConfirm, &focus.confirm),
-                action_button("ocr-setup-close", "Close", OcrSetupCancel, &focus.cancel),
+                action_button(
+                    "ocr-setup-retry",
+                    crate::i18n::t!("ocr.setup.retry").as_ref(),
+                    OcrSetupConfirm,
+                    &focus.confirm,
+                ),
+                action_button(
+                    "ocr-setup-close",
+                    crate::i18n::t!("ocr.setup.close").as_ref(),
+                    OcrSetupCancel,
+                    &focus.cancel,
+                ),
             ],
         ),
     };
@@ -249,7 +271,7 @@ fn progress_bar(pct: f32, w: f32) -> AnyElement {
 
 fn action_button<A: Action + Clone + 'static>(
     id: &'static str,
-    label: &'static str,
+    label: &str,
     action: A,
     focus: &FocusHandle,
 ) -> AnyElement {
@@ -271,7 +293,7 @@ fn action_button<A: Action + Clone + 'static>(
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
         })
-        .child(label)
+        .child(label.to_string())
         .into_any_element()
 }
 

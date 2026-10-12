@@ -124,10 +124,10 @@ pub fn complete_pending() {
     }
 
     let picked = rfd::FileDialog::new()
-        .set_title("Save screenshot")
+        .set_title(crate::i18n::t!("save.dialog_title").as_ref())
         .set_directory(default_dir())
         .set_file_name(suggested_name())
-        .add_filter("PNG image", &["png"])
+        .add_filter(crate::i18n::t!("save.png_filter").as_ref(), &["png"])
         .set_can_create_directories(true)
         .save_file();
 
@@ -148,8 +148,8 @@ fn write_and_notify(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) {
     if let Err(e) = export::save_png(path, w, h, rgba) {
         eprintln!("[shotori] save failed: {e:#}");
         crate::notify::send(
-            "Couldn’t save screenshot",
-            "Check the destination folder and available disk space.",
+            crate::i18n::t!("save.failed.title").as_ref(),
+            crate::i18n::t!("save.failed.body").as_ref(),
         );
         return;
     }

@@ -246,7 +246,7 @@ pub(crate) fn ocr_busy_badge(sel: Option<Bounds<Pixels>>, ws: Size<Pixels>) -> A
             div()
                 .text_size(px(13.))
                 .text_color(rgba(theme::c().hint_text))
-                .child("OCR…"),
+                .child(crate::i18n::t!("hud.ocr_busy").to_string()),
         )
         .into_any_element()
 }

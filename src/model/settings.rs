@@ -260,37 +260,68 @@ impl OcrModel {
     }
 
     /// Human-readable model name (setup dialog, settings rows).
-    pub const fn label(self) -> &'static str {
+    /// Locale-dependent since i18n — resolved through the shared table
+    /// (`ocr.model.{id}.label`), so this cannot stay `const`. The key
+    /// is derived from the stable [`OcrModel::id`] at runtime (hence
+    /// `String`, not `Cow<'static>`: rust-i18n's missing-key fallback
+    /// borrows the lookup key); a missing column degrades to English.
+    pub fn label(self) -> String {
+        let key = format!("ocr.model.{}.label", self.id());
+        crate::i18n::t!(key.as_str()).to_string()
+    }
+
+    /// Which scripts the recognition dictionary covers
+    /// (`ocr.model.{id}.langs`).
+    pub fn languages(self) -> String {
+        let key = format!("ocr.model.{}.langs", self.id());
+        crate::i18n::t!(key.as_str()).to_string()
+    }
+
+    /// Speed/accuracy/download positioning
+    /// (`ocr.model.{id}.tier`).
+    pub fn tier(self) -> String {
+        let key = format!("ocr.model.{}.tier", self.id());
+        crate::i18n::t!(key.as_str()).to_string()
+    }
+}
+
+/// The UI language (settings.toml top-level `language` key). `Auto`
+/// follows the system locale; the rest name a `locales/ui.yml` column.
+/// Unknown values degrade to Auto with a load warning (same contract
+/// as every other id in this file).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Language {
+    Auto,
+    English,
+    ChineseSimplified,
+}
+
+impl Language {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::English, Self::ChineseSimplified];
+
+    /// Stable id for the settings file (= the rust-i18n locale name,
+    /// except Auto which defers to the system).
+    pub const fn id(self) -> &'static str {
         match self {
-            Self::Ppocrv6Tiny => "PP-OCRv6 tiny",
-            Self::Ppocrv6Small => "PP-OCRv6 small",
-            Self::Ppocrv6Medium => "PP-OCRv6 medium",
-            Self::Ppocrv5EnMobile => "PP-OCRv5 English (mobile)",
-            Self::Ppocrv5ChMobile => "PP-OCRv5 Chinese/Japanese (mobile)",
-            Self::Ppocrv5ChServer => "PP-OCRv5 Chinese/Japanese (server)",
+            Self::Auto => "auto",
+            Self::English => "en",
+            Self::ChineseSimplified => "zh-CN",
         }
     }
 
-    /// Which scripts the recognition dictionary covers.
-    pub const fn languages(self) -> &'static str {
-        match self {
-            Self::Ppocrv6Tiny | Self::Ppocrv6Small | Self::Ppocrv6Medium => "Chinese + English",
-            Self::Ppocrv5EnMobile => "English",
-            Self::Ppocrv5ChMobile | Self::Ppocrv5ChServer => {
-                "Chinese, English, Japanese, Traditional Chinese"
-            }
-        }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|l| l.id() == id)
     }
 
-    /// Speed/accuracy/download positioning, one line for the settings row.
-    pub const fn tier(self) -> &'static str {
+    /// Sidebar-row label. Only the "Auto" row is translated (languages
+    /// name themselves — an English row must read "English" in every
+    /// locale). `String` for the same dynamic-key reason as
+    /// [`OcrModel::label`].
+    pub fn label(self) -> String {
         match self {
-            Self::Ppocrv6Tiny => "Fastest · lower accuracy · smallest download",
-            Self::Ppocrv6Small => "Balanced · the default",
-            Self::Ppocrv6Medium => "Highest accuracy of the v6 line · slower · larger download",
-            Self::Ppocrv5EnMobile => "English-only: faster and sharper on English text",
-            Self::Ppocrv5ChMobile => "Adds Japanese/Traditional · mobile speed",
-            Self::Ppocrv5ChServer => "Adds Japanese/Traditional · top accuracy · big download",
+            Self::Auto => crate::i18n::t!("settings.general.language.system").to_string(),
+            Self::English => "English".to_string(),
+            Self::ChineseSimplified => "简体中文".to_string(),
         }
     }
 }
@@ -308,6 +339,8 @@ pub struct Settings {
     /// classifier — screenshots almost always are, so this trades a
     /// rare rotated-line fixup for one inference stage less.
     ocr_assume_upright: bool,
+    /// UI language (`language` top-level key; Auto = system locale).
+    language: Language,
 }
 
 impl Default for Settings {
@@ -316,6 +349,7 @@ impl Default for Settings {
             row: DEFAULT_ROW.to_vec(),
             ocr_model: DEFAULT_OCR_MODEL,
             ocr_assume_upright: false,
+            language: Language::Auto,
         }
     }
 }
@@ -327,6 +361,8 @@ impl Default for Settings {
 struct File {
     toolbar: ToolbarFile,
     ocr: OcrFile,
+    /// Top-level `language = "auto" | "en" | "zh-CN"`.
+    language: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -401,6 +437,15 @@ impl Settings {
 
     pub fn set_ocr_assume_upright(&mut self, assume: bool) {
         self.ocr_assume_upright = assume;
+    }
+
+    /// The UI language (default Auto = follow the system).
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        self.language = language;
     }
 
     /// A button shows iff it has a slot in the row; hidden buttons
@@ -522,11 +567,27 @@ impl Settings {
             },
         };
         let ocr_assume_upright = file.ocr.assume_upright.unwrap_or(false);
+        // Top-level language: unknown value (hand-edit, newer shotori)
+        // degrades to Auto with a warning.
+        let language = match file.language.as_deref() {
+            None => Language::Auto,
+            Some(id) => match Language::from_id(id) {
+                Some(language) => language,
+                None => {
+                    errors.push(format!(
+                        "{}: unknown language {id:?} (using auto)",
+                        path.display()
+                    ));
+                    Language::Auto
+                }
+            },
+        };
         (
             Self {
                 row,
                 ocr_model,
                 ocr_assume_upright,
+                language,
             },
             errors,
         )
@@ -569,6 +630,7 @@ impl Settings {
         };
         toolbar.remove("hidden");
         toolbar.insert("items".into(), items);
+        table.insert("language".into(), toml::Value::from(self.language.id()));
         let ocr = table
             .entry("ocr")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -866,6 +928,55 @@ mod tests {
             "the legacy key must not survive next to items: {text}"
         );
         assert!(text.contains("items"));
+    }
+
+    #[test]
+    fn ocr_model_metadata_keys_all_resolve() {
+        // label/languages/tier derive their table keys from id() at
+        // runtime — a typo'd id column would silently fall back to the
+        // KEY ITSELF in the UI. Guard: every field must resolve to
+        // something other than the key.
+        for model in OcrModel::ALL {
+            for (field, value) in [
+                ("label", model.label()),
+                ("langs", model.languages()),
+                ("tier", model.tier()),
+            ] {
+                assert_ne!(
+                    value,
+                    format!("ocr.model.{}.{}", model.id(), field),
+                    "{} table column is missing for {}",
+                    field,
+                    model.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn language_ids_round_trip_and_default_is_auto() {
+        for language in Language::ALL {
+            assert_eq!(Language::from_id(language.id()), Some(language));
+        }
+        assert_eq!(Language::from_id("zh-TW"), None);
+        assert_eq!(Settings::default().language(), Language::Auto);
+
+        // file round trip + unknown degradation
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        s.set_language(Language::ChineseSimplified);
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(back.language(), Language::ChineseSimplified);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("zh-CN"));
+
+        std::fs::write(&path, "language = \"klingon\"\n").unwrap();
+        let (s, errors) = Settings::load(Some(&path));
+        assert_eq!(s.language(), Language::Auto);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("klingon"));
     }
 
     #[test]

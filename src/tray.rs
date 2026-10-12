@@ -47,13 +47,13 @@ fn setup(cx: &mut App) -> gpui_tray::Result<()> {
 
     let tray = Tray::builder()
         .icon(icon()?)
-        .tooltip("Shotori — click to take a screenshot")
+        .tooltip(crate::i18n::t!("tray.tooltip").as_ref())
         .menu(|_| {
             vec![
-                MenuItem::action("Screenshot", TakeScreenshot),
-                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action(crate::i18n::t!("tray.screenshot").as_ref(), TakeScreenshot),
+                MenuItem::action(crate::i18n::t!("tray.settings").as_ref(), OpenSettings),
                 MenuItem::separator(),
-                MenuItem::action("Quit", QuitTray),
+                MenuItem::action(crate::i18n::t!("tray.quit").as_ref(), QuitTray),
             ]
         })
         // Left-click / primary activation does the same as the menu item

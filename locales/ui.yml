@@ -1,0 +1,440 @@
+# Shotori UI strings. Embedded at compile time by rust-i18n (the same
+# engine gpui-component uses); `fallback = "en"` in src/i18n.rs makes a
+# missing translation degrade to English. Keys are grouped by module.
+_version: 2
+hud:
+  ocr_busy:
+    en: OCR…
+    zh-CN: 识别中…
+save:
+  dialog_title:
+    en: Save screenshot
+    zh-CN: 保存截图
+  png_filter:
+    en: PNG image
+    zh-CN: PNG 图片
+  failed:
+    title:
+      en: Couldn’t save screenshot
+      zh-CN: 无法保存截图
+    body:
+      en: Check the destination folder and available disk space.
+      zh-CN: 请检查目标文件夹和磁盘剩余空间。
+common:
+  copy:
+    en: Copy
+    zh-CN: 复制
+  save:
+    en: Save
+    zh-CN: 保存
+  close:
+    en: Close
+    zh-CN: 关闭
+settings:
+  title:
+    en: Shotori Settings
+    zh-CN: Shotori 设置
+  location:
+    en: "Saves to {{path}}"
+    zh-CN: "保存至 {{path}}"
+  no_config_dir:
+    en: "no config directory (is HOME set?)"
+    zh-CN: "找不到配置目录（HOME 未设置？）"
+  nav:
+    expand:
+      en: Expand navigation
+      zh-CN: 展开导航
+    collapse:
+      en: Collapse navigation
+      zh-CN: 折叠导航
+  general:
+    title:
+      en: General
+      zh-CN: 通用
+    blurb:
+      en: About this installation and where its configuration lives.
+      zh-CN: 关于本安装及其配置文件的位置。
+    version:
+      en: Version
+      zh-CN: 版本
+    settings_file:
+      en: Settings file
+      zh-CN: 设置文件
+    theme_file:
+      en: Theme file
+      zh-CN: 主题文件
+    theme_builtin:
+      en: built-in theme (no file)
+      zh-CN: 内置主题（无文件）
+    write_through:
+      en: Edits anywhere in this window write straight through to the files above — the next screenshot picks them up.
+      zh-CN: 本窗口中的任何修改都会立即写入上述文件——下次截图即生效。
+    language:
+      label:
+        en: Language
+        zh-CN: 语言
+      system:
+        en: System language
+        zh-CN: 跟随系统语言
+      blurb:
+        en: Applies immediately, everywhere in this window.
+        zh-CN: 立即生效，本窗口内即时切换。
+  toolbar_page:
+    title:
+      en: Toolbar
+      zh-CN: 工具栏
+    blurb:
+      en: Arrange the selection toolbar. Changes apply the next time you take a screenshot.
+      zh-CN: 调整选区工具栏。下次截图时生效。
+    hint:
+      en: "Drag a control to move it · release anywhere to drop it at the highlighted gap · drop it on the palette to remove it · click to remove / append · hidden controls keep their keyboard shortcuts"
+      zh-CN: "拖动控件可移动 · 松开鼠标即放入高亮空位 · 拖回面板即移除 · 点击可删除 / 添加 · 隐藏的控件仍保留快捷键"
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
+    palette_hint:
+      en: Not on the toolbar — drag onto the bar, or click to append
+      zh-CN: 未在工具栏上——拖到工具栏，或点击添加
+    separator:
+      en: Separator
+      zh-CN: 分隔线
+  ocr_page:
+    title:
+      en: OCR
+      zh-CN: 文字识别
+    blurb:
+      en: Trade recognition speed, accuracy and language coverage. Applies to the next screenshot.
+      zh-CN: 在识别速度、精度与语言覆盖之间取舍。下次截图时生效。
+    ready:
+      en: Ready
+      zh-CN: 已就绪
+    downloads_first:
+      en: Downloads on first OCR
+      zh-CN: 首次识别时下载
+    cache_hint:
+      en: "Models cache in {{dir}}. A newly selected model downloads the first time you OCR (with a confirmation dialog); files shared between models are reused."
+      zh-CN: "模型缓存于 {{dir}}。新选择的模型会在首次识别时下载（有确认对话框）；模型间共享的文件会复用。"
+    upright:
+      title:
+        en: "Assume upright text (faster)"
+        zh-CN: 假定文字正立（更快）
+      body:
+        en: Skip the orientation check — screenshot text is almost always upright. Saves one inference stage and one model download; rotated text (photo of a page) is then read garbled.
+        zh-CN: 跳过方向检测——截图里的文字几乎总是正立的。省去一级推理和一个模型下载；旋转文字（如拍摄的书页）将无法正确识别。
+  appearance:
+    title:
+      en: Appearance
+      zh-CN: 外观
+    blurb:
+      en: Preview the palette a capture would use; edits write to the theme file.
+      zh-CN: 预览截图将使用的配色；修改会写入主题文件。
+    base_palette:
+      en: Base palette
+      zh-CN: 基础配色
+    auto:
+      en: Auto
+      zh-CN: 自动
+    dark:
+      en: Dark
+      zh-CN: 深色
+    light:
+      en: Light
+      zh-CN: 浅色
+    high_contrast:
+      en: High contrast
+      zh-CN: 高对比
+    dim_opacity:
+      en: Dim opacity
+      zh-CN: 遮罩不透明度
+    annotations:
+      en: Annotations
+      zh-CN: 标注颜色
+    reset_colors:
+      en: Reset to base
+      zh-CN: 重置为基础色
+pin:
+  menu:
+    reset_zoom:
+      en: Reset zoom
+      zh-CN: 重置缩放
+  notify:
+    copy_failed:
+      title:
+        en: Couldn’t copy the pinned image
+        zh-CN: 无法复制贴图
+      body:
+        en: Try again, or copy from the overlay instead.
+        zh-CN: 请重试，或改在截图界面上复制。
+scroll:
+  notify:
+    running:
+      title:
+        en: Long screenshot running
+        zh-CN: 长截图进行中
+      body:
+        en: Scroll the content to capture. Enter or Ctrl+C copies, Ctrl+S saves, Esc cancels.
+        zh-CN: 滚动页面以捕获内容。Enter 或 Ctrl+C 复制，Ctrl+S 保存，Esc 取消。
+    stopped_early:
+      title:
+        en: Long screenshot stopped early
+        zh-CN: 长截图提前中止
+      partial:
+        en: "{{reason}}\nThe partial image was copied."
+        zh-CN: "{{reason}}\n已完成部分已复制。"
+    failed:
+      title:
+        en: Long screenshot failed
+        zh-CN: 长截图失败
+    waiting:
+      title:
+        en: Long screenshot waiting
+        zh-CN: 长截图等待中
+      body:
+        en: Scroll the content inside the selection to capture. Esc cancels.
+        zh-CN: 在选区内滚动页面以捕获内容。Esc 取消。
+    copy_failed:
+      title:
+        en: Couldn’t copy the long screenshot
+        zh-CN: 无法复制长截图
+      body:
+        en: The clipboard refused the image.
+        zh-CN: 剪贴板拒绝了图片。
+toolbar:
+  select:
+    en: Select
+    zh-CN: 选择
+  rectangle:
+    en: Rectangle
+    zh-CN: 矩形
+  ellipse:
+    en: Ellipse
+    zh-CN: 椭圆
+  line:
+    en: Line
+    zh-CN: 直线
+  polyline:
+    en: Polyline
+    zh-CN: 折线
+  arrow:
+    en: Arrow
+    zh-CN: 箭头
+  number:
+    en: Sequence number
+    zh-CN: 序号标注
+  pencil:
+    en: Pencil
+    zh-CN: 铅笔
+  highlighter:
+    en: Highlighter
+    zh-CN: 荧光笔
+  mosaic:
+    en: Mosaic / Blur
+    zh-CN: 马赛克 / 模糊
+  eraser:
+    en: Eraser
+    zh-CN: 橡皮擦
+  text:
+    en: Text
+    zh-CN: 文字
+  clear:
+    en: Clear annotations
+    zh-CN: 清除标注
+  ocr:
+    en: Recognize text
+    zh-CN: 识别文字
+  pin:
+    en: Pin to screen
+    zh-CN: 贴图
+  scroll:
+    en: Long screenshot (scroll)
+    zh-CN: 长截图（滚动）
+  save:
+    en: Save
+    zh-CN: 保存
+  copy:
+    en: Copy
+    zh-CN: 复制
+  settings:
+    en: Settings
+    zh-CN: 设置
+  cancel:
+    en: Cancel
+    zh-CN: 取消
+ocr:
+  model:
+    ppocrv6-tiny:
+      label:
+        en: PP-OCRv6 tiny
+        zh-CN: PP-OCRv6 tiny（极快）
+      langs:
+        en: Chinese + English
+        zh-CN: 中文 + 英文
+      tier:
+        en: Fastest · lower accuracy · smallest download
+        zh-CN: 最快 · 精度较低 · 下载量最小
+    ppocrv6-small:
+      label:
+        en: PP-OCRv6 small
+        zh-CN: PP-OCRv6 small（默认）
+      langs:
+        en: Chinese + English
+        zh-CN: 中文 + 英文
+      tier:
+        en: Balanced · the default
+        zh-CN: 均衡 · 默认
+    ppocrv6-medium:
+      label:
+        en: PP-OCRv6 medium
+        zh-CN: PP-OCRv6 medium（高精度）
+      langs:
+        en: Chinese + English
+        zh-CN: 中文 + 英文
+      tier:
+        en: Highest accuracy of the v6 line · slower · larger download
+        zh-CN: v6 系列精度最高 · 较慢 · 下载量较大
+    ppocrv5-en-mobile:
+      label:
+        en: PP-OCRv5 English (mobile)
+        zh-CN: PP-OCRv5 英文（mobile）
+      langs:
+        en: English
+        zh-CN: 仅英文
+      tier:
+        en: "English-only: faster and sharper on English text"
+        zh-CN: 纯英文场景更快更准
+    ppocrv5-ch-mobile:
+      label:
+        en: PP-OCRv5 Chinese/Japanese (mobile)
+        zh-CN: PP-OCRv5 中日（mobile）
+      langs:
+        en: Chinese, English, Japanese, Traditional Chinese
+        zh-CN: 中文、英文、日文、繁体中文
+      tier:
+        en: Adds Japanese/Traditional · mobile speed
+        zh-CN: 支持日文/繁体 · mobile 速度
+    ppocrv5-ch-server:
+      label:
+        en: PP-OCRv5 Chinese/Japanese (server)
+        zh-CN: PP-OCRv5 中日（server）
+      langs:
+        en: Chinese, English, Japanese, Traditional Chinese
+        zh-CN: 中文、英文、日文、繁体中文
+      tier:
+        en: Adds Japanese/Traditional · top accuracy · big download
+        zh-CN: 支持日文/繁体 · 精度最高 · 下载量大
+  setup:
+    title:
+      en: OCR needs models
+      zh-CN: OCR 需要模型
+    confirm:
+      en: "First use of the selected OCR model ({{model}}): download it from ModelScope?"
+      zh-CN: 首次使用所选 OCR 模型（{{model}}）：从 ModelScope 下载？
+    stored_at:
+      en: "Stored in {{dir}} · one-time only."
+      zh-CN: "保存于 {{dir}} · 仅此一次。"
+    download:
+      en: Download
+      zh-CN: 下载
+    cancel:
+      en: Cancel
+      zh-CN: 取消
+    downloading:
+      en: Downloading models…
+      zh-CN: 正在下载模型…
+    failed:
+      en: OCR setup failed
+      zh-CN: OCR 初始化失败
+    retry:
+      en: Retry
+      zh-CN: 重试
+    close:
+      en: Close
+      zh-CN: 关闭
+tray:
+  tooltip:
+    en: Shotori — click to take a screenshot
+    zh-CN: Shotori — 点击截图
+  screenshot:
+    en: Screenshot
+    zh-CN: 截图
+  settings:
+    en: Settings…
+    zh-CN: 设置…
+  quit:
+    en: Quit
+    zh-CN: 退出
+notify:
+  copied:
+    title:
+      en: Screenshot copied
+      zh-CN: 截图已复制
+    body:
+      en: The image is ready to paste.
+      zh-CN: 图片已就绪，可以直接粘贴。
+  saved:
+    title:
+      en: Screenshot saved
+      zh-CN: 截图已保存
+  open_failed:
+    title:
+      en: Couldn’t open image
+      zh-CN: 无法打开图片
+    body:
+      en: Open the saved file from your file manager.
+      zh-CN: 请在文件管理器中打开已保存的文件。
+  view_image:
+    en: View image
+    zh-CN: 查看图片
+  scroll:
+    start_failed:
+      title:
+        en: Can’t start a long screenshot
+        zh-CN: 无法开始长截图
+      cross_screen:
+        en: The selection must sit fully inside a single screen.
+        zh-CN: 选区必须完整位于同一块屏幕内。
+      no_bar:
+        en: The control bar failed to open.
+        zh-CN: 控制条打开失败。
+  pin:
+    failed:
+      title:
+        en: Couldn’t pin image
+        zh-CN: 无法贴图
+      body:
+        en: Try pinning the selection again.
+        zh-CN: 请重试贴图。
+  copy:
+    failed:
+      title:
+        en: Couldn’t copy screenshot
+        zh-CN: 无法复制截图
+      body:
+        en: Try again, or save the image to a file.
+        zh-CN: 请重试，或将图片保存为文件。
+  ocr:
+    empty:
+      title:
+        en: No text found
+        zh-CN: 未识别到文字
+      body:
+        en: Try selecting a clearer area containing text.
+        zh-CN: 请尝试选择更清晰的文字区域。
+    copied:
+      title:
+        en: Text copied
+        zh-CN: 文字已复制
+    copy_failed:
+      title:
+        en: Couldn’t copy text
+        zh-CN: 无法复制文字
+      body:
+        en: The clipboard is unavailable. Try again.
+        zh-CN: 剪贴板不可用，请重试。
+    failed:
+      title:
+        en: Couldn’t recognize text
+        zh-CN: 无法识别文字
+      body:
+        en: Try again or select a clearer area.
+        zh-CN: 请重试，或选择更清晰的区域。

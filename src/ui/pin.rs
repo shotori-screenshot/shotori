@@ -320,8 +320,8 @@ impl PinSurface {
                 if let Err(e) = crate::clipboard::copy_image(*w, *h, rgba, &png) {
                     eprintln!("[shotori] pin copy failed: {e:#}");
                     crate::notify::send(
-                        "Couldn’t copy the pinned image",
-                        "Try again, or copy from the overlay instead.",
+                        crate::i18n::t!("pin.notify.copy_failed.title").as_ref(),
+                        crate::i18n::t!("pin.notify.copy_failed.body").as_ref(),
                     );
                     return;
                 }
@@ -524,23 +524,22 @@ impl Render for PinSurface {
                     .max(px(0.))
                     .min(output.size.height - menu_size.height),
             );
-            let item = |id: &'static str,
-                        label: &'static str,
-                        action: fn() -> Box<dyn gpui_kit::Action>| {
-                gpui_kit::base::Button::new(id)
-                    .debug_selector(move || id.into())
-                    .accessibility_label(label)
-                    .w_full()
-                    .h(px(MENU_ITEM_H))
-                    .px_2()
-                    .rounded_sm()
-                    .text_sm()
-                    .text_color(rgba(crate::ui::theme::c().toolbar_text))
-                    .hover(|s| s.bg(rgba(crate::ui::theme::c().toolbar_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                    .child(label)
-            };
+            let item =
+                |id: &'static str, label: &str, action: fn() -> Box<dyn gpui_kit::Action>| {
+                    gpui_kit::base::Button::new(id)
+                        .debug_selector(move || id.into())
+                        .accessibility_label(label)
+                        .w_full()
+                        .h(px(MENU_ITEM_H))
+                        .px_2()
+                        .rounded_sm()
+                        .text_sm()
+                        .text_color(rgba(crate::ui::theme::c().toolbar_text))
+                        .hover(|s| s.bg(rgba(crate::ui::theme::c().toolbar_hover)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
+                        .child(label.to_string())
+                };
             div()
                 .id("pin-menu")
                 .debug_selector(|| "pin-menu".into())
@@ -558,9 +557,21 @@ impl Render for PinSurface {
                 .border_color(rgba(crate::ui::theme::c().toolbar_border))
                 .bg(rgba(crate::ui::theme::c().toolbar_bg))
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .child(item("pin-copy", "Copy", || Box::new(CopyPin)))
-                .child(item("pin-zoom", "Reset zoom", || Box::new(ResetPinZoom)))
-                .child(item("pin-close", "Close", || Box::new(ClosePin)))
+                .child(item(
+                    "pin-copy",
+                    crate::i18n::t!("common.copy").as_ref(),
+                    || Box::new(CopyPin),
+                ))
+                .child(item(
+                    "pin-zoom",
+                    crate::i18n::t!("pin.menu.reset_zoom").as_ref(),
+                    || Box::new(ResetPinZoom),
+                ))
+                .child(item(
+                    "pin-close",
+                    crate::i18n::t!("common.close").as_ref(),
+                    || Box::new(ClosePin),
+                ))
         });
         // All outputs consume the dismissing click, including outputs without the menu.
         let backdrop = any_menu.then(|| {

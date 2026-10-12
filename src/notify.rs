@@ -54,9 +54,11 @@ pub fn copied(png: &[u8]) {
             None
         }
     });
+    // Translated in the PARENT (its locale is already resolved) — the
+    // child only displays the argv strings it receives.
     spawn_child(
-        "Screenshot copied",
-        "The image is ready to paste.",
+        crate::i18n::t!("notify.copied.title").as_ref(),
+        crate::i18n::t!("notify.copied.body").as_ref(),
         Some(std::path::Path::new(STDIN_IMAGE)),
         path.as_deref(),
     );
@@ -80,8 +82,9 @@ fn write_clipboard_image(dir: &std::path::Path, png: &[u8]) -> std::io::Result<P
 /// the parent has nothing left to do (no pixels, no copy).
 pub fn saved(path: &std::path::Path) {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    // The body is the saved file's path — literal content, not translated.
     spawn_child(
-        "Screenshot saved",
+        crate::i18n::t!("notify.saved.title").as_ref(),
         &path.to_string_lossy(),
         Some(std::path::Path::new(STDIN_IMAGE)),
         Some(&path),
@@ -120,6 +123,10 @@ fn spawn_child(
 /// (`STDIN_IMAGE`), which renders the thumbnail here from the full-resolution
 /// PNG at `saved path` — the parent process does no pixel work.
 pub fn notify_main() -> i32 {
+    // The child produces two strings of its own ("View image", the
+    // open-failure fallback) — resolve the locale the same way the
+    // parent did, from the shared settings file.
+    crate::i18n::init_child();
     let mut args = std::env::args_os().skip(2);
     let (Some(summary), Some(body)) = (args.next(), args.next()) else {
         eprintln!("[shotori] notify child: usage: --notify <summary> <body> [image] [saved path]");
@@ -192,7 +199,7 @@ fn show(
         // "default" action — the standard open gesture and the ONLY
         // control we ship. An explicit button would duplicate exactly
         // what a click already does.
-        n.action("default", "View image")
+        n.action("default", crate::i18n::t!("notify.view_image").as_ref())
             .timeout(notify_rust::Timeout::Milliseconds(10000));
     }
     let handle = n.show()?;
@@ -220,8 +227,8 @@ fn show(
             {
                 eprintln!("[shotori] could not open saved screenshot: {error}");
                 send(
-                    "Couldn’t open image",
-                    "Open the saved file from your file manager.",
+                    crate::i18n::t!("notify.open_failed.title").as_ref(),
+                    crate::i18n::t!("notify.open_failed.body").as_ref(),
                 );
             }
         });
