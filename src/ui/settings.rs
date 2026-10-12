@@ -128,11 +128,12 @@ impl SearchableListItem for OcrModelItem {
     }
 }
 
-/// One row of the base palette Select: `auto` plus every preinstalled
-/// theme (see [`theme::load::BUILT_INS`]). `title` re-resolves on every
-/// render — the factory rows translate, community palettes are proper
-/// nouns — so a live locale flip relabels the menu like everywhere
-/// else.
+/// One row of the base palette Select: the shotori default (auto pair,
+/// orange — the product's own theme) plus every preinstalled community
+/// palette (see [`theme::load::BUILT_INS`]). `title` re-resolves on
+/// every render — the shotori row translates, community palettes are
+/// proper nouns — so a live locale flip relabels the menu like
+/// everywhere else.
 #[derive(Clone)]
 struct BaseItem {
     /// The `theme.toml` value: "auto" or a built-in name.
@@ -142,17 +143,18 @@ struct BaseItem {
 }
 
 impl BaseItem {
-    /// Auto first, then every preinstalled base in registry order.
+    /// The shotori default first, then every community theme in
+    /// registry order.
     fn all() -> Vec<Self> {
         std::iter::once(Self {
             name: "auto".into(),
-            display: "Auto".into(),
+            display: "Shotori".into(),
             label_key: Some("settings.appearance.auto"),
         })
         .chain(load::BUILT_INS.iter().map(|built_in| Self {
             name: built_in.name.into(),
             display: built_in.display.into(),
-            label_key: built_in.label_key,
+            label_key: None,
         }))
         .collect()
     }
@@ -1965,8 +1967,13 @@ impl AppearanceState {
 
         // Base palette selector: seeded from the file (None = auto); a
         // Confirm swaps the base, re-seeds the pickers below and
-        // writes through (see `appearance_set_base`).
-        let current_base = file.base.clone().unwrap_or_else(|| "auto".into());
+        // writes through (see `appearance_set_base`). "shotori" seeds
+        // as "auto" — the alias of the same pair, and the first row is
+        // what the editor writes back.
+        let current_base = match file.base.as_deref() {
+            None | Some("auto") | Some("shotori") => "auto".to_string(),
+            Some(base) => base.to_string(),
+        };
         let items = BaseItem::all();
         let selected = items
             .iter()

@@ -135,17 +135,8 @@ settings:
       en: Base palette
       zh-CN: 基础配色
     auto:
-      en: Auto
-      zh-CN: 自动
-    dark:
-      en: Dark
-      zh-CN: 深色
-    light:
-      en: Light
-      zh-CN: 浅色
-    high_contrast:
-      en: High contrast
-      zh-CN: 高对比
+      en: Shotori (auto)
+      zh-CN: Shotori（自动）
     dim_opacity:
       en: Dim opacity
       zh-CN: 遮罩不透明度

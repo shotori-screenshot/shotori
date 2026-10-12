@@ -125,130 +125,94 @@ pub enum Source {
     File(PathBuf),
 }
 
-/// One preinstalled base palette: the `theme.toml` / `--theme`
-/// identifier plus what the Appearance editor's base selector needs.
-/// The factory rows carry a translation key; community palettes are
-/// proper nouns, displayed as-is in every locale.
+/// One preinstalled community palette: the `theme.toml` / `--theme`
+/// identifier plus what the Appearance editor's base selector shows
+/// (a proper noun, displayed as-is in every locale).
 pub struct BuiltIn {
     /// The `base` value / `--theme` name (kebab-case, no dot — `resolve`
     /// routes any value containing `.` or a slash to the file path).
     pub name: &'static str,
-    /// Display name for untranslated (community) palettes.
+    /// Display name (proper noun).
     pub(crate) display: &'static str,
-    /// `t!` key for the factory rows, None for community palettes.
-    pub(crate) label_key: Option<&'static str>,
     palette: fn() -> Theme,
 }
 
-impl BuiltIn {
-    /// The editor label: translated for the factory rows, the proper
-    /// noun otherwise. Resolved per call, so a live locale flip
-    /// relabels like everywhere else.
-    pub fn label(&self) -> String {
-        self.label_key
-            .map(|key| crate::i18n::t!(key).to_string())
-            .unwrap_or_else(|| self.display.to_string())
-    }
-}
-
-/// Every preinstalled base, in editor display order: the factory rows
-/// first, then the house theme, then community palettes dark→light
-/// within each family. `auto` is NOT here — it is not a palette but
-/// the dark/light pair following the system appearance, and lives as a
-/// separate selector row (see the Appearance editor).
+/// The selectable presets, in editor display order — community
+/// palettes only. The shotori look (`auto`, the orange dark/light
+/// pair) is the selector's first row, not an entry here: it is a
+/// palette PAIR following the system, not a fixed palette. The
+/// factory `dark`/`light`/`high_contrast` are not selectable anymore
+/// either but still resolve in [`built_in`] for old theme files.
 pub const BUILT_INS: &[BuiltIn] = &[
-    BuiltIn {
-        name: "dark",
-        display: "Dark",
-        label_key: Some("settings.appearance.dark"),
-        palette: Theme::dark,
-    },
-    BuiltIn {
-        name: "light",
-        display: "Light",
-        label_key: Some("settings.appearance.light"),
-        palette: Theme::light,
-    },
-    BuiltIn {
-        name: "high_contrast",
-        display: "High contrast",
-        label_key: Some("settings.appearance.high_contrast"),
-        palette: Theme::high_contrast,
-    },
-    BuiltIn {
-        name: "shotori",
-        display: "Shotori",
-        label_key: None,
-        palette: Theme::shotori,
-    },
     BuiltIn {
         name: "catppuccin-frappe",
         display: "Catppuccin Frappé",
-        label_key: None,
         palette: Theme::catppuccin_frappe,
     },
     BuiltIn {
         name: "catppuccin-macchiato",
         display: "Catppuccin Macchiato",
-        label_key: None,
         palette: Theme::catppuccin_macchiato,
     },
     BuiltIn {
         name: "catppuccin-mocha",
         display: "Catppuccin Mocha",
-        label_key: None,
         palette: Theme::catppuccin_mocha,
     },
     BuiltIn {
         name: "catppuccin-latte",
         display: "Catppuccin Latte",
-        label_key: None,
         palette: Theme::catppuccin_latte,
     },
     BuiltIn {
         name: "dracula",
         display: "Dracula",
-        label_key: None,
         palette: Theme::dracula,
     },
     BuiltIn {
         name: "gruvbox-dark",
         display: "Gruvbox Dark",
-        label_key: None,
         palette: Theme::gruvbox_dark,
     },
     BuiltIn {
         name: "nord",
         display: "Nord",
-        label_key: None,
         palette: Theme::nord,
     },
     BuiltIn {
         name: "rose-pine",
         display: "Rosé Pine",
-        label_key: None,
         palette: Theme::rose_pine,
     },
     BuiltIn {
         name: "tokyo-night",
         display: "Tokyo Night",
-        label_key: None,
         palette: Theme::tokyo_night,
     },
 ];
 
 pub fn built_in(name: &str) -> Result<Theme, String> {
-    BUILT_INS
-        .iter()
-        .find(|built_in| built_in.name == name)
-        .map(|built_in| (built_in.palette)())
-        .ok_or_else(|| {
-            let names = std::iter::once("auto")
-                .chain(BUILT_INS.iter().map(|b| b.name))
-                .collect::<Vec<_>>()
-                .join(" | ");
-            format!("unknown theme {name:?} (want {names})")
-        })
+    // Hidden legacy names (2026-10): the factory palettes stopped being
+    // selectable presets when the auto pair became "the shotori
+    // theme"; theme.toml files written by older editors still carry
+    // them, so they keep resolving — silently, just not listed.
+    let theme = match name {
+        "dark" => Some(Theme::dark()),
+        "light" => Some(Theme::light()),
+        "high_contrast" => Some(Theme::high_contrast()),
+        _ => BUILT_INS
+            .iter()
+            .find(|built_in| built_in.name == name)
+            .map(|built_in| (built_in.palette)()),
+    };
+    theme.ok_or_else(|| {
+        let names = ["auto", "shotori"]
+            .into_iter()
+            .chain(BUILT_INS.iter().map(|b| b.name))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("unknown theme {name:?} (want {names})")
+    })
 }
 
 fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
@@ -284,12 +248,15 @@ fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
 }
 
 impl ThemeFile {
-    /// The resolved palettes this file describes (auto base = the
-    /// dark/light pair; a fixed base = one palette). Errors are the
-    /// per-field override problems, shared by both palettes' applies.
+    /// The resolved palettes this file describes (`auto` and its brand
+    /// alias `shotori` = the dark/light pair; a fixed base = one
+    /// palette). Errors are the per-field override problems, shared by
+    /// both palettes' applies.
     pub(crate) fn palettes(&self) -> (Theme, Option<Theme>, Vec<String>) {
         let base = self.base.as_deref().unwrap_or("auto");
-        let (mut dark, mut light, mut errors) = if base == "auto" {
+        // "shotori" IS the auto pair — the orange default look is the
+        // product's own theme, not a fixed variant of it.
+        let (mut dark, mut light, mut errors) = if matches!(base, "auto" | "shotori") {
             (Theme::dark(), Some(Theme::light()), Vec::new())
         } else {
             match built_in(base) {
@@ -472,12 +439,18 @@ mod tests {
     fn auto_and_fixed_palettes() {
         let (_, light, errors) = ThemeFile::default().palettes();
         assert!(light.is_some() && errors.is_empty());
-        for base in ["dark", "light", "high_contrast"] {
+        // dark/light/high_contrast are hidden legacy names now — files
+        // written by older editors must keep resolving.
+        for base in ["dark", "light", "high_contrast", "catppuccin-mocha"] {
             let file: ThemeFile = toml::from_str(&format!("base = {base:?}")).unwrap();
             let (theme, auto, errors) = file.palettes();
             assert!(auto.is_none() && errors.is_empty());
             assert_eq!(theme.toolbar_bg, built_in(base).unwrap().toolbar_bg);
         }
+        // the brand alias resolves to the same auto pair
+        let file: ThemeFile = toml::from_str("base = 'shotori'").unwrap();
+        let (_, light, errors) = file.palettes();
+        assert!(light.is_some() && errors.is_empty());
     }
     #[test]
     fn unknown_fields_are_still_rejected() {
@@ -655,12 +628,22 @@ mod tests {
         // the file overrides it — a built-in whose literal differs from
         // the derivation would render differently via `--theme name`
         // (the direct palette) vs base = "name" (a file load). The
-        // literals ARE the derivation, by construction.
-        for built in BUILT_INS {
-            let mut theme = built_in(built.name).unwrap();
+        // literals ARE the derivation, by construction. The factory
+        // trio is included even though it is no longer listed — `auto`
+        // resolves through them.
+        let palettes: Vec<(&str, Theme)> = BUILT_INS
+            .iter()
+            .map(|b| (b.name, built_in(b.name).unwrap()))
+            .chain([
+                ("dark", Theme::dark()),
+                ("light", Theme::light()),
+                ("high_contrast", Theme::high_contrast()),
+            ])
+            .collect();
+        for (name, mut theme) in palettes {
             let selected = theme.toolbar_selected;
             theme.adapt_accent();
-            assert_eq!(theme.toolbar_selected, selected, "{}", built.name);
+            assert_eq!(theme.toolbar_selected, selected, "{name}");
         }
     }
 
@@ -671,6 +654,7 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("auto"));
+        assert!(error.contains("shotori"));
         assert!(error.contains("catppuccin-mocha"));
         assert!(error.contains("tokyo-night"));
     }

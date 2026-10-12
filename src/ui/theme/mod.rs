@@ -4,11 +4,11 @@
 //! [`Theme`] struct instead of loose constants, so the look can be
 //! swapped as a whole. Resolution order (see [`load`]):
 //!
-//! 1. a built-in base theme — `auto` (default, follows the system
-//!    appearance) or one of the preinstalled palettes registered in
-//!    [`load::BUILT_INS`] (the factory `dark`/`light`/`high_contrast`
-//!    plus community palettes: Catppuccin, Dracula, Gruvbox, Nord,
-//!    Rosé Pine, Tokyo Night, and the house `shotori` theme)
+//! 1. the shotori theme — `auto` (default, the dark/light orange pair
+//!    following the system appearance; `shotori` is its brand alias) or
+//!    one of the preinstalled community palettes registered in
+//!    [`load::BUILT_INS`] (Catppuccin, Dracula, Gruvbox, Nord,
+//!    Rosé Pine, Tokyo Night)
 //! 2. an optional TOML settings file — `--theme <file>` or the XDG
 //!    config fallback (`~/.config/shotori/theme.toml`)
 //!
@@ -138,27 +138,6 @@ impl Theme {
     // baked in as literals — the theme.toml format cannot express them
     // (opaque hex only), which is why these are code palettes, not
     // embedded TOML files.
-
-    /// The house theme: deep charcoal-blue surfaces, teal accent —
-    /// shotori's own look, distinct from the historical orange default.
-    pub fn shotori() -> Self {
-        Self {
-            dim_color: 0x0B0E14FF,
-            dim_opacity: 0.55,
-            accent: 0x2DD4BFFF,
-            pin_border: 0x2DD4BF99,
-            chip_bg: 0x10131AE6,
-            hint_text: 0x9AA3B2FF,
-            btn_text: 0xE8ECF1FF,
-            btn_hover_bg: 0xFFFFFF1F,
-            toolbar_bg: 0x15171FFF,
-            toolbar_text: 0xE8ECF1FF,
-            toolbar_border: 0x30343FFF,
-            toolbar_hover: 0x1E212BFF,
-            toolbar_selected: 0x172D32FF,
-            swatch_border: 0xFFFFFF38,
-        }
-    }
 
     /// Catppuccin Frappé — the lightest of Catppuccin's dark flavors.
     pub fn catppuccin_frappe() -> Self {
@@ -600,7 +579,6 @@ mod tests {
         // dark chrome from a dark system.
         let darks = [
             Theme::dark(),
-            Theme::shotori(),
             Theme::catppuccin_frappe(),
             Theme::catppuccin_macchiato(),
             Theme::catppuccin_mocha(),
