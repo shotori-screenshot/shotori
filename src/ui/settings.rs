@@ -43,8 +43,7 @@ use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPick
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarFooter, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem,
-    SidebarToggleButton,
+    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Collapsible, Icon, Root, Sizable, Theme, ThemeMode};
@@ -1384,23 +1383,28 @@ impl SettingsWindow {
             .collapsed(collapsed)
             .header(identity)
             .footer(
-                // About lives in the footer (reference material, not a
-                // working section) — the item is a plain
-                // SidebarMenuItem so it matches the nav styling, and
-                // collapsed it degrades to the icon + managed tooltip.
-                SidebarFooter::new().collapsed(collapsed).child(
-                    SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
-                        .icon(Icon::new(IconName::Info))
-                        .collapsed(collapsed)
-                        .active(active == Section::About)
-                        .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
-                            if this.section != Section::About {
-                                this.section = Section::About;
-                                cx.notify();
-                            }
-                        }))
-                        .render("sidebar-about", window, cx),
-                ),
+                // About lives in the footer SLOT (reference material,
+                // not a working section) but is the SAME element as
+                // every nav item: a bare SidebarMenuItem, no
+                // SidebarFooter wrapper. That wrapper is a user-card
+                // shaped box — double padding, plus its own
+                // hover/selected states stacked on the item's — which
+                // made the entry read as a different kind of thing and
+                // sat its text 8px off the nav grid. The slot itself
+                // contributes only the bottom pinning and the shared
+                // px_3 insets; collapsed it still degrades to the icon
+                // + managed tooltip.
+                SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
+                    .icon(Icon::new(IconName::Info))
+                    .collapsed(collapsed)
+                    .active(active == Section::About)
+                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
+                        if this.section != Section::About {
+                            this.section = Section::About;
+                            cx.notify();
+                        }
+                    }))
+                    .render("sidebar-about", window, cx),
             )
             .child(menu)
     }
