@@ -35,8 +35,8 @@ settings:
     en: Shotori Settings
     zh-CN: Shotori 设置
   location:
-    en: "Saves to {{path}}"
-    zh-CN: "保存至 {{path}}"
+    en: "Saves to %{path}"
+    zh-CN: "保存至 %{path}"
   no_config_dir:
     en: "no config directory (is HOME set?)"
     zh-CN: "找不到配置目录（HOME 未设置？）"
@@ -115,8 +115,8 @@ settings:
       en: Downloads on first OCR
       zh-CN: 首次识别时下载
     cache_hint:
-      en: "Models cache in {{dir}}. A newly selected model downloads the first time you OCR (with a confirmation dialog); files shared between models are reused."
-      zh-CN: "模型缓存于 {{dir}}。新选择的模型会在首次识别时下载（有确认对话框）；模型间共享的文件会复用。"
+      en: "Models cache in %{dir}. A newly selected model downloads the first time you OCR (with a confirmation dialog); files shared between models are reused."
+      zh-CN: "模型缓存于 %{dir}。新选择的模型会在首次识别时下载（有确认对话框）；模型间共享的文件会复用。"
     upright:
       title:
         en: "Assume upright text (faster)"
@@ -167,8 +167,8 @@ scroll:
         en: Long screenshot stopped early
         zh-CN: 长截图提前中止
       partial:
-        en: "{{reason}}\nThe partial image was copied."
-        zh-CN: "{{reason}}\n已完成部分已复制。"
+        en: "%{reason}\nThe partial image was copied."
+        zh-CN: "%{reason}\n已完成部分已复制。"
     failed:
       title:
         en: Long screenshot failed
@@ -315,11 +315,11 @@ ocr:
       en: OCR needs models
       zh-CN: OCR 需要模型
     confirm:
-      en: "First use of the selected OCR model ({{model}}): download it from ModelScope?"
-      zh-CN: 首次使用所选 OCR 模型（{{model}}）：从 ModelScope 下载？
+      en: "First use of the selected OCR model (%{model}): download it from ModelScope?"
+      zh-CN: 首次使用所选 OCR 模型（%{model}）：从 ModelScope 下载？
     stored_at:
-      en: "Stored in {{dir}} · one-time only."
-      zh-CN: "保存于 {{dir}} · 仅此一次。"
+      en: "Stored in %{dir} · one-time only."
+      zh-CN: "保存于 %{dir} · 仅此一次。"
     download:
       en: Download
       zh-CN: 下载

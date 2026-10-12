@@ -94,6 +94,18 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_placeholders_substitute() {
+        // rust-i18n 4 substitutes `%{var}` — a `{{var}}` literal in the
+        // table renders raw (the "保存至 {{path}}" footer bug). Guard
+        // the syntax: substituted in, no placeholder left behind.
+        let _guard = LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let line = t!("settings.location", path = "/tmp/theme.toml").to_string();
+        assert!(line.contains("/tmp/theme.toml"), "{line}");
+        assert!(!line.contains('{'), "{line}");
+    }
+
+    #[test]
     fn child_entry_honors_the_settings_file_language() {
         let _guard = LOCALE_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
