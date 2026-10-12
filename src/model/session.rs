@@ -166,6 +166,17 @@ pub struct ScreenshotSession {
     toolbar_pos: Option<Point<Pixels>>,
     /// Set while the toolbar is being dragged by an edge grip.
     toolbar_drag: Option<ToolbarDrag>,
+    /// The grip strips as last PAINTED on this output (window-local),
+    /// reported by the measure canvas inside each grip element at paint
+    /// time. The cursor's grab affordance reads THIS, not the basis
+    /// derivation in [`ScreenshotSession::toolbar_grips`] — a stale
+    /// width basis once put the right strip ~70px left of the rendered
+    /// grip, over the buttons (user-reported; the two-row state sized
+    /// the bar at the pre-customization TB_W while row one had grown to
+    /// its configured width). One frame stale after any geometry
+    /// change (paint runs after the render that reads it); the
+    /// derivation stays as the first-frame fallback.
+    toolbar_grips_reported: Option<(SharedString, Bounds<Pixels>, Bounds<Pixels>)>,
     /// Window-snap targets in global logical coordinates; empty when the
     /// compositor exposes no supported IPC — see [`crate::platform::windowsnap`]
     snaps: Vec<crate::platform::windowsnap::SnapRect>,
@@ -206,6 +217,7 @@ impl ScreenshotSession {
             blocked: false,
             toolbar_pos: None,
             toolbar_drag: None,
+            toolbar_grips_reported: None,
             snaps,
             hovered: None,
             press: None,
@@ -479,12 +491,26 @@ impl ScreenshotSession {
 
     /// The left/right drag-grip strips (local coords) — for the cursor's
     /// grab affordance and nothing else; the elements themselves live in
-    /// `ui::toolbar`. ROW ONE ONLY (the settings row does not grab), and
-    /// inset by the bar's padding — this is the grip ELEMENT's exact
-    /// rect, so the hand cursor and the drag trigger coincide
-    /// pixel-for-pixel (a mismatch in either axis shows up instantly as
-    /// "draggable but not a hand" or vice versa — user-reported).
+    /// `ui::toolbar`. ROW ONE ONLY (the settings row does not grab).
+    /// Served from the RENDERED rects (see `toolbar_grips_reported`)
+    /// whenever a full pair has been painted — the derived strips below
+    /// are only the first-frame fallback, because the basis width can
+    /// drift from the real bar (it did: see the field's comment).
     pub(crate) fn toolbar_grips(&self, name: &str) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        if let Some((out, l, r)) = &self.toolbar_grips_reported
+            && out == name
+            && l.size.width > px(0.)
+            && r.size.width > px(0.)
+        {
+            return Some((*l, *r));
+        }
+        self.derived_toolbar_grips(name)
+    }
+
+    /// The strips as recomputed from the placement basis — the fallback
+    /// path of [`ScreenshotSession::toolbar_grips`], kept exact to the
+    /// grip element's intended geometry (BAR_PAD inset, ROW_H tall).
+    fn derived_toolbar_grips(&self, name: &str) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
         let b = self.toolbar_bounds(name)?;
         let (w, h) = (
             px(crate::model::placement::GRIP_W),
@@ -501,6 +527,40 @@ impl ScreenshotSession {
                 size: size(w, h),
             },
         ))
+    }
+
+    /// Paint-time report from a grip element's measure canvas. `left`
+    /// picks the strip. Returns true when the stored value changed, so
+    /// the caller can schedule the repaint that re-derives the cursor.
+    pub(crate) fn report_toolbar_grip(
+        &mut self,
+        name: &str,
+        left: bool,
+        rect: Bounds<Pixels>,
+    ) -> bool {
+        match &mut self.toolbar_grips_reported {
+            Some((out, l, r)) if out == name => {
+                let slot = if left { l } else { r };
+                if *slot == rect {
+                    false
+                } else {
+                    *slot = rect;
+                    true
+                }
+            }
+            // First report of a new output: the unreported strip stays
+            // zero-sized, which keeps `toolbar_grips` on the fallback
+            // until its element paints too (same frame, child order).
+            _ => {
+                let empty = Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(0.), px(0.)),
+                };
+                let (l, r) = if left { (rect, empty) } else { (empty, rect) };
+                self.toolbar_grips_reported = Some((name.into(), l, r));
+                true
+            }
+        }
     }
 
     /// Press on an edge grip: start dragging the toolbar. `press` is in

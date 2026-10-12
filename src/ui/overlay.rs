@@ -2502,6 +2502,23 @@ mod multi_output_tests {
             "copy clipped: {copy_right} vs bar right {bar_right}"
         );
 
+        // The cursor's grab strips ARE the rendered grip elements,
+        // exactly — same-frame, same-source (the measure canvas
+        // painting inside each grip reports the very rect the debug
+        // bounds record). This is the regression lock on the whole
+        // basis-vs-render drift class: a stale width basis once put
+        // the right strip ~70px left of the rendered grip, over the
+        // buttons — draggable, but no hand cursor there (user-reported).
+        let (gl, gr) = (
+            vcx.debug_bounds("tb-grip-left").unwrap(),
+            vcx.debug_bounds("tb-grip-right").unwrap(),
+        );
+        vcx.update(|_, cx| {
+            let (l, r) = session.read(cx).toolbar_grips("main").unwrap();
+            assert_eq!(gl, l, "left strip must be the rendered grip element");
+            assert_eq!(gr, r, "right strip must be the rendered grip element");
+        });
+
         // Two rows (a tool with the color settings row): the bar keeps
         // the full TB_W the color row needs — its last swatch must fit
         // inside the bar with room for the bar's padding.
@@ -2511,6 +2528,19 @@ mod multi_output_tests {
         vcx.update(|_, cx| {
             let b = session.read(cx).toolbar_bounds("main").unwrap();
             assert_eq!(b.size.height, px(crate::model::placement::TB_H));
+        });
+        // The alignment lock again in the TWO-ROW state — the exact
+        // state the TB_W drift bit: row one renders at its configured
+        // (wider) width while the basis still carried TB_W, so the
+        // derived right strip sat over the buttons.
+        let (gl, gr) = (
+            vcx.debug_bounds("tb-grip-left").unwrap(),
+            vcx.debug_bounds("tb-grip-right").unwrap(),
+        );
+        vcx.update(|_, cx| {
+            let (l, r) = session.read(cx).toolbar_grips("main").unwrap();
+            assert_eq!(gl, l, "left strip must be the rendered grip element");
+            assert_eq!(gr, r, "right strip must be the rendered grip element");
         });
         let swatch = vcx.debug_bounds("tb-color-5").unwrap();
         let bar_right =

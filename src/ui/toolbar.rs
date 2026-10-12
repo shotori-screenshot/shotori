@@ -688,12 +688,20 @@ fn grip(
     output: SharedString,
     session: Entity<ScreenshotSession>,
 ) -> impl IntoElement {
+    let left = id == "tb-grip-left";
+    // on_mouse_down and the measure canvas each own a handle — both
+    // outlive this function.
+    let (measure_output, measure_session) = (output.clone(), session.clone());
     div()
         .id(id)
+        // probe visibility: the cursor-alignment tests assert this
+        // element's laid-out rect equals `session::toolbar_grips`
+        .debug_selector(move || id.to_string())
         // Full row height, and offset only by the bar's side padding —
-        // the element's rect is then EXACTLY `session::toolbar_grips`
-        // (row one only, BAR_PAD inset, ROW_H tall): every pixel that
-        // shows the hand grabs, every pixel that grabs shows the hand.
+        // the element's rect is then EXACTLY the strip the cursor
+        // should grab (row one only, BAR_PAD inset, ROW_H tall): every
+        // pixel that shows the hand grabs, every pixel that grabs shows
+        // the hand.
         .h(px(ROW_H))
         .w(px(GRIP_W))
         .flex()
@@ -706,6 +714,36 @@ fn grip(
             cx.stop_propagation(); // the press belongs to the toolbar, not the canvas
         })
         .child(grip_texture())
+        .child(measure_grip(measure_output, measure_session, left))
+}
+
+/// The grip's measure back-channel: an invisible canvas filling the
+/// grip element, reporting its LAID-OUT rect to the session at paint
+/// time, so the cursor's grab strip follows the rendered grip whatever
+/// the bar's real width turned out to be — not a placement-basis
+/// derivation that can drift (the TB_W trap; see
+/// `toolbar_grips_reported`'s comment). Absolute + size-full keeps it
+/// out of the flex layout entirely. Paint runs after layout (and after
+/// the render that reads the value), so a geometry change lands one
+/// frame late; the derivation stays as the first-frame fallback. The
+/// report only notifies on change — no repaint loop.
+fn measure_grip(
+    output: SharedString,
+    session: Entity<ScreenshotSession>,
+    left: bool,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |viewport, (), _, cx| {
+            session.update(cx, |s, cx| {
+                if s.report_toolbar_grip(&output, left, viewport) {
+                    cx.notify();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 /// The grip's matte dot texture — the visual half of [`grip`], reused
