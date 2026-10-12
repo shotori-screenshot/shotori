@@ -50,6 +50,12 @@
 // expands to `crate::_rust_i18n_translate`, so the declaration must be
 // in the root module for every `crate::i18n::t!` / `use ...::t` caller
 // to resolve. Same shape as gpui-component's own lib.rs.
+// Cargo does not track files read inside proc-macro expansion, so a
+// locales/ui.yml edit alone would NOT rebuild — cargo run would
+// silently embed the stale table (the "still shows {{}}" trap). The
+// include below puts the file on cargo's dependency graph.
+const _LOCALES_UI_YML: &str = include_str!("../locales/ui.yml");
+
 rust_i18n::i18n!("locales", fallback = "en");
 
 /// Matches the desktop file basename and the installed hicolor icon name.
