@@ -349,7 +349,10 @@ fn sync_shell_palette(cx: &mut App) {
         c.title_bar_border = border;
         c.status_bar = bg;
         c.status_bar_border = border;
-        c.sidebar = bg;
+        // the kit's own derivation (theme/schema.rs apply_config):
+        // background blended with a 15% border tint — a distinct panel,
+        // not a second coat of the page color
+        c.sidebar = bg.blend(border.opacity(0.15));
         c.sidebar_foreground = text;
         c.sidebar_border = border;
         c.sidebar_accent = selected;
@@ -414,8 +417,9 @@ fn sync_shell_palette(cx: &mut App) {
         c.slider_bar = border;
         c.slider_thumb = text;
         c.scrollbar = bg;
-        c.scrollbar_thumb = border;
-        c.scrollbar_thumb_hover = selected;
+        // the kit's own fallbacks: the thumb IS the accent color
+        c.scrollbar_thumb = accent;
+        c.scrollbar_thumb_hover = accent;
         c.drop_target = selected;
         c.drag_border = accent;
         c.skeleton = hover;

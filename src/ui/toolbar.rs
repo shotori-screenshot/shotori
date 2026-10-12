@@ -51,7 +51,7 @@ gpui_kit::assets::icon_assets!(
         Settings2,
         PanelTop,
         Palette,
-        Camera,
+        Info,
         PanelLeftOpen,
         PanelLeftClose
     ]
