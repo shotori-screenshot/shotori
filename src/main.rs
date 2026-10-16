@@ -262,6 +262,11 @@ fn main() {
     // exit path.
     shotori::save_dialog::complete_pending();
 
+    // ③' Background OCR: Ctrl+O stashed a crop and unmapped the overlays —
+    // run the inference only now that the screen is free, then copy the
+    // text and notify. No-op on every other exit path.
+    shotori::ocr::complete_pending();
+
     // Startup-suite children report their peak RSS on the way out
     #[cfg(feature = "perf")]
     shotori::perf::report_child_rss();

@@ -2,10 +2,6 @@
 # engine gpui-component uses); `fallback = "en"` in src/i18n.rs makes a
 # missing translation degrade to English. Keys are grouped by module.
 _version: 2
-hud:
-  ocr_busy:
-    en: OCR…
-    zh-CN: 识别中…
 save:
   dialog_title:
     en: Save screenshot

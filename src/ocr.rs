@@ -460,6 +460,84 @@ pub fn run_ocr(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<String> {
     Ok(text.trim().to_string())
 }
 
+// ── Overlay → main-thread handoff (the background exit) ────────────────
+
+/// A cropped selection waiting for post-quit OCR.
+struct PendingOcr {
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+}
+
+/// Overlay → main-thread handoff, mirroring save_dialog's `PendingSave`:
+/// the overlay stashes the crop, unmaps and quits; [`complete_pending`]
+/// (invoked from `main` after the run loop returns) runs the inference.
+static PENDING: OnceLock<Mutex<Option<PendingOcr>>> = OnceLock::new();
+
+/// Stash a cropped selection for post-quit OCR; the caller unmaps the
+/// overlays and quits right after. Running the inference only after the
+/// app loop exits keeps the frozen overlay on screen for the unmap beat
+/// instead of the whole OCR — the user's desktop comes back immediately
+/// and the result arrives as a notification.
+pub fn stash(w: u32, h: u32, rgba: Vec<u8>) {
+    let slot = PENDING.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PendingOcr { w, h, rgba });
+}
+
+/// Run after the app loop exits: OCR the stashed crop, copy the text to
+/// the clipboard and notify — the delivery half of [`stash`]. Blocks on
+/// engine init + inference; there is no UI left to block (that is the
+/// point). Every outcome notifies: with the overlay gone, the
+/// notification is the only feedback a keybinding user gets.
+pub fn complete_pending() {
+    let Some(PendingOcr { w, h, rgba }) = PENDING.get().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }) else {
+        return;
+    };
+    match run_ocr(&rgba, w, h) {
+        Ok(t) if t.trim().is_empty() => {
+            crate::notify::send(
+                crate::i18n::t!("notify.ocr.empty.title").as_ref(),
+                crate::i18n::t!("notify.ocr.empty.body").as_ref(),
+            );
+        }
+        Ok(t) => {
+            if let Err(e) = crate::clipboard::copy_text(t.clone()) {
+                eprintln!("[shotori] OCR copy failed: {e:#}");
+                crate::notify::send(
+                    crate::i18n::t!("notify.ocr.copy_failed.title").as_ref(),
+                    crate::i18n::t!("notify.ocr.copy_failed.body").as_ref(),
+                );
+                return;
+            }
+            let lines = t.lines().count();
+            let preview: String = t
+                .replace('\n', " ")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(60)
+                .collect();
+            println!(
+                "[shotori] OCR done {w}x{h} → {lines} line(s) → clipboard (preview: {preview})"
+            );
+            crate::notify::send(
+                crate::i18n::t!("notify.ocr.copied.title").as_ref(),
+                &preview,
+            );
+        }
+        Err(e) => {
+            eprintln!("[shotori] OCR failed: {e:#}");
+            crate::notify::send(
+                crate::i18n::t!("notify.ocr.failed.title").as_ref(),
+                crate::i18n::t!("notify.ocr.failed.body").as_ref(),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

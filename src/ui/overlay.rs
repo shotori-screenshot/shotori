@@ -47,8 +47,6 @@ pub struct Overlay {
     /// First-run OCR setup (confirm → download progress), open while active
     ocr_setup: Option<Box<crate::ui::ocr_setup::OcrSetup>>,
     setup_focus: crate::ui::ocr_setup::SetupFocus,
-    /// OCR inference in flight → show the busy badge (spinner)
-    ocr_busy: bool,
     text_editing: Option<crate::ui::text_editor::TextEditor>,
     text_subscription: Option<Subscription>,
     /// Double-click value editor for a number badge: the shape index
@@ -125,7 +123,6 @@ impl Overlay {
             _subscriptions: Vec::new(),
             ocr_setup: None,
             setup_focus: crate::ui::ocr_setup::SetupFocus::new(cx),
-            ocr_busy: false,
             text_editing: None,
             text_subscription: None,
             number_edit: None,
@@ -662,19 +659,9 @@ impl Overlay {
         );
         crate::save_dialog::stash(w, h, rgba);
         // Unmap all overlays — they would cover the save dialog (layer-shell
-        // Overlay layer + exclusive keyboard). Quit is delayed a beat: the
-        // run loop needs a few iterations to flush the surface-destroy
-        // requests to the compositor — quitting immediately leaves frozen
-        // frames mapped on screen (measured)
-        cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
-        crate::save_dialog::close_overlays(window, cx);
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(150))
-                .await;
-            cx.update(|cx| cx.quit());
-        })
-        .detach();
+        // Overlay layer + exclusive keyboard) — and quit on a delay (see
+        // quit_after_close)
+        crate::save_dialog::quit_after_close(window, cx);
     }
 
     /// Ctrl+L / toolbar [Scroll]: the fifth exit — a long screenshot.
@@ -823,27 +810,27 @@ impl Overlay {
             self.setup_focus.focus_confirm(window, cx);
             cx.notify();
         } else {
-            self.spawn_ocr(snapshot, window, cx);
+            self.exit_into_ocr(snapshot, window, cx);
         }
     }
 
-    /// Run OCR on a snapshot (the Ctrl+O fast path, and the tail of the
-    /// first-run setup once models are in): background inference → text to
-    /// clipboard → quit. Free of `self` so both the action handler and the
-    /// download poll loop can call it.
-    fn spawn_ocr(
+    /// Ctrl+O fast path (models cached) and the post-download handover:
+    /// stash the crop, unmap the overlays and quit. The inference then runs
+    /// from `main` after the app loop exits ([`crate::ocr::complete_pending`])
+    /// — the frozen overlay occupies the screen only for the unmap beat
+    /// instead of the whole OCR, and the text arrives on the clipboard with
+    /// a notification. Needs `window` (not just the handle) because the
+    /// current window must remove itself through its own reference (see
+    /// save_dialog's teardown notes).
+    fn exit_into_ocr(
         &mut self,
         snapshot: crate::ui::ocr_setup::Snapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let crate::ui::ocr_setup::Snapshot { w, h, rgba } = snapshot;
-        let window_handle = window.window_handle();
-        let entity = cx.entity();
-        cx.spawn(async move |_, cx| {
-            ocr_to_clipboard(w, h, rgba, window_handle, entity, cx).await;
-        })
-        .detach();
+        crate::ocr::stash(w, h, rgba);
+        crate::save_dialog::quit_after_close(window, cx);
     }
 
     /// Setup dialog [Download]/[Retry]: switch to Downloading, spawn the
@@ -922,11 +909,13 @@ impl Overlay {
                     }
                 });
                 if let Some(crate::ui::ocr_setup::Snapshot { w, h, rgba }) = snap {
+                    // Not inside this window's action handler, so the
+                    // handle update works here (the no-op trap only hits
+                    // action handlers)
                     let _ = window_handle.update(cx, |_, window, cx| {
-                        let focus = entity.read(cx).focus_handle.clone();
-                        window.focus(&focus, cx);
+                        crate::ocr::stash(w, h, rgba);
+                        crate::save_dialog::quit_after_close(window, cx);
                     });
-                    ocr_to_clipboard(w, h, rgba, window_handle, entity, cx).await;
                 }
             } else {
                 let err = progress.error();
@@ -1004,79 +993,6 @@ async fn copy_to_clipboard(
             );
         }
     }
-}
-
-/// Background OCR → text to clipboard → quit. Shared by the Ctrl+O action
-/// path and the post-download handover. Flips `ocr_busy` on the view for the
-/// duration (spinner badge).
-async fn ocr_to_clipboard(
-    w: u32,
-    h: u32,
-    rgba: Vec<u8>,
-    window_handle: gpui_kit::AnyWindowHandle,
-    entity: gpui_kit::Entity<Overlay>,
-    cx: &mut gpui_kit::AsyncApp,
-) {
-    entity.update(cx, |this, cx| {
-        this.ocr_busy = true;
-        cx.notify();
-    });
-    let result: anyhow::Result<String> = cx
-        .background_executor()
-        .spawn(async move { crate::ocr::run_ocr(&rgba, w, h) })
-        .await;
-    let _ = window_handle.update(cx, |_, _, cx| match &result {
-        Ok(t) if t.trim().is_empty() => {
-            crate::notify::send(
-                crate::i18n::t!("notify.ocr.empty.title").as_ref(),
-                crate::i18n::t!("notify.ocr.empty.body").as_ref(),
-            );
-        }
-        Ok(t) => {
-            if let Err(e) = crate::clipboard::copy_text(t.clone()) {
-                eprintln!("[shotori] OCR copy failed: {e:#}");
-                crate::notify::send(
-                    crate::i18n::t!("notify.ocr.copy_failed.title").as_ref(),
-                    crate::i18n::t!("notify.ocr.copy_failed.body").as_ref(),
-                );
-                return;
-            }
-            let lines = t.lines().count();
-            let preview: String = t
-                .replace('\n', " ")
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(60)
-                .collect();
-            println!(
-                "[shotori] OCR done {w}x{h} → {lines} line(s) → clipboard (preview: {preview})"
-            );
-            crate::notify::send(
-                crate::i18n::t!("notify.ocr.copied.title").as_ref(),
-                &preview,
-            );
-            cx.quit();
-        }
-        Err(e) => {
-            eprintln!("[shotori] OCR failed: {e:#}");
-            // The overlay stays open with no in-UI error display yet —
-            // without this notification a keybinding user sees nothing
-            crate::notify::send(
-                crate::i18n::t!("notify.ocr.failed.title").as_ref(),
-                crate::i18n::t!("notify.ocr.failed.body").as_ref(),
-            );
-        }
-    });
-    // Clear the busy flag on both paths (failure stays on-screen; a stuck
-    // spinner would spin forever otherwise)
-    entity.update(cx, |this, cx| {
-        this.session.update(cx, |s, cx| {
-            s.set_blocked(false);
-            cx.notify();
-        });
-        this.ocr_busy = false;
-        cx.notify();
-    });
 }
 
 impl Render for Overlay {
@@ -1397,11 +1313,6 @@ impl Render for Overlay {
             .as_ref()
             .map(|s| crate::ui::ocr_setup::setup_card(s, &self.setup_focus).into_any_element());
 
-        // OCR-in-flight spinner badge, centered on the selection
-        let busy_el: Option<AnyElement> = self
-            .ocr_busy
-            .then(|| crate::ui::hud::ocr_busy_badge(sel, ws).into_any_element());
-
         base
             // Two-stage Esc (handled in place, no reliance on bubbling):
             // measured: dispatch_action inside a gpui window stops at the
@@ -1638,8 +1549,6 @@ impl Render for Overlay {
                     None
                 },
             )
-            // ⑤ OCR busy badge (spinner on the selection)
-            .children(busy_el)
             // ⑤½ Magnifier loupe (issue #19): the drag's precision
             // chrome, topmost below the setup dialog (which blocks
             // gestures anyway, so ⑥ stays above it). Renders only on

@@ -88,6 +88,24 @@ pub fn close_overlays(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Unmap every overlay and quit once the destroys are flushed — the
+/// shared teardown of every flow that hands off to something outside the
+/// app loop (the portal save dialog, background OCR). Quitting the moment
+/// the last window closes leaves frozen frames mapped on screen: the
+/// compositor only learns of the surface destructions when the run loop
+/// flushes the connection (measured), so quit waits ~150ms.
+pub fn quit_after_close(window: &mut Window, cx: &mut App) {
+    cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+    close_overlays(window, cx);
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(150))
+            .await;
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
 /// Where the dialog starts: `~/Pictures/Shotori` (created on demand — the
 /// portal rejects a non-existent default folder).
 fn default_dir() -> PathBuf {
