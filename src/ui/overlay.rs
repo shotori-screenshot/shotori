@@ -810,27 +810,8 @@ impl Overlay {
             self.setup_focus.focus_confirm(window, cx);
             cx.notify();
         } else {
-            self.exit_into_ocr(snapshot, window, cx);
+            exit_into_background_ocr(snapshot, &self.capture, window, cx);
         }
-    }
-
-    /// Ctrl+O fast path (models cached) and the post-download handover:
-    /// stash the crop, unmap the overlays and quit. The inference then runs
-    /// from `main` after the app loop exits ([`crate::ocr::complete_pending`])
-    /// — the frozen overlay occupies the screen only for the unmap beat
-    /// instead of the whole OCR, and the text arrives on the clipboard with
-    /// a notification. Needs `window` (not just the handle) because the
-    /// current window must remove itself through its own reference (see
-    /// save_dialog's teardown notes).
-    fn exit_into_ocr(
-        &mut self,
-        snapshot: crate::ui::ocr_setup::Snapshot,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let crate::ui::ocr_setup::Snapshot { w, h, rgba } = snapshot;
-        crate::ocr::stash(w, h, rgba);
-        crate::save_dialog::quit_after_close(window, cx);
     }
 
     /// Setup dialog [Download]/[Retry]: switch to Downloading, spawn the
@@ -903,18 +884,19 @@ impl Overlay {
                         .as_ref()
                         .is_some_and(|s| s.owns_download(&progress))
                     {
-                        this.ocr_setup.take().map(|s| s.snapshot)
+                        this.ocr_setup
+                            .take()
+                            .map(|s| (s.snapshot, this.capture.clone()))
                     } else {
                         None
                     }
                 });
-                if let Some(crate::ui::ocr_setup::Snapshot { w, h, rgba }) = snap {
+                if let Some((snapshot, capture)) = snap {
                     // Not inside this window's action handler, so the
                     // handle update works here (the no-op trap only hits
                     // action handlers)
                     let _ = window_handle.update(cx, |_, window, cx| {
-                        crate::ocr::stash(w, h, rgba);
-                        crate::save_dialog::quit_after_close(window, cx);
+                        exit_into_background_ocr(snapshot, &capture, window, cx);
                     });
                 }
             } else {
@@ -993,6 +975,57 @@ async fn copy_to_clipboard(
             );
         }
     }
+}
+
+/// The OCR exit: the desktop comes back the moment the overlays unmap and
+/// the inference runs on the background executor while a tiny
+/// non-interactive OSD chip (top-center of the triggering output, see
+/// [`crate::ui::ocr_osd`]) is the only in-flight feedback — no frozen
+/// screen, no stolen keyboard. On completion the text is delivered
+/// (clipboard + notification) and the process quits. `window` is the
+/// triggering overlay's window: the current window must remove itself
+/// through its own reference (see save_dialog's teardown notes). Shared by
+/// the Ctrl+O fast path and the post-download handover.
+fn exit_into_background_ocr(
+    snapshot: crate::ui::ocr_setup::Snapshot,
+    capture: &Capture,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let crate::ui::ocr_setup::Snapshot { w, h, rgba } = snapshot;
+    // Explicit quit BEFORE anything closes: between the overlays unmapping
+    // and the completion callback the app is down to zero windows, and the
+    // default auto-quit would kill the in-flight inference with them
+    cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+    // Pin the chip to the triggering output (position-matched — see
+    // display_for_capture for why Window::display is not usable here)
+    let osd = crate::platform::display::display_for_capture(capture, cx)
+        .and_then(|did| crate::ui::ocr_osd::open(Some(did), cx));
+    crate::save_dialog::close_overlays(window, cx);
+
+    let work = cx.background_executor().spawn(async move {
+        let result = crate::ocr::run_ocr(&rgba, w, h);
+        crate::ocr::deliver_text(w, h, result);
+    });
+    cx.spawn(async move |cx| {
+        work.await;
+        cx.update(|cx| {
+            if let Some(osd) = osd {
+                let _ = osd.update(cx, |_, window, _| window.remove_window());
+            }
+            // The usual flush lag (quit_after_close's measured details):
+            // the compositor learns of the OSD's destroy only when the
+            // loop pumps, so quit waits a beat
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    })
+    .detach();
 }
 
 impl Render for Overlay {

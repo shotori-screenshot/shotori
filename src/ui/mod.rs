@@ -8,6 +8,8 @@
 //! - [`placement`] lives in `crate::model` — the geometry both of these
 //!   consume
 //! - [`ocr_setup`]: first-run model-download dialog
+//! - [`ocr_osd`]: the tiny "recognizing…" chip shown while background
+//!   OCR runs after the overlays have unmapped
 //! - [`pin`]: the selection as a floating pinned window (贴图)
 //! - [`scroll_bar`]: the long-screenshot chrome (region frame + preview
 //!   panel; chrome-free on full-screen single-monitor sessions — see
@@ -23,6 +25,7 @@
 pub mod e2e;
 pub mod hud;
 pub mod image_util;
+pub mod ocr_osd;
 pub mod ocr_setup;
 pub mod overlay;
 pub mod pin;

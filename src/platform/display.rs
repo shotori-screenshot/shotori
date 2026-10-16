@@ -100,6 +100,22 @@ fn display_matches(bounds: &Bounds<Pixels>, cap: &Capture) -> bool {
     (f32::from(bounds.origin.x) - ex).abs() < 2.0 && (f32::from(bounds.origin.y) - ey).abs() < 2.0
 }
 
+/// The gpui display a capture belongs to, by the position rule above.
+/// `Window::display` is unreliable for layer-shell windows (the wayland
+/// backend only learns their output from a later enter event — measured:
+/// it returned None mid-session), so anything that must land on the
+/// triggering output resolves its display through this instead.
+pub(crate) fn display_for_capture(cap: &Capture, cx: &App) -> Option<DisplayId> {
+    let displays = cx.displays();
+    if displays.is_empty() {
+        return None;
+    }
+    displays
+        .iter()
+        .find(|d| display_matches(&d.bounds(), cap))
+        .map(|d| d.id())
+}
+
 // tests deliberately avoids `use super::*`: the parent module's
 // `use gpui_kit::*` pulls gpui's test macro in and shadows the built-in
 // #[test] (see the comment in selection.rs)
