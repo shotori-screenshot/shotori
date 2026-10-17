@@ -677,12 +677,16 @@ impl ScreenshotSession {
     /// Track the region under the cursor for the hover outline. Returns
     /// whether the hover changed (callers decide on cx.notify()).
     /// Suppressed while dragging — the freehand region takes over — and
-    /// while a modal is open. The smart layer answers first (it has the
-    /// compositor windows injected as candidates); the raw snap rects
-    /// are the fallback until its background analysis lands.
+    /// while a modal is open. A FINALIZED selection ends the phase
+    /// entirely: once the user has picked a region (drawn or snapped),
+    /// hunting for more candidates under the pointer is noise, not a
+    /// hint. The smart layer answers first (it has the compositor
+    /// windows injected as candidates); the raw snap rects are the
+    /// fallback until its background analysis lands.
     pub(crate) fn hover_at(&mut self, name: &str, local: Point<Pixels>) -> bool {
         if self.blocked
             || self.selection.is_dragging()
+            || self.selection.is_selected()
             || self.selection.is_editing()
             || self.toolbar_drag.is_some()
             || self.annotations.enabled()
@@ -703,8 +707,10 @@ impl ScreenshotSession {
 
     /// The hovered region's rect in this output's local coordinates, for
     /// the hover outline; None when not hovering anything visible here.
+    /// Also None once a selection is finalized — a stale `hovered` set
+    /// before the selection landed (Ctrl+A mid-hover) must not paint.
     pub(crate) fn hover_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
-        if self.blocked {
+        if self.blocked || self.selection.is_selected() {
             return None;
         }
         let screen = self.screen(name).bounds();
@@ -804,10 +810,12 @@ impl ScreenshotSession {
         self.cursor_screen = None; // re-pin on the next query
         // The outline may light up under a pointer that has not moved
         // since the analysis landed (mark-shot refreshes on arrival
-        // too — without this the first hover waits for motion).
+        // too — without this the first hover waits for motion). Only
+        // while the session is still in its selection phase.
         if let Some(global) = self.pointer_global
             && !self.blocked
             && !self.selection.is_dragging()
+            && !self.selection.is_selected()
             && !self.selection.is_editing()
             && !self.annotations.enabled()
             && let Some(bounds) = self.smart_region_at(global)
@@ -2392,6 +2400,28 @@ mod tests {
         assert!(!s.smart_step(-1));
     }
 
+    #[test]
+    fn hover_stops_once_a_selection_exists() {
+        let mut s = smart_session();
+        assert!(s.hover_at("right", point(px(50.), px(50.))));
+        assert!(s.hover_bounds("right").is_some());
+        // a user-drawn freehand selection ends the smart phase: no more
+        // candidate hunting under the pointer
+        s.begin("right", point(px(5.), px(5.)));
+        s.drag_to("right", point(px(30.), px(30.)));
+        s.end("right", point(px(30.), px(30.)));
+        assert!(s.selection().is_selected());
+        assert!(!s.hover_at("right", point(px(50.), px(50.))));
+        assert!(s.hover_bounds("right").is_none());
+        // even a stale hover (set before the selection landed, e.g.
+        // Ctrl+A mid-hover) must not paint
+        let mut s = smart_session();
+        assert!(s.hover_at("right", point(px(50.), px(50.))));
+        s.cycle_select_all("right");
+        assert!(s.selection().is_selected());
+        assert!(s.hover_bounds("right").is_none());
+    }
+
     // ── In-place selection editing (move / resize) ────────────────
 
     #[test]
@@ -2590,9 +2620,10 @@ mod tests {
         assert!(!s.hover_at("right", point(px(30.), px(40.)))); // over a window, but editing
         assert!(s.hover_bounds("right").is_none());
         s.pointer_up("right", point(px(40.), px(55.)), false);
-        // released: hover tracking resumes
-        assert!(s.hover_at("right", point(px(30.), px(40.))));
-        assert!(s.hover_bounds("right").is_some());
+        // released, but the selection still exists: the hover phase is
+        // over (no candidate hunting under a finalized selection)
+        assert!(!s.hover_at("right", point(px(30.), px(40.))));
+        assert!(s.hover_bounds("right").is_none());
     }
 
     // ── Toolbar dragging ───────────────────────────────────────────
