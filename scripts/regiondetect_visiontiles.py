@@ -49,8 +49,10 @@ only thing that can talk to the vision model):
        -> vision/<stem>-seed.json  {"rects": [...]} in FULL-image pixels
        (review files win over raw drafts; the per-tile audit prints
        how many boxes were kept/fixed/deleted/added)
-  6. curate: regiondetect_annotate.py DUMP/<stem>-input.png --trace vision/<stem>-seed.json
-       (blue = drafted rects; click to delete, drag to add, s to save)
+  6. curate: regiondetect_workbench.py DUMP_DIR eDP-1
+       (Tab walks the draft queue zoomed to each box, y accepts, d
+       deletes; click to delete/accept in the overview; F5 runs the
+       eval report in-window)
 
 Rectangles are half-open [l, t, r, b] throughout.
 """

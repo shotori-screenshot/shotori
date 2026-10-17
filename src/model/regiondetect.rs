@@ -41,9 +41,9 @@
 //! Offline tuning: `SHOTORI_REGIONDUMP=<dir>` (read in main.rs) makes the
 //! analysis save its input pixels, edge map and every scored proposal —
 //! accepted or not, with the gate that rejected it — via
-//! [`DetectTrace::save_artifacts`]. Score and diagnose the dumps with
-//! `scripts/regiondetect_eval.py`; draw ground truth with
-//! `scripts/regiondetect_annotate.py`.
+//! [`DetectTrace::save_artifacts`]. Grade ground truth and score the
+//! dumps with `scripts/regiondetect_workbench.py` (or
+//! `scripts/regiondetect_eval.py` directly).
 
 // ── Geometry ─────────────────────────────────────────────────────────
 

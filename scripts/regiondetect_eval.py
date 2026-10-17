@@ -7,9 +7,9 @@ Usage:
 
 DUMP_DIR holds `<output>-trace.json` (+ `-input.png`, `-edges.png`) as
 written by the detector, and ground truth `<output>.json` files
-({"rects": [[l,t,r,b], ...]}, as saved by regiondetect_annotate.py) in
---gt-dir (default DUMP_DIR/gt). All rectangles are half-open image-pixel
-rects.
+({"rects": [[l,t,r,b], ...]}, as graded in
+regiondetect_workbench.py) in --gt-dir (default DUMP_DIR/gt). All
+rectangles are half-open image-pixel rects.
 
 Prints, per screen and overall, precision/recall at each IoU threshold,
 the rejection-reason histogram, and — the payoff — for every
@@ -166,7 +166,7 @@ def main():
               f"{len(candidates)} candidates, {len(trace['proposals'])} proposals")
 
         if gts is None:
-            print("   no ground truth (regiondetect_annotate.py) — stats only")
+            print("   no ground truth (regiondetect_workbench.py) — stats only")
             if args.render:
                 # candidates-only overlay: eyeball detection quality
                 # before annotating
