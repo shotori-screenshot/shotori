@@ -145,6 +145,14 @@ libwayland-dev` (see CI).
   they live in `locales/ui.yml` (rust-i18n, en + zh-CN, missing columns
   fall back to English) and are resolved via `crate::i18n::t!` — write
   the English text as a new yml column entry, never inline.
+- No god files. When a file accumulates distinct concerns — a window
+  shell plus its pages, a contract struct plus unrelated vocabularies —
+  split it into a directory module instead of extending it: root keeps
+  the core, each child takes one concern, `pub use` re-exports keep
+  external paths stable. Precedents: `ui/overlay`, `ui/settings`,
+  `model/settings`. Tests move with the code they cover and stay
+  in-file; pure code past ~1000 lines is the smell, not raw line count
+  (tests often are half of a healthy file).
 - Comments explain **why**, not what — the war stories stay. Don't strip
   context when refactoring.
 - No `unwrap()`/`expect()` on runtime paths; no `let _ =` on fallible
