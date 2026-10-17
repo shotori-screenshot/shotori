@@ -2637,13 +2637,3 @@ mod tests {
         assert!(s.text_bounds("left", near_edge, 24.).is_none());
     }
 }
-        let at_corner = s.text_bounds("left", local_origin, 24.).unwrap();
-        assert_eq!(at_corner.origin, selection.origin + point(px(2.), px(2.)));
-        let half_line =
-            selection.bottom_right() - s.screen_origin("left") - point(px(50.), px(20.));
-        assert!(s.text_bounds("left", half_line, 24.).is_none());
-        assert!(s.text_bounds("left", half_line, 12.).is_some());
-        let near_edge = selection.bottom_right() - s.screen_origin("left") - point(px(3.), px(3.));
-        assert!(s.text_bounds("left", near_edge, 24.).is_none());
-    }
-}
