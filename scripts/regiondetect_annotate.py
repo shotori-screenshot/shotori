@@ -81,12 +81,19 @@ class Annotator:
                 self.seeded.append(False)
             return
         if trace_path and trace_path.exists() and seed:
-            trace = json.loads(trace_path.read_text())
-            for cand in trace.get("candidates", []):
-                self.rects.append([int(v) for v in cand["rect"]])
+            data = json.loads(trace_path.read_text())
+            if isinstance(data, dict) and "candidates" in data:
+                # detector trace.json shape
+                rects = [cand["rect"] for cand in data["candidates"]]
+            elif isinstance(data, dict):
+                rects = data.get("rects", [])
+            else:
+                rects = data
+            for rect in rects:
+                self.rects.append([int(v) for v in rect])
                 self.seeded.append(True)
             print(
-                f"seeded {len(self.rects)} detector candidates; "
+                f"seeded {len(self.rects)} rects from {trace_path.name}; "
                 "click inside the wrong ones, drag in the misses"
             )
 
