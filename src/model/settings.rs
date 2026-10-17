@@ -18,11 +18,23 @@
 //! to the subset this binary understands, and [`Settings::save`]
 //! round-trips the unknown parts so the editor never eats keys it does
 //! not know about.
+//!
+//! Layout: this module is the file format and the process-global —
+//! struct, load/save, [`current`]/[`init`]. The id vocabularies live
+//! in children, re-exported so every `settings::ToolbarButton`-style
+//! path keeps working: [`toolbar`] (row items + the factory row) and
+//! [`ocr`] (the model-set table).
 
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use serde::Deserialize;
+
+mod ocr;
+mod toolbar;
+
+pub use ocr::{DEFAULT_OCR_MODEL, OcrModel};
+pub use toolbar::{DEFAULT_ROW, ToolbarButton, ToolbarCluster, ToolbarItem};
 
 /// Settings file name inside the config dir (see [`config_dir`]).
 pub const FILE_NAME: &str = "settings.toml";
@@ -45,268 +57,6 @@ pub const DEFAULT_ANNOTATION_COLORS: [u32; PALETTE] = [
     0xFF4545FF, 0xFF8A32FF, 0xFFD43BFF, 0x40C878FF, 0x409CFFFF, 0x222222FF, 0xFFFFFFFF,
 ];
 
-/// One toggleable row-one button of the selection toolbar. Variant
-/// order is the canonical order (the factory row, the settings
-/// palette); [`ToolbarButton::id`] strings are the file format — never
-/// rename one (files exist in the wild).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum ToolbarButton {
-    Select,
-    Rectangle,
-    Ellipse,
-    Line,
-    Polyline,
-    Arrow,
-    Number,
-    Pencil,
-    Highlighter,
-    Mosaic,
-    Eraser,
-    Text,
-    Clear,
-    Ocr,
-    Save,
-    Pin,
-    Scroll,
-    Cancel,
-    Copy,
-    Settings,
-}
-
-/// The row-one groups the settings palette groups buttons by (the
-/// toolbar itself renders one flat sequence — the factory row's two
-/// separators reproduce the two-cluster look).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ToolbarCluster {
-    Tools,
-    Actions,
-    Confirm,
-}
-
-impl ToolbarButton {
-    /// Every button, in factory/display order. The settings palette
-    /// lists and the factory row both iterate this — one order
-    /// everywhere.
-    pub const ALL: [Self; 20] = [
-        Self::Select,
-        Self::Rectangle,
-        Self::Ellipse,
-        Self::Line,
-        Self::Polyline,
-        Self::Arrow,
-        Self::Number,
-        Self::Pencil,
-        Self::Highlighter,
-        Self::Mosaic,
-        Self::Eraser,
-        Self::Text,
-        Self::Clear,
-        Self::Ocr,
-        Self::Pin,
-        Self::Scroll,
-        Self::Save,
-        Self::Copy,
-        Self::Settings,
-        Self::Cancel,
-    ];
-
-    /// Stable id for the settings file.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Select => "select",
-            Self::Rectangle => "rectangle",
-            Self::Ellipse => "ellipse",
-            Self::Line => "line",
-            Self::Polyline => "polyline",
-            Self::Arrow => "arrow",
-            Self::Number => "number",
-            Self::Pencil => "pencil",
-            Self::Highlighter => "highlighter",
-            Self::Mosaic => "mosaic",
-            Self::Eraser => "eraser",
-            Self::Text => "text",
-            Self::Clear => "clear",
-            Self::Ocr => "ocr",
-            Self::Save => "save",
-            Self::Pin => "pin",
-            Self::Scroll => "scroll",
-            Self::Cancel => "cancel",
-            Self::Copy => "copy",
-            Self::Settings => "settings",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|b| b.id() == id)
-    }
-
-    /// Which palette group the button lists under.
-    pub const fn cluster(self) -> ToolbarCluster {
-        match self {
-            Self::Select
-            | Self::Rectangle
-            | Self::Ellipse
-            | Self::Line
-            | Self::Polyline
-            | Self::Arrow
-            | Self::Number
-            | Self::Pencil
-            | Self::Highlighter
-            | Self::Mosaic
-            | Self::Eraser
-            | Self::Text
-            | Self::Clear => ToolbarCluster::Tools,
-            Self::Ocr | Self::Save | Self::Pin | Self::Scroll => ToolbarCluster::Actions,
-            Self::Cancel | Self::Copy => ToolbarCluster::Confirm,
-            // app-level, not selection-level — groups with the confirm
-            // end of the bar and the palette's Actions section
-            Self::Settings => ToolbarCluster::Confirm,
-        }
-    }
-}
-
-/// One slot of the configured toolbar row. A row is an ordered list of
-/// these — the order IS the customization.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ToolbarItem {
-    Button(ToolbarButton),
-    /// The thin vertical group break. Any number may appear — grouping
-    /// is the one layout concept the toolbar needs (a "flexible gap"
-    /// variant was tried and dropped: the bar hugs its content, so a
-    /// flexible gap can never flex — it was just a separator without
-    /// the line).
-    Separator,
-}
-
-impl ToolbarItem {
-    /// Stable id for the settings file (same vocabulary as button ids).
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Button(button) => button.id(),
-            Self::Separator => "separator",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "separator" => Some(Self::Separator),
-            _ => ToolbarButton::from_id(id).map(Self::Button),
-        }
-    }
-
-    /// Human name for the drag ghost / palette chip of a layout item.
-    pub fn layout_name(self) -> Option<&'static str> {
-        match self {
-            Self::Separator => Some("Separator"),
-            Self::Button(_) => None,
-        }
-    }
-}
-
-/// The factory row — the maintainer's preferred default (captured
-/// from a live editor session): the tool cluster, then the action
-/// group ending in Copy, then a group break before the gear-and-
-/// cancel pair. A fresh install, "Reset to defaults" and legacy
-/// `hidden`-format migration all land here.
-pub const DEFAULT_ROW: [ToolbarItem; 22] = [
-    ToolbarItem::Button(ToolbarButton::Select),
-    ToolbarItem::Button(ToolbarButton::Rectangle),
-    ToolbarItem::Button(ToolbarButton::Ellipse),
-    ToolbarItem::Button(ToolbarButton::Line),
-    ToolbarItem::Button(ToolbarButton::Polyline),
-    ToolbarItem::Button(ToolbarButton::Arrow),
-    ToolbarItem::Button(ToolbarButton::Number),
-    ToolbarItem::Button(ToolbarButton::Pencil),
-    ToolbarItem::Button(ToolbarButton::Highlighter),
-    ToolbarItem::Button(ToolbarButton::Mosaic),
-    ToolbarItem::Button(ToolbarButton::Eraser),
-    ToolbarItem::Button(ToolbarButton::Text),
-    ToolbarItem::Button(ToolbarButton::Clear),
-    ToolbarItem::Separator,
-    ToolbarItem::Button(ToolbarButton::Ocr),
-    ToolbarItem::Button(ToolbarButton::Pin),
-    ToolbarItem::Button(ToolbarButton::Scroll),
-    ToolbarItem::Button(ToolbarButton::Save),
-    ToolbarItem::Button(ToolbarButton::Copy),
-    ToolbarItem::Separator,
-    ToolbarItem::Button(ToolbarButton::Settings),
-    ToolbarItem::Button(ToolbarButton::Cancel),
-];
-
-/// The curated OCR model sets a user can pick (settings window → OCR).
-/// The `id()` strings are the file format AND rapidocr-core's registry
-/// names — one vocabulary, never rename one. Sets NOT listed here
-/// (rapidocr ships more, e.g. the superseded ppocrv4-en-mobile) stay
-/// accepted on load for forward/backward compat but are not offered.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OcrModel {
-    Ppocrv6Tiny,
-    Ppocrv6Small,
-    Ppocrv6Medium,
-    Ppocrv5EnMobile,
-    Ppocrv5ChMobile,
-    Ppocrv5ChServer,
-}
-
-impl OcrModel {
-    /// Every offered model, in settings-display order: the speed/quality
-    /// ladder first (the default sits in the middle), then language
-    /// variants.
-    pub const ALL: [Self; 6] = [
-        Self::Ppocrv6Tiny,
-        Self::Ppocrv6Small,
-        Self::Ppocrv6Medium,
-        Self::Ppocrv5EnMobile,
-        Self::Ppocrv5ChMobile,
-        Self::Ppocrv5ChServer,
-    ];
-
-    /// Stable id for the settings file (= rapidocr's registry name).
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Ppocrv6Tiny => "ppocrv6-tiny",
-            Self::Ppocrv6Small => "ppocrv6-small",
-            Self::Ppocrv6Medium => "ppocrv6-medium",
-            Self::Ppocrv5EnMobile => "ppocrv5-en-mobile",
-            Self::Ppocrv5ChMobile => "ppocrv5-ch-mobile",
-            Self::Ppocrv5ChServer => "ppocrv5-ch-server",
-        }
-    }
-
-    pub fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|m| m.id() == id)
-    }
-
-    /// Human-readable model name (setup dialog, settings rows).
-    /// Locale-dependent since i18n — resolved through the shared table
-    /// (`ocr.model.{id}.label`), so this cannot stay `const`. The key
-    /// is derived from the stable [`OcrModel::id`] at runtime (hence
-    /// `String`, not `Cow<'static>`: rust-i18n's missing-key fallback
-    /// borrows the lookup key); a missing column degrades to English.
-    pub fn label(self) -> String {
-        let key = format!("ocr.model.{}.label", self.id());
-        crate::i18n::t!(key.as_str()).to_string()
-    }
-
-    /// Which scripts the recognition dictionary covers
-    /// (`ocr.model.{id}.langs`).
-    pub fn languages(self) -> String {
-        let key = format!("ocr.model.{}.langs", self.id());
-        crate::i18n::t!(key.as_str()).to_string()
-    }
-
-    /// Speed/accuracy/download positioning
-    /// (`ocr.model.{id}.tier`).
-    pub fn tier(self) -> String {
-        let key = format!("ocr.model.{}.tier", self.id());
-        crate::i18n::t!(key.as_str()).to_string()
-    }
-}
-
-/// The UI language (settings.toml top-level `language` key). `Auto`
-/// follows the system locale; the rest name a `locales/ui.yml` column.
-/// Unknown values degrade to Auto with a load warning (same contract
-/// as every other id in this file).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     Auto,
@@ -343,11 +93,6 @@ impl Language {
         }
     }
 }
-
-/// The factory OCR configuration — deliberately the historical default,
-/// so existing installs see no behavior change until they opt in.
-pub const DEFAULT_OCR_MODEL: OcrModel = OcrModel::Ppocrv6Small;
-
 /// User settings. Default = the factory row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -612,7 +357,7 @@ impl Settings {
                     None => errors.push(format!(
                         "{}: unknown toolbar item {id:?} (skipped; known ids: {})",
                         path.display(),
-                        known_ids()
+                        toolbar::known_ids()
                     )),
                 }
             }
@@ -799,13 +544,6 @@ impl Settings {
 }
 
 /// All valid ids, comma-joined for error messages.
-fn known_ids() -> String {
-    let mut ids: Vec<&str> = ToolbarButton::ALL.iter().map(|b| b.id()).collect();
-    ids.extend(["separator"]);
-    ids.join(", ")
-}
-
-/// `~/.config/shotori` (XDG_CONFIG_HOME-aware) — shared by the theme
 /// and settings loaders so the two files can never disagree about
 /// where the config dir is.
 pub fn config_dir() -> Option<PathBuf> {
@@ -917,63 +655,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn item_ids_round_trip_and_are_unique() {
-        let mut seen = std::collections::BTreeSet::new();
-        for button in ToolbarButton::ALL {
-            assert_eq!(ToolbarButton::from_id(button.id()), Some(button));
-            assert!(seen.insert(button.id()), "duplicate id {}", button.id());
-        }
-        assert!(seen.insert("separator"), "duplicate id separator");
-        assert_eq!(
-            ToolbarItem::from_id("separator"),
-            Some(ToolbarItem::Separator)
-        );
-        assert_eq!(ToolbarItem::from_id("translate"), None);
-        // the dropped spacer variant degrades to a warning, not a load
-        // failure (files written by the short-lived v1 editor)
-        assert_eq!(ToolbarItem::from_id("spacer"), None);
-    }
-
-    #[test]
-    fn factory_row_is_the_maintainer_default() {
-        let row = Settings::default().row().to_vec();
-        // tools | ocr pin scroll save copy | settings cancel — two
-        // group breaks, cancel (not the gear) closes the row
-        assert_eq!(row.len(), 22);
-        assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
-        assert_eq!(row[13], ToolbarItem::Separator);
-        assert_eq!(row[19], ToolbarItem::Separator);
-        assert_eq!(row[20], ToolbarItem::Button(ToolbarButton::Settings));
-        assert_eq!(
-            *row.last().unwrap(),
-            ToolbarItem::Button(ToolbarButton::Cancel)
-        );
-        // every button placed exactly once
-        for button in ToolbarButton::ALL {
-            assert!(Settings::default().toolbar_visible(button));
-        }
-        assert_eq!(Settings::default().row1_button_count(), 20);
-        assert_eq!(Settings::default().row1_separator_count(), 2);
-    }
-
-    #[test]
-    fn row_order_controls_visibility_and_sequence() {
-        let mut s = Settings::default();
-        s.set_row(vec![
-            ToolbarItem::Button(ToolbarButton::Copy),
-            ToolbarItem::Button(ToolbarButton::Select),
-            ToolbarItem::Separator,
-        ]);
-        assert!(s.toolbar_visible(ToolbarButton::Copy));
-        assert!(!s.toolbar_visible(ToolbarButton::Save));
-        assert_eq!(s.row1_button_count(), 2);
-        assert_eq!(s.row1_separator_count(), 1);
-        // an empty row is a valid "hide everything" toolbar
-        s.set_row(Vec::new());
-        assert_eq!(s.row1_button_count(), 0);
-    }
-
-    #[test]
     fn load_missing_file_is_factory_silently() {
         let (s, errors) = Settings::load(Some(Path::new("/nonexistent/shotori/settings.toml")));
         assert_eq!(s, Settings::default());
@@ -1003,59 +684,6 @@ mod tests {
         assert!(
             errors[0].contains("separator"),
             "known ids are listed in the error"
-        );
-    }
-
-    #[test]
-    fn drops_reorder_and_insert_at_the_right_slot() {
-        use ToolbarButton as B;
-        let btn = |b: ToolbarButton| ToolbarItem::Button(b);
-        let row = [btn(B::Copy), btn(B::Save), btn(B::Pin)];
-
-        // palette insert at the front / middle / past-the-end (clamps)
-        assert_eq!(
-            Settings::apply_drop(btn(B::Ocr), &row, 0, None),
-            [btn(B::Ocr), btn(B::Copy), btn(B::Save), btn(B::Pin)]
-        );
-        assert_eq!(
-            Settings::apply_drop(btn(B::Ocr), &row, 2, None),
-            [btn(B::Copy), btn(B::Save), btn(B::Ocr), btn(B::Pin)]
-        );
-        assert_eq!(
-            Settings::apply_drop(btn(B::Ocr), &row, 99, None),
-            [btn(B::Copy), btn(B::Save), btn(B::Pin), btn(B::Ocr)]
-        );
-
-        // reorder: slots are indexed against the displayed row — the
-        // lifted item is already gone. Copy lifts → [Save, Pin]; the
-        // gap between Save and Pin is slot 1
-        assert_eq!(
-            Settings::apply_drop(btn(B::Copy), &row, 1, Some(0)),
-            [btn(B::Save), btn(B::Copy), btn(B::Pin)]
-        );
-        // drag Pin (slot 2) to the very front: Pin lifts → [Copy, Save],
-        // slot 0 = before Copy
-        assert_eq!(
-            Settings::apply_drop(btn(B::Pin), &row, 0, Some(2)),
-            [btn(B::Pin), btn(B::Copy), btn(B::Save)]
-        );
-        // drop back onto its own gap: Save lifts → [Copy, Pin], the
-        // middle gap is slot 1 — no-op
-        assert_eq!(
-            Settings::apply_drop(btn(B::Save), &row, 1, Some(1)),
-            row.to_vec()
-        );
-        // a stale source (row changed mid-drag) degrades to an insert
-        assert_eq!(
-            Settings::apply_drop(btn(B::Pin), &row, 0, Some(9)),
-            [btn(B::Pin), btn(B::Copy), btn(B::Save), btn(B::Pin)]
-        );
-
-        // layout items stack: a second separator drops in fine
-        let with_sep = [btn(B::Copy), ToolbarItem::Separator];
-        assert_eq!(
-            Settings::apply_drop(ToolbarItem::Separator, &with_sep, 2, None),
-            [btn(B::Copy), ToolbarItem::Separator, ToolbarItem::Separator]
         );
     }
 
@@ -1177,29 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn ocr_model_metadata_keys_all_resolve() {
-        // label/languages/tier derive their table keys from id() at
-        // runtime — a typo'd id column would silently fall back to the
-        // KEY ITSELF in the UI. Guard: every field must resolve to
-        // something other than the key.
-        for model in OcrModel::ALL {
-            for (field, value) in [
-                ("label", model.label()),
-                ("langs", model.languages()),
-                ("tier", model.tier()),
-            ] {
-                assert_ne!(
-                    value,
-                    format!("ocr.model.{}.{}", model.id(), field),
-                    "{} table column is missing for {}",
-                    field,
-                    model.id()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn language_ids_round_trip_and_default_is_auto() {
         for language in Language::ALL {
             assert_eq!(Language::from_id(language.id()), Some(language));
@@ -1223,25 +828,6 @@ mod tests {
         assert_eq!(s.language(), Language::Auto);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("klingon"));
-    }
-
-    #[test]
-    fn ocr_model_ids_round_trip_and_are_unique() {
-        let mut seen = std::collections::BTreeSet::new();
-        for model in OcrModel::ALL {
-            assert_eq!(OcrModel::from_id(model.id()), Some(model));
-            assert!(seen.insert(model.id()), "duplicate id {}", model.id());
-            // the curated ids must all exist in rapidocr's registry —
-            // ocr.rs resolves them by name at engine init
-            assert!(
-                rapidocr_core::model::model_set_by_name(model.id()).is_some(),
-                "{} is not a registered rapidocr model set",
-                model.id()
-            );
-        }
-        assert_eq!(OcrModel::from_id("ppocrv4-en-mobile"), None);
-        assert_eq!(Settings::default().ocr_model(), DEFAULT_OCR_MODEL);
-        assert!(!Settings::default().ocr_assume_upright());
     }
 
     #[test]
