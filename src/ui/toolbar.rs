@@ -50,6 +50,7 @@ gpui_kit::assets::icon_assets!(
         Settings,
         Settings2,
         PanelTop,
+        Keyboard,
         Palette,
         Info,
         PanelLeftOpen,

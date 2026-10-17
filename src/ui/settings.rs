@@ -43,7 +43,7 @@ use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPick
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
+    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Collapsible, Icon, Root, Sizable, Theme, ThemeMode};
@@ -573,6 +573,14 @@ impl SettingsWindow {
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The logo click: expand/collapse the navigation sidebar
+    /// (write-through; the next `shotori settings` restores the rail).
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.settings.set_sidebar_collapsed(self.sidebar_collapsed);
+        self.persist(cx);
     }
 
     /// Install a row and write it through. Rows built here are valid
@@ -1406,7 +1414,9 @@ impl SettingsWindow {
         let collapsed = self.sidebar_collapsed;
         // `label` is a translation KEY (settings.general.title etc.) —
         // the sidebar translates on render, so a live locale flip
-        // relabels the navigation with everything else.
+        // relabels the navigation with everything else. Icons ride only
+        // on the collapsed rail: expanded, the label text carries the
+        // meaning and an icon column next to it read as clutter.
         let item = |key: &'static str, icon: IconName, target: Section| {
             let selected = active == target;
             let click = cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
@@ -1415,58 +1425,57 @@ impl SettingsWindow {
                     cx.notify();
                 }
             });
-            SidebarMenuItem::new(crate::i18n::t!(key).to_string())
-                .icon(Icon::new(icon))
-                .active(selected)
-                .on_click(click)
-        };
-        // The header/footer/toggle wiring is the component's demo shape:
-        // the Sidebar itself pushes `collapsed` into the menu items, but
-        // the header, footer and toggle button are plain elements — the
-        // app owns the bool and threads it into each of them.
-        let toggle = SidebarToggleButton::new()
-            .collapsed(collapsed)
-            .accessibility_label(if collapsed {
-                crate::i18n::t!("settings.nav.expand").to_string()
+            let item = SidebarMenuItem::new(crate::i18n::t!(key).to_string());
+            let item = if collapsed {
+                item.icon(Icon::new(icon))
             } else {
-                crate::i18n::t!("settings.nav.collapse").to_string()
-            })
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                // write-through like every other control in this window
-                this.sidebar_collapsed = !this.sidebar_collapsed;
-                this.settings.set_sidebar_collapsed(this.sidebar_collapsed);
-                this.persist(cx);
-            }));
+                item
+            };
+            item.active(selected).on_click(click)
+        };
+        // The header/footer wiring is the component's demo shape, minus
+        // the toggle button: the LOGO is the expand/collapse control
+        // (click it — the rail keeps its icons, the expanded list keeps
+        // text-only labels). The header, footer are plain elements —
+        // the app owns the bool and threads it into each of them.
         let mut identity = SidebarHeader::new().collapsed(collapsed);
         // The logo: the app icon master (the same 64px asset the tray
         // embeds), decoded once — 64px stays crisp at the header's 16px
-        // logical size on HiDPI.
-        let logo = || img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4();
+        // logical size on HiDPI. Clicking it toggles the sidebar.
+        let logo_button = |label: &'static str| {
+            div()
+                .id("sidebar-logo")
+                .cursor_pointer()
+                .p(px(4.))
+                .rounded(px(6.))
+                .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
+                .aria_label(crate::i18n::t!(label).to_string())
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    // write-through like every other control in this window
+                    this.toggle_sidebar(cx);
+                }))
+                .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4())
+        };
         if collapsed {
-            // icon rail: logo (branding survives collapsing) stacked
-            // over the toggle — the header is an h_flex, so wrap the
-            // pair to keep them centered in the narrow rail
+            // icon rail: just the clickable logo (branding + the only
+            // affordance — click to expand)
             identity = identity.child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(8.))
                     .w_full()
-                    .child(logo())
-                    .child(toggle),
+                    .child(logo_button("settings.nav.expand")),
             );
         } else {
-            identity = identity
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(logo())
-                        .child(div().text_size(px(13.)).child("Shotori")),
-                )
-                .child(toggle);
+            identity = identity.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(logo_button("settings.nav.collapse"))
+                    .child(div().text_size(px(13.)).child("Shotori")),
+            );
         }
         // Built BEFORE the sidebar chain: the `item` helper holds a
         // shared cx borrow (cx.listener), while the footer's
@@ -1498,6 +1507,23 @@ impl SettingsWindow {
                 IconName::Palette,
                 Section::Appearance,
             ));
+        // About (the footer item): same shape as every nav item, and
+        // like them it carries an icon only on the collapsed rail —
+        // expanded is text-only.
+        let about = SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
+            .collapsed(collapsed)
+            .active(active == Section::About)
+            .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
+                if this.section != Section::About {
+                    this.section = Section::About;
+                    cx.notify();
+                }
+            }));
+        let about = if collapsed {
+            about.icon(Icon::new(IconName::Info))
+        } else {
+            about
+        };
         Sidebar::new("settings-sidebar")
             .collapsible(true)
             .collapsed(collapsed)
@@ -1513,18 +1539,10 @@ impl SettingsWindow {
                 // sat its text 8px off the nav grid. The slot itself
                 // contributes only the bottom pinning and the shared
                 // px_3 insets; collapsed it still degrades to the icon
-                // + managed tooltip.
-                SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
-                    .icon(Icon::new(IconName::Info))
-                    .collapsed(collapsed)
-                    .active(active == Section::About)
-                    .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
-                        if this.section != Section::About {
-                            this.section = Section::About;
-                            cx.notify();
-                        }
-                    }))
-                    .render("sidebar-about", window, cx),
+                // + managed tooltip. The icon rides only on the
+                // collapsed rail (same rule as the nav items —
+                // expanded is text-only).
+                about.render("sidebar-about", window, cx),
             )
             .child(menu)
     }

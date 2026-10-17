@@ -40,6 +40,22 @@
 //!
 //! `down`/`gmove`/`up` chain into a drag.
 //!
+//! ## Headless sway recipe (a zero-footprint e2e desktop)
+//!
+//! ```sh
+//! WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+//!     sway -c empty-config &   # renders to memory: no window anywhere
+//! mkfifo keys.fifo
+//! vptr keep < keys.fifo &      # PERSISTENT devices — sway only grants
+//!                              # layer-surface keyboard focus once the
+//!                              # seat has them (and per-chord attach/
+//!                              # detach trips an upstream gpui unwrap)
+//! echo "ctrl-y" > keys.fifo    # inject chords into the session
+//! grim out.png                 # inspect the pixels
+//! ```
+//! Start the keeper BEFORE launching shotori: the capability timeline
+//! is what breaks, not the devices themselves.
+//!
 //! ## The coordinate-mapping trap (measured, don't re-derive)
 //!
 //! `motion_absolute(x, y, x_extent, y_extent)` maps the FRACTIONS
