@@ -8,10 +8,10 @@
 //! same event queue, so a capture can never race the scroll it is
 //! supposed to follow.
 //!
-//! The engine is wire code around [`crate::model::scroll_stitch`]
+//! The engine is wire code around [`crate::model::scroll_sheet`]
 //! (the pure decision core). The platform→model import here is a
 //! conscious exception to the "ui → model → platform" arrows: the
-//! stitcher imports nothing platform-side, and keeping the engine next
+//! sheet imports nothing platform-side, and keeping the engine next
 //! to the other compositor clients beats inventing a trait seam for
 //! exactly one consumer.
 //!
@@ -23,6 +23,7 @@
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
@@ -40,7 +41,9 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 };
 
 use super::capture::convert_to_rgba;
-use crate::model::scroll_stitch::{ScrollStitcher, StitchOptions, StitchOutcome, StitchReject};
+use crate::model::scroll_sheet::{
+    Axis as ScrollAxis, Fold, Phase, Refusal, ScrollSheet, SheetLimits, phase_of,
+};
 use crate::model::session::ScrollRect;
 
 /// Which screen to watch and where (output-local LOGICAL integer px —
@@ -51,10 +54,20 @@ pub struct ScrollSpec {
     /// frame rewrites it and the next poll captures the new spot (w/h
     /// stay fixed — drags move, never resize).
     pub rect: std::sync::Arc<std::sync::Mutex<ScrollRect>>,
-    /// Manual: the user scrolls, the engine only captures + stitches
+    /// Manual: the user scrolls, the engine only captures + folds
     /// (works everywhere, no injection). Auto: the engine injects wheel
     /// steps itself — currently niri-hostile (see inject_step).
     pub mode: ScrollMode,
+    /// Initial growth direction; the HUD can switch it until the first
+    /// frame is accepted.
+    pub axis: ScrollAxis,
+    /// How many preview pixels tall the panel's well is (0 = no panel,
+    /// e.g. a chrome-free session: the engine then never renders one).
+    /// The panel writes this once it knows its own height; the engine
+    /// converts it into sheet rows with the same `k` it downscales by,
+    /// so the strip is exactly as tall as the well and never rescales
+    /// mid-scroll.
+    pub preview_rows: Arc<AtomicU32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,30 +76,44 @@ pub enum ScrollMode {
     Auto,
 }
 
-/// What the engine reports to the UI. `Finished` carries the stitched
+/// What the engine reports to the UI. `Finished` carries the folded
 /// image; every terminal event (`Finished`/`Failed`/`Cancelled`) is sent
 /// exactly once, then the thread exits.
 pub enum ScrollEvent {
     /// First frame captured; the physical frame size (post-scale).
     Started { width: u32, height: u32 },
-    /// Rows captured beyond the initial viewport (progress UI).
-    Progress { stitched: u32 },
+    /// Growth direction changed (or the initial direction, sent right
+    /// after `Started`). `locked` is true once a frame was accepted and
+    /// the axis can no longer be swapped.
+    Axis { axis: ScrollAxis, locked: bool },
+    /// Rows captured beyond the initial viewport, plus the sheet height
+    /// the header can show as "W × H" (progress UI).
+    Progress { extent: u32, total: u32 },
     /// The viewport moved (preview rows, engine-mapped) — no pixels,
     /// cheap enough to fire on every accepted frame so the highlight
     /// tracks the frame drag in real time.
     Viewport { top: u32, height: u32 },
-    /// A downscaled tail of the canvas for the live preview panel
-    /// (throttled; RGBA, box-filtered by [`crate::model::scroll_stitch::preview_tail`]).
-    /// `tail_start`/`viewport_*` place the capture viewport on the
-    /// preview so the panel can highlight "what you are looking at".
+    /// A downscaled WINDOW of the sheet for the live preview panel:
+    /// box-filtered by [`crate::model::scroll_sheet::preview_slice`] at a
+    /// fixed scale, cut at the window
+    /// [`preview_window`](crate::model::scroll_sheet::preview_window)
+    /// picked. The window is exactly the panel's own height in sheet
+    /// rows, so the strip scrolls at 1:1 with the page instead of
+    /// rescaling as the sheet grows. `viewport_*` place the capture
+    /// viewport inside that window (preview rows; `None` when the panel
+    /// is looking at a part of the sheet the viewport is not on).
     Preview {
         width: u32,
         height: u32,
         rgba: Arc<Vec<u8>>,
-        tail_start: u32,
-        viewport_top: u32,
+        viewport_top: Option<u32>,
         viewport_height: u32,
     },
+    /// What the session is doing right now (see [`Phase`]). Fired on
+    /// change only. A refusal is a STATE, not a failure: the session
+    /// keeps sampling and the chip says "no overlap" instead of the
+    /// capture dying under the user.
+    Phase(Phase),
     /// The canvas is complete (bottom reached, cap hit, or user finish).
     Finished {
         width: u32,
@@ -94,7 +121,7 @@ pub enum ScrollEvent {
         rgba: Arc<Vec<u8>>,
     },
     /// Unrecoverable (missing protocol, unsupported output, no alignment).
-    /// `partial` carries whatever was stitched before the failure — a
+    /// `partial` carries whatever was folded before the failure — a
     /// session that captured something must never silently discard it;
     /// the UI copies/saves it and says so in the notification.
     Failed {
@@ -102,9 +129,6 @@ pub enum ScrollEvent {
         /// (width, height, rgba) of the canvas so far, when one exists.
         partial: Option<(u32, u32, Arc<Vec<u8>>)>,
     },
-    /// Nothing has been accepted for a while (engine-sent once): the UI
-    /// hints the user to scroll. Informational, never terminal.
-    Idle,
     /// User cancelled; nothing is delivered.
     Cancelled,
 }
@@ -114,6 +138,18 @@ enum Cmd {
     Finish,
     /// Stop and discard.
     Cancel,
+    /// Stop sampling/injecting; keep the session and its canvas alive.
+    Pause,
+    /// Resume after [`Cmd::Pause`].
+    Resume,
+    /// Switch growth direction (ignored once locked).
+    SetAxis(ScrollAxis),
+    /// Step the preview away from the live edge (`Some(preview rows)`,
+    /// negative = look further up) or return to it (`None`). The strip
+    /// is a viewfinder, not a scrollable copy: a wheel step therefore
+    /// re-aims the engine's camera instead of moving a bitmap around in
+    /// the panel.
+    Peek(Option<i32>),
 }
 
 /// The UI's handle onto a running engine. Cheap to clone; dropping it
@@ -131,6 +167,24 @@ impl ScrollControls {
     pub fn cancel(&self) {
         let _ = self.tx.try_send(Cmd::Cancel);
     }
+    /// Freeze the capture without ending the session. The engine keeps
+    /// the sheet and its canvas; the next frame after resume
+    /// re-anchors against whatever the page shows then.
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self
+            .tx
+            .try_send(if paused { Cmd::Pause } else { Cmd::Resume });
+    }
+    /// Switch growth direction; the engine confirms with a `ScrollEvent::Axis`
+    /// (or reports it locked). No-op once the first frame was accepted.
+    pub fn set_axis(&self, axis: ScrollAxis) {
+        let _ = self.tx.try_send(Cmd::SetAxis(axis));
+    }
+    /// Aim the preview at history (`Some(preview-row delta)`, negative =
+    /// up) or back at the live edge (`None`).
+    pub fn peek(&self, delta: Option<i32>) {
+        let _ = self.tx.try_send(Cmd::Peek(delta));
+    }
     /// A handle to nowhere — commands vanish. For the UI when the engine
     /// thread could not even spawn; the failure arrives as a `Failed`
     /// event on the paired (synthetic) stream.
@@ -145,7 +199,7 @@ impl ScrollControls {
 /// pumping events into the control-bar window).
 pub fn start(
     spec: ScrollSpec,
-    options: StitchOptions,
+    options: SheetLimits,
 ) -> anyhow::Result<(ScrollControls, Receiver<ScrollEvent>)> {
     let (cmd_tx, cmd_rx) = async_channel::bounded(8);
     let (ev_tx, ev_rx) = async_channel::bounded(64);
@@ -156,7 +210,7 @@ pub fn start(
             if let Err(e) = result {
                 // The UI is gone too (window closed)? Then nobody reads;
                 // try_send failing is fine. Pre-canvas failures only —
-                // once a stitcher exists, the loops report through
+                // once a sheet exists, the loops report through
                 // `fail_with_partial` so the capture so far survives.
                 let _ = ev_tx.try_send(ScrollEvent::Failed {
                     reason: format!("{e:#}"),
@@ -182,14 +236,12 @@ const FRAME_DEADLINE: Duration = Duration::from_millis(2000);
 /// Whole-session budget — a runaway scroll on an infinite feed stops
 /// here even without the height cap.
 const SESSION_DEADLINE: Duration = Duration::from_secs(60);
-/// Consecutive NoMotion outcomes before declaring the bottom reached.
+/// Consecutive Still outcomes before declaring the bottom reached.
 const BOTTOM_NO_MOTION: u32 = 3;
-/// Consecutive alignment rejections tolerated before failing.
-const MAX_REJECTS: u32 = 4;
 /// Wheel "lines" injected on the first probe (calibrated afterwards).
 const INITIAL_LINES: i32 = 3;
 /// Aim for this step size as a fraction of the viewport (must stay
-/// below the stitcher's max_motion_ratio for overlap to survive).
+/// below the sheet's max_motion_ratio for overlap to survive).
 const TARGET_STEP_RATIO: f32 = 0.45;
 /// Manual-mode polling cadence — fast enough that a brisk user scroll
 /// never skips more than one viewport, slow enough to stay cheap.
@@ -197,51 +249,30 @@ const MANUAL_POLL: Duration = Duration::from_millis(60);
 /// Manual-mode wall budget (the user pauses to read; this is a
 /// safety valve, not a target).
 const MANUAL_DEADLINE: Duration = Duration::from_secs(600);
-/// A full-height static band inside the selection rejects EVERY frame
-/// (the trimmed-mean matcher absorbs ≤ ~14% of rows; anything taller
-/// never aligns). Rather than stitching silence forever, the session
-/// stops — with the partial canvas and an actionable message — once
-/// rejections have piled up for this long with no accepted frame in
-/// between. Torn smooth-scroll frames reject for a couple of polls and
-/// then accept; only genuinely unmatchable content streaks.
-const STATIC_REGION_ABORT: Duration = Duration::from_secs(4);
-/// Minimum rejects before STATIC_REGION_ABORT may fire — separates
-/// "content that never aligns" from "user is reading" (idle sessions
-/// produce duplicates, not rejects).
-const STATIC_REGION_MIN_REJECTS: u32 = 8;
-/// Nothing accepted for this long (and nothing rejecting either — pure
-/// idle): the UI gets a one-shot hint to scroll. The session keeps
-/// running; a reader pausing mid-capture is normal.
-const IDLE_HINT: Duration = Duration::from_secs(15);
+/// Polls with nothing changed for this long read as "the user stopped
+/// scrolling" rather than "the capture is broken": the HUD says
+/// *waiting*, which is what a reader pausing mid-capture is doing.
+const WAIT_HINT: Duration = Duration::from_millis(1200);
 
 /// Terminal failure that PRESERVES the capture so far: send exactly one
 /// `Failed` carrying the partial canvas, then end the loop cleanly
 /// (returning `Ok` — the thread wrapper only reports `Err` for
-/// failures that predate the stitcher, where nothing exists to keep).
+/// failures that predate the sheet, where nothing exists to keep).
 fn fail_with_partial(
     events: &Sender<ScrollEvent>,
-    stitcher: &ScrollStitcher,
+    sheet: &mut ScrollSheet,
     reason: &str,
 ) -> anyhow::Result<()> {
-    let (w, h) = stitcher.dimensions();
+    // The partial image must be in OUTPUT orientation: a horizontal
+    // session's canvas is still transposed internally.
+    let (w, h, rgba) = sheet.output();
     eprintln!("[shotori] scroll: failing with partial canvas: {reason}");
     let _ = events.try_send(ScrollEvent::Failed {
         reason: reason.to_owned(),
-        partial: Some((w, h, Arc::new(stitcher.canvas().to_vec()))),
+        partial: Some((w, h, Arc::new(rgba))),
     });
     Ok(())
 }
-/// Live-preview refresh cadence.
-const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
-/// Live-preview target width (px, before the panel scales it again).
-/// ~2× the panel's logical column: the panel upscales to its width, and
-/// a real 2× sample still holds text legible on HiDPI. (200 was a 5–10×
-/// box filter on wide frames — destructively soft, user-reported.)
-const PREVIEW_WIDTH: u32 = 480;
-/// Canvas rows included in the preview tail (the growing edge). Also
-/// the cost bound: the tail spans at most this × k canvas rows.
-const PREVIEW_MAX_ROWS: u32 = 2000;
-
 /// How the wheel is injected. Discrete (axis_discrete) is the modern
 /// form; some compositors only honor the plain axis value — if two
 /// cycles produce no motion we degrade gracefully instead of failing.
@@ -268,7 +299,7 @@ fn now_ms() -> u32 {
 /// invocations all work). Connection-per-step reproduces the only
 /// semantics compositors actually deliver; the ~1 ms connect cost is
 /// noise next to the settle wait.
-fn inject_step(lines: i32, sign: f64, style: InjectStyle) -> anyhow::Result<()> {
+fn inject_step(axis: ScrollAxis, lines: i32, sign: f64, style: InjectStyle) -> anyhow::Result<()> {
     let conn = Connection::connect_to_env().context("injector connection")?;
     let (globals, mut queue) =
         registry_queue_init::<EngineState>(&conn).map_err(|e| anyhow!("injector registry: {e}"))?;
@@ -293,11 +324,13 @@ fn inject_step(lines: i32, sign: f64, style: InjectStyle) -> anyhow::Result<()> 
     queue.roundtrip(&mut state).ok();
     let clock = now_ms();
     let value = sign * 15.0 * f64::from(lines);
+    let wheel_axis = match axis {
+        ScrollAxis::Vertical => Axis::VerticalScroll,
+        ScrollAxis::Horizontal => Axis::HorizontalScroll,
+    };
     match style {
-        InjectStyle::Discrete => {
-            ptr.axis_discrete(clock, Axis::VerticalScroll, value, (sign as i32) * lines)
-        }
-        InjectStyle::Plain => ptr.axis(clock, Axis::VerticalScroll, value),
+        InjectStyle::Discrete => ptr.axis_discrete(clock, wheel_axis, value, (sign as i32) * lines),
+        InjectStyle::Plain => ptr.axis(clock, wheel_axis, value),
     }
     ptr.frame();
     queue.roundtrip(&mut state).ok();
@@ -306,7 +339,7 @@ fn inject_step(lines: i32, sign: f64, style: InjectStyle) -> anyhow::Result<()> 
 
 fn run(
     spec: &ScrollSpec,
-    options: &StitchOptions,
+    options: &SheetLimits,
     events: &Sender<ScrollEvent>,
     cmds: &Receiver<Cmd>,
 ) -> anyhow::Result<()> {
@@ -386,7 +419,7 @@ fn run(
         .ok_or_else(|| anyhow!("output {} not found", spec.output))?;
     let target = state.outputs[idx].clone();
     // 90°-family rotations swap the output's axes — the logical region
-    // math and the row-based stitcher both break there. Flips are fine:
+    // math and the row-based sheet both break there. Flips are fine:
     // screencopy buffers come orientation-normalized (measured on niri's
     // winit backend, which advertises Flipped180 with upright buffers),
     // and the engine's direction calibration absorbs any inversion.
@@ -491,17 +524,27 @@ fn run(
     };
     let first = capturer.capture_once()?;
     let (fw, fh) = capturer.frame_size;
-    let mut stitcher = ScrollStitcher::new(fw, fh, &first, *options)
-        .map_err(|r| anyhow!("selection too small for scroll stitching ({r:?})"))?;
+    let mut sheet = match spec.axis {
+        ScrollAxis::Vertical => ScrollSheet::new(fw, fh, &first, *options),
+        ScrollAxis::Horizontal => {
+            ScrollSheet::new_with_axis(fw, fh, &first, *options, ScrollAxis::Horizontal)
+        }
+    }
+    .map_err(|r| anyhow!("selection too small for a scroll sheet ({r:?})"))?;
+    let mut axis = spec.axis;
     println!("[shotori] scroll: started {fw}x{fh} on {}", spec.output);
     let _ = events.try_send(ScrollEvent::Started {
         width: fw,
         height: fh,
     });
+    let _ = events.try_send(ScrollEvent::Axis {
+        axis,
+        locked: false,
+    });
 
     // ── the scroll loop ─────────────────────────────────────────────
     // sign: vptr-measured on niri — a negative vertical axis value
-    // scrolls DOWN. The first Appended/Prepended verdict calibrates the
+    // scrolls DOWN. The first GrewBottom/GrewTop verdict calibrates the
     // direction for real; apps disagree no further than that.
     let mut sign = -1.0f64;
     let mut style = InjectStyle::Discrete;
@@ -512,34 +555,76 @@ fn run(
     // Has any injection produced motion yet? Gates the proactive
     // direction flip (see the no-motion arm).
     let mut direction_validated = false;
-    let target_step = (fh as f32 * TARGET_STEP_RATIO).max(40.);
+    let step_len = |axis: ScrollAxis| match axis {
+        ScrollAxis::Vertical => fh,
+        ScrollAxis::Horizontal => fw,
+    };
+    let mut target_step = (step_len(axis) as f32 * TARGET_STEP_RATIO).max(40.);
     let mut anchor = first;
+    let mut paused = false;
+    let mut preview = Preview::new(spec.preview_rows.clone());
 
     if spec.mode == ScrollMode::Manual {
-        return run_manual(&mut stitcher, &mut capturer, &mut anchor, events, cmds);
+        return run_manual(
+            &mut sheet,
+            &mut capturer,
+            &mut anchor,
+            events,
+            cmds,
+            &mut preview,
+        );
     }
 
     loop {
-        if Instant::now() > session_deadline {
+        if !paused && Instant::now() > session_deadline {
             return fail_with_partial(
                 events,
-                &stitcher,
+                &mut sheet,
                 "The scroll session timed out before reaching the bottom.",
             );
         }
         match cmds.try_recv() {
-            Ok(Cmd::Finish) => return deliver(events, &stitcher),
+            Ok(Cmd::Finish) => return deliver(events, &mut sheet),
             Ok(Cmd::Cancel) => {
                 let _ = events.try_send(ScrollEvent::Cancelled);
                 return Ok(());
             }
+            Ok(Cmd::Pause) => {
+                paused = true;
+                println!("[shotori] scroll: paused");
+                continue;
+            }
+            Ok(Cmd::Resume) => {
+                paused = false;
+                println!("[shotori] scroll: resumed");
+                continue;
+            }
+            Ok(Cmd::SetAxis(next)) => {
+                if sheet.set_axis(next) {
+                    axis = next;
+                    target_step = (step_len(axis) as f32 * TARGET_STEP_RATIO).max(40.);
+                }
+                let _ = events.try_send(ScrollEvent::Axis {
+                    axis: sheet.axis(),
+                    locked: sheet.axis_locked(),
+                });
+                continue;
+            }
+            Ok(Cmd::Peek(delta)) => {
+                preview.peek(delta, &sheet, events);
+                continue;
+            }
             Err(_) => {}
         }
+        if paused {
+            std::thread::sleep(POLL_INTERVAL);
+            continue;
+        }
 
-        if let Err(e) = inject_step(lines, sign, style) {
+        if let Err(e) = inject_step(axis, lines, sign, style) {
             return fail_with_partial(
                 events,
-                &stitcher,
+                &mut sheet,
                 &format!("Scrolling the selection failed: {e:#}"),
             );
         }
@@ -549,21 +634,21 @@ fn run(
             Err(e) => {
                 return fail_with_partial(
                     events,
-                    &stitcher,
+                    &mut sheet,
                     &format!("The compositor stopped delivering frames: {e:#}"),
                 );
             }
         };
-        let outcome = stitcher.push(&frame);
+        let outcome = sheet.push(&frame);
         println!(
             "[shotori] scroll: frame #{} → {:?} (lines={lines}, sign={sign}, style={style:?})",
-            stitcher.stats().0,
+            sheet.stats().0,
             outcome
         );
         // E2E backdoor: dump every pushed frame for offline matcher
         // analysis (see ui/e2e.rs conventions).
         if let Ok(dir) = std::env::var("SHOTORI_SCROLL_DUMP") {
-            let n = stitcher.stats().0;
+            let n = sheet.stats().0;
             if let Ok(png) = crate::model::export::encode_png(
                 capturer.frame_size.0,
                 capturer.frame_size.1,
@@ -576,27 +661,29 @@ fn run(
             }
         }
         match outcome {
-            StitchOutcome::Appended { dy, .. } => {
+            Fold::GrewBottom { dy, .. } => {
                 no_motion = 0;
                 rejects = 0;
                 direction_validated = true;
+                preview.report(Phase::Following, events);
                 // Calibrate the step size toward the target (bounded
                 // adaptation: never below one line, never absurd).
                 if dy > 0 {
                     lines = ((lines as f32 * target_step / dy as f32).round() as i32).clamp(1, 16);
                 }
                 let _ = events.try_send(ScrollEvent::Progress {
-                    stitched: stitcher.captured_extent(),
+                    extent: sheet.captured_extent(),
+                    total: sheet.dimensions().1,
                 });
             }
-            StitchOutcome::Prepended { .. } => {
+            Fold::GrewTop { .. } => {
                 // We scrolled the wrong way (or the app inverted us):
                 // flip once, fail if direction never stabilizes.
                 flips += 1;
                 if flips > 2 {
                     return fail_with_partial(
                         events,
-                        &stitcher,
+                        &mut sheet,
                         "The content scrolled both ways and never settled on a direction.",
                     );
                 }
@@ -604,12 +691,13 @@ fn run(
                 no_motion = 0;
                 rejects = 0;
                 direction_validated = true;
+                preview.report(Phase::Following, events);
                 println!("[shotori] scroll: direction flipped (sign now {sign})");
             }
-            StitchOutcome::Contained { .. } => {
+            Fold::Shifted { .. } => {
                 no_motion = 0;
             }
-            StitchOutcome::Duplicate | StitchOutcome::NoMotion => {
+            Fold::Unchanged | Fold::Still => {
                 no_motion += 1;
                 // Discrete injection ignored twice ⇒ try the plain axis
                 // value (niri ignores zwlr_virtual_pointer.axis_discrete
@@ -636,7 +724,7 @@ fn run(
                     if flips > 4 {
                         return fail_with_partial(
                             events,
-                            &stitcher,
+                            &mut sheet,
                             "The selection does not respond to scrolling.",
                         );
                     }
@@ -644,29 +732,24 @@ fn run(
                 if no_motion >= BOTTOM_NO_MOTION {
                     // Bottom reached (or the region ignores the wheel —
                     // either way, nothing more will happen).
-                    return deliver(events, &stitcher);
+                    return deliver(events, &mut sheet);
                 }
             }
-            StitchOutcome::Rejected(StitchReject::Ambiguous)
-            | StitchOutcome::Rejected(StitchReject::HighResidual) => {
-                rejects += 1;
-                if rejects > MAX_REJECTS {
-                    return fail_with_partial(
-                        events,
-                        &stitcher,
-                        "The scrolled frames never aligned — part of the selection may not \
-                         scroll with the rest (fixed bars, sidebars or video).",
-                    );
-                }
+            Fold::Refused(Refusal::Unclear) | Fold::Refused(Refusal::Mismatch) => {
+                // Same rule as manual mode: a refusal is a state. Keep
+                // sampling and let the chip say "no overlap"; the wheel
+                // keeps turning, so a settled frame usually follows.
+                rejects = rejects.saturating_add(1);
+                preview.report(phase_of(rejects), events);
             }
-            StitchOutcome::Rejected(StitchReject::HeightLimit) => {
+            Fold::Refused(Refusal::TooTall) => {
                 println!("[shotori] scroll: height cap reached");
-                return deliver(events, &stitcher);
+                return deliver(events, &mut sheet);
             }
-            StitchOutcome::Rejected(other) => {
+            Fold::Refused(other) => {
                 return fail_with_partial(
                     events,
-                    &stitcher,
+                    &mut sheet,
                     &format!("The capture region changed mid-session ({other:?})."),
                 );
             }
@@ -675,215 +758,293 @@ fn run(
 }
 
 /// Ship the finished canvas and log the session summary.
-fn deliver(events: &Sender<ScrollEvent>, stitcher: &ScrollStitcher) -> anyhow::Result<()> {
-    let (w, h) = stitcher.dimensions();
-    let (pushed, accepted) = stitcher.stats();
+fn deliver(events: &Sender<ScrollEvent>, sheet: &mut ScrollSheet) -> anyhow::Result<()> {
+    let (w, h, rgba) = sheet.output();
+    let (pushed, accepted) = sheet.stats();
     println!("[shotori] scroll: finished {w}x{h} ({accepted}/{pushed} frames folded)");
     let _ = events.try_send(ScrollEvent::Finished {
         width: w,
         height: h,
-        rgba: Arc::new(stitcher.canvas().to_vec()),
+        rgba: Arc::new(rgba),
     });
     Ok(())
 }
 
-/// Push a throttled downscaled canvas tail for the preview panel,
-/// including where the capture viewport sits on it. Returns the canvas
-/// height the image was built from (the growth-flush reference).
-fn send_preview(stitcher: &ScrollStitcher, events: &Sender<ScrollEvent>) -> u32 {
-    let (w, h) = stitcher.dimensions();
-    let (tail_start, pw, ph, rgba) = crate::model::scroll_stitch::preview_tail(
-        stitcher.canvas(),
-        w,
-        h,
-        PREVIEW_WIDTH,
-        PREVIEW_MAX_ROWS,
-    );
-    let (v_top, v_h) = viewport_in_preview(stitcher, w, tail_start, pw, ph);
-    let _ = events.try_send(ScrollEvent::Preview {
-        width: pw,
-        height: ph,
-        rgba: Arc::new(rgba),
-        tail_start,
-        viewport_top: v_top,
-        viewport_height: v_h,
-    });
-    h
+/// The live preview's camera.
+///
+/// The panel is a **viewfinder**, not a scrollable second copy of the
+/// sheet: it paints [a window the size of its own well](preview_window)
+/// at a fixed downscale, and the camera keeps the viewport's bottom edge
+/// on the window's bottom edge. Two consequences, both deliberate:
+///
+/// - the strip advances at exactly the scroll rate (one captured row is
+///   one strip row, always — the old "tail" grew the image while the
+///   sheet grew, which read as a zoom-out and as a lag against the page);
+/// - the pixel cost per refresh is bounded by the well, not by the sheet,
+///   so a 20 000-row capture previews as cheaply as a 1 000-row one.
+struct Preview {
+    /// Panel well height in LOGICAL px, written by the panel; 0 = no
+    /// panel to feed (chrome-free session) and the engine renders none.
+    rows: Arc<AtomicU32>,
+    /// Identity of the bitmap the panel currently holds: (window top,
+    /// rows, sheet top-shift revision). A frame that only *re-writes*
+    /// rows (an up-scroll inside the sheet) changes none of these, so
+    /// the pixels are not rebuilt.
+    shown: Option<(u32, u32, u32)>,
+    /// The panel stepped off the live edge: the sheet row the window
+    /// should end at. `None` = follow the viewport.
+    peek_end: Option<u32>,
+    /// Last reported phase, so the loop speaks only on change.
+    phase: Option<Phase>,
 }
 
-/// The viewport's position in PREVIEW rows (the mapping needs the
-/// downscale factor only the engine knows). Fires as its own cheap
-/// event so frame drags update the highlight without resending pixels.
-fn send_viewport(stitcher: &ScrollStitcher, events: &Sender<ScrollEvent>) {
-    let (w, h) = stitcher.dimensions();
-    // Mirror preview_tail's geometry math for the tail bounds.
-    let k = ((w as f32) / PREVIEW_WIDTH.max(1) as f32).ceil().max(1.0) as u32;
-    let pw = w.div_ceil(k);
-    let tail_start = h.saturating_sub(PREVIEW_MAX_ROWS.saturating_mul(k));
-    let ph = h.saturating_sub(tail_start).div_ceil(k);
-    let (v_top, v_h) = viewport_in_preview(stitcher, w, tail_start, pw, ph);
-    let _ = events.try_send(ScrollEvent::Viewport {
-        top: v_top,
-        height: v_h,
-    });
-}
+impl Preview {
+    fn new(rows: Arc<AtomicU32>) -> Self {
+        Self {
+            rows,
+            shown: None,
+            peek_end: None,
+            phase: None,
+        }
+    }
 
-fn viewport_in_preview(
-    stitcher: &ScrollStitcher,
-    w: u32,
-    tail_start: u32,
-    pw: u32,
-    ph: u32,
-) -> (u32, u32) {
-    let (vt, vh) = stitcher.viewport_span();
-    let k = w.div_ceil(pw.max(1));
-    let v_h = (vh / k).clamp(1, ph.max(1));
-    let v_top = (vt.saturating_sub(tail_start) / k).min(ph.saturating_sub(v_h));
-    (v_top, v_h)
+    /// The window height in SHEET rows: the panel's well, converted with
+    /// the same integer `k` the slicer uses. `None` when there is no
+    /// panel (or it has not sized itself yet).
+    fn window(&self, width: u32) -> Option<(u32, u32)> {
+        let well = self.rows.load(Ordering::Relaxed);
+        if well == 0 || width == 0 {
+            return None;
+        }
+        let (k, pw) = crate::model::scroll_sheet::preview_scale(width);
+        let ph = crate::model::scroll_sheet::preview_fit_rows(well as f32, pw);
+        Some((ph * k, k))
+    }
+
+    /// Aim, then repaint the panel if its bitmap is out of date. `force`
+    /// rebuilds even when nothing moved (axis switch, first frame).
+    fn push(&mut self, sheet: &ScrollSheet, events: &Sender<ScrollEvent>, force: bool) {
+        let (w, h) = sheet.dimensions();
+        let Some((rows, k)) = self.window(w) else {
+            return;
+        };
+        let (vt, vh) = sheet.viewport_span();
+        let aimed = match self.peek_end {
+            Some(end) => end.saturating_sub(vh),
+            None => vt,
+        };
+        let (top, rows) = crate::model::scroll_sheet::preview_window(h, aimed, vh, rows);
+        let identity = (top, rows, sheet.top_revision());
+        if force || self.shown != Some(identity) {
+            let (pw, ph, rgba) = crate::model::scroll_sheet::preview_slice(
+                sheet.canvas(),
+                w,
+                h,
+                top,
+                rows,
+                crate::model::scroll_sheet::PREVIEW_SAMPLE_W,
+            );
+            let (v_top, v_h) = self.mapping(sheet, top, rows, k);
+            let _ = events.try_send(ScrollEvent::Preview {
+                width: pw,
+                height: ph,
+                rgba: Arc::new(rgba),
+                viewport_top: v_top,
+                viewport_height: v_h,
+            });
+            self.shown = Some(identity);
+        } else {
+            // Pixels are already right (the sheet only rewrote rows in
+            // place); the highlight may still have moved.
+            if let (Some(v_top), v_h) = self.mapping(sheet, top, rows, k) {
+                let _ = events.try_send(ScrollEvent::Viewport {
+                    top: v_top,
+                    height: v_h,
+                });
+            }
+        }
+    }
+
+    /// Where the viewport sits inside the window `[top, top + rows)`,
+    /// in preview rows. `None` when it is entirely off the window (the
+    /// user is looking at history, so there is no "you are here" band).
+    fn mapping(&self, sheet: &ScrollSheet, top: u32, rows: u32, k: u32) -> (Option<u32>, u32) {
+        let k = k.max(1);
+        let (vt, vh) = sheet.viewport_span();
+        let ph = (rows / k).max(1);
+        let v_h = (vh / k).max(1).min(ph);
+        if vt.saturating_add(vh) <= top || vt >= top.saturating_add(rows) {
+            return (None, v_h);
+        }
+        let v_top = vt.saturating_sub(top) / k;
+        (Some(v_top.min(ph - v_h)), v_h)
+    }
+
+    /// Wheel in the strip: move the camera by `delta` preview rows
+    /// (negative = up), or return to the live edge with `None`.
+    fn peek(&mut self, delta: Option<i32>, sheet: &ScrollSheet, events: &Sender<ScrollEvent>) {
+        let (w, h) = sheet.dimensions();
+        let Some((rows, k)) = self.window(w) else {
+            return;
+        };
+        match delta {
+            None => self.peek_end = None,
+            Some(delta) => {
+                let (vt, vh) = sheet.viewport_span();
+                let base = self.peek_end.unwrap_or((vt + vh).min(h)) as i64;
+                let step = i64::from(delta) * i64::from(k);
+                let lowest = rows.min(h) as i64;
+                self.peek_end = Some((base - step).clamp(lowest, i64::from(h)) as u32);
+            }
+        }
+        self.push(sheet, events, true);
+    }
+
+    /// First paint: the panel announces its height a moment after the
+    /// engine starts (it opens after this thread does), so the initial
+    /// slice cannot be rendered at launch. Cheap to call every poll —
+    /// two atomics until the first slice exists.
+    fn ensure_first(&mut self, sheet: &ScrollSheet, events: &Sender<ScrollEvent>) {
+        if self.shown.is_none() {
+            self.push(sheet, events, true);
+        }
+    }
+
+    /// Report a phase transition (deduplicated — the loop calls this on
+    /// every frame).
+    fn report(&mut self, phase: Phase, events: &Sender<ScrollEvent>) {
+        if self.phase != Some(phase) {
+            self.phase = Some(phase);
+            let _ = events.try_send(ScrollEvent::Phase(phase));
+        }
+    }
 }
 
 /// Manual mode: the user scrolls, the engine watches. Pure capture +
-/// stitch polling — no injection, no direction logic; duplicates ride
-/// (user idle) and transient rejects ride (mid-scroll tears the anchor
-/// refresh absorbs). Termination is the user's Finish/Cancel, the
-/// height cap, the manual deadline — or one of the two diagnostic
-/// exits, which keep the partial canvas:
+/// fold polling — no injection, no direction logic. Termination is the
+/// user's Finish/Cancel, the height cap or the manual deadline.
 ///
-/// - **Static-region abort** — frames keep CHANGING but never ALIGN
-///   for [`STATIC_REGION_ABORT`] with no accept in between: a fixed
-///   band taller than the matcher's trim budget lives inside the
-///   selection (site header, sidebar, video). Nothing new can ever be
-///   stitched; the user gets told to re-select, not left staring at a
-///   frozen preview.
-/// - **Idle hint** — nothing accepted and nothing rejecting for
-///   [`IDLE_HINT`]: one nudge to scroll (the wheel may simply be going
-///   to another surface). Non-terminal.
+/// Nothing the MATCHER says is fatal any more. A frame that cannot be
+/// placed — a tear mid-animation, a flick faster than the overlap
+/// budget, fixed chrome inside the region — increments the refusal
+/// counter and the HUD says "no overlap"; the loop keeps sampling, and
+/// the next frame that aligns folds in. The old loop ended the session
+/// after a few refusals, which looked exactly like a crash: the capture
+/// window vanished and a notification said "stopped early" while the
+/// user was still scrolling.
 fn run_manual(
-    stitcher: &mut ScrollStitcher,
+    sheet: &mut ScrollSheet,
     capturer: &mut Capturer<'_>,
     anchor: &mut Vec<u8>,
     events: &Sender<ScrollEvent>,
     cmds: &Receiver<Cmd>,
+    preview: &mut Preview,
 ) -> anyhow::Result<()> {
-    println!("[shotori] scroll: manual mode — you scroll, the engine stitches");
+    println!("[shotori] scroll: manual mode — you scroll, the engine folds");
     let deadline = Instant::now() + MANUAL_DEADLINE;
-    let mut last_preview = Instant::now()
-        .checked_sub(PREVIEW_INTERVAL)
-        .unwrap_or_else(Instant::now);
-    let mut last_image_h = send_preview(stitcher, events);
-    // Image-refresh fidelity floor: once the canvas has grown ~4 preview
-    // rows past the image the panel currently shows, the viewport
-    // highlight maps past that image's rows (clamped at the panel, i.e.
-    // visibly stale content under the highlight) — refresh immediately
-    // instead of waiting out the throttle. Idle stretches (duplicates,
-    // small contained wiggles) still ride the 250 ms cadence.
-    let k = ((stitcher.dimensions().0 as f32) / PREVIEW_WIDTH.max(1) as f32)
-        .ceil()
-        .max(1.0) as u32;
-    let flush_rows = 4 * k;
-    // Diagnostics: any accept resets the reject clock; rejects
-    // accumulate only between accepts (idle ≠ broken). The idle hint
-    // is strictly for sessions where NOTHING was ever captured — a
-    // user reading mid-scroll must not be nagged.
+    preview.push(sheet, events, true);
+    let mut refusals = 0u32;
     let mut last_accept = Instant::now();
-    let mut rejects_since_accept = 0u32;
-    let mut accepted_any = false;
-    let mut idle_hinted = false;
+    let mut paused = false;
     loop {
-        if Instant::now() > deadline {
+        if !paused && Instant::now() > deadline {
             return fail_with_partial(
                 events,
-                stitcher,
+                sheet,
                 "Nothing new was captured for ten minutes — the session timed out.",
             );
         }
         match cmds.try_recv() {
-            Ok(Cmd::Finish) => return deliver(events, stitcher),
+            Ok(Cmd::Finish) => return deliver(events, sheet),
             Ok(Cmd::Cancel) => {
                 let _ = events.try_send(ScrollEvent::Cancelled);
                 return Ok(());
             }
+            Ok(Cmd::Pause) => {
+                paused = true;
+                println!("[shotori] scroll: paused");
+                continue;
+            }
+            Ok(Cmd::Resume) => {
+                paused = false;
+                println!("[shotori] scroll: resumed");
+                continue;
+            }
+            Ok(Cmd::SetAxis(next)) => {
+                if sheet.set_axis(next) {
+                    println!("[shotori] scroll: axis → {next:?}");
+                    // The seed was transposed; refresh the strip and
+                    // highlight now instead of waiting for a frame.
+                    preview.push(sheet, events, true);
+                }
+                let _ = events.try_send(ScrollEvent::Axis {
+                    axis: sheet.axis(),
+                    locked: sheet.axis_locked(),
+                });
+                continue;
+            }
+            Ok(Cmd::Peek(delta)) => {
+                preview.peek(delta, sheet, events);
+                continue;
+            }
             Err(_) => {}
         }
+        if paused {
+            std::thread::sleep(MANUAL_POLL);
+            continue;
+        }
+        preview.ensure_first(sheet, events);
         let frame = match capturer.capture_once() {
             Ok(frame) => frame,
             Err(e) => {
                 return fail_with_partial(
                     events,
-                    stitcher,
+                    sheet,
                     &format!("The compositor stopped delivering frames: {e:#}"),
                 );
             }
         };
-        let outcome = stitcher.push(&frame);
-        if !matches!(outcome, StitchOutcome::Duplicate) {
-            println!(
-                "[shotori] scroll: frame #{} → {outcome:?}",
-                stitcher.stats().0
-            );
+        let outcome = sheet.push(&frame);
+        if !matches!(outcome, Fold::Unchanged) {
+            println!("[shotori] scroll: frame #{} → {outcome:?}", sheet.stats().0);
         }
         match outcome {
-            StitchOutcome::Appended { .. }
-            | StitchOutcome::Prepended { .. }
-            | StitchOutcome::Contained { .. } => {
+            Fold::GrewBottom { .. } | Fold::GrewTop { .. } | Fold::Shifted { .. } => {
                 last_accept = Instant::now();
-                rejects_since_accept = 0;
-                accepted_any = true;
+                refusals = 0;
                 let _ = events.try_send(ScrollEvent::Progress {
-                    stitched: stitcher.captured_extent(),
+                    extent: sheet.captured_extent(),
+                    total: sheet.dimensions().1,
                 });
             }
-            StitchOutcome::Rejected(StitchReject::HeightLimit) => {
+            Fold::Refused(Refusal::TooTall) => {
                 println!("[shotori] scroll: height cap reached");
-                return deliver(events, stitcher);
+                return deliver(events, sheet);
             }
-            StitchOutcome::Rejected(StitchReject::TooSmall)
-            | StitchOutcome::Rejected(StitchReject::InsufficientOverlap) => {
+            Fold::Refused(Refusal::TooSmall) => {
                 return fail_with_partial(
                     events,
-                    stitcher,
+                    sheet,
                     "The capture region changed size mid-session.",
                 );
             }
-            StitchOutcome::Rejected(_) => {
-                rejects_since_accept += 1;
-            }
-            StitchOutcome::Duplicate | StitchOutcome::NoMotion => {}
+            // Everything else is a normal, recoverable state: the frame
+            // is kept as the comparison anchor and the next one gets a
+            // chance. The chip says so; the session lives on.
+            Fold::Refused(_) => refusals = refusals.saturating_add(1),
+            Fold::Unchanged | Fold::Still => {}
         }
-        // Frames change but never align: a static region taller than
-        // the matcher's trim budget is inside the selection.
-        if rejects_since_accept >= STATIC_REGION_MIN_REJECTS
-            && last_accept.elapsed() >= STATIC_REGION_ABORT
-        {
-            return fail_with_partial(
-                events,
-                stitcher,
-                "Part of the selection doesn't scroll with the rest — fixed bars, \
-                 sidebars or video break stitching. Select only the scrolling area.",
-            );
-        }
-        // Nothing moving at all: one nudge, then keep waiting (reading
-        // pauses are normal; only rejects, not idling, are fatal).
-        if !idle_hinted
-            && !accepted_any
-            && rejects_since_accept == 0
-            && last_accept.elapsed() >= IDLE_HINT
-        {
-            idle_hinted = true;
-            println!("[shotori] scroll: idle — hinting the user to scroll");
-            let _ = events.try_send(ScrollEvent::Idle);
-        }
-        // Every accepted (non-duplicate) outcome can move the viewport
-        // OR reshape the canvas (prepends grow the top) — the highlight
-        // follows via the cheap event; the pixel stream refreshes on
-        // throttle OR growth (see `flush_rows`).
-        if !matches!(outcome, StitchOutcome::Duplicate) {
-            send_viewport(stitcher, events);
-            let grew = stitcher.dimensions().1.saturating_sub(last_image_h);
-            if last_preview.elapsed() >= PREVIEW_INTERVAL || grew >= flush_rows {
-                last_preview = Instant::now();
-                last_image_h = send_preview(stitcher, events);
-            }
+        // Phase: the refusal ladder is a pure model function; the
+        // "waiting" reading is a clock and lives here.
+        let phase = if refusals == 0 && last_accept.elapsed() >= WAIT_HINT {
+            Phase::Waiting
+        } else {
+            phase_of(refusals)
+        };
+        preview.report(phase, events);
+        // Pixels only move when the sheet or the viewport did.
+        if !matches!(outcome, Fold::Unchanged | Fold::Still) {
+            preview.push(sheet, events, false);
         }
         *anchor = frame;
         std::thread::sleep(MANUAL_POLL);
@@ -902,7 +1063,7 @@ struct Capturer<'a> {
     output: wl_output::WlOutput,
     rect: &'a std::sync::Arc<std::sync::Mutex<ScrollRect>>,
     /// The physical (buffer-space) frame size, filled by the first
-    /// capture — the stitcher's viewport geometry.
+    /// capture — the sheet's viewport geometry.
     frame_size: (u32, u32),
 }
 

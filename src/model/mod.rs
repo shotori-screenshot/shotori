@@ -10,7 +10,7 @@
 //!   toolbar at the bottom — disjoint by construction)
 //! - [`regiondetect`]: pixel-based smart-selection candidates (hover /
 //!   click snap / wheel hierarchy) for the frozen captures
-//! - [`scroll_stitch`]: the long-screenshot assembler (viewport state
+//! - [`scroll_sheet`]: the long-screenshot assembler (viewport state
 //!   machine + column-sampled frame matching)
 //! - [`settings`]: persistent user settings (toolbar layout) in
 //!   `~/.config/shotori/settings.toml`
@@ -18,7 +18,7 @@
 pub mod export;
 pub mod placement;
 pub mod regiondetect;
-pub mod scroll_stitch;
+pub mod scroll_sheet;
 pub mod selection;
 pub mod session;
 pub mod settings;

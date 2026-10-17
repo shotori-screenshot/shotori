@@ -224,6 +224,36 @@ pub(crate) fn frame_strokes(rect: ScrollRect) -> [Bounds<Pixels>; 4] {
     ]
 }
 
+/// Size of the move affordance that rides at the frame's top edge.
+/// Small and outside the rect: it can never be captured. Sized as a
+/// capsule (2:1 would be too thin to read), and close enough to the
+/// stroke to belong to it — a distant floating lozenge read as random
+/// decoration.
+pub(crate) const FRAME_CHIP_W: f32 = 46.;
+pub(crate) const FRAME_CHIP_H: f32 = 18.;
+pub(crate) const FRAME_CHIP_GAP: f32 = 4.;
+
+/// The move chip: a small grip centered above the frame (below it when
+/// the frame touches the output top). `None` when neither side has room
+/// — a full-height selection cannot show it without painting inside the
+/// capture rect, and the strokes remain draggable anyway.
+pub(crate) fn frame_grab_chip(rect: ScrollRect, out_w: f32, out_h: f32) -> Option<Bounds<Pixels>> {
+    let x = (rect.x as f32 + rect.width as f32 / 2. - FRAME_CHIP_W / 2.)
+        .clamp(0., (out_w - FRAME_CHIP_W).max(0.));
+    let above = rect.y as f32 - FRAME_CHIP_GAP - FRAME_CHIP_H;
+    if above >= 0. {
+        return Some(Bounds {
+            origin: point(px(x), px(above)),
+            size: size(px(FRAME_CHIP_W), px(FRAME_CHIP_H)),
+        });
+    }
+    let below = rect.y as f32 + rect.height as f32 + FRAME_CHIP_GAP;
+    (below + FRAME_CHIP_H <= out_h).then(|| Bounds {
+        origin: point(px(x), px(below)),
+        size: size(px(FRAME_CHIP_W), px(FRAME_CHIP_H)),
+    })
+}
+
 /// The (thicker) grab bands the input region covers, derived from the
 /// SAME rect as the strokes (one geometry source per concept — the
 /// grip/cursor alignment trap).
@@ -250,9 +280,10 @@ pub(crate) fn frame_grab_bands(rect: ScrollRect) -> [Bounds<Pixels>; 4] {
     ]
 }
 
-/// The frame's toolbar size (logical px): [⇕] | [Copy][Save][✕].
-pub(crate) const FRAME_TB_W: f32 = 198.;
-pub(crate) const FRAME_TB_H: f32 = 32.;
+/// The chrome-free frame toolbar's size (logical px):
+/// [⇕] | [Copy][Save][✕].
+pub(crate) const FRAME_TB_W: f32 = 194.;
+pub(crate) const FRAME_TB_H: f32 = 38.;
 /// Gap between the frame edge and its toolbar.
 pub(crate) const FRAME_TB_GAP: f32 = 10.;
 
@@ -265,7 +296,7 @@ pub(crate) const SCROLL_PANEL_MARGIN: f32 = 10.;
 ///
 /// wlr-screencopy captures the fully-composited output — including our
 /// own layer surfaces — so any chrome painted over the capture rect
-/// burns into every stitched frame. The panel therefore only docks on
+/// burns into every folded frame. The panel therefore only docks on
 /// a side that leaves [`SCROLL_PANEL_W`] + margins of space between
 /// the rect and the output edge; when no side qualifies it moves to
 /// another output, or (single monitor) the session goes chrome-free.
@@ -429,8 +460,9 @@ mod tests {
     // Explicit imports (same reason as selection.rs: avoid gpui's test
     // macro shadowing the built-in #[test])
     use super::{
-        FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H, SCROLL_PANEL_MARGIN, ScrollPanelDock, TB_H, TB_W,
-        TB_W_ROW1, clamp_moved_rect, frame_grab_bands, frame_strokes, frame_toolbar, label_anchor,
+        FRAME_CHIP_GAP, FRAME_CHIP_H, FRAME_CHIP_W, FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H,
+        SCROLL_PANEL_MARGIN, ScrollPanelDock, TB_H, TB_W, TB_W_ROW1, clamp_moved_rect,
+        frame_grab_bands, frame_grab_chip, frame_strokes, frame_toolbar, label_anchor,
         legacy_scroll_panel, plan_scroll_panel, toolbar_anchor, toolbar_size,
     };
     use crate::model::session::ScrollRect;
@@ -647,6 +679,34 @@ mod tests {
     }
 
     #[test]
+    fn grab_chip_stays_outside_the_capture_rect() {
+        // Above by default, centered on the frame.
+        let chip = frame_grab_chip(rect(100, 100), 1920., 1080.).unwrap();
+        assert_eq!(
+            f32::from(chip.origin.x),
+            100. + 400. / 2. - FRAME_CHIP_W / 2.
+        );
+        assert_eq!(
+            f32::from(chip.origin.y),
+            100. - FRAME_CHIP_GAP - FRAME_CHIP_H
+        );
+        // At the output top it flips below the frame.
+        let chip = frame_grab_chip(rect(100, 0), 1920., 1080.).unwrap();
+        assert_eq!(f32::from(chip.origin.y), 0. + 300. + FRAME_CHIP_GAP);
+        // Full height leaves nowhere legal: no chip at all.
+        let full = ScrollRect {
+            x: 100,
+            y: 0,
+            width: 400,
+            height: 1080,
+        };
+        assert!(frame_grab_chip(full, 1920., 1080.).is_none());
+        // Never outside the output horizontally.
+        let chip = frame_grab_chip(rect(1800, 100), 1920., 1080.).unwrap();
+        assert!(f32::from(chip.right()) <= 1920.);
+    }
+
+    #[test]
     fn frame_toolbar_below_by_default_flips_at_the_top_clamps_x() {
         let dock = ScrollPanelDock::Right;
         // centered under the frame's bottom edge, one gap below
@@ -691,7 +751,7 @@ mod tests {
         // The historical bug: a full-height selection (the classic
         // tall-column long screenshot) flipped the toolbar "above" and
         // clamped it to y = 0 — INSIDE the capture region, so every
-        // stitched frame carried a 198×32 toolbar at its top. The
+        // folded frame carried a 198×32 toolbar at its top. The
         // ladder must find somewhere outside or hide the bar instead.
         let full_height = ScrollRect {
             x: 760,

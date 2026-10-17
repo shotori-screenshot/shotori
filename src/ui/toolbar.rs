@@ -42,6 +42,9 @@ gpui_kit::assets::icon_assets!(
         ArrowUpRight,
         ListOrdered,
         ScanText,
+        ArrowDown,
+        Pause,
+        Play,
         Save,
         Pin,
         Trash,
@@ -837,6 +840,28 @@ pub(crate) fn grip_texture() -> impl IntoElement {
         }))
 }
 
+/// The move handle's grip: a compact 3×2 dot matrix.
+///
+/// Deliberately NOT [`grip_texture`]: that one is a 21 px tall 3×7
+/// matrix sized for the 30 px toolbar, and pressing it into the 16 px
+/// capture-region chip made the dots overflow the capsule and read as
+/// noise on top of the page ("这个把手样式不太对"). Two rows fit, echo
+/// the same texture language, and survive being seen at 14 px.
+pub(crate) fn chip_grip() -> impl IntoElement {
+    let grain = (theme::c().accent & 0xFFFFFF00) | 0xD0;
+    div()
+        .flex()
+        .gap(px(2.))
+        .items_center()
+        .children((0..3).map(|_| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .children((0..2).map(|_| div().size(px(2.)).rounded_full().bg(rgba(grain))))
+        }))
+}
+
 /// A non-dispatching control for the settings editor's preview bar:
 /// the exact 30px look of the real button, but the click belongs to
 /// the editor (remove), never to the action itself.
@@ -913,7 +938,7 @@ fn control(
         })
 }
 
-struct ToolbarTooltip(SharedString);
+pub(crate) struct ToolbarTooltip(pub(crate) SharedString);
 impl Render for ToolbarTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()

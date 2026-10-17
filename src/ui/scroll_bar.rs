@@ -10,12 +10,30 @@
 //!   wheel events over the captured content pass through to the app —
 //!   manual scrolling keeps working. Dragging a stroke MOVES the region:
 //!   the shared capture rect updates live and the engine follows the
-//!   frame to content that never scrolled into view (for the stitcher,
+//!   frame to content that never scrolled into view (for the sheet,
 //!   "frame moves down" is indistinguishable from "content scrolls up").
-//! - the **preview panel** — docked on a side of the screen that does
-//!   not overlap the capture rect: status, the action buttons and a
-//!   downscaled stream of the growing canvas with a highlight marking
-//!   WHERE in the long image the current viewport sits.
+//! - the **capture HUD** — a floating action bar in the selection
+//!   toolbar's own vocabulary (grip-free, 30 px icon tiles, accent
+//!   primary) above a strip of the growing long image. Status and live
+//!   size ride as small chips ON the strip, the same language as the
+//!   selection's size label. No panel header, no footer, no slab: with
+//!   the HUD up, the frame is just the selection outline plus a move
+//!   chip — no duplicated toolbar.
+//!
+//! ## What the strip is, relative to the selection
+//!
+//! The strip is a **viewfinder on the sheet**, not a second copy of the
+//! screen: one sheet row is always the same number of panel pixels
+//! ([`crate::model::scroll_sheet::preview_fit_rows`]), the window is
+//! exactly as tall as the panel's well, and the camera keeps the
+//! selection's bottom edge on the window's bottom edge. So the strip
+//! moves at the rate the page scrolls — new rows enter at its bottom as
+//! the capture takes them, old ones leave at the top — and the tinted
+//! band is the part of the sheet the selection is showing right now.
+//! While the selection sits at the growing edge (the normal case) the
+//! window is simply the last well-height of the sheet; scrolling back up
+//! re-aims the camera and the band rises through the strip instead of
+//! the whole image sliding.
 //!
 //! ## Chrome must never paint inside the capture rect
 //!
@@ -34,43 +52,52 @@
 //!
 //! Keyboard lives on the panel (or, chrome-free, on the frame) and
 //! mirrors the selection flow exactly: Enter/Ctrl+C finish+copy,
-//! Ctrl+S finish+save, Esc cancels.
+//! Ctrl+S finish+save, Space pauses/resumes, Esc cancels.
 
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 #[cfg(target_os = "linux")]
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::*;
 
 use crate::model::placement::{
-    SCROLL_PANEL_MARGIN, ScrollPanelDock, clamp_moved_rect, frame_grab_bands, frame_strokes,
-    frame_toolbar, legacy_scroll_panel, plan_scroll_panel,
+    SCROLL_PANEL_MARGIN, ScrollPanelDock, clamp_moved_rect, frame_grab_bands, frame_grab_chip,
+    frame_strokes, frame_toolbar, legacy_scroll_panel, plan_scroll_panel,
 };
-use crate::model::scroll_stitch::StitchOptions;
+use crate::model::scroll_sheet::{Axis, Phase, SheetLimits};
 use crate::model::session::ScrollRect;
 use crate::platform::scroll_capture::{self, ScrollControls, ScrollEvent, ScrollSpec};
 use crate::ui::image_util;
 use crate::ui::theme;
 
-actions!(scroll, [ScrollFinish, ScrollCancel, ScrollSave]);
+actions!(
+    scroll,
+    [ScrollFinish, ScrollCancel, ScrollSave, ScrollPause]
+);
 
 /// Preview panel width (logical px) — owned by `model::placement` (the
 /// docking planner sizes its side strips from it); the panel's layout
 /// math uses the same constant.
 use crate::model::placement::SCROLL_PANEL_W as PANEL_W;
-/// Panel padding (p_2) and border (border_1) — the preview image's
-/// display width is derived from these (see [`PREVIEW_IMG_W`]).
-const PANEL_PAD: f32 = 8.;
-const PANEL_BORDER: f32 = 1.;
-/// The preview image's display width: panel minus padding and border.
-/// The img element's height is derived from this and the image's own
-/// aspect — NEVER from the element's intrinsic sizing: gpui leaks the
-/// BITMAP's pixel height into the layout as logical px, so on a 2×
-/// screen the box rendered 2× taller than width × aspect, throwing the
-/// highlight's relative() fractions (fractions of that box) off with
-/// it — the whole "preview doesn't match my frame" saga (measured:
-/// 1164 physical px of box where 590 was correct).
-const PREVIEW_IMG_W: f32 = PANEL_W - 2. * (PANEL_PAD + PANEL_BORDER);
+/// Preview well border (the only frame around the page strip).
+const PREVIEW_BORDER: f32 = 1.;
+/// Gap between the floating action bar and the preview strip.
+const TOOLBAR_GAP: f32 = 6.;
+/// The action bar's height — a compact version of the selection toolbar.
+const TOOLBAR_H: f32 = 36.;
+/// Gutter between the preview well's border and the page strip.
+const PREVIEW_GUTTER: f32 = 4.;
+/// The preview image's display width: window minus the well's border
+/// and the inner gutter. The img element's height is derived from this
+/// and the image's own aspect — NEVER from the element's intrinsic
+/// sizing: gpui leaks the BITMAP's pixel height into the layout as
+/// logical px, so on a 2× screen the box rendered 2× taller than
+/// width × aspect, throwing the highlight's relative() fractions
+/// (fractions of that box) off with it — the whole "preview doesn't
+/// match my frame" saga (measured: 1164 physical px of box where 590
+/// was correct).
+const PREVIEW_IMG_W: f32 = PANEL_W - 2. * PREVIEW_BORDER - 2. * PREVIEW_GUTTER;
 
 /// Everything `launch` needs about the target output, in logical px.
 pub(crate) struct ScrollChrome {
@@ -84,7 +111,7 @@ pub(crate) struct ScrollChrome {
 /// loop with the capture half-started. Returns the shared capture rect
 /// (already inside `spec`).
 pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> anyhow::Result<()> {
-    let options = StitchOptions::default();
+    let options = SheetLimits::default();
     let shared_rect = spec.rect.clone();
     let rect_now = *shared_rect
         .lock()
@@ -109,6 +136,9 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     // (not a compositor failure — those arrive as Failed events) still
     // yields a live event stream carrying the error, so the lifecycle
     // code stays single-shaped.
+    // The engine renders preview pixels only when a panel exists; the
+    // panel writes its well height here once it knows it.
+    let preview_height = spec.preview_rows.clone();
     let (controls, events) = match scroll_capture::start(spec, options) {
         Ok(pair) => pair,
         Err(e) => {
@@ -214,36 +244,53 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
         ScrollPanelDock::Left => Side::Left,
         _ => Side::Right,
     };
+    // A floating card, not a full-height sidebar: the deck reads as one
+    // object instead of a screen-wide slab, and keeps the output's
+    // vertical rhythm. Tall enough for a useful preview on a 1080p
+    // screen, capped so 4K users do not get a 1500px column.
+    let panel_h = (panel_out_h * 0.40)
+        .clamp(320., 500.)
+        .min((panel_out_h - 2. * SCROLL_PANEL_MARGIN).max(120.));
     let panel_options = WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: None,
-        window_background: WindowBackgroundAppearance::Opaque,
+        // Only the action bar and the preview strip paint — the window
+        // itself is a floating HUD, not a slab over the desktop.
+        window_background: WindowBackgroundAppearance::Transparent,
         focus: true,
         display_id: panel_display,
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
-            size: size(
-                px(PANEL_W),
-                px((panel_out_h - 2. * SCROLL_PANEL_MARGIN).max(120.)),
-            ),
+            size: size(px(PANEL_W), px(panel_h)),
         })),
         #[cfg(target_os = "linux")]
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "shotori-scroll-preview".into(),
             layer: Layer::Overlay,
-            anchor: Anchor::TOP | Anchor::BOTTOM | side_anchor(side),
+            anchor: Anchor::TOP | side_anchor(side),
             exclusive_zone: Some(px(-1.)),
             // The panel owns the keyboard so the shortcuts match the
             // selection flow. NOTE: if the compositor routes wheel by
             // keyboard focus (niri does for virtual pointers), scrolling
             // degrades to frame-dragging — deliberately shipped both.
             keyboard_interactivity: KeyboardInteractivity::Exclusive,
-            margin: Some((
-                px(SCROLL_PANEL_MARGIN),
-                px(0.),
-                px(SCROLL_PANEL_MARGIN),
-                px(0.),
-            )),
+            // CSS order: top, right, bottom, left. The side margin
+            // keeps the card off the output edge; the top margin
+            // matches the old dock's breathing room.
+            margin: Some(match side {
+                Side::Left => (
+                    px(SCROLL_PANEL_MARGIN),
+                    px(0.),
+                    px(0.),
+                    px(SCROLL_PANEL_MARGIN),
+                ),
+                Side::Right => (
+                    px(SCROLL_PANEL_MARGIN),
+                    px(SCROLL_PANEL_MARGIN),
+                    px(0.),
+                    px(0.),
+                ),
+            }),
             ..Default::default()
         }),
         #[cfg(not(target_os = "linux"))]
@@ -255,7 +302,7 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     let pcell = panel_cell.clone();
     let panel = cx.open_window(panel_options, |window, cx| {
         cx.new(|cx| {
-            let panel = PreviewPanel::new(controls, events, panel_out_h, window, cx);
+            let panel = PreviewPanel::new(controls, events, panel_h, preview_height, window, cx);
             *pcell.borrow_mut() = Some(cx.entity().downgrade());
             panel
         })
@@ -322,6 +369,8 @@ pub(crate) struct FrameView {
     /// frame exists): toolbar exits without cross-window dispatch.
     controls: Option<ScrollControls>,
     panel: Option<gpui_kit::WeakEntity<PreviewPanel>>,
+    /// Chrome-free pause state (the deck tracks its own).
+    paused: bool,
 }
 
 /// The chrome-free engine host's state (a miniature of what the panel
@@ -353,6 +402,7 @@ impl FrameView {
             drag: None,
             controls: None,
             panel: None,
+            paused: false,
         }
     }
 
@@ -494,6 +544,15 @@ impl FrameView {
         }
     }
 
+    /// Space: freeze or resume sampling in a chrome-free session.
+    fn pause_key(&mut self, _: &ScrollPause, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(controls) = &self.controls {
+            self.paused = !self.paused;
+            controls.set_paused(self.paused);
+            cx.notify();
+        }
+    }
+
     /// Ctrl+S: finish, then hand the canvas to the save flow.
     fn save(&mut self, _: &ScrollSave, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(host) = &mut self.host {
@@ -535,12 +594,28 @@ impl FrameView {
         // covers only their rects — the captured content stays
         // interactive for the app beneath.
         let strokes = frame_strokes(self.rect);
-        let toolbar = frame_toolbar(
-            self.rect,
-            f32::from(self.output.width),
-            f32::from(self.output.height),
-            self.dock,
-        );
+        // A docked deck carries every action, so the frame is just the
+        // selection outline plus a small move chip. Only the chrome-free
+        // session (no deck at all) needs a toolbar on the frame.
+        let chip = (self.dock != ScrollPanelDock::Hidden)
+            .then(|| {
+                frame_grab_chip(
+                    self.rect,
+                    f32::from(self.output.width),
+                    f32::from(self.output.height),
+                )
+            })
+            .flatten();
+        let toolbar = (self.dock == ScrollPanelDock::Hidden)
+            .then(|| {
+                frame_toolbar(
+                    self.rect,
+                    f32::from(self.output.width),
+                    f32::from(self.output.height),
+                    self.dock,
+                )
+            })
+            .flatten();
         let grab = cx.listener(|this, event: &MouseDownEvent, _, _| {
             this.drag = Some((event.position, this.rect, true));
         });
@@ -557,6 +632,16 @@ impl FrameView {
                 controls.cancel();
             }
         });
+        let chip_grab = cx.listener(|this, event: &MouseDownEvent, _, _| {
+            this.drag = Some((event.position, this.rect, true));
+        });
+        let pause = cx.listener(|this, _: &MouseDownEvent, _, cx| {
+            if let Some(controls) = &this.controls {
+                this.paused = !this.paused;
+                controls.set_paused(this.paused);
+                cx.notify();
+            }
+        });
         div()
             .id("shotori-scroll-frame")
             // The ShotoriScroll context + focus are only live when this
@@ -567,6 +652,7 @@ impl FrameView {
             .on_action(cx.listener(Self::finish))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::pause_key))
             // FIRST child: the sink canvas must sit under the toolbar
             // in paint order so the buttons win the element hit-test.
             .child(pointer_sink(
@@ -574,6 +660,40 @@ impl FrameView {
                 self.output,
                 self.panel_reserve(),
             ))
+            .children(chip.map(|chip| {
+                div()
+                    .id("frame-grab-chip")
+                    .absolute()
+                    .left(chip.origin.x)
+                    .top(chip.origin.y)
+                    .w(chip.size.width)
+                    .h(chip.size.height)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    // Wears the frame's own accent instead of the
+                    // toolbar's neutral slab: the strokes, this handle
+                    // and the selection's size chip are one family, so
+                    // the handle reads as "grab here" rather than as a
+                    // stray widget over the page.
+                    .bg(rgba(alpha(theme::c().accent, 0x2E)))
+                    .border_1()
+                    .border_color(rgba(alpha(theme::c().accent, 0x66)))
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .hover(|style| style.bg(rgba(alpha(theme::c().accent, 0x4A))))
+                    .active(|style| style.bg(rgba(alpha(theme::c().accent, 0x66))))
+                    .tooltip(|_, cx| {
+                        cx.new(|_| {
+                            crate::ui::toolbar::ToolbarTooltip(
+                                crate::i18n::t!("scroll.action.drag").to_string().into(),
+                            )
+                        })
+                        .into()
+                    })
+                    .on_mouse_down(MouseButton::Left, chip_grab)
+                    .child(crate::ui::toolbar::chip_grip())
+            }))
             .children(strokes.iter().map(|s| {
                 div()
                     .absolute()
@@ -581,9 +701,18 @@ impl FrameView {
                     .top(s.origin.y)
                     .w(s.size.width)
                     .h(s.size.height)
+                    .cursor(CursorStyle::OpenHand)
                     .bg(rgba(theme::c().accent))
             }))
             .children(toolbar.map(|toolbar| {
+                let copy_label = crate::i18n::t!("common.copy").to_string();
+                let save_label = crate::i18n::t!("common.save").to_string();
+                let cancel_label = crate::i18n::t!("scroll.action.cancel").to_string();
+                let pause_label = if self.paused {
+                    crate::i18n::t!("scroll.action.resume").to_string()
+                } else {
+                    crate::i18n::t!("scroll.action.pause").to_string()
+                };
                 div()
                     .id("frame-toolbar")
                     .absolute()
@@ -593,53 +722,125 @@ impl FrameView {
                     .h(toolbar.size.height)
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .px_1()
-                    .rounded(px(8.))
+                    .gap(px(4.))
+                    .px(px(4.))
+                    .rounded(px(10.))
                     .bg(rgba(theme::c().toolbar_bg))
                     .border_1()
-                    .border_color(rgba(theme::c().pin_border))
-                    .child(hold_button("frame-tb-grab", "⇕", 34., grab))
-                    .child(hold_button(
+                    .border_color(rgba(theme::c().toolbar_border))
+                    .shadow_md()
+                    .child(frame_grip(grab))
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h(px(18.))
+                            .bg(rgba(theme::c().toolbar_border)),
+                    )
+                    .child(frame_button(
+                        "frame-tb-pause",
+                        pause_label.clone(),
+                        format!("{pause_label} · Space"),
+                        if self.paused {
+                            IconName::Play
+                        } else {
+                            IconName::Pause
+                        },
+                        false,
+                        pause,
+                    ))
+                    .child(frame_button(
                         "frame-tb-copy",
-                        crate::i18n::t!("common.copy").as_ref(),
-                        52.,
+                        copy_label.clone(),
+                        format!("{copy_label} · Enter"),
+                        IconName::Copy,
+                        true,
                         copy,
                     ))
-                    .child(hold_button(
+                    .child(frame_button(
                         "frame-tb-save",
-                        crate::i18n::t!("common.save").as_ref(),
-                        52.,
+                        save_label.clone(),
+                        format!("{save_label} · Ctrl+S"),
+                        IconName::Save,
+                        false,
                         save,
                     ))
-                    .child(hold_button("frame-tb-cancel", "✕", 26., cancel))
+                    .child(frame_button(
+                        "frame-tb-cancel",
+                        cancel_label.clone(),
+                        format!("{cancel_label} · Esc"),
+                        IconName::X,
+                        false,
+                        cancel,
+                    ))
             }))
     }
 }
 
-/// One toolbar button. Press semantics for every entry: the press
-/// starts the effect (the grab button's drag ends on mouse-up via the
-/// window listeners).
-fn hold_button<F: Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>(
-    id: &'static str,
-    label: &str,
-    w: f32,
-    on_press: F,
+/// Chrome-free deck substitute: a 26×30 grip that drags the frame
+/// vertically. The tooltip is the only label it needs.
+fn frame_grip(
+    on_press: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     div()
-        .id(id)
-        .w(px(w))
-        .flex_1()
-        .h_full()
+        .id("frame-tb-grab")
         .flex()
         .items_center()
-        .justify_around()
+        .justify_center()
+        .w(px(26.))
+        .h(px(30.))
         .rounded(px(6.))
-        .text_size(px(12.))
-        .text_color(rgba(theme::c().btn_text))
-        .hover(|s| s.bg(rgba(theme::c().btn_hover_bg)))
+        .text_size(px(13.))
+        .text_color(rgba(theme::c().hint_text))
+        .cursor(CursorStyle::ResizeUpDown)
+        .hover(|style| style.bg(rgba(theme::c().toolbar_hover)))
+        .tooltip(|_, cx| {
+            cx.new(|_| {
+                crate::ui::toolbar::ToolbarTooltip(
+                    crate::i18n::t!("scroll.action.drag").to_string().into(),
+                )
+            })
+            .into()
+        })
         .on_mouse_down(MouseButton::Left, on_press)
-        .child(label.to_string())
+        .child("⇕")
+}
+
+/// The chrome-free toolbar's icon button — the deck's 34px tile,
+/// shrunk to 30px to keep the floating bar compact.
+fn frame_button(
+    id: &'static str,
+    label: String,
+    tooltip: String,
+    icon: IconName,
+    primary: bool,
+    on_press: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let (bg, hover, ink) = if primary {
+        (
+            alpha(theme::c().accent, 0x2E),
+            alpha(theme::c().accent, 0x4A),
+            theme::c().accent,
+        )
+    } else {
+        (0, theme::c().toolbar_hover, theme::c().toolbar_text)
+    };
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(30.))
+        .rounded(px(6.))
+        .bg(rgba(bg))
+        .hover(move |style| style.bg(rgba(hover)))
+        .cursor(CursorStyle::PointingHand)
+        .aria_label(label)
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::ui::toolbar::ToolbarTooltip(tooltip.clone().into()))
+                .into()
+        })
+        .on_mouse_down(MouseButton::Left, on_press)
+        .child(svg().path(icon.path()).size(px(16.)).text_color(rgba(ink)))
 }
 
 /// The invisible canvas that owns the frame window's pointer listeners.
@@ -739,12 +940,23 @@ impl Render for FrameView {
         // visuals. The toolbar only joins when the placement ladder
         // found room for it OUTSIDE the capture region.
         let mut hit: Vec<Bounds<Pixels>> = frame_grab_bands(self.rect).into();
-        hit.extend(frame_toolbar(
-            self.rect,
-            f32::from(self.output.width),
-            f32::from(self.output.height),
-            self.dock,
-        ));
+        if self.dock != ScrollPanelDock::Hidden
+            && let Some(chip) = frame_grab_chip(
+                self.rect,
+                f32::from(self.output.width),
+                f32::from(self.output.height),
+            )
+        {
+            hit.push(chip);
+        }
+        if self.dock == ScrollPanelDock::Hidden {
+            hit.extend(frame_toolbar(
+                self.rect,
+                f32::from(self.output.width),
+                f32::from(self.output.height),
+                self.dock,
+            ));
+        }
         window.set_input_region(Some(&hit));
         FrameView::render(self, cx)
     }
@@ -762,19 +974,47 @@ pub(crate) struct PreviewPanel {
     /// The region-frame window, closed on every terminal path.
     sibling: Option<AnyWindowHandle>,
     image: Option<Arc<RenderImage>>,
+    /// Every preview bitmap the window has been handed. gpui keeps a GPU
+    /// texture per `RenderImage`; a 16 fps preview would otherwise leak
+    /// one ~1 MB texture per frame (the "it freezes after a minute of
+    /// scrolling" report). Retired ones are dropped during the next
+    /// paint — `CanvasImages` is the crate's existing eviction dance.
+    preview_images: image_util::CanvasImages,
+    /// Textures to evict on the next paint (see above).
+    retired: Vec<Arc<RenderImage>>,
     /// Viewport highlight in PREVIEW-row coordinates (already mapped by
-    /// the engine): (top, height).
-    viewport: (u32, u32),
+    /// the engine); `None` when the panel is peeking at history, i.e.
+    /// the viewport is not on the window it shows.
+    viewport: Option<(u32, u32)>,
     preview_rows: u32,
     /// The preview bitmap's width in px (for the aspect-derived display
     /// height — see [`PREVIEW_IMG_W`]).
     preview_cols: u32,
-    /// The host output's logical height — the preview column's visible
-    /// window derives from it (the panel is anchored TOP|BOTTOM with
-    /// 10 px margins).
+    /// The engine's camera writes its preview height here (0 = none).
+    preview_height: Arc<std::sync::atomic::AtomicU32>,
+    /// The deck window's logical height — the preview well's visible
+    /// area derives from it (the card is top-anchored, not full-height).
     output_h: f32,
+    /// Physical capture size from `Started` (width, height).
+    capture: Option<(u32, u32)>,
+    /// Full canvas height from `Progress` — the header's "W × H".
+    total_height: u32,
+    /// The session's own reading of the last few frames (waiting /
+    /// following / no overlap / stalled) — a refusal is a state here,
+    /// never an error.
+    phase: Phase,
+    /// Sampling paused by the user (Space / the pause button).
+    paused: bool,
+    /// Current growth direction (confirmed by the engine).
+    axis: Axis,
+    /// The engine accepted a frame: the axis can no longer be swapped.
+    axis_locked: bool,
+    /// The wheel in the strip aimed the camera at history; the chip
+    /// returns it to the live edge.
+    peeking: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum PanelState {
     /// Engine thread is connecting / capturing the first frame.
     Starting,
@@ -794,6 +1034,7 @@ impl PreviewPanel {
         controls: ScrollControls,
         events: async_channel::Receiver<ScrollEvent>,
         output_h: f32,
+        preview_height: Arc<std::sync::atomic::AtomicU32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -808,11 +1049,22 @@ impl PreviewPanel {
             saving: false,
             sibling: None,
             image: None,
-            viewport: (0, 0),
+            preview_images: image_util::CanvasImages::default(),
+            retired: Vec::new(),
+            viewport: None,
             preview_rows: 0,
             preview_cols: 1,
+            preview_height,
             output_h,
+            capture: None,
+            total_height: 0,
+            phase: Phase::Waiting,
+            paused: false,
+            axis: Axis::Vertical,
+            axis_locked: false,
+            peeking: false,
         };
+        this.publish_preview_height();
 
         // The event pump: engine → entity updates; ends with the channel
         // (the engine closes its sender on exit).
@@ -848,6 +1100,120 @@ impl PreviewPanel {
         }
     }
 
+    /// Stop sampling and deliver the canvas (the deck's Copy button).
+    fn request_finish(&mut self, cx: &mut Context<Self>) {
+        if let Some(controls) = &self.controls
+            && !matches!(self.state, PanelState::Done)
+        {
+            self.state = PanelState::Finishing;
+            controls.finish();
+            cx.notify();
+        }
+    }
+
+    /// Discard the session (the deck's Cancel button).
+    fn request_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(controls) = self.controls.take() {
+            controls.cancel();
+            cx.notify();
+        }
+    }
+
+    /// The preview well's visible height and the strip's rendered height,
+    /// from the same constants the renderer uses.
+    fn preview_metrics(&self) -> (f32, f32) {
+        let content_h = self.output_h.max(120.);
+        let area_h = (content_h - TOOLBAR_H - TOOLBAR_GAP - 2. * PREVIEW_BORDER).max(60.);
+        let img_h = (PREVIEW_IMG_W * self.preview_rows as f32 / self.preview_cols.max(1) as f32)
+            .clamp(1., 8000.);
+        (area_h, img_h)
+    }
+
+    /// Tell the engine how tall the strip is. The engine sizes the slice
+    /// from it (same `k`, same fit), which is what keeps one sheet row a
+    /// constant number of screen pixels — the old preview resized its own
+    /// image as the sheet grew and moved at a rate nobody could predict.
+    fn publish_preview_height(&self) {
+        let (area_h, _) = self.preview_metrics();
+        self.preview_height.store(
+            area_h.round().max(0.) as u32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Wheel over the strip: aim the engine's camera at history instead
+    /// of the live edge. The panel never scrolls a bitmap — the strip is
+    /// a viewfinder, so a step is a new slice from the engine and the
+    /// "Back to live" chip restores following.
+    fn scroll_preview(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let lines = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y,
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
+        };
+        if lines == 0. || self.image.is_none() {
+            return;
+        }
+        let step = (lines * 3.).round() as i32;
+        if step == 0 {
+            return;
+        }
+        if let Some(controls) = &self.controls {
+            self.peeking = true;
+            controls.peek(Some(step));
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The contextual chip that appears over the preview only when the
+    /// session is NOT simply following: waiting, no overlap, stalled,
+    /// paused or wrapping up. A healthy capture needs no word — the
+    /// moving strip says it.
+    fn state_chip(&self) -> Option<String> {
+        if self.paused {
+            return Some(crate::i18n::t!("scroll.status.paused").to_string());
+        }
+        match self.state {
+            PanelState::Starting => None,
+            PanelState::Finishing | PanelState::Done => {
+                Some(crate::i18n::t!("scroll.status.finishing").to_string())
+            }
+            PanelState::Running => match self.phase {
+                Phase::Waiting => Some(crate::i18n::t!("scroll.status.waiting").to_string()),
+                Phase::NoOverlap => Some(crate::i18n::t!("scroll.status.no_overlap").to_string()),
+                Phase::Stalled => Some(crate::i18n::t!("scroll.status.stalled").to_string()),
+                Phase::Following => None,
+            },
+        }
+    }
+
+    /// Space / the pause button: freeze sampling without ending the
+    /// session. The engine keeps the canvas; resuming re-anchors on
+    /// whatever the page shows then.
+    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        if let Some(controls) = &self.controls {
+            self.paused = !self.paused;
+            controls.set_paused(self.paused);
+            cx.notify();
+        }
+    }
+
+    /// Swap vertical/horizontal growth. The engine confirms with a
+    /// `ScrollEvent::Axis` (and reports `locked` once it is too late).
+    fn toggle_axis(&mut self, cx: &mut Context<Self>) {
+        if self.axis_locked {
+            return;
+        }
+        let next = match self.axis {
+            Axis::Vertical => Axis::Horizontal,
+            Axis::Horizontal => Axis::Vertical,
+        };
+        if let Some(controls) = &self.controls {
+            controls.set_axis(next);
+            cx.notify();
+        }
+    }
+
     fn close_sibling(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.sibling.take() {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -856,39 +1222,67 @@ impl PreviewPanel {
 
     fn on_event(&mut self, event: ScrollEvent, window: &AnyWindowHandle, cx: &mut Context<Self>) {
         match event {
-            ScrollEvent::Started { .. } => {
-                self.state = PanelState::Running;
+            ScrollEvent::Axis { axis, locked } => {
+                self.axis = axis;
+                self.axis_locked = locked;
+                self.peeking = false;
+                self.publish_preview_height();
+                // The initial long dimension follows the axis: the
+                // region's height for vertical, its width for
+                // horizontal. Progress overwrites this on the first
+                // accepted frame (after which the axis is locked).
+                if let Some((w, h)) = self.capture {
+                    self.total_height = match axis {
+                        Axis::Vertical => h,
+                        Axis::Horizontal => w,
+                    };
+                }
                 cx.notify();
             }
-            ScrollEvent::Progress { .. } => {
-                // Row counters were panel status copy once; the panel is
-                // a pure preview now and progress rides the image stream.
+            ScrollEvent::Started { width, height } => {
+                self.state = PanelState::Running;
+                self.capture = Some((width, height));
+                // Vertical is the initial direction; the Axis event
+                // that follows corrects the long dimension.
+                self.total_height = height;
+                cx.notify();
+            }
+            ScrollEvent::Progress { total, .. } => {
+                // The header shows the growing canvas size; `extent`
+                // stays available for a future progress bar.
+                self.total_height = self.total_height.max(total);
+                cx.notify();
+            }
+            ScrollEvent::Phase(phase) => {
+                self.phase = phase;
+                cx.notify();
             }
             ScrollEvent::Viewport { top, height } => {
                 // The pixel-free twin of Preview's viewport fields: the
                 // highlight follows frame drags without image resend.
-                self.viewport = (top, height);
+                self.viewport = Some((top, height));
                 cx.notify();
             }
             ScrollEvent::Preview {
                 width,
                 height,
                 rgba,
-                tail_start: _,
                 viewport_top,
                 viewport_height,
             } => {
-                self.image = Some(image_util::rgba_to_render_image(
-                    (*rgba).clone(),
-                    width,
-                    height,
-                ));
+                // A new bitmap every frame buys a GPU texture every
+                // frame; retire the one it replaces (painted-dropped,
+                // see `retired`).
+                let image = image_util::rgba_to_render_image((*rgba).clone(), width, height);
+                self.retired
+                    .extend(self.preview_images.replace(vec![image.clone()]));
+                self.image = Some(image);
                 self.preview_rows = height;
                 self.preview_cols = width.max(1);
-                // The engine already mapped the span into PREVIEW rows
-                // (top clamped inside the tail); the panel only turns
-                // rows into fractions of the preview height.
-                self.viewport = (viewport_top, viewport_height);
+                // The engine mapped the span into PREVIEW rows already;
+                // `None` = the viewport is not on the window it sent
+                // (the camera is looking at history).
+                self.viewport = viewport_top.map(|top| (top, viewport_height));
                 cx.notify();
             }
             ScrollEvent::Finished {
@@ -944,14 +1338,6 @@ impl PreviewPanel {
                     self.close(window, cx);
                 }
             }
-            ScrollEvent::Idle => {
-                // Engine-sent once: nothing has moved since it started.
-                // The wheel may simply be going to another surface.
-                crate::notify::send(
-                    crate::i18n::t!("scroll.notify.waiting.title").as_ref(),
-                    crate::i18n::t!("scroll.notify.waiting.body").as_ref(),
-                );
-            }
             ScrollEvent::Cancelled => {
                 println!("[shotori] scroll cancelled");
                 self.close(window, cx);
@@ -971,23 +1357,19 @@ impl PreviewPanel {
     }
 
     /// Enter / Ctrl+C / [Copy]: stop the engine now; whatever is
-    /// stitched is the deliverable.
+    /// folded image is the deliverable.
     fn finish(&mut self, _: &ScrollFinish, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(controls) = &self.controls
-            && !matches!(self.state, PanelState::Done)
-        {
-            self.state = PanelState::Finishing;
-            controls.finish();
-            cx.notify();
-        }
+        self.request_finish(cx);
     }
 
     /// Esc / [Cancel]: discard everything.
     fn cancel(&mut self, _: &ScrollCancel, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(controls) = self.controls.take() {
-            controls.cancel();
-            cx.notify();
-        }
+        self.request_cancel(cx);
+    }
+
+    /// Space / [Pause]: freeze or resume sampling.
+    fn pause(&mut self, _: &ScrollPause, _window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_pause(cx);
     }
 
     /// Ctrl+S: finish, then hand the canvas to the save flow.
@@ -1071,67 +1453,248 @@ fn scroll_save_exit(
 }
 
 impl Render for PreviewPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = &self.state; // Starting/Finishing/Done differ only in logic now
-        // The panel is a PURE PREVIEW (user-designed): the frame's
-        // toolbar carries the buttons, the keyboard shortcuts stay
-        // bound here invisibly. When the long image is TALLER than the
-        // panel, the visible window FOLLOWS the viewport highlight —
-        // a bottom-anchored image let the highlight scroll out of view
-        // (clipped away entirely at v_top = 0: the "no upward sync"
-        // report, where the highlight was pinned to an off-screen
-        // image top). Fitting images still anchor to the bottom (the
-        // growing edge stays put).
-        let mut preview_area = div().flex_1().relative().overflow_hidden();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Retire the previous frame's texture. gpui keeps a texture per
+        // `RenderImage` per window; at capture cadence an un-evicted
+        // preview leaks one bitmap-sized texture every ~60 ms, which is
+        // what froze (then killed) long sessions.
+        for image in self.retired.drain(..) {
+            if let Err(error) = window.drop_image(image) {
+                eprintln!("[shotori] preview cleanup failed: {error}");
+            }
+        }
+        let size = self.capture.map(|(w, h)| match self.axis {
+            Axis::Vertical => format!("{w} × {}", self.total_height.max(h)),
+            Axis::Horizontal => format!("{} × {h}", self.total_height.max(w)),
+        });
+        let state = self.state_chip();
+
+        // ── action bar: the selection toolbar's vocabulary, floating
+        // over the capture instead of becoming a panel header. ────────
+        let pause_label = if self.paused {
+            crate::i18n::t!("scroll.action.resume").to_string()
+        } else {
+            crate::i18n::t!("scroll.action.pause").to_string()
+        };
+        let pause_icon = if self.paused {
+            IconName::Play
+        } else {
+            IconName::Pause
+        };
+        let axis_label = match self.axis {
+            Axis::Vertical => crate::i18n::t!("scroll.action.axis_horizontal").to_string(),
+            Axis::Horizontal => crate::i18n::t!("scroll.action.axis_vertical").to_string(),
+        };
+        let axis_tip = if self.axis_locked {
+            crate::i18n::t!("scroll.action.axis_locked").to_string()
+        } else {
+            axis_label.clone()
+        };
+        let copy_label = crate::i18n::t!("common.copy").to_string();
+        let save_label = crate::i18n::t!("common.save").to_string();
+        let cancel_label = crate::i18n::t!("scroll.action.cancel").to_string();
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .h(px(TOOLBAR_H))
+            .px(px(6.))
+            .rounded(px(10.))
+            .bg(rgba(theme::c().toolbar_bg))
+            .border_1()
+            .border_color(rgba(theme::c().toolbar_border))
+            .shadow_md()
+            .child(deck_button(
+                "scroll-deck-pause",
+                pause_label.clone(),
+                format!("{pause_label} · Space"),
+                DeckIcon::Kit(pause_icon),
+                DeckTone::Neutral,
+                true,
+                cx.listener(|this, _, _, cx| this.toggle_pause(cx)),
+            ))
+            .child(deck_button(
+                "scroll-deck-axis",
+                axis_label.clone(),
+                axis_tip,
+                DeckIcon::Own("icons/axis.svg"),
+                DeckTone::Neutral,
+                !self.axis_locked,
+                cx.listener(|this, _, _, cx| this.toggle_axis(cx)),
+            ))
+            .child(
+                div()
+                    .w(px(1.))
+                    .h(px(18.))
+                    .bg(rgba(theme::c().toolbar_border)),
+            )
+            .child(deck_button(
+                "scroll-deck-copy",
+                copy_label.clone(),
+                format!("{copy_label} · Enter"),
+                DeckIcon::Kit(IconName::Copy),
+                DeckTone::Primary,
+                true,
+                cx.listener(|this, _, _, cx| this.request_finish(cx)),
+            ))
+            .child(deck_button(
+                "scroll-deck-save",
+                save_label.clone(),
+                format!("{save_label} · Ctrl+S"),
+                DeckIcon::Kit(IconName::Save),
+                DeckTone::Neutral,
+                true,
+                cx.listener(|this, _, _, cx| this.request_save(cx)),
+            ))
+            .child(deck_button(
+                "scroll-deck-cancel",
+                cancel_label.clone(),
+                format!("{cancel_label} · Esc"),
+                DeckIcon::Kit(IconName::X),
+                DeckTone::Neutral,
+                true,
+                cx.listener(|this, _, _, cx| this.request_cancel(cx)),
+            ));
+        let toolbar = div().w_full().flex().justify_center().child(bar);
+
+        // ── preview strip: the long image itself, no extra panel chrome.
+        let (area_h, _) = self.preview_metrics();
+        let mut preview = div()
+            .flex_1()
+            .relative()
+            .overflow_hidden()
+            .rounded(px(10.))
+            .bg(rgba(theme::c().toolbar_hover))
+            .border_1()
+            .border_color(rgba(alpha(theme::c().toolbar_border, 0xD0)))
+            .on_scroll_wheel(cx.listener(Self::scroll_preview));
+
         if let Some(image) = self.image.clone() {
             let rows = self.preview_rows.max(1) as f32;
-            let (v_top, v_h) = self.viewport;
-            // Viewport events reference the CURRENT canvas while this
-            // image is up to one preview-interval stale — v_top can
-            // exceed `rows` mid-scroll. Cap below 1.0 so the height
-            // clamp's min ≤ max always holds (an uncapped pair once
-            // panicked the render pass: the "scrolling crashes" bug).
-            let top_frac = (v_top as f32 / rows).min(0.99);
-            let h_frac = (v_h as f32 / rows).clamp(0.01, 1. - top_frac);
-            // EXPLICIT height from the known aspect — intrinsic sizing
-            // is the HiDPI trap (see PREVIEW_IMG_W). The wrapper then
-            // hugs exactly this box and the fractions below are
-            // fractions of the IMAGE.
-            let img_h = (PREVIEW_IMG_W * self.preview_rows as f32 / self.preview_cols as f32)
-                .clamp(1., 8000.);
-            // The visible column: panel window height (output minus the
-            // layer-shell margins) minus padding and border.
-            let area_h = (self.output_h
-                - 2. * crate::model::placement::SCROLL_PANEL_MARGIN
-                - 2. * (PANEL_PAD + PANEL_BORDER))
-                .max(60.);
-            let y_off = if img_h <= area_h {
-                area_h - img_h // bottom-anchored, as before
-            } else {
-                // Scroll the image so the highlight sits centered in
-                // the visible window, clamped to the image's extent.
-                let hl_center = (top_frac + h_frac / 2.) * img_h;
-                (area_h / 2. - hl_center).clamp(area_h - img_h, 0.)
+            let (_, img_h) = self.preview_metrics();
+            // The engine cut the window to this well's height, so the
+            // strip is painted 1:1 and never scaled to fit: at most a
+            // rounding pixel of slack, centered.
+            let strip_h = img_h.min(area_h);
+            let y_off = (area_h - strip_h) / 2.;
+            // Suppress the accent wash when the viewport IS the whole
+            // strip (the first screen): tinting every pixel adds nothing
+            // but a color cast.
+            let (wash, marker) = match self.viewport {
+                Some((v_top, v_h)) => {
+                    // Fractions of the STRIP (not the well): the engine's
+                    // mapping is already in preview rows. Cap below 1.0 so
+                    // the height clamp's min ≤ max always holds (an
+                    // uncapped pair once panicked the render pass — the
+                    // "scrolling crashes" bug).
+                    let top_frac = (v_top as f32 / rows).min(0.99);
+                    let h_frac = (v_h as f32 / rows).clamp(0.01, 1. - top_frac);
+                    let wash = if top_frac > 0.01 || h_frac < 0.98 {
+                        alpha(theme::c().accent, 0x12)
+                    } else {
+                        0
+                    };
+                    (wash, Some((top_frac, h_frac)))
+                }
+                // Peeking at history: no "you are here" band to draw.
+                None => (alpha(theme::c().hint_text, 0x08), None),
             };
-            preview_area = preview_area.child(
+            let mut strip = div()
+                .absolute()
+                .left(px(PREVIEW_GUTTER))
+                .top(px(y_off))
+                .w(px(PREVIEW_IMG_W))
+                .child(img(image).w_full().h(px(strip_h)));
+            if let Some((top_frac, h_frac)) = marker {
+                // The viewport marker: a translucent accent wash plus a
+                // crisp accent rule. The old 1px border read as a random
+                // rectangle; the wash makes "this is what the frame
+                // currently shows" legible at a glance, including at a
+                // 1–2 px band.
+                strip = strip.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .w_full()
+                        .top(relative(top_frac))
+                        .h(relative(h_frac))
+                        .bg(rgba(wash))
+                        .border_1()
+                        .border_color(rgba(theme::c().accent))
+                        .rounded_sm(),
+                );
+            }
+            preview = preview.child(strip);
+        } else {
+            let hint = if self.paused {
+                crate::i18n::t!("scroll.status.paused")
+            } else {
+                crate::i18n::t!("scroll.hint.start")
+            };
+            preview = preview.child(
                 div()
-                    .absolute()
-                    .left_0()
-                    .top(px(y_off))
-                    .w_full()
-                    .child(img(image).w_full().h(px(img_h)))
-                    // viewport highlight — where the capture frame sits
-                    // in the long image (accent outline, image-relative)
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.))
+                    .child(
+                        svg()
+                            .path(IconName::ArrowDown.path())
+                            .size(px(20.))
+                            .text_color(rgba(theme::c().hint_text)),
+                    )
                     .child(
                         div()
-                            .absolute()
-                            .left_0()
-                            .w_full()
-                            .top(relative(top_frac))
-                            .h(relative(h_frac))
-                            .border_1()
-                            .border_color(rgba(theme::c().accent))
-                            .rounded_sm(),
+                            .text_size(px(12.))
+                            .text_color(rgba(theme::c().toolbar_text))
+                            .child(hint),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgba(theme::c().hint_text))
+                            .child(crate::i18n::t!("scroll.hint.shortcuts").to_string()),
+                    ),
+            );
+        }
+
+        // Chips float over the image, exactly like the selection's size
+        // label: status on the left (only when not simply following the
+        // scroll), live size on the right.
+        if let Some(state) = state {
+            preview = preview.child(preview_chip(state).left(px(8.)));
+        }
+        if let Some(size) = size {
+            preview = preview.child(preview_chip(size).right(px(8.)));
+        }
+        if self.peeking {
+            preview = preview.child(
+                div()
+                    .id("scroll-back-to-live")
+                    .absolute()
+                    .bottom(px(8.))
+                    .right(px(8.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .bg(rgba(theme::c().chip_bg))
+                    .border_1()
+                    .border_color(rgba(alpha(theme::c().toolbar_border, 0xB0)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.peeking = false;
+                        if let Some(controls) = &this.controls {
+                            controls.peek(None);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgba(theme::c().hint_text))
+                            .child(crate::i18n::t!("scroll.action.follow").to_string()),
                     ),
             );
         }
@@ -1143,16 +1706,103 @@ impl Render for PreviewPanel {
             .size_full()
             .flex()
             .flex_col()
-            .p_2()
-            .bg(rgba(theme::c().toolbar_bg))
-            // Deliberately NOT pin_border: that is accent-orange at 60%
-            // alpha and reads as a giant "highlight" around the whole
-            // panel — the user kept mistaking it for the viewport box.
-            .border_1()
-            .border_color(rgba(0xFFFFFF20))
             .on_action(cx.listener(Self::finish))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::save))
-            .child(preview_area)
+            .on_action(cx.listener(Self::pause))
+            .child(toolbar)
+            .child(div().h(px(TOOLBAR_GAP)))
+            .child(preview)
     }
+}
+
+/// A small floating label over the preview, in the selection size-chip
+/// language (`chip_bg` + hint text). Absolute top is set by the caller.
+fn preview_chip(text: String) -> Div {
+    div()
+        .absolute()
+        .top(px(8.))
+        .px(px(6.))
+        .py(px(2.))
+        .rounded(px(5.))
+        .bg(rgba(theme::c().chip_bg))
+        .border_1()
+        .border_color(rgba(alpha(theme::c().toolbar_border, 0xB0)))
+        .text_size(px(10.))
+        .text_color(rgba(theme::c().hint_text))
+        .child(text)
+}
+
+/// The floating bar's icon look: the selection toolbar's 30px tile,
+/// with one accent tile for the primary exit. Disabled tiles fade but
+/// keep their tooltip (the axis explains why it locked).
+fn deck_button(
+    id: &'static str,
+    label: String,
+    tooltip: String,
+    icon: DeckIcon,
+    tone: DeckTone,
+    enabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let (bg, hover, ink) = match tone {
+        DeckTone::Neutral => (0, theme::c().toolbar_hover, theme::c().toolbar_text),
+        DeckTone::Primary => (
+            alpha(theme::c().accent, 0x2E),
+            alpha(theme::c().accent, 0x4A),
+            theme::c().accent,
+        ),
+    };
+    let button = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(30.))
+        .rounded(px(7.))
+        .bg(rgba(bg))
+        .aria_label(label)
+        .tooltip(move |_, cx| {
+            cx.new(|_| crate::ui::toolbar::ToolbarTooltip(tooltip.clone().into()))
+                .into()
+        });
+    let button = if enabled {
+        button
+            .hover(move |style| style.bg(rgba(hover)))
+            .cursor(CursorStyle::PointingHand)
+            .on_click(on_click)
+    } else {
+        button.opacity(0.45)
+    };
+    button
+        .child(icon.svg().size(px(16.)).text_color(rgba(ink)))
+        .into_any_element()
+}
+
+/// Icon source for a HUD tile: a gpui-kit asset or one of Shotori's own
+/// SVGs (the axis swap glyph is ours — Lucide has no neat twin-arrow).
+#[derive(Clone, Copy)]
+enum DeckIcon {
+    Kit(IconName),
+    Own(&'static str),
+}
+
+impl DeckIcon {
+    fn svg(self) -> Svg {
+        match self {
+            Self::Kit(name) => svg().path(name.path()),
+            Self::Own(path) => svg().path(path),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DeckTone {
+    Neutral,
+    Primary,
+}
+
+/// `0xRRGGBBAA` with a replacement alpha — theme colors are opaque.
+fn alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0xFFFFFF00) | u32::from(alpha)
 }

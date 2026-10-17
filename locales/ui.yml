@@ -211,14 +211,62 @@ pin:
         en: Try again, or copy from the overlay instead.
         zh-CN: 请重试，或改在截图界面上复制。
 scroll:
+  status:
+    waiting:
+      en: Waiting for scroll
+      zh-CN: 等待滚动
+    no_overlap:
+      en: No overlap
+      zh-CN: 无重叠
+    stalled:
+      en: Can’t advance
+      zh-CN: 无法推进
+    paused:
+      en: Paused
+      zh-CN: 已暂停
+    finishing:
+      en: Finishing…
+      zh-CN: 正在完成…
+  hint:
+    start:
+      en: Scroll the page to capture
+      zh-CN: 滚动页面开始捕获
+    shortcuts:
+      en: Enter to copy, Ctrl+S to save
+      zh-CN: Enter 复制，Ctrl+S 保存
+  action:
+    drag:
+      en: Drag the capture area
+      zh-CN: 拖动捕获区域
+    follow:
+      en: Back to live
+      zh-CN: 回到实时
+    axis_horizontal:
+      en: Switch to horizontal
+      zh-CN: 切换为横向
+    axis_vertical:
+      en: Switch to vertical
+      zh-CN: 切换为纵向
+    axis_locked:
+      en: Direction locked
+      zh-CN: 方向已锁定
+    pause:
+      en: Pause
+      zh-CN: 暂停
+    resume:
+      en: Resume
+      zh-CN: 继续
+    cancel:
+      en: Cancel
+      zh-CN: 取消
   notify:
     running:
       title:
         en: Long screenshot running
         zh-CN: 长截图进行中
       body:
-        en: Scroll the content to capture. Enter or Ctrl+C copies, Ctrl+S saves, Esc cancels.
-        zh-CN: 滚动页面以捕获内容。Enter 或 Ctrl+C 复制，Ctrl+S 保存，Esc 取消。
+        en: Scroll the content to capture. Space pauses, Enter or Ctrl+C copies, Ctrl+S saves, Esc cancels.
+        zh-CN: 滚动页面以捕获内容。Space 暂停，Enter 或 Ctrl+C 复制，Ctrl+S 保存，Esc 取消。
     stopped_early:
       title:
         en: Long screenshot stopped early

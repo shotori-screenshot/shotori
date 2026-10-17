@@ -83,14 +83,19 @@ impl Overlay {
         );
         let display_id = crate::ui::pin::display_containing(center);
         let shared_rect = std::sync::Arc::new(std::sync::Mutex::new(rect));
+        // Filled in by the preview panel once it knows its own height
+        // (0 = chrome-free: no panel, no preview pixels rendered).
+        let preview_rows = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let spec = crate::platform::scroll_capture::ScrollSpec {
             output: self.capture.output_name.clone(),
             rect: shared_rect,
+            preview_rows,
             // Auto-scroll is shelved behind an env flag until the
             // injection story works on niri (see inject_step); the
             // shipped UX is manual scrolling. The e2e backdoor needs
             // the self-contained auto mode (a headless run has no hands
             // to scroll with).
+            axis: crate::model::scroll_sheet::Axis::Vertical,
             mode: if std::env::var_os("SHOTORI_SCROLL_AUTO").is_some()
                 || std::env::var_os("SHOTORI_DEBUG_ACTION").is_some()
             {

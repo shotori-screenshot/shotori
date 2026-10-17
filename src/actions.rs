@@ -107,6 +107,13 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) {
             crate::ui::scroll_bar::ScrollSave,
             Some("ShotoriScroll"),
         ),
+        // Space freezes sampling without ending the session (the panel
+        // button dispatches the same action)
+        KeyBinding::new(
+            "space",
+            crate::ui::scroll_bar::ScrollPause,
+            Some("ShotoriScroll"),
+        ),
         // pins are their own windows with their own context
         KeyBinding::new("shift-f10", crate::ui::pin::OpenPinMenu, Some("ShotoriPin")),
         // Esc in the menu only dismisses it; with no menu it closes the
