@@ -831,6 +831,13 @@ impl ScreenshotSession {
     /// candidate (or only the full screen, which reads as "no hit" —
     /// unless the user wheeled up to it explicitly).
     fn smart_region_at(&mut self, global: Point<Pixels>) -> Option<Bounds<Pixels>> {
+        // The settings switch is the feature's single off switch: one
+        // check here silences hover, click-snap and the mark-shot
+        // refresh together (the wheel path has its own gate in
+        // `smart_step`). The compositor snap fallback below stays live.
+        if !crate::model::settings::current().smart_region() {
+            return None;
+        }
         let ix = self.screen_index_at(global)?;
         let detector = self.screens[ix].detector.clone()?;
         if self.cursor_screen != Some(ix) {
@@ -851,6 +858,9 @@ impl ScreenshotSession {
     /// event was consumed (a detector must have landed).
     pub(crate) fn smart_step(&mut self, direction: i32) -> bool {
         if self.blocked
+            // same off switch as `smart_region_at` — the wheel must not
+            // resurrect a hierarchy the user turned off
+            || !crate::model::settings::current().smart_region()
             || self.annotations.enabled()
             || self.annotations.tool().is_some()
             || self.selection.bounds().is_some()

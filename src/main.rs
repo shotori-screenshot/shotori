@@ -202,8 +202,9 @@ fn main() {
                     // session per output; hover/click snapping lights up
                     // silently wherever the analysis found candidates.
                     // Until then the compositor snap rects alone serve
-                    // the same interaction.
-                    {
+                    // the same interaction. The settings switch skips
+                    // the whole pass — no detector, no analysis cost.
+                    if shotori::model::settings::current().smart_region() {
                         let caps: Vec<std::sync::Arc<shotori::platform::capture::Capture>> =
                             targets.iter().map(|(cap, _)| cap.clone()).collect();
                         let session = session.clone();
@@ -242,8 +243,8 @@ fn main() {
                             });
                         })
                         .detach();
+                        shotori::boot_mark("region detection dispatched");
                     }
-                    shotori::boot_mark("region detection dispatched");
                     for (cap, did) in targets {
                         if did.is_none() {
                             eprintln!(

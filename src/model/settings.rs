@@ -362,6 +362,12 @@ pub struct Settings {
     /// Settings-window sidebar collapsed (written through on every
     /// toggle; the next `shotori settings` restores the rail).
     sidebar_collapsed: bool,
+    /// Pixel-based smart region selection (hover outline, click snap,
+    /// wheel hierarchy over detector candidates). Off = every selection
+    /// is drawn by hand. Compositor window snapping is a different
+    /// layer and stays available either way (the detector's quality
+    /// itself is issue #27's topic).
+    smart_region: bool,
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
@@ -379,6 +385,7 @@ impl Default for Settings {
             ocr_assume_upright: false,
             language: Language::Auto,
             sidebar_collapsed: false,
+            smart_region: true,
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
             keys: crate::actions::default_keys(),
         }
@@ -400,6 +407,10 @@ struct File {
     /// Settings-window sidebar collapsed (`sidebar_collapsed`,
     /// absent = expanded).
     sidebar_collapsed: Option<bool>,
+    /// Smart region selection on/off (`smart_region`, absent = on —
+    /// preference files written before the key existed keep the
+    /// shipped behavior).
+    smart_region: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -495,6 +506,15 @@ impl Settings {
 
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
         self.sidebar_collapsed = collapsed;
+    }
+
+    /// Whether pixel-based smart region selection is enabled (default on).
+    pub fn smart_region(&self) -> bool {
+        self.smart_region
+    }
+
+    pub fn set_smart_region(&mut self, enabled: bool) {
+        self.smart_region = enabled;
     }
 
     /// The resolved shortcut keystrokes (id → keystroke, defaults
@@ -681,6 +701,7 @@ impl Settings {
                 ocr_assume_upright,
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
+                smart_region: file.smart_region.unwrap_or(true),
                 annotation_colors,
                 keys,
             },
@@ -737,6 +758,7 @@ impl Settings {
             "sidebar_collapsed".into(),
             toml::Value::from(self.sidebar_collapsed),
         );
+        table.insert("smart_region".into(), toml::Value::from(self.smart_region));
         let ocr = table
             .entry("ocr")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -1254,6 +1276,25 @@ mod tests {
         assert!(!Settings::default().sidebar_collapsed());
         let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
         assert!(!fresh.sidebar_collapsed());
+    }
+
+    #[test]
+    fn smart_region_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        assert!(s.smart_region());
+        s.set_smart_region(false);
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert!(!back.smart_region());
+        // The factory default is enabled, and an absent key (a
+        // preference file written before the key existed) loads as
+        // enabled — turning the feature off is an explicit act.
+        assert!(Settings::default().smart_region());
+        let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
+        assert!(fresh.smart_region());
     }
 
     #[test]

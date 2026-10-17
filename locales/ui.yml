@@ -74,6 +74,13 @@ settings:
       blurb:
         en: Applies immediately, everywhere in this window.
         zh-CN: 立即生效，本窗口内即时切换。
+    smart_region:
+      title:
+        en: Smart region selection
+        zh-CN: 智能选区
+      body:
+        en: Hover outlines and click snapping propose regions detected in the frozen capture — windows, panels, controls. Turn off to draw every selection by hand.
+        zh-CN: 悬停高亮与点击吸附会提议冻结画面中识别出的区域（窗口、面板、控件）。关闭后全部手动框选。
   about:
     nav:
       en: About

@@ -1722,11 +1722,62 @@ impl SettingsWindow {
             ))
             .child(self.config_files_row(cx))
             .child(self.language_control(cx))
+            .child(self.smart_region_control(cx))
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgba(t.hint_text))
                     .child(crate::i18n::t!("settings.general.write_through").to_string()),
+            )
+    }
+
+    /// The smart-region switch (General page). Same write-through
+    /// contract as the OCR upright toggle: the flip saves the file and
+    /// the next capture reads it — a live overlay is not rewired
+    /// mid-session (its detectors, if any, simply stay unused: the
+    /// session queries the setting on every hover/press/wheel).
+    fn smart_region_control(&self, cx: &Context<Self>) -> Div {
+        let t = theme::c();
+        let entity = cx.entity();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(t.toolbar_border))
+            .child(
+                Switch::new("smart-region")
+                    .checked(self.settings.smart_region())
+                    .on_click(move |checked, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.settings.set_smart_region(*checked);
+                            this.persist(cx);
+                        });
+                    })
+                    .color(rgba(t.accent)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(
+                        div().text_size(px(13.)).text_color(rgba(t.btn_text)).child(
+                            crate::i18n::t!("settings.general.smart_region.title").to_string(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgba(t.hint_text))
+                            .child(
+                                crate::i18n::t!("settings.general.smart_region.body").to_string(),
+                            ),
+                    ),
             )
     }
 
