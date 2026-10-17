@@ -430,6 +430,9 @@ notify:
   view_image:
     en: View image
     zh-CN: 查看图片
+  open_text:
+    en: Open text
+    zh-CN: 打开文本
   scroll:
     start_failed:
       title:
@@ -476,6 +479,13 @@ notify:
       body:
         en: The clipboard is unavailable. Try again.
         zh-CN: 剪贴板不可用，请重试。
+    open_failed:
+      title:
+        en: Couldn’t open text
+        zh-CN: 无法打开文本
+      body:
+        en: The recognized text is still on your clipboard.
+        zh-CN: 识别结果仍在剪贴板中。
     failed:
       title:
         en: Couldn’t recognize text

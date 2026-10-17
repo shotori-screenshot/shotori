@@ -495,10 +495,10 @@ pub fn deliver_text(w: u32, h: u32, result: anyhow::Result<String>) {
             println!(
                 "[shotori] OCR done {w}x{h} → {lines} line(s) → clipboard (preview: {preview})"
             );
-            crate::notify::send(
-                crate::i18n::t!("notify.ocr.copied.title").as_ref(),
-                &preview,
-            );
+            // The full text is cached as a `.txt` so clicking the
+            // notification reopens it in the default editor — the body
+            // only carries a one-line preview.
+            crate::notify::ocr_copied(&t, &preview);
         }
         Err(e) => {
             eprintln!("[shotori] OCR failed: {e:#}");

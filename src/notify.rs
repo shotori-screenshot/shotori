@@ -2,7 +2,7 @@
 //!
 //! Why a child process: shotori calls `cx.quit()` right after saving / OCR.
 //! A plain background thread would be killed mid-send when the process
-//! exits; a detached child (`shotori --notify <summary> <body> [image] [saved path]`,
+//! exits; a detached child (`shotori --notify <summary> <body> [image] [open path]`,
 //! same pattern as the Linux clipboard daemon) outlives the parent and always
 //! delivers. Failures are silent by design — a missing notification daemon
 //! must never break a screenshot tool.
@@ -19,6 +19,10 @@
 //! process anyway — does the decode + downscale + thumbnail encode. The
 //! copy path additionally caches the full-resolution PNG so the
 //! notification's Open action can show it.
+//!
+//! Recognized text: the OCR exit caches the text as a `.txt` file and
+//! passes it as the open target — clicking the notification hands it to
+//! the desktop's default text editor through `xdg-open`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -33,7 +37,8 @@ pub const STDIN_IMAGE: &str = "-";
 
 /// Max thumbnail edge (px) — enough for any daemon's rendering, tiny file
 const PREVIEW_MAX: u32 = 256;
-/// Notification images older than this are removed on the next copy/save
+/// Notification cache files (thumbnails, copied screenshots, OCR text)
+/// older than this are removed on the next copy/save/OCR run
 const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 /// Queue a plain notification and return immediately.
@@ -73,6 +78,42 @@ fn write_clipboard_image(dir: &std::path::Path, png: &[u8]) -> std::io::Result<P
         .suffix(".png")
         .tempfile_in(dir)?;
     file.write_all(png)?;
+    let (_, path) = file.keep().map_err(|error| error.error)?;
+    Ok(path)
+}
+
+/// Retain the recognized text so the notification body can open it in the
+/// desktop's default text editor, and queue the notification. The text is
+/// already on the clipboard — a cache failure only loses the click target,
+/// never the primary result.
+pub fn ocr_copied(text: &str, preview: &str) {
+    let path = cache_dir().and_then(|dir| match write_ocr_text(&dir, text) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!("[shotori] could not cache recognized text: {error}");
+            None
+        }
+    });
+    spawn_child(
+        crate::i18n::t!("notify.ocr.copied.title").as_ref(),
+        preview,
+        None,
+        path.as_deref(),
+    );
+}
+
+/// The `.txt` suffix is load-bearing: `xdg-open` routes the click by the
+/// file's extension, so it lands in the default editor rather than an
+/// unknown-type dialog.
+fn write_ocr_text(dir: &std::path::Path, text: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    cleanup_old_previews(dir);
+    // Exclusive creation also handles simultaneous OCR runs.
+    let mut file = tempfile::Builder::new()
+        .prefix("ocr-")
+        .suffix(".txt")
+        .tempfile_in(dir)?;
+    file.write_all(text.as_bytes())?;
     let (_, path) = file.keep().map_err(|error| error.error)?;
     Ok(path)
 }
@@ -118,18 +159,19 @@ fn spawn_child(
     // usually exits a moment later and the OS reaps it.
 }
 
-/// Child entry point: `shotori --notify <summary> <body> [image] [saved path]`
+/// Child entry point: `shotori --notify <summary> <body> [image] [open path]`
 /// → show → exit. `image` is either a ready thumbnail path or `-`
 /// (`STDIN_IMAGE`), which renders the thumbnail here from the full-resolution
-/// PNG at `saved path` — the parent process does no pixel work.
+/// PNG at `open path` — the parent process does no pixel work. `open path` is
+/// what a notification click opens: a PNG for screenshots, a `.txt` for OCR.
 pub fn notify_main() -> i32 {
-    // The child produces two strings of its own ("View image", the
-    // open-failure fallback) — resolve the locale the same way the
+    // The child produces strings of its own ("View image" / "Open text",
+    // the open-failure fallbacks) — resolve the locale the same way the
     // parent did, from the shared settings file.
     crate::i18n::init_child();
     let mut args = std::env::args_os().skip(2);
     let (Some(summary), Some(body)) = (args.next(), args.next()) else {
-        eprintln!("[shotori] notify child: usage: --notify <summary> <body> [image] [saved path]");
+        eprintln!("[shotori] notify child: usage: --notify <summary> <body> [image] [open path]");
         return 1;
     };
     let image = args.next().filter(|s| !s.is_empty());
@@ -194,12 +236,18 @@ fn show(
     if let Some(path) = image {
         n.image_path(&format!("file://{}", path.display()));
     }
-    if open_path.is_some() {
+    if let Some(path) = open_path {
         // Clicking the notification body invokes the freedesktop
         // "default" action — the standard open gesture and the ONLY
         // control we ship. An explicit button would duplicate exactly
-        // what a click already does.
-        n.action("default", crate::i18n::t!("notify.view_image").as_ref())
+        // what a click already does. The label follows the target: OCR
+        // text opens in the default editor, screenshots in the viewer.
+        let label = if is_text_target(path) {
+            crate::i18n::t!("notify.open_text")
+        } else {
+            crate::i18n::t!("notify.view_image")
+        };
+        n.action("default", label.as_ref())
             .timeout(notify_rust::Timeout::Milliseconds(10000));
     }
     let handle = n.show()?;
@@ -223,13 +271,21 @@ fn show(
             .ok();
         handle.wait_for_action(|action| {
             if action == "default"
-                && let Err(error) = open_image(path)
+                && let Err(error) = open_target(path)
             {
-                eprintln!("[shotori] could not open saved screenshot: {error}");
-                send(
-                    crate::i18n::t!("notify.open_failed.title").as_ref(),
-                    crate::i18n::t!("notify.open_failed.body").as_ref(),
-                );
+                if is_text_target(path) {
+                    eprintln!("[shotori] could not open recognized text: {error}");
+                    send(
+                        crate::i18n::t!("notify.ocr.open_failed.title").as_ref(),
+                        crate::i18n::t!("notify.ocr.open_failed.body").as_ref(),
+                    );
+                } else {
+                    eprintln!("[shotori] could not open saved screenshot: {error}");
+                    send(
+                        crate::i18n::t!("notify.open_failed.title").as_ref(),
+                        crate::i18n::t!("notify.open_failed.body").as_ref(),
+                    );
+                }
             }
         });
     }
@@ -252,15 +308,28 @@ fn cache_app_icon(dir: &std::path::Path) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Hand the notification's target to the desktop (xdg-open): screenshots
+/// open in the default image viewer, OCR `.txt` files in the default text
+/// editor. Both go through the desktop's MIME associations, so there is no
+/// editor guessing here — `$EDITOR` may name a terminal editor that cannot
+/// start detached from a notification click.
 #[cfg(target_os = "linux")]
-fn open_image(path: &std::path::Path) -> anyhow::Result<()> {
+fn open_target(path: &std::path::Path) -> anyhow::Result<()> {
     let status = Command::new("xdg-open")
         .arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .status()?;
-    anyhow::ensure!(status.success(), "image opener exited with {status}");
+    anyhow::ensure!(status.success(), "opener exited with {status}");
     Ok(())
+}
+
+/// OCR results are cached as `.txt`; every other open target is an image
+/// (the copied PNG or the saved file).
+#[cfg(target_os = "linux")]
+fn is_text_target(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
 }
 
 /// Notification daemons may parse body markup, including OCR text and filenames.
@@ -299,9 +368,10 @@ fn render_preview(png_path: &std::path::Path) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Best-effort removal of previews past their TTL. The file must outlive
-/// the notification that references it — 24h is orders of magnitude more
-/// than any notification timeout.
+/// Best-effort removal of notification cache files (thumbnails, copied
+/// screenshots, OCR text) past their TTL. The file must outlive the
+/// notification that references it — 24h is orders of magnitude more than
+/// any notification timeout.
 fn cleanup_old_previews(dir: &std::path::Path) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
@@ -316,8 +386,10 @@ fn cleanup_old_previews(dir: &std::path::Path) {
             .is_some_and(|age| age > PREVIEW_TTL);
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let is_preview = name.starts_with("preview-") || name.starts_with("clipboard-");
-        if stale && is_preview {
+        let is_cache_entry = name.starts_with("preview-")
+            || name.starts_with("clipboard-")
+            || name.starts_with("ocr-");
+        if stale && is_cache_entry {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -352,7 +424,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old =
             std::time::SystemTime::now() - super::PREVIEW_TTL - std::time::Duration::from_secs(60);
-        for name in ["clipboard-old.png", "preview-old.png", "saved.png"] {
+        for name in [
+            "clipboard-old.png",
+            "preview-old.png",
+            "ocr-old.txt",
+            "saved.png",
+        ] {
             let file = std::fs::File::create(dir.path().join(name)).unwrap();
             file.set_times(std::fs::FileTimes::new().set_modified(old))
                 .unwrap();
@@ -362,6 +439,7 @@ mod tests {
         assert!(dir.path().join("saved.png").exists());
         assert!(!dir.path().join("clipboard-old.png").exists());
         assert!(!dir.path().join("preview-old.png").exists());
+        assert!(!dir.path().join("ocr-old.txt").exists());
     }
 
     #[test]
@@ -376,6 +454,21 @@ mod tests {
         assert_eq!(image.dimensions(), (640, 360));
         assert_eq!(image.into_raw(), rgba);
         assert_eq!(std::fs::read(second).unwrap(), png);
+    }
+
+    #[test]
+    fn ocr_cache_retains_the_full_text_and_uses_txt_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "第一行\nsecond line\n";
+        let first = super::write_ocr_text(dir.path(), text).unwrap();
+        let second = super::write_ocr_text(dir.path(), text).unwrap();
+        assert_ne!(first, second);
+        // The suffix is what routes a click to the default editor; a
+        // suffix-less cache file would hit the unknown-type fallback.
+        assert_eq!(first.extension().unwrap(), "txt");
+        assert!(super::is_text_target(&first));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), text);
+        assert!(!super::is_text_target(std::path::Path::new("shot.png")));
     }
 
     #[test]

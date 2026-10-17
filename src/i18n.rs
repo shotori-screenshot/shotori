@@ -90,6 +90,9 @@ mod tests {
         // The table must actually be embedded: a present key resolves,
         // an absent one returns itself (rust-i18n's fallback signal).
         assert_eq!(t!("notify.view_image").to_string(), "View image");
+        // The notify child resolves this label at click time; a missing
+        // key would surface as the raw key on the button.
+        assert_eq!(t!("notify.open_text").to_string(), "Open text");
         assert_eq!(t!("no.such.key").to_string(), "no.such.key");
     }
 
