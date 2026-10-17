@@ -218,6 +218,9 @@ scroll:
     no_overlap:
       en: No overlap
       zh-CN: 无重叠
+    unstable:
+      en: Can’t line up
+      zh-CN: 画面对不上
     stalled:
       en: Can’t advance
       zh-CN: 无法推进

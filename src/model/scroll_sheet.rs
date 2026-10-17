@@ -59,18 +59,31 @@
 //!   rectangle is rewritten into the sheet (not just the new band). Where
 //!   old and new overlap the fresh pixels win, so blinking carets and
 //!   lazy-loading images leave the *latest* state in the output.
-//! - **Anchor refresh on every non-duplicate frame** — a refused frame
-//!   still becomes the comparison anchor. Differencing a mid-animation
-//!   tear against the last *stable* frame forever would never recover;
-//!   riding through the change re-anchors on the settled content.
-//! - **Dual anchor** — the riding anchor above is only the FALLBACK base.
-//!   Matching happens against the last frame ACCEPTED into the sheet
-//!   first: a riding anchor sits at a position the sheet never advanced
-//!   to, so a dy measured from it silently drops the band between the
-//!   last accept and the anchor (the "lost band" that left the long image
-//!   shorter than the real page). The stable base recovers the full
-//!   displacement whenever the step fits inside the matcher's window —
-//!   which every real scroll step does.
+//! - **One position base, and refusals write nothing** — a frame is only
+//!   ever placed against the last frame the sheet actually advanced to
+//!   (`stable_profile`). Measuring the step against *any* nearer frame
+//!   ("why not re-anchor on the frame we just saw?") understates it by
+//!   the rows the sheet never advanced through, and the whole-viewport
+//!   write then paints displaced pixels over rows that were already
+//!   right: one refused frame corrupted 475 rows of a 1 864-row canvas
+//!   in the probe that found this. So an unplaceable frame is REFUSED:
+//!   no write, no growth, the canvas stays byte-identical, and the base
+//!   stays where it was until a frame overlaps it again — a tear or a
+//!   fast flick then costs the band nothing could bridge instead of
+//!   poisoning a viewport of good content. The previous frame is still
+//!   remembered, but only as evidence for the duplicate shortcut and the
+//!   fixed-column mask, never as a position.
+//! - **Only rows that can testify vote** — a vertical translation is
+//!   observable through vertical VARIATION alone. A row identical to its
+//!   neighbour could sit anywhere in the other frame and still "match",
+//!   so averaging it in does not merely dilute the verdict, it inverts
+//!   it: on a mostly-blank page two blank regions match at ANY distance
+//!   for cost ≈ 0, and the cheapest offset is decided by leftover
+//!   texture. Every cost is therefore a weighted mean over rows whose
+//!   weight is how much they differ from their neighbour, and a candidate
+//!   with too little weighted evidence is refused instead of ranked.
+//!   Without this the sparse-content fixture accepted `dy = -474` for a
+//!   272-row scroll and rewrote the sheet in the wrong place.
 //!
 //! Fixed bottom chrome (a site footer/status bar) follows the same
 //! evidence as the top band, but with a simpler sheet rule: once
@@ -96,7 +109,12 @@
 pub struct SheetLimits {
     /// Offsets above this fraction of the viewport height are never
     /// considered — a frame that jumped that far either lost all overlap
-    /// or matched a wrong periodic copy. 0.6 keeps ≥ 40 % overlap.
+    /// or matched a wrong periodic copy. It is only a sanity bound: the
+    /// real floor is [`SheetLimits::min_overlap`], which still has to
+    /// leave `min_overlap` rows to verify a candidate. Manual scrolling
+    /// makes the step whatever the user's finger did, so the bound sits
+    /// as high as the overlap budget allows; a tighter one refused every
+    /// frame of a brisk trackpad flick.
     pub max_motion_ratio: f32,
     /// Mean band-signal |Δ| (0–255 grayscale units) below which an offset
     /// counts as a match. 2.5 absorbs the ±1–2 shimmer of GPU-antialiased
@@ -119,7 +137,7 @@ pub struct SheetLimits {
 impl Default for SheetLimits {
     fn default() -> Self {
         Self {
-            max_motion_ratio: 0.6,
+            max_motion_ratio: 0.8,
             cost_threshold: 2.5,
             ambiguity_margin: 1.5,
             min_overlap: 48,
@@ -164,16 +182,21 @@ fn transpose_rgba(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
 pub(crate) enum Refusal {
     /// Viewport smaller than the minimum workable size.
     TooSmall,
-    /// No admissible offset exists at all: every candidate would leave
-    /// less than [`SheetLimits::min_overlap`] rows of overlap.
-    /// Unreachable with the constructor's size gate and default options —
-    /// kept as the matcher's defensive floor for custom options.
+    /// The motion is bigger than the overlap budget: either every
+    /// candidate would leave less than [`SheetLimits::min_overlap`] rows
+    /// of overlap, or the best candidate sits at the very edge of the
+    /// search window with a bad residual — the frame moved further than
+    /// one capture interval could bridge. Actionable by the user (scroll
+    /// slower) and self-healing (the base is unchanged, so a later frame
+    /// that still overlaps it links up with its full displacement).
     NoOverlap,
     /// Multiple offsets fit equally well (periodic texture). Not
     /// force-fit; a later frame usually escapes the pattern.
     Unclear,
     /// The best offset is still a bad match — content changed shape
-    /// (mid-animation tear, page navigation, video).
+    /// (mid-animation tear, page navigation, video). Unlike
+    /// [`Refusal::NoOverlap`] this says the AREA is unstable; scrolling
+    /// slower will not help.
     Mismatch,
     /// Accepting the offset would grow the canvas past
     /// [`SheetLimits::max_height`].
@@ -301,7 +324,31 @@ struct RowProfile {
     /// answer is Still; a later textured frame brings something to
     /// match against. Flat PDF margins hit this.
     spread: u8,
+    /// Per-row 0–1 evidence weight: how much this row differs from the
+    /// row above it. A vertical translation can only be observed through
+    /// vertical VARIATION — a row byte-identical to its neighbour could
+    /// sit anywhere in the other frame and still "match". Averaging over
+    /// such rows is not merely useless, it is actively harmful: on a page
+    /// that is mostly blank two blank regions match at ANY distance with
+    /// cost ~0, so the cheapest offset is decided by whatever leftover
+    /// texture happens to line up. Measured on the sparse-page fixture:
+    /// after two refusals the matcher accepted `dy = -474` for a 272-row
+    /// scroll and rewrote the sheet in the wrong place. Weights turn
+    /// "average over everything" into "average over the rows that can
+    /// testify".
+    row_weight: Vec<f32>,
 }
+
+/// `row_weight` reaches 1.0 once a row differs from its neighbour by this
+/// much mean luma (0–255) — the ramp stops small antialiasing shimmer
+/// from counting as evidence without drowning real text (which scores
+/// far above the cap).
+const ROW_EVIDENCE_SATURATION: f32 = 24.;
+/// Sampled rows of evidence a verdict needs. Below this the overlap is
+/// too flat to place: refuse and let a textured frame do it. Without a
+/// floor the cheapest offset among a handful of informative rows wins by
+/// luck.
+const MIN_EVIDENCE_ROWS: usize = 16;
 
 /// Samples compared per candidate offset, topside for the cost scan.
 const SCAN_BUDGET: usize = 120_000;
@@ -390,6 +437,24 @@ impl RowProfile {
             }
             prev_mean = Some(mean);
         }
+        // Evidence weights: mean |row − row above|, saturated. Row 0 has
+        // no row above it and borrows row 1's reading (a frame's first
+        // row is not special, only unmeasurable in isolation).
+        let mut row_weight = vec![0.0f32; height as usize];
+        for row in 1..height as usize {
+            let above = &data[(row - 1) * stride..row * stride];
+            let here = &data[row * stride..(row + 1) * stride];
+            let diff = here
+                .iter()
+                .zip(above.iter())
+                .map(|(a, b)| u32::from(a.abs_diff(*b)))
+                .sum::<u32>() as f32
+                / stride as f32;
+            row_weight[row] = (diff / ROW_EVIDENCE_SATURATION).min(1.0);
+        }
+        if height > 1 {
+            row_weight[0] = row_weight[1];
+        }
         Self {
             height,
             stride,
@@ -398,6 +463,7 @@ impl RowProfile {
             bands,
             band_means,
             spread,
+            row_weight,
         }
     }
 
@@ -638,8 +704,13 @@ impl StickyBands {
         let rows = self.commit_height(&self.run, skip, step, viewport_height)?;
         // At least one structured row must attest the band (the
         // flat-content guard — see the struct docs).
+        // Strictly INSIDE the band: the row just past it is the first
+        // scrolling row, so counting it would let a run of blank rows pin
+        // itself off the texture of the content below (measured on the
+        // sparse-page fixture: a sticky band of 8 blank rows committed,
+        // shifting the viewport highlight for the rest of the session).
         let structured = (skip..)
-            .take_while(|&j| (j * step) as u32 <= rows)
+            .take_while(|&j| ((j * step) as u32) < rows)
             .any(|j| grid_row_structured(cur, j * step));
         (structured && rows > self.top).then_some(rows)
     }
@@ -742,10 +813,14 @@ struct OffsetEstimate {
     /// Best cost among offsets outside the ±2-row peak around `dy`
     /// (`f32::INFINITY` when there is no such candidate).
     runner_up: f32,
+    /// The largest offset the search was allowed to consider. A bad cost
+    /// right at this edge reads as "the motion was bigger than the
+    /// window", not as "the content changed" (see `classify`).
+    window: i32,
 }
 
 /// One matcher verdict against a specific comparison base (see
-/// `ScrollSheet::place` for the dual-anchor selection).
+/// `ScrollSheet::place`).
 enum Placement {
     /// A usable offset (cost and margin pass, dy ≠ 0).
     Match(OffsetEstimate),
@@ -796,21 +871,35 @@ fn band_cost(
     if rows < min_overlap as usize {
         return None;
     }
+    // Only rows that can testify count (see `RowProfile::row_weight`):
+    // a candidate that lands on blank content in both frames is not a
+    // cheap match, it is NO match, and must not outrank a real one.
     let mut sums = [0.0f32; BAND_COUNT];
+    let mut evidence = 0.0f32;
+    let mut counted = 0usize;
     for j in first..end {
         let pj = (j as i32 + d) as usize;
+        let w = cur.row_weight[j].min(prev.row_weight[pj]);
+        if w <= 0.0 {
+            continue;
+        }
+        evidence += w;
+        counted += 1;
         for (band, &weight) in weights.iter().enumerate() {
             if weight <= 0.0 {
                 continue;
             }
-            sums[band] += (cur.band_means[j][band] - prev.band_means[pj][band]).abs();
+            sums[band] += w * (cur.band_means[j][band] - prev.band_means[pj][band]).abs();
         }
+    }
+    if counted < MIN_EVIDENCE_ROWS || evidence <= 0.0 {
+        return None;
     }
     let mut active: Vec<f32> = sums
         .iter()
         .zip(weights.iter())
         .filter(|&(_, &w)| w > 0.0)
-        .map(|(sum, _)| *sum / rows as f32)
+        .map(|(sum, _)| *sum / evidence)
         .collect();
     if active.is_empty() {
         return None;
@@ -824,10 +913,11 @@ fn band_cost(
     Some(active.iter().sum::<f32>() / active.len() as f32)
 }
 
-/// Weighted full-row pixel MAD on the step grid. This is the exact
-/// signal that decides a match: masked bands are skipped but the
-/// per-row trimmed mean from v1 is kept (fixed edge chrome misaligns
-/// under every translation, and dropping the worst rows absorbs it).
+/// The exact signal that decides a match: per-row pixel MAD over the
+/// step grid, weighted by row evidence and trimmed at the expensive end
+/// (fixed edge chrome misaligns under every translation, and dropping the
+/// worst rows absorbs it). `None` when the overlap holds too little
+/// evidence to judge — see [`MIN_EVIDENCE_ROWS`].
 fn row_cost(
     prev: &RowProfile,
     cur: &RowProfile,
@@ -835,14 +925,20 @@ fn row_cost(
     weights: &BandWeights,
     trim_top: i32,
     trim_bot: i32,
-) -> f32 {
+) -> Option<f32> {
     let h = prev.height.min(cur.height) as i32;
     let (first, end) = overlap_window(h, d, trim_top, trim_bot);
     let first = first.div_ceil(cur.step) * cur.step;
     let stride = cur.stride;
-    let mut row_sums: Vec<f32> = Vec::with_capacity(16);
+    // (cost, evidence weight) per sampled row.
+    let mut row_sums: Vec<(f32, f32)> = Vec::with_capacity(16);
     let mut j = first;
     while j < end {
+        let w = cur.row_weight[j].min(prev.row_weight[(j as i32 + d) as usize]);
+        if w <= 0.0 {
+            j += cur.step;
+            continue;
+        }
         let mut sum = 0u32;
         let mut width = 0usize;
         for (band, &weight) in weights.iter().enumerate() {
@@ -873,22 +969,42 @@ fn row_cost(
                 .sum();
             width = stride;
         }
-        row_sums.push(sum as f32 / width as f32);
+        row_sums.push((sum as f32 / width as f32, w));
         j += cur.step;
     }
     let n = row_sums.len();
-    if n == 0 {
-        return f32::INFINITY;
+    if n < MIN_EVIDENCE_ROWS {
+        return None;
     }
     let keep = n - n / 7;
-    row_sums.select_nth_unstable_by(keep - 1, f32::total_cmp);
-    row_sums.iter().take(keep).sum::<f32>() / keep as f32
+    row_sums.select_nth_unstable_by(keep - 1, |a, b| a.0.total_cmp(&b.0));
+    row_sums.truncate(keep);
+    let weight_sum: f32 = row_sums.iter().map(|(_, w)| w).sum();
+    if weight_sum <= 0.0 {
+        return None;
+    }
+    Some(row_sums.iter().map(|(cost, w)| cost * w).sum::<f32>() / weight_sum)
 }
+
+/// Row spacing of the coarse sweep. Kept in sync with the ±3 refinement
+/// in [`estimate_offset`] (a step of `2·SWEEP_STEP + 1` or less leaves no
+/// hole between one basin's refinement and the next).
+const SWEEP_STEP: i32 = 3;
 
 /// Candidate offsets for the first search pass: the prediction
 /// neighbourhood (the ±128-row window around the last accepted step,
-/// where a smooth scroll almost always lands) plus a step-3 coarse
-/// sweep of the whole range.
+/// where a smooth scroll almost always lands) plus a coarse sweep of the
+/// whole range.
+///
+/// The sweep is anchored at ZERO, never at the range edge. Anchoring it
+/// at `-max_admissible` made the grid's PHASE a function of that bound,
+/// so which offsets were even looked at depended on a threshold that has
+/// nothing to do with the content: a 300-row jump sat on the grid at
+/// `max_motion_ratio = 0.6` (480 % 3 == 0) and fell between grid points
+/// at 0.8 (640 % 3 == 2), turning a perfect match into Mismatch. Real
+/// content hides this (its cost valley is a few rows wide, so a grid
+/// point always lands inside one); synthetic one-row-wide valleys do not.
+///
 /// Small ranges are enumerated fully so tiny test/toolbar-sized frames
 /// keep exact behaviour.
 fn candidate_offsets(max_admissible: i32, prediction: i32) -> Vec<i32> {
@@ -913,12 +1029,15 @@ fn candidate_offsets(max_admissible: i32, prediction: i32) -> Vec<i32> {
             push(d, &mut candidates);
         }
     } else {
-        let mut d = -max_admissible;
-        while d <= max_admissible {
-            push(d, &mut candidates);
-            d += 3;
+        push(0, &mut candidates);
+        let mut k = 1;
+        while k * SWEEP_STEP <= max_admissible {
+            push(k * SWEEP_STEP, &mut candidates);
+            push(-k * SWEEP_STEP, &mut candidates);
+            k += 1;
         }
         push(max_admissible, &mut candidates);
+        push(-max_admissible, &mut candidates);
     }
     candidates
 }
@@ -1030,7 +1149,12 @@ fn estimate_offset(
     let mut best: Option<(i32, f32)> = None;
     let mut evaluated: Vec<(i32, f32)> = Vec::with_capacity(shortlist.len());
     for d in shortlist {
-        let cost = row_cost(prev, cur, d, weights, trim_top, trim_bot);
+        // `None` = the overlap holds too little evidence to judge this
+        // offset at all (a blank seam): it is not a candidate, and it is
+        // not a runner-up either.
+        let Some(cost) = row_cost(prev, cur, d, weights, trim_top, trim_bot) else {
+            continue;
+        };
         evaluated.push((d, cost));
         if best.is_none_or(|(_, bc)| cost < bc) {
             best = Some((d, cost));
@@ -1047,6 +1171,7 @@ fn estimate_offset(
         dy: best_dy,
         cost: best_cost,
         runner_up,
+        window: max_admissible,
     })
 }
 
@@ -1071,17 +1196,19 @@ pub(crate) struct ScrollSheet {
     /// The sheet so far: RGBA, `height()` rows of `width` px.
     canvas: Vec<u8>,
     state: ViewportState,
-    /// The last frame used as comparison anchor (raw bytes — the exact
-    /// duplicate test memcmp's it).
-    anchor_raw: Vec<u8>,
-    anchor_profile: RowProfile,
+    /// The PREVIOUS frame seen (raw bytes — the exact duplicate test
+    /// memcmp's it). Purely a "what did the screen just look like"
+    /// reference: the duplicate shortcut and the fixed-column mask. It
+    /// is NOT a position base — see [`ScrollSheet::stable_profile`].
+    prev_raw: Vec<u8>,
+    prev_profile: RowProfile,
     /// Sticky-band detection state (see [`StickyBands`]).
     sticky: StickyBands,
-    /// The profile of the last frame ACCEPTED into the canvas. The
-    /// FIRST comparison base in [`ScrollSheet::place`] — see the
-    /// module docs ("dual anchor"): a clean frame after a tear matches
-    /// it directly and the full displacement lands, where the riding
-    /// anchor would swallow the in-between band.
+    /// The profile of the last frame ACCEPTED into the canvas: the one
+    /// and only comparison base for placement. A frame that cannot be
+    /// measured against it is refused rather than folded against a
+    /// remembered substitute, because a guessed position writes correct
+    /// pixels over rows that were already right (see `place`).
     stable_profile: RowProfile,
     /// Fixed-sidebar mask learned from consecutive frames (see
     /// [`MotionMask`]): bands that never move are chrome, not content.
@@ -1153,8 +1280,8 @@ impl ScrollSheet {
                 position: 0,
                 max_position: 0,
             },
-            anchor_raw: seed,
-            anchor_profile: profile.clone(),
+            prev_raw: seed,
+            prev_profile: profile.clone(),
             sticky: StickyBands::new(),
             stable_profile: profile,
             motion: MotionMask::default(),
@@ -1201,9 +1328,9 @@ impl ScrollSheet {
         self.canvas = seed.clone();
         self.width = old_h;
         self.viewport_height = old_w;
-        self.anchor_raw = seed.clone();
-        self.anchor_profile = RowProfile::from_rgba(&seed, self.width, self.viewport_height);
-        self.stable_profile = self.anchor_profile.clone();
+        self.prev_raw = seed.clone();
+        self.prev_profile = RowProfile::from_rgba(&seed, self.width, self.viewport_height);
+        self.stable_profile = self.prev_profile.clone();
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
@@ -1303,7 +1430,7 @@ impl ScrollSheet {
                 transposed.as_slice()
             }
         };
-        if frame == self.anchor_raw.as_slice() {
+        if frame == self.prev_raw.as_slice() {
             // Poll outran the repaint: not even a Still — the anchor
             // must stay so the next real frame diffs against fresh bytes.
             return Fold::Unchanged;
@@ -1311,11 +1438,15 @@ impl ScrollSheet {
 
         let profile = RowProfile::from_rgba(frame, self.width, self.viewport_height);
         let outcome = self.place(frame, &profile);
-        // Every non-duplicate frame becomes the new anchor, including
-        // rejected ones — see the module docs ("anchor refresh").
-        self.anchor_raw.clear();
-        self.anchor_raw.extend_from_slice(frame);
-        self.anchor_profile = profile;
+        // Every non-duplicate frame becomes the previous-frame reference,
+        // refused ones included: the fixed-column mask needs two ADJACENT
+        // frames to tell "this band never moves" from "this band moved a
+        // lot", and a duplicate must never become that reference. The
+        // POSITION base (`stable_profile`) is not touched here — only
+        // `place` advances it, and only on an accept.
+        self.prev_raw.clear();
+        self.prev_raw.extend_from_slice(frame);
+        self.prev_profile = profile;
         outcome
     }
 
@@ -1334,6 +1465,14 @@ impl ScrollSheet {
             return Placement::Reject(Refusal::NoOverlap);
         };
         if estimate.cost > self.options.cost_threshold {
+            // A bad residual at the very EDGE of the search window means
+            // the frame moved further than the window could bridge: the
+            // honest reading is "no overlap left", not "the content
+            // changed on its own". The distinction is the HUD's whole
+            // message — "slow down" versus "this area will not sit still".
+            if estimate.dy.abs() >= estimate.window - 2 {
+                return Placement::Reject(Refusal::NoOverlap);
+            }
             return Placement::Reject(Refusal::Mismatch);
         }
         if estimate.dy == 0 {
@@ -1350,31 +1489,29 @@ impl ScrollSheet {
         // by any translation — the
         // conservative answer is Still; a later textured frame brings
         // something to match against. Flat PDF margins hit this.
-        if self.anchor_profile.spread <= 1 {
+        if self.stable_profile.spread <= 1 {
             return Fold::Still;
         }
-        // Sidebar evidence: compare this frame against the riding anchor
+        // Sidebar evidence: compare this frame against the previous one
         // at the same position and down-weight bands that did not move.
-        self.motion.observe(&self.anchor_profile, profile);
-        // Dual-anchor selection. The riding anchor (every non-duplicate
-        // frame, INCLUDING rejects) sits at a position the canvas never
-        // advanced to — accepting a dy measured from it silently drops
-        // the band between the last accept and the anchor (the "lost
-        // band" that left the long image shorter than the real one,
-        // user-visible as the preview not matching the frame). The last
-        // ACCEPTED frame is therefore tried FIRST: a clean frame after
-        // a tear matches it directly and the full displacement lands.
-        // The riding anchor remains the fallback for motion beyond the
-        // stable window — a jump no single bridge could cover — where
-        // the band loss is the documented, unavoidable cost.
-        let (estimate, stable_used) = match self.classify(&self.stable_profile, profile) {
-            Placement::Match(e) => (e, true),
+        self.motion.observe(&self.prev_profile, profile);
+        // Position comes from ONE base: the last frame actually folded
+        // into the sheet. There used to be a second, "riding" anchor
+        // (every seen frame) that took over when the step outgrew the
+        // matcher's window. It was a trap: a dy measured from a frame
+        // the sheet never advanced to understates the displacement by
+        // the lost band, so the frame was written a band too HIGH and
+        // the newest-wins write painted displaced pixels over a whole
+        // viewport of already-correct rows (measured: one refused frame
+        // corrupted 475 rows of the canvas). A frame whose distance from
+        // the stable base cannot be measured is now simply refused —
+        // nothing is written, the canvas stays exactly as it was, and
+        // the next frame that overlaps the (unchanged) base links up
+        // again with its full displacement.
+        let estimate = match self.classify(&self.stable_profile, profile) {
+            Placement::Match(e) => e,
             Placement::Still => return Fold::Still,
-            Placement::Reject(_) => match self.classify(&self.anchor_profile, profile) {
-                Placement::Match(e) => (e, false),
-                Placement::Still => return Fold::Still,
-                Placement::Reject(reason) => return Fold::Refused(reason),
-            },
+            Placement::Reject(reason) => return Fold::Refused(reason),
         };
 
         let (next, branch, growth) = self.state.transition(estimate.dy);
@@ -1389,12 +1526,7 @@ impl ScrollSheet {
         // Sticky evidence rides on the same accepted match — stillness
         // is only meaningful against the base that produced it.
         {
-            let base = if stable_used {
-                &self.stable_profile
-            } else {
-                &self.anchor_profile
-            };
-            let still = stillness_grid(base, profile, &self.options);
+            let still = stillness_grid(&self.stable_profile, profile, &self.options);
             if !still.is_empty() {
                 self.sticky.update(&still, next.position);
                 if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
@@ -1679,9 +1811,17 @@ pub enum Phase {
     Waiting,
     /// Frames are folding in. A healthy capture says nothing on screen.
     Following,
-    /// Frames changed but none could be placed — no overlap with what we
-    /// have. Transient by nature; the next settled frame usually folds.
+    /// Frames changed but none could be placed because the motion
+    /// outran the overlap budget: the user scrolled faster than one
+    /// capture interval could bridge. Transient by nature, and the cure
+    /// is in the user's hands — the base never moved, so scrolling
+    /// slower re-links as soon as a frame still overlaps it.
     NoOverlap,
+    /// The area refuses to sit still — an animation, a video, a canvas
+    /// that repaints, or a tear that never settles. Scrolling slower
+    /// does not help; this is the honest reading of a region whose
+    /// content changes on its own.
+    Unstable,
     /// No overlap for long enough that the region cannot advance on its
     /// own (fixed chrome taller than the matcher's trim, a video pane, a
     /// region that does not scroll). Still not fatal: the user can keep
@@ -1698,14 +1838,27 @@ const NO_OVERLAP_FRAMES: u32 = 2;
 const STALLED_FRAMES: u32 = 40;
 
 /// The refusal ladder: how many frames in a row have changed without
-/// being placeable. `refusals` counts CHANGED frames since the last
-/// frame folded in — duplicates (nothing moved) are not refusals, so a
-/// reader pausing mid-capture never looks broken.
-pub(crate) fn phase_of(refusals: u32) -> Phase {
+/// being placeable, and WHY the newest one failed. `refusals` counts
+/// CHANGED frames since the last frame folded in — duplicates (nothing
+/// moved) are not refusals, so a reader pausing mid-capture never looks
+/// broken, and the loop clears the streak on a still frame for the same
+/// reason.
+///
+/// The reason picks the word on the chip: "no overlap" is advice about
+/// scroll speed, "unstable" is a statement about the area. Reporting
+/// every refusal as "no overlap" was the old bug — a region with a
+/// blinking video ad told the user to scroll slower forever.
+pub(crate) fn phase_of(refusals: u32, reason: Refusal) -> Phase {
     if refusals >= STALLED_FRAMES {
         Phase::Stalled
     } else if refusals >= NO_OVERLAP_FRAMES {
-        Phase::NoOverlap
+        match reason {
+            Refusal::NoOverlap => Phase::NoOverlap,
+            // `TooTall` and `TooSmall` end the session before they can
+            // reach the chip; anything else is "the pixels moved in a
+            // way a translation cannot explain".
+            _ => Phase::Unstable,
+        }
     } else {
         Phase::Following
     }
@@ -1844,12 +1997,24 @@ mod tests {
 
     #[test]
     fn phase_ladder_separates_a_tear_from_a_dead_region() {
-        assert_eq!(phase_of(0), Phase::Following);
-        assert_eq!(phase_of(1), Phase::Following);
-        assert_eq!(phase_of(2), Phase::NoOverlap);
-        assert_eq!(phase_of(STALLED_FRAMES - 1), Phase::NoOverlap);
-        assert_eq!(phase_of(STALLED_FRAMES), Phase::Stalled);
-        assert_eq!(phase_of(u32::MAX), Phase::Stalled);
+        assert_eq!(phase_of(1, Refusal::NoOverlap), Phase::Following);
+        assert_eq!(phase_of(2, Refusal::NoOverlap), Phase::NoOverlap);
+        assert_eq!(
+            phase_of(STALLED_FRAMES - 1, Refusal::NoOverlap),
+            Phase::NoOverlap
+        );
+        assert_eq!(phase_of(STALLED_FRAMES, Refusal::NoOverlap), Phase::Stalled);
+        assert_eq!(phase_of(u32::MAX, Refusal::Mismatch), Phase::Stalled);
+    }
+
+    /// The chip's word comes from the matcher's verdict, not from the
+    /// count alone: "no overlap" is advice about scroll speed, while
+    /// unstable pixels are a property of the area.
+    #[test]
+    fn the_chip_word_follows_the_refusal_reason() {
+        assert_eq!(phase_of(3, Refusal::NoOverlap), Phase::NoOverlap);
+        assert_eq!(phase_of(3, Refusal::Mismatch), Phase::Unstable);
+        assert_eq!(phase_of(3, Refusal::Unclear), Phase::Unstable);
     }
 
     #[test]
@@ -2140,24 +2305,6 @@ mod tests {
         // The canvas covers source rows 40..160+H2-hdr; the viewport
         // highlight must be back at the very top.
         assert_eq!(s.viewport_span().0, 0);
-    }
-
-    #[test]
-    fn jumps_beyond_the_stable_window_fall_back_to_the_riding_anchor() {
-        // A CLEAN frame can be rejected too — here by jumping beyond the
-        // matcher's window from the last accept (0 → 70 > 0.6 × H). It
-        // still becomes the riding anchor. The next frame (100) is also
-        // beyond the stable window but 30 rows from that anchor: the
-        // fallback accepts it with the anchor-relative dy — losing the
-        // 70-row band nothing could bridge (the documented cost).
-        let mut s = sheet();
-        assert_eq!(s.push(&frame_at(70)), Fold::Refused(Refusal::Mismatch));
-        let out = s.push(&frame_at(100));
-        assert!(
-            matches!(out, Fold::GrewBottom { dy: 30, growth: 30 }),
-            "{out:?}"
-        );
-        assert_eq!(s.dimensions(), (W, H + 30));
     }
 
     #[test]
@@ -2613,9 +2760,204 @@ mod tests {
         assert_eq!(s.canvas(), ideal.as_slice());
     }
 
+    // === Realistic manual-scroll probe =================================
+
+    const TW: u32 = 240;
+    const TH: u32 = 6_000;
+
+    fn ink_hash(x: u32, y: u32) -> u32 {
+        x.wrapping_mul(0x9E37_79B1)
+            .wrapping_add(y.wrapping_mul(0x85EB_CA77))
+            .wrapping_mul(2654435761)
+            >> 11
+    }
+
+    /// A text-like page: lines of per-pixel ink on a light ground. Unlike
+    /// the `source_row` fixtures, a row is NOT one constant colour — that
+    /// is what makes this page a fair stand-in for a real document.
+    fn text_page() -> Vec<u8> {
+        let mut page = vec![246u8; (TW * TH) as usize];
+        let mut y = 0u32;
+        let mut line = 0u32;
+        while y < TH {
+            let line_h = 13 + line * 7 % 12; // 13..=24 rows
+            let ink_rows = (y + line_h * 3 / 4).min(TH);
+            for gy in y..ink_rows {
+                for x in 0..TW {
+                    let h = ink_hash(x, gy);
+                    let px = if h % 100 < 42 {
+                        30 + (h % 60) as u8
+                    } else {
+                        238 + (h % 8) as u8
+                    };
+                    page[(gy * TW + x) as usize] = px;
+                }
+            }
+            y += line_h;
+            line += 1;
+        }
+        page
+    }
+
+    /// The viewport at a FRACTIONAL scroll offset: a real compositor
+    /// resamples a sub-pixel scroll, so the frame is a bilinear blend of
+    /// two page rows.
+    fn sample(page: &[u8], top: f32, vh: u32) -> Vec<u8> {
+        let mut out = Vec::with_capacity((TW * vh * 4) as usize);
+        for j in 0..vh {
+            let y = top + j as f32;
+            let y0 = y.floor().max(0.0) as u32;
+            let f = y - y0 as f32;
+            let a = y0.min(TH - 1);
+            let b = (y0 + 1).min(TH - 1);
+            for x in 0..TW {
+                let va = f32::from(page[(a * TW + x) as usize]);
+                let vb = f32::from(page[(b * TW + x) as usize]);
+                let v = (va + (vb - va) * f).round() as u8;
+                out.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        out
+    }
+
+    /// A sparse-text page: a paragraph every 44 rows, the rest blank. This
+    /// is what most documentation/markdown pages look like inside a tall
+    /// selection, and it is the hard case for a translation matcher: most
+    /// rows carry no signal, so many offsets cost ~nothing.
+    fn sparse_page() -> Vec<u8> {
+        let mut page = vec![250u8; (TW * TH) as usize];
+        let mut y = 20u32;
+        while y + 15 < TH {
+            for gy in y..y + 15 {
+                for x in 24..TW - 24 {
+                    let h = ink_hash(x, gy);
+                    if h % 100 < 40 {
+                        page[(gy * TW + x) as usize] = 40 + (h % 50) as u8;
+                    }
+                }
+            }
+            y += 44;
+        }
+        page
+    }
+
+    /// Drive a manual session over `page` — one frame per poll — and check
+    /// the invariant that makes a long capture worth anything:
+    ///
+    /// **the sheet is always an exact PREFIX of the page.**
+    ///
+    /// Not "looks about right": byte-for-byte. Rows that were folded in
+    /// early can never be rewritten by a later frame that was placed at a
+    /// guessed position (that is what used to shift a whole viewport of
+    /// correct content), and the sheet can never grow by more than the
+    /// page was actually scrolled. Returns the number of refused frames so
+    /// a caller can assert which path it exercised.
+    fn scroll_and_check_prefix(page: &[u8], steps: &[f32], rounds: usize) -> (ScrollSheet, usize) {
+        const VH: u32 = 700;
+        let mut s = ScrollSheet::new(TW, VH, &sample(page, 0., VH), SheetLimits::default())
+            .expect("sheet from a full-width frame");
+        let mut top = 0f32;
+        let mut refused = 0;
+        for _ in 0..rounds {
+            for &step in steps {
+                top += step;
+                if matches!(s.push(&sample(page, top, VH)), Fold::Refused(_)) {
+                    refused += 1;
+                }
+            }
+        }
+        let rows = s.dimensions().1;
+        assert!(
+            rows <= top as u32 + VH,
+            "the sheet claims more rows than were scrolled: {rows} > {}+{VH}",
+            top as u32
+        );
+        let want = sample(page, 0., rows);
+        assert!(
+            s.canvas() == want.as_slice(),
+            "the sheet stopped being an exact prefix of the page \
+             ({rows} rows after scrolled-to {top})"
+        );
+        (s, refused)
+    }
+
+    /// The manual-scroll reality check: a real page (per-pixel ink, not
+    /// row-constant test stripes), a fractional eased-out flick, one frame
+    /// per poll. Every changed frame must fold, and the result must be the
+    /// page itself.
+    #[test]
+    fn a_smooth_flick_of_a_real_page_folds_every_frame() {
+        let page = text_page();
+        let steps = [96f32, 92., 84., 66., 44., 24., 10., 4.];
+        let (s, refused) = scroll_and_check_prefix(&page, &steps, 3);
+        let (pushed, accepted) = s.stats();
+        assert_eq!(refused, 0, "no frame of a smooth flick may be refused");
+        assert_eq!(accepted, pushed, "every changed frame must fold in");
+        // 3 rounds of 420 rows over a 700-row viewport.
+        assert_eq!(s.dimensions(), (TW, 1_260 + 700));
+    }
+
+    /// The same gesture over sparse content (a paragraph every 44 rows,
+    /// blank in between): the matcher's cost surface is nearly flat there,
+    /// which is exactly where a guessed position used to win. Some frames
+    /// may be refused as ambiguous; the sheet must still be exact.
+    #[test]
+    fn a_sparse_page_stays_exact_whatever_the_matcher_refuses() {
+        let page = sparse_page();
+        let steps = [96f32, 92., 84., 66., 44., 24., 10., 4.];
+        let (s, _) = scroll_and_check_prefix(&page, &steps, 3);
+        let (pushed, accepted) = s.stats();
+        assert!(accepted >= pushed / 2, "{accepted}/{pushed} folded in");
+    }
+
+    /// A fast trackpad flick outruns the overlap budget: steps beyond
+    /// 0.8 × 700 rows. Those frames are refused — and the refusal must
+    /// cost nothing but the lost band. The old code "recovered" by
+    /// placing them against the frame it had just seen, which shifted
+    /// every accepted row after the first refusal.
+    #[test]
+    fn a_fast_flick_beyond_the_window_refuses_instead_of_shifting() {
+        let page = text_page();
+        let steps = [300f32, 380., 440., 520., 640.];
+        let (s, refused) = scroll_and_check_prefix(&page, &steps, 2);
+        assert!(refused > 0, "640 rows cannot be bridged by a 700-row frame");
+        let (pushed, accepted) = s.stats();
+        assert!(accepted > 0, "the slow part of the flick must still fold");
+        assert!(
+            accepted < pushed,
+            "{accepted}/{pushed} — did the jump fold?"
+        );
+    }
+
+    /// A short region (the matcher's window is only ±48 rows here): a
+    /// jump beyond it writes NOT ONE BYTE, and a frame that still overlaps
+    /// the untouched base then lands with its FULL displacement — the
+    /// self-healing half of "refusals are a state, not an error".
+    #[test]
+    fn a_jump_beyond_the_window_refuses_and_keeps_the_canvas_byte_identical() {
+        let mut s = sheet();
+        let seed = s.canvas().to_vec();
+        for top in [70u32, 100, 130] {
+            let out = s.push(&frame_at(top));
+            assert!(matches!(out, Fold::Refused(_)), "jump to {top}: {out:?}");
+            assert_eq!(s.canvas(), seed.as_slice(), "a refusal must not write");
+            assert_eq!(s.dimensions(), (W, H));
+        }
+        let out = s.push(&frame_at(40));
+        assert!(
+            matches!(out, Fold::GrewBottom { dy: 40, growth: 40 }),
+            "{out:?}"
+        );
+        assert_eq!(s.dimensions(), (W, H + 40));
+        assert_eq!(s.canvas(), expected_canvas(0, 40).as_slice());
+    }
+
     /// A flat TOP region of moving content must NOT be pinned: the
     /// band-level structure guard is what separates "flat because
-    /// chrome" from "flat because blank".
+    /// chrome" from "flat because blank". Runs long enough for the
+    /// detection ladder to fire — a blank prefix is "still" in every
+    /// frame, which is exactly what a pinned navbar looks like, and only
+    /// the in-band structure test tells them apart.
     #[test]
     fn flat_top_content_is_not_pinned() {
         const H2: u32 = 800;
@@ -2633,10 +2975,17 @@ mod tests {
             v
         };
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        let out = s.push(&frame(40));
-        assert!(matches!(out, Fold::GrewBottom { .. }), "{out:?}");
-        // Still all-flat rows accumulated a run, but no structure → no
-        // commit: the span stays whole-viewport.
-        assert_eq!(s.viewport_span(), (40, H2));
+        let mut extent = 0u32;
+        for top in [40u32, 80, 120, 160, 200] {
+            let out = s.push(&frame(top));
+            assert!(
+                matches!(out, Fold::GrewBottom { dy, .. } if dy == top - extent),
+                "{out:?}"
+            );
+            extent = top;
+            // Still all-flat rows accumulated a run, but no structure →
+            // no commit: the span stays whole-viewport.
+            assert_eq!(s.viewport_span(), (top, H2), "band pinned at {top}");
+        }
     }
 }

@@ -1181,6 +1181,7 @@ impl PreviewPanel {
             PanelState::Running => match self.phase {
                 Phase::Waiting => Some(crate::i18n::t!("scroll.status.waiting").to_string()),
                 Phase::NoOverlap => Some(crate::i18n::t!("scroll.status.no_overlap").to_string()),
+                Phase::Unstable => Some(crate::i18n::t!("scroll.status.unstable").to_string()),
                 Phase::Stalled => Some(crate::i18n::t!("scroll.status.stalled").to_string()),
                 Phase::Following => None,
             },

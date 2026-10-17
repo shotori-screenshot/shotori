@@ -243,9 +243,17 @@ const INITIAL_LINES: i32 = 3;
 /// Aim for this step size as a fraction of the viewport (must stay
 /// below the sheet's max_motion_ratio for overlap to survive).
 const TARGET_STEP_RATIO: f32 = 0.45;
-/// Manual-mode polling cadence — fast enough that a brisk user scroll
-/// never skips more than one viewport, slow enough to stay cheap.
-const MANUAL_POLL: Duration = Duration::from_millis(60);
+/// Manual-mode polling cadence. This is the whole sync story: one
+/// capture interval is the largest scroll step the matcher ever has to
+/// bridge, and it is also the preview's refresh period. The old 60 ms
+/// sat ON TOP of the capture's own latency (a screencopy roundtrip), so
+/// a cycle was 90–150 ms — one brisk flick then moved more rows than
+/// the overlap budget could cover, the frame was refused, the strip
+/// froze, and the gap poisoned a whole viewport of good rows. Smaller
+/// is better up to the point where screencopies start costing more than
+/// they reveal; the sleep is only the REMAINDER of this budget (see
+/// `run_manual`), so the cadence is honest whatever the capture costs.
+const MANUAL_POLL: Duration = Duration::from_millis(28);
 /// Manual-mode wall budget (the user pauses to read; this is a
 /// safety valve, not a target).
 const MANUAL_DEADLINE: Duration = Duration::from_secs(600);
@@ -565,14 +573,7 @@ fn run(
     let mut preview = Preview::new(spec.preview_rows.clone());
 
     if spec.mode == ScrollMode::Manual {
-        return run_manual(
-            &mut sheet,
-            &mut capturer,
-            &mut anchor,
-            events,
-            cmds,
-            &mut preview,
-        );
+        return run_manual(&mut sheet, &mut capturer, events, cmds, &mut preview);
     }
 
     loop {
@@ -735,12 +736,14 @@ fn run(
                     return deliver(events, &mut sheet);
                 }
             }
-            Fold::Refused(Refusal::Unclear) | Fold::Refused(Refusal::Mismatch) => {
-                // Same rule as manual mode: a refusal is a state. Keep
-                // sampling and let the chip say "no overlap"; the wheel
-                // keeps turning, so a settled frame usually follows.
+            Fold::Refused(reason @ (Refusal::Unclear | Refusal::Mismatch | Refusal::NoOverlap)) => {
+                // Same rule as manual mode: a refusal is a state, not an
+                // error. Nothing was written; keep turning the wheel and
+                // a settled frame usually links up. `NoOverlap` here means
+                // the app scrolled further than the wheel asked (an
+                // anchor jump, a lazy-load reflow) — still recoverable.
                 rejects = rejects.saturating_add(1);
-                preview.report(phase_of(rejects), events);
+                preview.report(phase_of(rejects, reason), events);
             }
             Fold::Refused(Refusal::TooTall) => {
                 println!("[shotori] scroll: height cap reached");
@@ -935,7 +938,6 @@ impl Preview {
 fn run_manual(
     sheet: &mut ScrollSheet,
     capturer: &mut Capturer<'_>,
-    anchor: &mut Vec<u8>,
     events: &Sender<ScrollEvent>,
     cmds: &Receiver<Cmd>,
     preview: &mut Preview,
@@ -943,10 +945,14 @@ fn run_manual(
     println!("[shotori] scroll: manual mode — you scroll, the engine folds");
     let deadline = Instant::now() + MANUAL_DEADLINE;
     preview.push(sheet, events, true);
-    let mut refusals = 0u32;
+    // (frames in a row that could not be placed, why the newest one
+    // failed) — the chip says different words for "you scrolled too
+    // fast" and "this area never sits still".
+    let mut streak: Option<(u32, Refusal)> = None;
     let mut last_accept = Instant::now();
     let mut paused = false;
     loop {
+        let tick = Instant::now();
         if !paused && Instant::now() > deadline {
             return fail_with_partial(
                 events,
@@ -1006,12 +1012,16 @@ fn run_manual(
         };
         let outcome = sheet.push(&frame);
         if !matches!(outcome, Fold::Unchanged) {
-            println!("[shotori] scroll: frame #{} → {outcome:?}", sheet.stats().0);
+            println!(
+                "[shotori] scroll: frame #{} → {outcome:?} ({}ms)",
+                sheet.stats().0,
+                tick.elapsed().as_millis()
+            );
         }
         match outcome {
             Fold::GrewBottom { .. } | Fold::GrewTop { .. } | Fold::Shifted { .. } => {
                 last_accept = Instant::now();
-                refusals = 0;
+                streak = None;
                 let _ = events.try_send(ScrollEvent::Progress {
                     extent: sheet.captured_extent(),
                     total: sheet.dimensions().1,
@@ -1028,26 +1038,37 @@ fn run_manual(
                     "The capture region changed size mid-session.",
                 );
             }
-            // Everything else is a normal, recoverable state: the frame
-            // is kept as the comparison anchor and the next one gets a
-            // chance. The chip says so; the session lives on.
-            Fold::Refused(_) => refusals = refusals.saturating_add(1),
-            Fold::Unchanged | Fold::Still => {}
+            // Everything else is a normal, recoverable state: nothing was
+            // written, the base stays where it was, and the next frame
+            // that still overlaps it links up. The chip says which kind of
+            // trouble it is; the session lives on.
+            Fold::Refused(reason) => {
+                streak = Some(match streak {
+                    Some((count, _)) => (count.saturating_add(1), reason),
+                    None => (1, reason),
+                });
+            }
+            // A still frame carries no unplaceable motion: the ladder has
+            // nothing to count, or a reader who paused mid-flick would
+            // leave the chip stuck on a warning forever.
+            Fold::Unchanged | Fold::Still => streak = None,
         }
         // Phase: the refusal ladder is a pure model function; the
         // "waiting" reading is a clock and lives here.
-        let phase = if refusals == 0 && last_accept.elapsed() >= WAIT_HINT {
-            Phase::Waiting
-        } else {
-            phase_of(refusals)
+        let phase = match streak {
+            None if last_accept.elapsed() >= WAIT_HINT => Phase::Waiting,
+            None => Phase::Following,
+            Some((count, reason)) => phase_of(count, reason),
         };
         preview.report(phase, events);
         // Pixels only move when the sheet or the viewport did.
         if !matches!(outcome, Fold::Unchanged | Fold::Still) {
             preview.push(sheet, events, false);
         }
-        *anchor = frame;
-        std::thread::sleep(MANUAL_POLL);
+        // Sleep only what the cycle has left: the capture roundtrip is
+        // the real cost, and adding the full budget on top of it halved
+        // the sampling rate for nothing.
+        std::thread::sleep(MANUAL_POLL.saturating_sub(tick.elapsed()));
     }
 }
 
