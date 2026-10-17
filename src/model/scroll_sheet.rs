@@ -2952,6 +2952,32 @@ mod tests {
         assert_eq!(s.canvas(), expected_canvas(0, 40).as_slice());
     }
 
+    /// The stall is not the end of the session: while nothing links to
+    /// the base the sheet simply stops growing, and a single nudge back
+    /// inside the window resumes it with the page rows that were skipped
+    /// still on the right coordinates — no gap, no duplicate band.
+    #[test]
+    fn a_stalled_session_resumes_exactly_after_one_nudge_back() {
+        let mut s = sheet();
+        let seed = s.canvas().to_vec();
+        for top in [70u32, 140, 210] {
+            assert!(matches!(s.push(&frame_at(top)), Fold::Refused(_)));
+            assert_eq!(s.canvas(), seed.as_slice(), "a stall must not write");
+        }
+        // One nudge back inside the window, then keep going down.
+        let mut extent = 0u32;
+        for top in [40u32, 80, 120] {
+            let out = s.push(&frame_at(top));
+            assert!(
+                matches!(out, Fold::GrewBottom { dy, .. } if dy == top - extent),
+                "{out:?}"
+            );
+            extent = top;
+        }
+        assert_eq!(s.dimensions(), (W, H + 120));
+        assert_eq!(s.canvas(), expected_canvas(0, 120).as_slice());
+    }
+
     /// A flat TOP region of moving content must NOT be pinned: the
     /// band-level structure guard is what separates "flat because
     /// chrome" from "flat because blank". Runs long enough for the
