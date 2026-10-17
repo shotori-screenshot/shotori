@@ -3,20 +3,26 @@
 
 Half of the smart-selection evaluation loop (scoring: see
 scripts/regiondetect_eval.py). Open the `<output>-input.png` from a
-SHOTORI_REGIONDUMP dump, drag a rectangle around every region a human
-would expect the detector to offer, then press `s`.
+SHOTORI_REGIONDUMP dump, curate the region set, press `s`.
 
 Usage:
-  regiondetect_annotate.py INPUT_PNG [GT_JSON]
+  regiondetect_annotate.py INPUT_PNG [GT_JSON] [--trace TRACE_JSON] [--no-seed]
 
-Without GT_JSON the file lands next to the dump as
-`gt/<output>.json` (derived from the `-input.png` suffix). Rectangles
-are stored half-open [l, t, r, b] in original image pixels — the same
-space the detector's trace reports.
+With a sibling `<output>-trace.json` (or --trace) the detector's own
+candidates are pre-filled as the starting set — blue = program claim,
+green = your addition. Curating beats drawing from scratch: click
+inside a blue rect you disagree with to remove it, drag the misses in
+yourself. If the GT file already exists it is loaded as-is and the
+trace is NOT re-seeded (your curation wins over re-running).
 
-Keys: left-drag add · z undo · s save · q quit without saving.
-Annotate BEFORE looking at eval renders, so the ground truth stays
-honest (you should not be copying the detector's opinions).
+Keys: left-drag add · click-inside delete · z undo · s save · q quit.
+Rectangles are stored half-open [l, t, r, b] in original image pixels —
+the same space the detector's trace reports.
+
+Mind the bias: a seeded answer key measures "is the detector's output
+acceptable", not "how good is it from scratch". For an honest recall
+number, `--no-seed` and draw from empty on at least a couple of
+screens; seeded runs are for fast iteration.
 """
 import json
 import pathlib
@@ -28,13 +34,18 @@ from PIL import Image, ImageTk
 # Fit-to-window zoom cap; dump screenshots are full screens.
 MAX_WINDOW = 1400
 
+CLICK_SLOP = 4  # px in image space: below this a press+release is a click
+
 
 class Annotator:
-    def __init__(self, root, image_path, gt_path):
+    def __init__(self, root, image_path, gt_path, trace_path=None, seed=True):
         self.image_path = image_path
         self.gt_path = gt_path
         self.image = Image.open(image_path).convert("RGB")
-        self.rects = self.load_existing()
+        self.rects = []  # [l, t, r, b] in image px
+        self.seeded = []  # parallel: True = came from the detector
+        self.undo_stack = []  # ("add", idx) | ("delete", idx, rect, was_seeded)
+        self.load_existing(trace_path, seed)
         self.zoom = min(
             1.0, MAX_WINDOW / self.image.width, MAX_WINDOW / self.image.height
         )
@@ -45,7 +56,9 @@ class Annotator:
         self.photo = ImageTk.PhotoImage(self.image.resize(size, Image.BILINEAR))
 
         self.root = root
-        self.base_title = f"{image_path.name}  —  drag=rect  z=undo  s=save  q=quit"
+        self.base_title = (
+            f"{image_path.name}  —  drag=add  click-in=delete  z=undo  s=save  q=quit"
+        )
         self.canvas = tk.Canvas(root, width=size[0], height=size[1], cursor="crosshair")
         self.canvas.pack()
         self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
@@ -59,12 +72,23 @@ class Annotator:
         self.root.bind("q", lambda event: root.destroy())
         self.redraw()
 
-    def load_existing(self):
+    def load_existing(self, trace_path, seed):
         if self.gt_path.exists():
             data = json.loads(self.gt_path.read_text())
             rects = data["rects"] if isinstance(data, dict) else data
-            return [list(map(int, rect)) for rect in rects]
-        return []
+            for rect in rects:
+                self.rects.append([int(v) for v in rect])
+                self.seeded.append(False)
+            return
+        if trace_path and trace_path.exists() and seed:
+            trace = json.loads(trace_path.read_text())
+            for cand in trace.get("candidates", []):
+                self.rects.append([int(v) for v in cand["rect"]])
+                self.seeded.append(True)
+            print(
+                f"seeded {len(self.rects)} detector candidates; "
+                "click inside the wrong ones, drag in the misses"
+            )
 
     def to_image(self, event):
         return (round(event.x / self.zoom), round(event.y / self.zoom))
@@ -97,43 +121,77 @@ class Annotator:
         end = self.to_image(event)
         left, right = sorted((start[0], end[0]))
         top, bottom = sorted((start[1], end[1]))
-        if right - left < 4 or bottom - top < 4:  # a click, not a drag
+        if right - left < CLICK_SLOP or bottom - top < CLICK_SLOP:
+            # a click: delete the topmost rect containing the point
+            for index in range(len(self.rects) - 1, -1, -1):
+                rect = self.rects[index]
+                if rect[0] <= left < rect[2] and rect[1] <= top < rect[3]:
+                    self.undo_stack.append(
+                        ("delete", index, self.rects.pop(index), self.seeded.pop(index))
+                    )
+                    self.redraw()
+                    return
             return
         self.rects.append([left, top, right, bottom])
+        self.seeded.append(False)
+        self.undo_stack.append(("add", len(self.rects) - 1))
         self.redraw()
 
     def undo(self):
-        if self.rects:
-            self.rects.pop()
-            self.redraw()
+        if not self.undo_stack:
+            return
+        op = self.undo_stack.pop()
+        if op[0] == "add":
+            index = op[1]
+            if index < len(self.rects):
+                self.rects.pop(index)
+                self.seeded.pop(index)
+        else:
+            _, index, rect, was_seeded = op
+            self.rects.insert(min(index, len(self.rects)), rect)
+            self.seeded.insert(min(index, len(self.seeded)), was_seeded)
+        self.redraw()
 
     def redraw(self):
         self.canvas.delete("rect")
-        for left, top, right, bottom in self.rects:
+        for index, (left, top, right, bottom) in enumerate(self.rects):
+            color = "#3aa0ff" if self.seeded[index] else "#22cc44"
             self.canvas.create_rectangle(
                 left * self.zoom,
                 top * self.zoom,
                 right * self.zoom,
                 bottom * self.zoom,
-                outline="#22cc44",
+                outline=color,
                 width=2,
                 tags="rect",
             )
-        self.root.title(f"{self.base_title}  —  {len(self.rects)} rects")
+        blue = sum(self.seeded)
+        self.root.title(
+            f"{self.base_title}  —  {len(self.rects)} rects ({blue} from detector)"
+        )
 
     def save(self):
         self.gt_path.parent.mkdir(parents=True, exist_ok=True)
-        self.gt_path.write_text(json.dumps({"rects": self.rects}, indent=1))
+        payload = {"rects": [rect[:] for rect in self.rects]}
+        self.gt_path.write_text(json.dumps(payload, indent=1))
         print(f"saved {len(self.rects)} rects -> {self.gt_path}")
 
 
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    seed = "--no-seed" not in args
+    args = [arg for arg in args if arg != "--no-seed"]
+    trace_arg = None
+    if "--trace" in args:
+        index = args.index("--trace")
+        trace_arg = pathlib.Path(args[index + 1])
+        del args[index : index + 2]
+    if not args:
         print(__doc__)
         sys.exit(1)
-    image_path = pathlib.Path(sys.argv[1])
-    if len(sys.argv) > 2:
-        gt_path = pathlib.Path(sys.argv[2])
+    image_path = pathlib.Path(args[0])
+    if len(args) > 1:
+        gt_path = pathlib.Path(args[1])
     else:
         stem = image_path.name
         for suffix in ("-input.png", ".png"):
@@ -141,8 +199,18 @@ def main():
                 stem = stem[: -len(suffix)]
                 break
         gt_path = image_path.parent / "gt" / f"{stem}.json"
+    if trace_arg is None:
+        for suffix in ("-input.png", ".png"):
+            if image_path.name.endswith(suffix):
+                candidate = image_path.with_name(
+                    image_path.name[: -len(suffix)] + "-trace.json"
+                )
+                if candidate.exists():
+                    trace_arg = candidate
+                break
+
     root = tk.Tk()
-    Annotator(root, image_path, gt_path)
+    Annotator(root, image_path, gt_path, trace_arg, seed)
     root.mainloop()
 
 
