@@ -1203,6 +1203,28 @@ impl ScreenshotSession {
             .collect()
     }
 
+    /// The in-flight freehand draft (Pencil/Highlighter) in window-local
+    /// coordinates. While the raster preview owns the committed marks,
+    /// the live stroke paints as a vector union path on top instead of
+    /// being baked into the selection image — baking meant re-uploading
+    /// the whole crop to the atlas on every pointer move, and that
+    /// per-frame cost is what broke strokes into visible dots.
+    pub(crate) fn local_draft(&self, name: &str) -> Option<crate::annotation::Shape> {
+        let origin = self.screen(name).bounds().origin;
+        let mut shape = self.annotations.draft_shape()?.clone();
+        if !matches!(
+            shape.kind,
+            crate::annotation::ShapeKind::Pencil | crate::annotation::ShapeKind::Highlighter
+        ) {
+            return None;
+        }
+        shape.bounds.origin -= origin;
+        for point in &mut shape.points {
+            *point -= origin;
+        }
+        Some(shape)
+    }
+
     /// The selected shape cloned into the output's local coordinates —
     /// the highlight layer paints its visual geometry from this.
     pub(crate) fn selected_shape_local(&self, name: &str) -> Option<crate::annotation::Shape> {
@@ -1404,7 +1426,35 @@ impl ScreenshotSession {
                 .iter()
                 .map(|s| s.capture.width as f32 / f32::from(s.logical_size.width))
                 .fold(1_f32, f32::max);
-            let heavy = self.annotations.visible().any(|shape| {
+            // Freehand drafts no longer bake into the image (they ride
+            // as a vector overlay), so a growing stroke must never spawn
+            // the worker — nor respawn it on every landing while the
+            // gesture continues. Only committed/selection changes and
+            // pixel-filter (blur/mosaic) marks re-render off-thread.
+            let ink_only = self
+                .annotations
+                .draft_shape()
+                .is_some_and(|shape| shape.is_freehand())
+                && self.filter_preview.borrow().as_ref().is_some_and(|cache| {
+                    cache.selection == self.selection.bounds()
+                        && cache.committed == self.annotations.committed()
+                });
+            // A just-finished freehand stroke promotes incrementally on
+            // the UI thread (its raster state is warm, so this is O(new
+            // segments)); handing the append to the worker would blank
+            // the fresh ink until the worker lands.
+            let promotable = self.filter_preview.borrow().as_ref().is_some_and(|cache| {
+                cache.stroke.is_some()
+                    && self.annotations.draft_shape().is_none()
+                    && self.annotations.committed().len() == cache.committed.len() + 1
+                    && self.annotations.committed().starts_with(&cache.committed)
+                    && self
+                        .annotations
+                        .committed()
+                        .last()
+                        .is_some_and(|shape| shape.is_freehand())
+            });
+            let heavy = self.annotations.committed().iter().any(|shape| {
                 shape.points.len() > 1024
                     || (matches!(
                         shape.kind,
@@ -1414,8 +1464,17 @@ impl ScreenshotSession {
                         * max_scale
                         * max_scale
                         >= 262_144.)
+            }) || self.annotations.visible().any(|shape| {
+                matches!(
+                    shape.kind,
+                    crate::annotation::ShapeKind::Blur | crate::annotation::ShapeKind::Mosaic
+                ) && f32::from(shape.bounds.size.width)
+                    * f32::from(shape.bounds.size.height)
+                    * max_scale
+                    * max_scale
+                    >= 262_144.
             });
-            if unchanged || !heavy {
+            if unchanged || !heavy || ink_only || promotable {
                 self.preview_display = None;
                 return self.filtered_preview(output);
             }
@@ -1598,20 +1657,21 @@ impl ScreenshotSession {
             if cached.committed != committed {
                 cached.committed = committed.to_vec();
             }
-            let pixels = if let Some(shape) =
-                draft.filter(|s| matches!(s.kind, ShapeKind::Pencil | ShapeKind::Highlighter))
-            {
-                cached
-                    .stroke
-                    .get_or_insert_with(Default::default)
-                    .render(
-                        shape,
-                        &cached.pixels,
-                        (original.width, original.height),
-                        original.bounds.origin,
-                        original.scale,
-                    )
-                    .to_vec()
+            if let Some(shape) = draft.filter(|s| s.is_freehand()) {
+                // Live freehand stroke: advance the incremental raster so
+                // the release promotion stays O(new segments), but do NOT
+                // rebuild the selection image — the stroke paints as a
+                // vector union path on the overlay (see local_draft).
+                // Re-swapping the whole crop into the atlas on every
+                // pointer move was the stutter that broke strokes into
+                // visible dots.
+                cached.stroke.get_or_insert_with(Default::default).render(
+                    shape,
+                    &cached.pixels,
+                    (original.width, original.height),
+                    original.bounds.origin,
+                    original.scale,
+                );
             } else {
                 cached.stroke = None;
                 let mut pixels = cached.pixels.clone();
@@ -1623,13 +1683,12 @@ impl ScreenshotSession {
                     original.bounds.origin,
                     original.scale,
                 );
-                pixels
-            };
-            cached.image = crate::ui::image_util::rgba_to_render_image(
-                pixels,
-                original.width,
-                original.height,
-            );
+                cached.image = crate::ui::image_util::rgba_to_render_image(
+                    pixels,
+                    original.width,
+                    original.height,
+                );
+            }
             cached.draft = draft.cloned();
             cached.draft_generation = self.annotations.draft_generation();
         }
@@ -1641,6 +1700,24 @@ impl ScreenshotSession {
     /// Keep the original single-output crop when possible. Spanning selections
     /// use the highest participating pixel density; desktop gaps stay transparent.
     fn crop_impl(&self, fallback_output: &str, marked: bool) -> Option<RasterSelection> {
+        self.crop_composite(fallback_output, marked, true)
+    }
+
+    /// Test seam: the export-grade composite of the COMMITTED marks only —
+    /// exactly what the filtered preview shows while a freehand draft is
+    /// in flight, since the live stroke rides as a vector overlay
+    /// (see `Overlay::render`) and never bakes into the preview image.
+    #[cfg(test)]
+    pub(crate) fn crop_without_freehand_draft(&self, output: &str) -> Option<(u32, u32, Vec<u8>)> {
+        Self::crop_composite(self, output, true, false).map(|r| (r.width, r.height, r.rgba))
+    }
+
+    fn crop_composite(
+        &self,
+        fallback_output: &str,
+        marked: bool,
+        include_draft: bool,
+    ) -> Option<RasterSelection> {
         // Export shortcut: the preview cache holds exactly this composite
         // (full-selection crop + committed annotations) whenever the
         // selection and history are unchanged since the last render.
@@ -1692,7 +1769,18 @@ impl ScreenshotSession {
                     px((f32::from(bounds.top()) * scale).round() / scale),
                 );
             if marked {
-                self.annotations.rasterize(&mut rgba, w, h, origin, scale);
+                if include_draft {
+                    self.annotations.rasterize(&mut rgba, w, h, origin, scale);
+                } else {
+                    crate::annotation::Annotations::rasterize_shapes(
+                        self.annotations.committed().iter(),
+                        &mut rgba,
+                        w,
+                        h,
+                        origin,
+                        scale,
+                    );
+                }
             }
             return Some(RasterSelection {
                 scale,
@@ -1745,8 +1833,19 @@ impl ScreenshotSession {
         }
         let mut rgba = out.into_raw();
         if marked {
-            self.annotations
-                .rasterize(&mut rgba, w, h, extent.origin, scale);
+            if include_draft {
+                self.annotations
+                    .rasterize(&mut rgba, w, h, extent.origin, scale);
+            } else {
+                crate::annotation::Annotations::rasterize_shapes(
+                    self.annotations.committed().iter(),
+                    &mut rgba,
+                    w,
+                    h,
+                    extent.origin,
+                    scale,
+                );
+            }
         }
         Some(RasterSelection {
             scale,
@@ -2862,7 +2961,18 @@ mod tests {
     }
 
     fn assert_preview_matches_export(s: &ScreenshotSession) {
-        let pixels = s.crop("left").unwrap().2;
+        // While a freehand draft is live the preview intentionally lacks
+        // its ink: the stroke rides as a vector overlay (Overlay::render)
+        // and only committed marks are baked into the image.
+        let draft_live = s
+            .annotations()
+            .draft_shape()
+            .is_some_and(crate::annotation::Shape::is_freehand);
+        let pixels = if draft_live {
+            s.crop_without_freehand_draft("left").unwrap().2
+        } else {
+            s.crop("left").unwrap().2
+        };
         match s.filtered_preview("left") {
             Some((_, preview)) => {
                 let expected: Vec<_> = pixels
@@ -3258,8 +3368,10 @@ mod tests {
         let started = std::time::Instant::now();
         let (_, first) = s.filtered_preview("left").unwrap();
         let elapsed = started.elapsed();
-        let expected = s.crop("left").unwrap().2;
-        let expected: Vec<_> = expected
+        let expected: Vec<_> = s
+            .crop_without_freehand_draft("left")
+            .unwrap()
+            .2
             .as_chunks::<4>()
             .0
             .iter()
@@ -3275,12 +3387,9 @@ mod tests {
                 false,
             );
             let start = std::time::Instant::now();
-            let raster = s.crop_impl("left", true).unwrap();
-            let expected = crate::ui::image_util::rgba_to_render_image(
-                raster.rgba,
-                raster.width,
-                raster.height,
-            );
+            let raster = s.crop_without_freehand_draft("left").unwrap();
+            let expected =
+                crate::ui::image_util::rgba_to_render_image(raster.2, raster.0, raster.1);
             full += start.elapsed();
             let start = std::time::Instant::now();
             let (_, image) = s.filtered_preview("left").unwrap();
@@ -3330,12 +3439,9 @@ mod tests {
         for i in 1..=30 {
             s.pointer_move("left", point(px(100. + i as f32 * 8.), px(110.)), false);
             let start = std::time::Instant::now();
-            let raster = s.crop_impl("left", true).unwrap();
-            let expected = crate::ui::image_util::rgba_to_render_image(
-                raster.rgba,
-                raster.width,
-                raster.height,
-            );
+            let raster = s.crop_without_freehand_draft("left").unwrap();
+            let expected =
+                crate::ui::image_util::rgba_to_render_image(raster.2, raster.0, raster.1);
             full += start.elapsed();
             let start = std::time::Instant::now();
             let (_, preview) = s.filtered_preview("left").unwrap();

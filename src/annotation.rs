@@ -84,6 +84,21 @@ impl Shape {
         line::paths(self, offset)
     }
 
+    /// The live freehand draft as union-filled vector paths (see
+    /// `line::draft_paths`): painted per frame while drawing, while the
+    /// rasterized form only materializes in the selection image on
+    /// release.
+    pub(crate) fn draft_paths(&self, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
+        line::draft_paths(self, offset)
+    }
+
+    /// Freehand tools record a point trail instead of bounds; their
+    /// preview and rasterization paths are unique (see `StrokePreview`,
+    /// `line::coverage`).
+    pub(crate) fn is_freehand(&self) -> bool {
+        matches!(self.kind, ShapeKind::Pencil | ShapeKind::Highlighter)
+    }
+
     /// Match export's inward ellipse ring; reverse the inner contour to cut a hole.
     pub(crate) fn ellipse_path(&self, offset: Point<Pixels>) -> Option<Path<Pixels>> {
         let rx = f32::from(self.bounds.size.width) / 2.;
@@ -186,10 +201,26 @@ impl Shape {
     }
 }
 
+/// Freehand input conditioning: the smoothed ink cursor trails the raw
+/// pointer by ≈ this many logical px in steady state, at any speed.
+/// Larger = smoother curves but more visible lag.
+const INK_SMOOTHING_RADIUS: f32 = 2.;
+/// Minimum travel between two recorded freehand points. Pointer events
+/// arrive far denser than ink needs; the step also caps the point count
+/// of slow scribbles and keeps the capsule union cheap.
+const INK_RESAMPLE_STEP: f32 = 1.;
+
 #[derive(Clone)]
 struct Draft {
     start: Point<Pixels>,
     shape: Shape,
+    /// Smoothed ink cursor for freehand tools (Pencil/Highlighter): a
+    /// distance-adaptive exponential average of the raw pointer trail.
+    /// Raw event positions quantize to the event grid and chain into
+    /// visible corners and stair-steps; the EMA rounds them into a
+    /// continuous curve. Committed points ARE the smoothed cursor, so
+    /// preview, export and hit-testing all share one geometry.
+    ink: Point<Pixels>,
 }
 
 /// An eraser gesture in flight (issue #14). The eraser deletes whole
@@ -460,6 +491,7 @@ impl Annotations {
         }
         self.draft = Some(Draft {
             start: bounds.origin,
+            ink: bounds.origin,
             shape: Shape {
                 kind: ShapeKind::Text,
                 number: None,
@@ -660,6 +692,7 @@ impl Annotations {
         self.draft_generation += 1;
         self.draft = Some(Draft {
             start: p,
+            ink: p,
             shape: Shape {
                 kind: self.tool.expect("active annotation tool"),
                 text: None,
@@ -735,11 +768,24 @@ impl Annotations {
         };
         if matches!(draft.shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
             let end = line_endpoint(draft.start, p, selection, false);
-            if draft.shape.points.last() == Some(&end) {
-                return false;
+            // Distance-adaptive exponential smoothing (see Draft::ink):
+            // micro tremor is damped hard, fast flicks pass through
+            // nearly raw, and the trail behind the pointer stays ≈
+            // INK_SMOOTHING_RADIUS at any speed. Recording waits for
+            // INK_RESAMPLE_STEP of cursor travel, not raw event density.
+            let ink = draft.ink;
+            let (dx, dy) = (f32::from(end.x - ink.x), f32::from(end.y - ink.y));
+            let dist = dx.hypot(dy);
+            let alpha = dist / (dist + INK_SMOOTHING_RADIUS);
+            let next = point(ink.x + px(dx * alpha), ink.y + px(dy * alpha));
+            draft.ink = next;
+            let changed = draft.shape.points.last().is_some_and(|last| {
+                f32::from(next.x - last.x).hypot(f32::from(next.y - last.y)) >= INK_RESAMPLE_STEP
+            });
+            if changed {
+                draft.shape.points.push(next);
             }
-            draft.shape.points.push(end);
-            return true;
+            return changed;
         }
         if draft.shape.kind == ShapeKind::Number {
             let bounds = number_bounds(p, selection, f32::from(draft.shape.bounds.size.width));
@@ -2055,23 +2101,88 @@ mod tests {
         a.begin(points[0], selection(), false);
         for p in &points[1..] {
             assert!(a.drag_to(*p, selection(), false));
+            // Repeating a sample converges: the smoothed cursor is
+            // already within a resample step of the recorded tail.
             assert!(!a.drag_to(*p, selection(), false));
         }
         a.end();
         assert!(!a.drag_to(point(px(70.), px(70.)), selection(), false));
-        assert_eq!(a.visible().next().unwrap().points, points);
+        // The stroke is one history entry whose smoothed points hug the
+        // raw polyline — within the smoothing trail of every sample.
+        let stroke_points = a.visible().next().unwrap().points.clone();
+        assert_eq!(stroke_points.len(), points.len());
+        for (recorded, raw) in stroke_points.iter().zip(points) {
+            let dx = f32::from(recorded.x - raw.x);
+            let dy = f32::from(recorded.y - raw.y);
+            assert!(dx.hypot(dy) <= super::INK_SMOOTHING_RADIUS + super::INK_RESAMPLE_STEP);
+        }
         a.undo();
         assert_eq!(a.visible().count(), 0);
         a.redo();
-        assert_eq!(a.visible().next().unwrap().points, points);
+        assert_eq!(a.visible().next().unwrap().points, stroke_points);
+        // A flick into the selection edge keeps the tip at the release
+        // position, within the smoothing trail.
         a.begin(points[0], selection(), false);
         a.drag_to(point(px(200.), px(-40.)), selection(), false);
-        assert_eq!(
-            *a.visible().last().unwrap().points.last().unwrap(),
-            point(px(80.), px(0.))
-        );
+        let tip = *a.visible().last().unwrap().points.last().unwrap();
+        let dx = f32::from(tip.x - px(80.));
+        let dy = f32::from(tip.y - px(0.));
+        assert!(dx.hypot(dy) <= super::INK_SMOOTHING_RADIUS + super::INK_RESAMPLE_STEP);
         a.cancel();
         assert_eq!(a.visible().count(), 1);
+    }
+
+    #[test]
+    fn freehand_smoothing_damps_tremor_and_trails_fast_flicks() {
+        let mut a = Annotations::default();
+        a.toggle(super::ShapeKind::Pencil);
+        a.begin(point(px(50.), px(50.)), selection(), false);
+        // Sub-pixel tremor around one spot never becomes ink.
+        for i in 0..50 {
+            let jitter = if i % 2 == 0 { 0.4 } else { -0.4 };
+            assert!(!a.drag_to(
+                point(px(50. + jitter), px(50. + jitter)),
+                selection(),
+                false
+            ));
+        }
+        assert_eq!(a.visible().last().unwrap().points.len(), 1);
+        // A fast flick records points that approach the pointer but
+        // never overshoot it, and repeated samples converge quickly.
+        assert!(a.drag_to(point(px(75.), px(50.)), selection(), false));
+        let mut repeats = 0;
+        while a.drag_to(point(px(75.), px(50.)), selection(), false) {
+            repeats += 1;
+            assert!(repeats < 100, "smoothing cursor must converge");
+        }
+        let tail = a.visible().last().unwrap().points.clone();
+        for p in &tail {
+            assert!(f32::from(p.x) >= 50. && f32::from(p.x) <= 75.);
+            assert!((f32::from(p.y) - 50.).abs() <= super::INK_SMOOTHING_RADIUS);
+        }
+        let tip = tail.last().unwrap();
+        assert!(f32::from(px(75.) - tip.x) <= super::INK_SMOOTHING_RADIUS);
+    }
+
+    #[test]
+    fn freehand_smoothing_keeps_ink_inside_the_selection() {
+        let mut a = Annotations::default();
+        a.toggle(super::ShapeKind::Highlighter);
+        a.begin(point(px(5.), px(5.)), selection(), false);
+        for i in 0..20 {
+            let x = 5. + i as f32 * 12.;
+            let y = if i % 3 == 0 { 200. } else { -30. };
+            a.drag_to(point(px(x), px(y)), selection(), false);
+        }
+        let selection = selection();
+        for p in &a.visible().last().unwrap().points {
+            // The clamp edge itself is fair game (f32 saturation can
+            // touch it); the ink must never step PAST the selection.
+            assert!(f32::from(p.x) >= f32::from(selection.left()));
+            assert!(f32::from(p.x) <= f32::from(selection.right()));
+            assert!(f32::from(p.y) >= f32::from(selection.top()));
+            assert!(f32::from(p.y) <= f32::from(selection.bottom()));
+        }
     }
 
     #[test]

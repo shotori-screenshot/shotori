@@ -119,10 +119,21 @@ impl Render for Overlay {
             .map(round_px);
         let hover = shared.hover_bounds(&self.capture.output_name).map(round_px);
         let selected_shape = shared.selected_shape_local(&self.capture.output_name);
-        let shapes = if shared.uses_raster_preview() {
+        let raster_preview = shared.uses_raster_preview();
+        let shapes = if raster_preview {
             Vec::new()
         } else {
             shared.local_annotations(&self.capture.output_name)
+        };
+        // The live freehand stroke rides ABOVE the raster preview as a
+        // vector union path: baking it into the selection image meant
+        // re-uploading the entire crop to the atlas on every pointer
+        // move — the stroke-stutter bottleneck. On release the stroke is
+        // promoted into the image once (see session::filtered_preview).
+        let draft_mark = if raster_preview {
+            shared.local_draft(&self.capture.output_name)
+        } else {
+            None
         };
         let canvas_images = self.canvas_images.clone();
         let filtered_image = filtered.as_ref().map(|(_, image)| image.clone());
@@ -532,6 +543,11 @@ impl Render for Overlay {
                                         for mut stroke in shape.strokes() {
                                             stroke.origin += viewport.origin;
                                             window.paint_quad(fill(stroke, rgba(shape.color)));
+                                        }
+                                    }
+                                    if let Some(mark) = &draft_mark {
+                                        for path in mark.draft_paths(viewport.origin) {
+                                            window.paint_path(path, rgba(mark.color));
                                         }
                                     }
                                 },

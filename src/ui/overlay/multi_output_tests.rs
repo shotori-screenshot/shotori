@@ -106,9 +106,15 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
             window.draw(cx).clear(cx);
             let (_, image) = session.read(cx).filtered_preview("screen").unwrap();
             assert!(window.has_image_atlas_entry(&image));
-            if let Some(old) = previous.take() {
+            if let Some(old) = previous.take()
+                && old.id != image.id
+            {
                 assert!(!window.has_image_atlas_entry(&old));
             }
+            // Mid-gesture the ink rides as a vector overlay: the image Arc
+            // must stay IDENTICAL (no per-move atlas re-upload). A fresh
+            // image appears only when a stroke is promoted on release,
+            // and the retired one must leave the atlas immediately.
             previous = Some(image);
         });
     }
@@ -1628,14 +1634,16 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
     ) {
         cx.update(|_, cx| {
             let marks = session.read(cx).annotations();
-            assert_eq!(
-                marks.visible().next().unwrap().points,
-                vec![
-                    point(px(50.), px(50.)),
-                    point(px(90.), px(90.)),
-                    point(px(180.), px(50.))
-                ]
-            );
+            let stroke = marks.visible().next().unwrap().points.clone();
+            // Three samples recorded, smoothed: the first lands exactly,
+            // the rest trail their raw sample within the ink radius.
+            assert_eq!(stroke.len(), 3);
+            assert_eq!(stroke[0], point(px(50.), px(50.)));
+            for (recorded, raw) in stroke[1..].iter().zip([(90., 90.), (180., 50.)]) {
+                let dx = f32::from(recorded.x - px(raw.0));
+                let dy = f32::from(recorded.y - px(raw.1));
+                assert!(dx.hypot(dy) <= 3., "{recorded:?} trails {raw:?} too far");
+            }
         });
         let key = if kind == crate::annotation::ShapeKind::Highlighter {
             "h"

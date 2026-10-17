@@ -1,5 +1,5 @@
 //! Shared rounded stroke geometry for line preview and PNG rasterization.
-use gpui_kit::{Path, PathBuilder, Pixels, Point, point, px};
+use gpui_kit::{FillOptions, Path, PathBuilder, PathStyle, Pixels, Point, point, px};
 
 /// A stroke is a union of capsules: round endpoints and round joins, including
 /// reversals and self-intersections. Both rendering paths use these polygons.
@@ -91,6 +91,32 @@ pub(super) fn paths(shape: &super::Shape, offset: Point<Pixels>) -> Vec<Path<Pix
         builder.build().ok()
     })
     .collect()
+}
+
+/// The live freehand draft painted straight onto the overlay while the
+/// stroke is in flight (the rasterized release form lives in the
+/// selection image). All capsule subpaths wind the same direction, so a
+/// NonZero fill unions them into one shape: retraces within the stroke
+/// coat once, matching the export's coverage union. The lyon default
+/// fill rule is EvenOdd, which would punch a hole at every capsule
+/// overlap. Chunks stay under the u16 tessellation index ceiling.
+pub(super) fn draft_paths(shape: &super::Shape, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
+    const CHUNK: usize = 1024; // 34 vertices per capsule × 1024 ≪ u16::MAX
+    polygons(&shape.points, shape.width)
+        .chunks(CHUNK)
+        .filter_map(|chunk| {
+            let mut builder =
+                PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero()));
+            for polygon in chunk {
+                builder.move_to(polygon[0] + offset);
+                for p in &polygon[1..] {
+                    builder.line_to(*p + offset);
+                }
+                builder.close();
+            }
+            builder.build().ok()
+        })
+        .collect()
 }
 
 pub(super) fn rasterize(
