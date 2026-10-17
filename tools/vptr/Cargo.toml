@@ -10,3 +10,9 @@ description = "wlr virtual pointer injector for interactive e2e tests (Linux/Way
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 niri-ipc = "26.4.0"
+
+[dependencies.wayland-scanner]
+version = "0.31"
+
+[dependencies.wayland-backend]
+version = "0.3"

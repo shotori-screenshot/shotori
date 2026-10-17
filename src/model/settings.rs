@@ -365,6 +365,10 @@ pub struct Settings {
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
+    /// The configurable shortcut keystrokes, resolved: factory
+    /// defaults with the file's `[keys]` overrides applied (see
+    /// `crate::actions::CONFIGURABLE_KEYS` for the id list).
+    keys: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -376,6 +380,7 @@ impl Default for Settings {
             language: Language::Auto,
             sidebar_collapsed: false,
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
+            keys: crate::actions::default_keys(),
         }
     }
 }
@@ -387,6 +392,9 @@ impl Default for Settings {
 struct File {
     toolbar: ToolbarFile,
     ocr: OcrFile,
+    /// Per-command keystroke overrides (`[keys]`, id → keystroke —
+    /// see `crate::actions::CONFIGURABLE_KEYS`). Absent = all factory.
+    keys: Option<std::collections::BTreeMap<String, String>>,
     /// Top-level `language = "auto" | "en" | "zh-CN"`.
     language: Option<String>,
     /// Settings-window sidebar collapsed (`sidebar_collapsed`,
@@ -487,6 +495,24 @@ impl Settings {
 
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
         self.sidebar_collapsed = collapsed;
+    }
+
+    /// The resolved shortcut keystrokes (id → keystroke, defaults
+    /// included). The settings editor reads this to render the key
+    /// caps; the overlay binds from it at startup.
+    pub fn keys(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.keys
+    }
+
+    /// Rebind one configurable command (the shortcut recorder; the id
+    /// and keystroke were validated against the registry before this).
+    pub fn set_key(&mut self, id: &str, keystroke: String) {
+        self.keys.insert(id.to_owned(), keystroke);
+    }
+
+    /// Restore every shortcut to its factory keystroke.
+    pub fn reset_keys(&mut self) {
+        self.keys = crate::actions::default_keys();
     }
 
     /// A button shows iff it has a slot in the row; hidden buttons
@@ -642,6 +668,12 @@ impl Settings {
                 }
             },
         };
+        // [keys]: resolved against the registry — unknown ids,
+        // unparseable keystrokes and duplicates degrade per entry with
+        // a warning (same contract as the other fields).
+        let empty = std::collections::BTreeMap::new();
+        let keys =
+            crate::actions::resolve_keys(path, file.keys.as_ref().unwrap_or(&empty), &mut errors);
         (
             Self {
                 row,
@@ -650,6 +682,7 @@ impl Settings {
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 annotation_colors,
+                keys,
             },
             errors,
         )
@@ -718,6 +751,20 @@ impl Settings {
             "assume_upright".into(),
             toml::Value::from(self.ocr_assume_upright),
         );
+        // [keys]: overwrite the known ids, keep unknown ones (the same
+        // forward-compat contract as every other section)
+        let keys = table
+            .entry("keys")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let Some(keys) = keys.as_table_mut() else {
+            return Err(format!(
+                "{}: [keys] is not a table — refusing to overwrite",
+                path.display()
+            ));
+        };
+        for (id, keystroke) in &self.keys {
+            keys.insert(id.clone(), toml::Value::from(keystroke.as_str()));
+        }
         let body = toml::to_string(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = format!(
             "# Shotori settings — managed by `shotori settings`; unknown keys are preserved.\n{body}"
@@ -1047,6 +1094,42 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[toolbar]"));
         assert!(text.contains("\"separator\""));
+    }
+
+    #[test]
+    fn keys_round_trip_and_per_entry_degrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        s.set_key("copy", "ctrl-y".into());
+        s.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[keys]"));
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(back, s);
+
+        // Hand-edited file: the valid override applies; the invalid
+        // keystroke and the unknown id each warn and degrade.
+        std::fs::write(
+            &path,
+            "[keys]\ncopy = \"ctrl-y\"\nsave = \"oops\"\nlegacy = \"ctrl-1\"\n",
+        )
+        .unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert_eq!(back.keys().get("copy").unwrap(), "ctrl-y");
+        assert_eq!(back.keys().get("save").unwrap(), "ctrl-s");
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn save_preserves_unknown_keys_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "[keys]\nfuture_id = \"ctrl-9\"\n").unwrap();
+        Settings::default().save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future_id"), "unknown ids survive a save");
     }
 
     #[test]

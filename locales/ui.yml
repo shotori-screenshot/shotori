@@ -93,6 +93,49 @@ settings:
     credits:
       en: UI hand-drawn with gpui-kit · OCR by RapidOCR (PP-OCR) · Community themes — Catppuccin, Dracula, Gruvbox, Nord, Rosé Pine, Tokyo Night
       zh-CN: 界面基于 gpui-kit 手绘 · 识别引擎 RapidOCR（PP-OCR）· 社区主题——Catppuccin、Dracula、Gruvbox、Nord、Rosé Pine、Tokyo Night
+  keys_page:
+    title:
+      en: Shortcuts
+      zh-CN: 快捷键
+    blurb:
+      en: Rebind the screenshot commands. Click a key cap, press the new chord — applies to the next screenshot.
+      zh-CN: 重新绑定截图命令。点击键帽后按下新组合键——下次截图时生效。
+    copy:
+      en: Copy to clipboard
+      zh-CN: 复制到剪贴板
+    save:
+      en: Save to file
+      zh-CN: 保存为文件
+    pin:
+      en: Pin to screen
+      zh-CN: 贴图
+    ocr:
+      en: OCR text
+      zh-CN: OCR 识别文字
+    scroll:
+      en: Long screenshot
+      zh-CN: 长截图
+    select_screen:
+      en: Select entire screen
+      zh-CN: 选定整屏
+    settings:
+      en: Open settings
+      zh-CN: 打开设置
+    record:
+      en: Press keys…
+      zh-CN: 按下新的快捷键…
+    default:
+      en: "Default %{keys}"
+      zh-CN: "默认 %{keys}"
+    reserved:
+      en: Esc and Enter are reserved
+      zh-CN: Esc 与 Enter 为保留键
+    conflict:
+      en: Already used by “%{action}”
+      zh-CN: 已被「%{action}」占用
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
   toolbar_page:
     title:
       en: Toolbar

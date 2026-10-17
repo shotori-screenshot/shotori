@@ -1,10 +1,12 @@
-//! # vptr — virtual pointer injector for interactive e2e tests
+//! # vptr — virtual pointer + keyboard injector for interactive e2e tests
 //!
-//! Drives the pointer through the `zwlr_virtual_pointer_v1` protocol so
-//! scripts (and agents) can click real UIs on a live compositor — the
-//! missing half of screenshot-tool e2e: `grim` sees the pixels, this
-//! pokes them. Built during the pin (贴图) work to reproduce click →
-//! Esc flows without a human.
+//! Drives the pointer through the `zwlr_virtual_pointer_v1` protocol and
+//! keystrokes through `zwp_virtual_keyboard_v1`, so scripts (and agents)
+//! can drive real UIs on a live compositor — the missing half of
+//! screenshot-tool e2e: `grim` sees the pixels, this pokes them. Built
+//! during the pin (贴图) work to reproduce click → Esc flows without a
+//! human; the keyboard half landed with the configurable-shortcuts
+//! feature (the settings recorder only reacts to real key events).
 //!
 //! ## Usage
 //!
@@ -20,12 +22,23 @@
 //! vptr move    X Y [W H]  # move only
 //! vptr down | up          # press / release the left button
 //! vptr scroll N           # N lines (negative scrolls up)
+//!
+//! # keyboard (raw protocol mode; chord in gpui keystroke syntax):
+//! vptr key CHORD          # one-shot injection (attaches a keyboard,
+//!                         # sends, detaches)
+//! vptr keep [CHORD...]    # hold a virtual pointer+keyboard forever and
+//!                         # inject one chord per stdin line — a
+//!                         # PERSISTENT device: compositors compute seat
+//!                         # capabilities from attached devices, and
+//!                         # sway (for one) won't give a layer surface
+//!                         # keyboard focus when its seat had no
+//!                         # keyboard at surface-map time; the stdin
+//!                         # server also avoids the attach/detach churn
+//!                         # per chord that crashes gpui's keyboard
+//!                         # state (upstream unwrap, measured)
 //! ```
 //!
-//! `down`/`gmove`/`up` chain into a drag. There is **no keyboard
-//! injection**: the wlr virtual-pointer protocol only carries pointer
-//! events (zwp_virtual_keyboard exists but is a different manager; add
-//! it here if a test ever needs keystrokes).
+//! `down`/`gmove`/`up` chain into a drag.
 //!
 //! ## The coordinate-mapping trap (measured, don't re-derive)
 //!
@@ -57,12 +70,37 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::wl_keyboard::KeyState;
 use wayland_client::protocol::wl_pointer::{Axis, ButtonState};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
 use wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
+
+/// Generated bindings for `zwp_virtual_keyboard_unstable_v1` (see
+/// protocols/virtual-keyboard-unstable-v1.xml — no crates.io protocol
+/// crate packages this one). Module shape mirrors wayland-protocols'
+/// own `wayland_protocol!` macro: glob the core protocol in, generate
+/// interface tables against ITS `__interfaces` re-exports, then the
+/// client API.
+pub mod vkbd {
+    #![allow(dead_code, non_camel_case_types, non_snake_case, unused_variables)]
+    #![allow(non_upper_case_globals, unused_imports, missing_docs, clippy::all)]
+    use wayland_client;
+    use wayland_client::protocol::*;
+
+    pub mod __interfaces {
+        use wayland_client::protocol::__interfaces::*;
+        wayland_scanner::generate_interfaces!("protocols/virtual-keyboard-unstable-v1.xml");
+    }
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_client_code!("protocols/virtual-keyboard-unstable-v1.xml");
+
+    pub use zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+    pub use zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
+}
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -86,6 +124,10 @@ macro_rules! noop_dispatch {
     )* };
 }
 noop_dispatch!(WlSeat, ZwlrVirtualPointerManagerV1, ZwlrVirtualPointerV1);
+noop_dispatch!(
+    vkbd::ZwpVirtualKeyboardManagerV1,
+    vkbd::ZwpVirtualKeyboardV1
+);
 
 impl Dispatch<WlRegistry, GlobalListContents> for App {
     fn event(
@@ -104,6 +146,21 @@ fn main() {
     let Some(mode) = args.first().cloned() else {
         usage_and_exit();
     };
+    // Keyboard path is fully separate: a virtual keyboard, no pointer.
+    if mode == "key" {
+        let Some(chord) = args.get(1) else {
+            usage_and_exit();
+        };
+        key_inject(chord);
+        return;
+    }
+    // Device-keeper: hold the connection open so the seat keeps its
+    // pointer+keyboard capabilities, and serve chords from stdin (see
+    // the `keep` docs above)
+    if mode == "keep" {
+        keep_devices();
+        return;
+    }
     // num(0) = first argument after the mode
     let num = |i: usize| -> f64 {
         args.get(i + 1)
@@ -222,6 +279,262 @@ fn main() {
     queue.roundtrip(&mut app).expect("roundtrip");
 }
 
+/// Inject one chord (gpui keystroke syntax: `ctrl-shift-f1`) through a
+/// virtual keyboard: press the modifiers, press+release the key,
+/// release the modifiers. The keymap is a system-include XKB string —
+/// the COMPOSITOR parses it with its own libxkbcommon and system xkb
+/// data, so no keymap tables live here; only the evdev codes below.
+fn key_inject(chord: &str) {
+    let conn = Connection::connect_to_env().expect("connect to $WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("wayland registry");
+    let qh = queue.handle();
+    let seat: WlSeat = globals.bind(&qh, 1..=1, ()).expect("wl_seat");
+    let mgr: vkbd::ZwpVirtualKeyboardManagerV1 = globals
+        .bind(&qh, 1..=1, ())
+        .expect("zwp_virtual_keyboard_manager_v1 (compositor support missing?)");
+    let kb = mgr.create_virtual_keyboard(&seat, &qh, ());
+
+    // The protocol wants the keymap as an fd; a temp file is the
+    // dependency-free way to get one. Compositor-side parsing makes
+    // the include-based map as complete as the system's xkb data.
+    let keymap = "xkb_keymap {\n\
+                  \x20 xkb_keycodes { include \"evdev\" };\n\
+                  \x20 xkb_types { include \"complete\" };\n\
+                  \x20 xkb_compatibility { include \"complete\" };\n\
+                  \x20 xkb_symbols { include \"pc+us\" };\n\
+                  };";
+    let path = std::env::temp_dir().join("vptr-keymap.xkb");
+    std::fs::write(&path, keymap).expect("write keymap temp file");
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::File::open(&path).expect("reopen keymap temp file");
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) };
+    kb.keymap(
+        wayland_client::protocol::wl_keyboard::KeymapFormat::XkbV1,
+        fd,
+        keymap.len() as u32,
+    );
+    let mut app = App;
+    queue.roundtrip(&mut app).expect("roundtrip");
+    inject_chord(&kb, &mut queue, &mut app, chord);
+    drop(std::fs::remove_file(&path));
+}
+
+/// Hold a virtual pointer + keyboard open until stdin closes, injecting
+/// one chord per stdin line. Compositors derive seat capabilities from
+/// attached devices; a headless session that starts device-less leaves
+/// clients without keyboard focus paths even after devices come and go
+/// (sway measured: layer surfaces mapped before the first keyboard
+/// never get keyboard focus). Serving chords over the SAME persistent
+/// keyboard also avoids the attach/detach churn per chord that trips
+/// gpui's keyboard state (upstream unwrap in the Modifiers handler,
+/// measured).
+fn keep_devices() {
+    let conn = Connection::connect_to_env().expect("connect to $WAYLAND_DISPLAY");
+    let (globals, mut queue) = registry_queue_init::<App>(&conn).expect("wayland registry");
+    let qh = queue.handle();
+    let seat: WlSeat = globals.bind(&qh, 1..=1, ()).expect("wl_seat");
+    let pointer_mgr: ZwlrVirtualPointerManagerV1 = globals
+        .bind(&qh, 1..=2, ())
+        .expect("zwlr_virtual_pointer_manager_v1 (compositor support missing?)");
+    let keyboard_mgr: vkbd::ZwpVirtualKeyboardManagerV1 = globals
+        .bind(&qh, 1..=1, ())
+        .expect("zwp_virtual_keyboard_manager_v1 (compositor support missing?)");
+    let _ptr = pointer_mgr.create_virtual_pointer(Some(&seat), &qh, ());
+    let kb = keyboard_mgr.create_virtual_keyboard(&seat, &qh, ());
+    // A keymap is required before the compositor treats the keyboard as
+    // usable; the include-based map resolves against the system xkb data
+    let keymap = "xkb_keymap {\n\
+                  \x20 xkb_keycodes { include \"evdev\" };\n\
+                  \x20 xkb_types { include \"complete\" };\n\
+                  \x20 xkb_compatibility { include \"complete\" };\n\
+                  \x20 xkb_symbols { include \"pc+us\" };\n\
+                  };";
+    let path = std::env::temp_dir().join("vptr-keep-keymap.xkb");
+    std::fs::write(&path, keymap).expect("write keymap temp file");
+    use std::os::fd::AsRawFd as _;
+    let file = std::fs::File::open(&path).expect("reopen keymap temp file");
+    let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) };
+    kb.keymap(
+        wayland_client::protocol::wl_keyboard::KeymapFormat::XkbV1,
+        fd,
+        keymap.len() as u32,
+    );
+    drop(std::fs::remove_file(&path));
+    let mut app = App;
+    queue.roundtrip(&mut app).expect("roundtrip");
+    eprintln!("vptr: keeper ready");
+
+    use std::io::BufRead as _;
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        let chord = line.trim();
+        if chord.is_empty() {
+            continue;
+        }
+        inject_chord(&kb, &mut queue, &mut app, chord);
+    }
+}
+
+/// Send one chord through the given (already keymapped) virtual
+/// keyboard: modifiers request + modifier keys, the key, then release.
+fn inject_chord(
+    kb: &vkbd::ZwpVirtualKeyboardV1,
+    queue: &mut wayland_client::EventQueue<App>,
+    app: &mut App,
+    chord: &str,
+) {
+    let Some((mods, mask, key)) = parse_chord(chord) else {
+        eprintln!("vptr: unknown key or modifier in chord {chord:?}");
+        return;
+    };
+    // The wire carries RAW EVDEV codes: wlroots applies the +8 into
+    // libxkbcommon keycode space itself (measured: an evdev-21 "y"
+    // sent as 29 landed as "k", exactly one +8 off). Modifiers go
+    // through the protocol's own `modifiers` request — pressing the
+    // modifier keys alone raced the client's modifiers event and the
+    // chord arrived without ctrl (also measured); the explicit
+    // depressed-mask request is deterministic.
+    for m in &mods {
+        kb.key(1000, *m, KeyState::Pressed);
+    }
+    if mask != 0 {
+        kb.modifiers(mask, 0, 0, 0);
+    }
+    queue.roundtrip(app).expect("roundtrip");
+    sleep(Duration::from_millis(120));
+    kb.key(1100, key, KeyState::Pressed);
+    queue.roundtrip(app).expect("roundtrip");
+    sleep(Duration::from_millis(90));
+    kb.key(1150, key, KeyState::Released);
+    if mask != 0 {
+        kb.modifiers(0, 0, 0, 0);
+    }
+    queue.roundtrip(app).expect("roundtrip");
+    for m in mods.iter().rev() {
+        kb.key(1200, *m, KeyState::Released);
+    }
+    queue.roundtrip(app).expect("roundtrip");
+}
+
+/// `ctrl-shift-f1` → ([ctrl code, shift code], f1 code). Modifier
+/// names match gpui's keystroke prefixes; the last segment is the key.
+/// Codes come out as evdev numbers (+8 into keymap space at the call
+/// site) so the injection path can't re-fail on a name.
+fn parse_chord(chord: &str) -> Option<(Vec<u32>, u32, u32)> {
+    let parts: Vec<&str> = chord.split('-').filter(|p| !p.is_empty()).collect();
+    let (key, mods) = parts.split_last()?;
+    let key = key_code(key)?;
+    let mut codes = Vec::new();
+    let mut mask = 0;
+    for m in mods {
+        if !is_modifier(m) {
+            return None;
+        }
+        // wlroots' depressed-mask bit for each modifier (wlr_keyboard:
+        // shift=1, caps=2, ctrl=4, alt=8, mod2=16, mod3=32, super=64)
+        mask |= match *m {
+            "shift" => 1,
+            "ctrl" => 4,
+            "alt" => 8,
+            _ => 64, // "super" — is_modifier() filtered the rest
+        };
+        codes.push(key_code(m)?);
+    }
+    Some((codes, mask, key))
+}
+
+fn is_modifier(name: &str) -> bool {
+    matches!(name, "ctrl" | "alt" | "shift" | "super")
+}
+
+/// evdev keycode for a key name (the +8 into libxkbcommon space
+/// happens at the call site). Letters and digits are contiguous runs;
+/// the rest is the sparse table e2e chords actually need.
+fn key_code(name: &str) -> Option<u32> {
+    let lower = name.to_lowercase();
+    if let Some(rest) = lower.strip_prefix('f')
+        && let Ok(n) = rest.parse::<u32>()
+    {
+        return match n {
+            1..=10 => Some(58 + n), // F1=59 .. F10=68
+            11 => Some(87),
+            12 => Some(88),
+            _ => None,
+        };
+    }
+    Some(match lower.as_str() {
+        "escape" | "esc" => 1,
+        "1" => 2,
+        "2" => 3,
+        "3" => 4,
+        "4" => 5,
+        "5" => 6,
+        "6" => 7,
+        "7" => 8,
+        "8" => 9,
+        "9" => 10,
+        "0" => 11,
+        "minus" => 12,
+        "equal" => 13,
+        "backspace" => 14,
+        "tab" => 15,
+        "q" => 16,
+        "w" => 17,
+        "e" => 18,
+        "r" => 19,
+        "t" => 20,
+        "y" => 21,
+        "u" => 22,
+        "i" => 23,
+        "o" => 24,
+        "p" => 25,
+        "leftbracket" | "[" => 26,
+        "rightbracket" | "]" => 27,
+        "enter" | "return" => 28,
+        "ctrl" => 29,
+        "a" => 30,
+        "s" => 31,
+        "d" => 32,
+        "f" => 33,
+        "g" => 34,
+        "h" => 35,
+        "j" => 36,
+        "k" => 37,
+        "l" => 38,
+        "semicolon" | ";" => 39,
+        "apostrophe" | "'" => 40,
+        "grave" | "`" => 41,
+        "shift" => 42,
+        "backslash" | "\\" => 43,
+        "z" => 44,
+        "x" => 45,
+        "c" => 46,
+        "v" => 47,
+        "b" => 48,
+        "n" => 49,
+        "m" => 50,
+        "comma" | "," => 51,
+        "dot" | "." => 52,
+        "slash" | "/" => 53,
+        "alt" => 56,
+        "space" => 57,
+        "capslock" => 58,
+        "home" => 102,
+        "up" => 103,
+        "pageup" => 104,
+        "left" => 105,
+        "right" => 106,
+        "end" => 107,
+        "down" => 108,
+        "pagedown" => 109,
+        "insert" => 110,
+        "delete" => 111,
+        "super" | "cmd" | "win" => 125,
+        _ => return None,
+    })
+}
+
 /// The union of all niri outputs' logical rects: (x, y, w, h). This is
 /// the space `motion_absolute` fractions map onto (see the module docs).
 fn niri_desktop_union() -> Option<(f64, f64, f64, f64)> {
@@ -252,7 +565,8 @@ fn usage_and_exit() -> ! {
         "usage: vptr gclick|grclick|gmove GX GY   (global logical coords, via niri IPC)\n\
          \x20      vptr click|rclick|move X Y [W H]  (raw fraction mode)\n\
          \x20      vptr down | up                    (left button press/release)\n\
-         \x20      vptr scroll N                     (lines; negative = up)"
+         \x20      vptr scroll N                     (lines; negative = up)\n\
+         \x20      vptr key CHORD                    (e.g. ctrl+y, escape, ctrl-shift-f1)"
     );
     std::process::exit(2);
 }

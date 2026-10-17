@@ -68,6 +68,9 @@ const PAGE_PAD: f32 = 24.;
 enum Section {
     General,
     Toolbar,
+    /// The overlay's configurable shortcut commands (the key-cap
+    /// recorder; see [`SettingsWindow::page_keys`]).
+    Keys,
     Ocr,
     Appearance,
     /// The identity card — a footer entry, not main navigation (the
@@ -457,6 +460,16 @@ struct SettingsWindow {
     /// Drives the preview strip's horizontal scroll (see
     /// [`SettingsWindow::preview_strip`]).
     preview_scroll: ScrollHandle,
+    /// The shortcut row currently recording a new keystroke (the
+    /// configurable action's registry id), `None` outside recordings.
+    recording: Option<String>,
+    /// Why the last captured chord was refused (still recording — the
+    /// message shows inside the badge until the next attempt).
+    record_error: Option<String>,
+    /// The recording badge's focus target: the keydown listener lives
+    /// on that element, and focusing it routes the chord there (where
+    /// stop_propagation keeps the window's own bindings out of the way).
+    record_focus: FocusHandle,
     /// Drag-edge auto-scroll for the preview strip — the shared
     /// gpui-base manager (ramped speed, ~60fps ticks, `stop()` retires
     /// it); see [`edge_scroll_delta`] for the curve.
@@ -553,6 +566,9 @@ impl SettingsWindow {
             language_select,
             ocr_select,
             preview_scroll: ScrollHandle::new(),
+            recording: None,
+            record_error: None,
+            record_focus: cx.focus_handle(),
             edge_scroll: AutoScroll::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -1141,8 +1157,18 @@ impl Render for SettingsWindow {
             .key_context("ShotoriSettings")
             // Esc mirrors the titlebar close (the binding is registered
             // in `run`; handled here — app-level backstops never see
-            // window-dispatched actions)
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _| {
+            // window-dispatched actions). While the key-cap recorder is
+            // listening, Esc belongs to it (cancel) — and the recorder's
+            // stop_propagation can't keep THIS action from firing (gpui
+            // collects the context bindings before running key
+            // listeners, measured), so the guard lives here.
+            .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
+                if this.recording.take().is_some() {
+                    this.record_error = None;
+                    window.blur(cx);
+                    cx.notify();
+                    return;
+                }
                 window.remove_window();
             }))
             .child(self.sidebar(window, cx))
@@ -1254,6 +1280,95 @@ fn page_header(title: &str, blurb: &str) -> Div {
                 .text_color(rgba(t.hint_text))
                 .child(blurb.to_string()),
         )
+}
+
+/// The localized display name of a configurable shortcut id. The ids
+/// live in `actions::CONFIGURABLE_KEYS`; the test below pins that
+/// every one of them lands on a real label (the fallback returns the
+/// raw id only so a future registry entry can't render as nothing).
+fn key_label(id: &str) -> String {
+    match id {
+        "copy" => crate::i18n::t!("settings.keys_page.copy").to_string(),
+        "save" => crate::i18n::t!("settings.keys_page.save").to_string(),
+        "pin" => crate::i18n::t!("settings.keys_page.pin").to_string(),
+        "ocr" => crate::i18n::t!("settings.keys_page.ocr").to_string(),
+        "scroll" => crate::i18n::t!("settings.keys_page.scroll").to_string(),
+        "select_screen" => crate::i18n::t!("settings.keys_page.select_screen").to_string(),
+        "settings" => crate::i18n::t!("settings.keys_page.settings").to_string(),
+        _ => id.to_owned(),
+    }
+}
+
+/// Canonical stored form of a captured chord (`"ctrl-alt-p"`). Built
+/// from the event's modifiers — NOT `Keystroke`'s Display, which
+/// prints platform glyphs (❖) on Linux that `Keystroke::parse` then
+/// can't read back; these strings must round-trip through parse
+/// (resolve_keys re-validates them on the next load).
+fn canonical_chord(keystroke: &gpui_kit::Keystroke) -> String {
+    let mut chord = String::new();
+    let m = &keystroke.modifiers;
+    if m.control {
+        chord.push_str("ctrl-");
+    }
+    if m.alt {
+        chord.push_str("alt-");
+    }
+    if m.platform {
+        chord.push_str("super-");
+    }
+    if m.shift {
+        chord.push_str("shift-");
+    }
+    if m.function {
+        chord.push_str("fn-");
+    }
+    chord.push_str(&keystroke.key);
+    chord
+}
+
+/// Human-facing chord: `"ctrl-,"` → `"Ctrl+,"`, `"alt-escape"` →
+/// `"Alt+Esc"`. Parses first so the `-` key ("ctrl--") splits right.
+fn pretty_keystroke(keystroke: &str) -> String {
+    let Ok(parsed) = gpui_kit::Keystroke::parse(keystroke) else {
+        return keystroke.to_owned();
+    };
+    let m = &parsed.modifiers;
+    let mut parts: Vec<String> = Vec::new();
+    if m.control {
+        parts.push("Ctrl".into());
+    }
+    if m.alt {
+        parts.push("Alt".into());
+    }
+    if m.platform {
+        parts.push("Super".into());
+    }
+    if m.shift {
+        parts.push("Shift".into());
+    }
+    if m.function {
+        parts.push("Fn".into());
+    }
+    parts.push(pretty_key(&parsed.key));
+    parts.join("+")
+}
+
+/// One key's display name (mod handled by [`pretty_keystroke`]).
+fn pretty_key(key: &str) -> String {
+    match key {
+        "escape" => "Esc".into(),
+        "space" => "Space".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        single if single.chars().count() == 1 => single.to_uppercase(),
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        }
+    }
 }
 
 /// Decode an embedded PNG into a RenderImage via the img() BGRA path.
@@ -1369,6 +1484,11 @@ impl SettingsWindow {
                 Section::Toolbar,
             ))
             .child(item(
+                "settings.keys_page.title",
+                IconName::Keyboard,
+                Section::Keys,
+            ))
+            .child(item(
                 "settings.ocr_page.title",
                 IconName::ScanText,
                 Section::Ocr,
@@ -1419,6 +1539,7 @@ impl SettingsWindow {
         let mut page = match self.section {
             Section::General => self.page_general(cx),
             Section::Toolbar => self.page_toolbar(cx),
+            Section::Keys => self.page_keys(cx),
             Section::Ocr => self.page_ocr(cx),
             Section::Appearance => self.page_appearance(cx),
             Section::About => self.page_about(cx),
@@ -1451,6 +1572,259 @@ impl SettingsWindow {
                     .text_color(rgba(t.hint_text))
                     .child(crate::i18n::t!("settings.general.write_through").to_string()),
             )
+    }
+
+    /// Shortcut editor: one row per configurable command. Clicking a
+    /// key cap starts a recording; the next (non-modifier) keystroke
+    /// rebinds the command, escape cancels, reserved keys and
+    /// conflicts are refused inline. Writes through like every control
+    /// here — the next screenshot binds from the file (each capture is
+    /// a fresh process; there is no live rebinding to do).
+    fn page_keys(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme::c();
+        let entity = cx.entity();
+        div()
+            .id("page-keys")
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .p(px(PAGE_PAD))
+            .size_full()
+            .overflow_y_scroll()
+            .child(page_header(
+                crate::i18n::t!("settings.keys_page.title").as_ref(),
+                crate::i18n::t!("settings.keys_page.blurb").as_ref(),
+            ))
+            .children({
+                let mut rows = Vec::with_capacity(crate::actions::CONFIGURABLE_KEYS.len());
+                for (id, factory) in crate::actions::CONFIGURABLE_KEYS {
+                    rows.push(self.key_row(id, factory, cx));
+                }
+                rows
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pt(px(12.))
+                    .child(
+                        Button::new("keys-reset")
+                            .accessibility_label(
+                                crate::i18n::t!("settings.keys_page.reset").to_string(),
+                            )
+                            .px(px(12.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .text_color(rgba(t.btn_text))
+                            .border_1()
+                            .border_color(rgba(t.toolbar_border))
+                            .hover(|s| s.bg(rgba(t.toolbar_hover)))
+                            .focus_visible(|s| s.border_color(rgba(t.accent)))
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.settings.reset_keys();
+                                        this.persist(cx);
+                                    });
+                                }
+                            })
+                            .child(crate::i18n::t!("settings.keys_page.reset").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_right()
+                            .text_size(px(11.))
+                            .when_some(self.error.clone(), |el, error| {
+                                el.text_color(rgba(t.accent)).child(error)
+                            }),
+                    ),
+            )
+    }
+
+    /// One shortcut row: the command's label (plus its factory
+    /// keystroke once customized) on the left, the key cap on the
+    /// right. Only the RECORDING row tracks focus — one shared handle,
+    /// attached to whichever row is listening; without focus the
+    /// keydown listener is dead weight on the others.
+    fn key_row(&self, id: &str, factory: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme::c();
+        let entity = cx.entity();
+        let recording = self.recording.as_deref() == Some(id);
+        let keystroke = self
+            .settings
+            .keys()
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(factory)
+            .to_owned();
+        let customized = keystroke != factory;
+        let cap_label = if recording {
+            match &self.record_error {
+                Some(error) => error.clone(),
+                None => crate::i18n::t!("settings.keys_page.record").to_string(),
+            }
+        } else {
+            pretty_keystroke(&keystroke)
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(if recording {
+                t.accent
+            } else {
+                t.toolbar_border
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgba(t.btn_text))
+                            .child(key_label(id)),
+                    )
+                    .when(customized, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgba(t.hint_text))
+                                .child(
+                                    crate::i18n::t!(
+                                        "settings.keys_page.default",
+                                        keys = pretty_keystroke(factory)
+                                    )
+                                    .to_string(),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("key-cap-{id}")))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(110.))
+                    .h(px(26.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgba(if recording {
+                        t.accent
+                    } else {
+                        t.toolbar_border
+                    }))
+                    .bg(rgba(if recording {
+                        t.toolbar_hover
+                    } else {
+                        t.toolbar_bg
+                    }))
+                    .text_color(rgba(if recording { t.accent } else { t.btn_text }))
+                    .hover(|s| s.border_color(rgba(t.accent)))
+                    .when(recording, |el| {
+                        el.track_focus(&self.record_focus)
+                            .on_key_down(cx.listener(Self::capture_key))
+                    })
+                    .on_click({
+                        let id = id.to_owned();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.toggle_recording(&id, window, cx));
+                        }
+                    })
+                    .child(cap_label),
+            )
+    }
+
+    /// Key-cap click: start recording (focusing the cap so the chord
+    /// lands on its keydown listener), or — clicking the listening cap
+    /// again — cancel.
+    fn toggle_recording(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.as_deref() == Some(id) {
+            self.stop_recording(window, cx);
+            return;
+        }
+        self.recording = Some(id.to_owned());
+        self.record_error = None;
+        window.focus(&self.record_focus, cx);
+        cx.notify();
+    }
+
+    /// Leave recording mode (commit, cancel — and refocus nothing: the
+    /// cap keeps no focus so a stray chord can't re-trigger it).
+    fn stop_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.recording = None;
+        self.record_error = None;
+        window.blur(cx);
+        cx.notify();
+    }
+
+    /// The recording cap's keydown: canonicalize the chord, then
+    /// commit it, refuse it (reserved / taken — inline message, still
+    /// recording) or wait it out (bare modifiers, so Ctrl then C can
+    /// be pressed as one chord). Escape cancels. stop_propagation
+    /// keeps the window's own Esc binding from closing the window
+    /// mid-recording.
+    fn capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.recording.clone() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        let bare = keystroke.modifiers == gpui_kit::Modifiers::default();
+        if keystroke.key == "escape" && bare {
+            // Cancel WITHOUT clearing `recording` here: the CloseSettings
+            // action still fires after this listener (see the guard on
+            // the root), and it consumes `recording` to tell "this Esc
+            // was the recorder's, not the window's". Re-render happens
+            // via that path.
+            window.blur(cx);
+            cx.stop_propagation();
+            return;
+        }
+        // Plain modifier keys (ctrl alone, alt alone …): hold the
+        // recording until a real key joins the chord
+        if matches!(
+            keystroke.key.as_str(),
+            "ctrl" | "control" | "alt" | "shift" | "super" | "cmd" | "fn" | "platform" | "meta"
+        ) {
+            return;
+        }
+        let chord = canonical_chord(keystroke);
+        let taken = self
+            .settings
+            .keys()
+            .iter()
+            .find(|(other, key)| other.as_str() != id && key.as_str() == chord)
+            .map(|(other, _)| other.clone());
+        if let Some(other) = taken {
+            self.record_error = Some(
+                crate::i18n::t!("settings.keys_page.conflict", action = key_label(&other))
+                    .to_string(),
+            );
+        } else if crate::actions::RESERVED_KEYS.contains(&chord.as_str()) {
+            self.record_error = Some(crate::i18n::t!("settings.keys_page.reserved").to_string());
+        } else {
+            self.settings.set_key(&id, chord);
+            self.persist(cx);
+            self.stop_recording(window, cx);
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     /// The config-file row (General page): one compact button per

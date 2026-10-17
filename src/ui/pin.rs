@@ -879,7 +879,7 @@ mod interaction_tests {
     fn board(cx: &mut TestAppContext) -> Entity<PinBoard> {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
-            crate::actions::bind_keys(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
         });
         cx.new(|_| {
             PinBoard::new(vec![

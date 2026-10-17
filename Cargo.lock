@@ -7995,8 +7995,10 @@ name = "vptr"
 version = "0.1.0"
 dependencies = [
  "niri-ipc",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols-wlr",
+ "wayland-scanner",
 ]
 
 [[package]]
