@@ -21,6 +21,11 @@ fn text_area(selection: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
 struct Screen {
     capture: Arc<Capture>,
     logical_size: Size<Pixels>,
+    /// Pixel-based smart-region candidates for this output's frozen
+    /// capture (see [`crate::model::regiondetect`]). None until the
+    /// background analysis lands — hover/click fall back to the
+    /// compositor snap rects until then.
+    detector: Option<Arc<crate::model::regiondetect::RegionDetector>>,
 }
 
 /// An in-flight move of the selected shape (issue #5 phase B): the
@@ -180,8 +185,16 @@ pub struct ScreenshotSession {
     /// Window-snap targets in global logical coordinates; empty when the
     /// compositor exposes no supported IPC — see [`crate::platform::windowsnap`]
     snaps: Vec<crate::platform::windowsnap::SnapRect>,
-    /// Index into `snaps`: the window under the cursor (hover outline)
-    hovered: Option<usize>,
+    /// The hover outline's rect (GLOBAL logical coordinates), whichever
+    /// source produced it: a smart detected region (which includes the
+    /// snap windows injected as candidates) or, before detection has
+    /// landed, a raw compositor snap rect.
+    hovered: Option<Bounds<Pixels>>,
+    /// Smart-selection hover state (debounce + manual wheel level) —
+    /// see [`crate::model::regiondetect::SelectionCursor`]. Lives in the
+    /// owning screen's PHYSICAL pixel space; `cursor_screen` pins it.
+    smart_cursor: crate::model::regiondetect::SelectionCursor,
+    cursor_screen: Option<usize>,
     /// Press point of the ongoing interaction (global). The click-snap
     /// hit-tests the PRESS position, not wherever a jittery release lands
     press: Option<Point<Pixels>>,
@@ -206,6 +219,7 @@ impl ScreenshotSession {
                         size(px(w), px(h))
                     },
                     capture,
+                    detector: None,
                 })
                 .collect(),
             selection: Selection::Idle,
@@ -220,6 +234,8 @@ impl ScreenshotSession {
             toolbar_grips_reported: None,
             snaps,
             hovered: None,
+            smart_cursor: Default::default(),
+            cursor_screen: None,
             press: None,
             annotations: Default::default(),
             filter_preview: Default::default(),
@@ -635,16 +651,21 @@ impl ScreenshotSession {
         self.selection
             .end(local + self.screen(name).bounds().origin);
         // An in-place click (< selection::MIN_SIZE) leaves Idle — if a
-        // window sits under the PRESS point, select its rect instead
-        // (window snapping). A real drag still wins: freehand beats snap.
+        // smart region or a compositor window sits under the PRESS
+        // point, select its rect instead (smart selection / window
+        // snapping). A real drag still wins: freehand beats snap.
         if !self.selection.is_dragging()
             && !self.selection.is_selected()
             && let Some(press) = self.press
-            && let Some(hit) = crate::platform::windowsnap::hit_test(&self.snaps, press)
         {
-            self.selection = Selection::Selected {
-                bounds: self.snaps[hit].bounds,
-            };
+            let snapped = self.smart_region_at(press).or_else(|| {
+                crate::platform::windowsnap::hit_test(&self.snaps, press)
+                    .map(|hit| self.snaps[hit].bounds)
+            });
+            if let Some(bounds) = snapped {
+                self.selection = Selection::Selected { bounds };
+            }
+            self.smart_cursor.reset();
         }
         self.press = None;
         // A fresh drag can finish over the seam on another output — the
@@ -653,42 +674,200 @@ impl ScreenshotSession {
         self.follow_selection_host();
     }
 
-    /// Track the window under the cursor for the hover outline. Returns
+    /// Track the region under the cursor for the hover outline. Returns
     /// whether the hover changed (callers decide on cx.notify()).
     /// Suppressed while dragging — the freehand region takes over — and
-    /// while a modal is open.
+    /// while a modal is open. The smart layer answers first (it has the
+    /// compositor windows injected as candidates); the raw snap rects
+    /// are the fallback until its background analysis lands.
     pub(crate) fn hover_at(&mut self, name: &str, local: Point<Pixels>) -> bool {
         if self.blocked
             || self.selection.is_dragging()
             || self.selection.is_editing()
             || self.toolbar_drag.is_some()
-            || self.snaps.is_empty()
             || self.annotations.enabled()
         {
             return false;
         }
         let global = local + self.screen(name).bounds().origin;
-        let hit = crate::platform::windowsnap::hit_test(&self.snaps, global);
-        if hit == self.hovered {
+        let next = self.smart_region_at(global).or_else(|| {
+            crate::platform::windowsnap::hit_test(&self.snaps, global)
+                .map(|hit| self.snaps[hit].bounds)
+        });
+        if next == self.hovered {
             return false;
         }
-        self.hovered = hit;
+        self.hovered = next;
         true
     }
 
-    /// The hovered window's rect in this output's local coordinates, for
+    /// The hovered region's rect in this output's local coordinates, for
     /// the hover outline; None when not hovering anything visible here.
     pub(crate) fn hover_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
         if self.blocked {
             return None;
         }
         let screen = self.screen(name).bounds();
-        let mut b = self.snaps.get(self.hovered?)?.bounds.intersect(&screen);
+        let mut b = self.hovered?.intersect(&screen);
         if b.size.width <= px(0.) || b.size.height <= px(0.) {
             return None;
         }
         b.origin -= screen.origin;
         Some(b)
+    }
+
+    // ── Smart regions (pixel-based candidates) ─────────────────────
+
+    /// The screen whose bounds contain a global logical point.
+    fn screen_index_at(&self, global: Point<Pixels>) -> Option<usize> {
+        self.screens
+            .iter()
+            .position(|s| s.bounds().contains(&global))
+    }
+
+    /// A screen's physical-pixel coordinate for a global logical point
+    /// (the detector's native space).
+    fn to_physical(screen: &Screen, global: Point<Pixels>) -> (i32, i32) {
+        let bounds = screen.bounds();
+        let sx = screen.capture.width as f32 / f32::from(bounds.size.width).max(1.);
+        let sy = screen.capture.height as f32 / f32::from(bounds.size.height).max(1.);
+        (
+            ((f32::from(global.x - bounds.origin.x)) * sx).round() as i32,
+            ((f32::from(global.y - bounds.origin.y)) * sy).round() as i32,
+        )
+    }
+
+    /// A detector rect (screen physical px) back into global logical
+    /// coordinates — the session's selection space.
+    fn to_logical_bounds(
+        screen: &Screen,
+        rect: crate::model::regiondetect::IntRect,
+    ) -> Bounds<Pixels> {
+        let bounds = screen.bounds();
+        let sx = f32::from(bounds.size.width) / (screen.capture.width as f32).max(1.);
+        let sy = f32::from(bounds.size.height) / (screen.capture.height as f32).max(1.);
+        let origin = bounds.origin;
+        Bounds {
+            origin: point(
+                px(rect.left as f32 * sx) + origin.x,
+                px(rect.top as f32 * sy) + origin.y,
+            ),
+            size: size(
+                px((rect.right - rect.left) as f32 * sx),
+                px((rect.bottom - rect.top) as f32 * sy),
+            ),
+        }
+    }
+
+    /// Install a screen's detector (delivered by the background
+    /// analysis in `main`). The compositor snap rects are injected as
+    /// window candidates so the wheel hierarchy can step out to whole
+    /// windows even where pixel detection found nothing. Refreshes the
+    /// hover under the (possibly stationary) pointer.
+    pub fn set_region_detector(
+        &mut self,
+        name: &str,
+        mut detector: crate::model::regiondetect::RegionDetector,
+    ) {
+        let Some(ix) = self
+            .screens
+            .iter()
+            .position(|s| s.capture.output_name == name)
+        else {
+            return;
+        };
+        let screen_bounds = self.screens[ix].bounds();
+        let capture = self.screens[ix].capture.clone();
+        // Snap rects live in global logical space; the detector wants
+        // this screen's PHYSICAL pixels. Clip to the screen first — a
+        // window straddling two outputs must not import the other
+        // output's pixels into this detector's coordinate space.
+        let sx = capture.width as f32 / f32::from(screen_bounds.size.width).max(1.);
+        let sy = capture.height as f32 / f32::from(screen_bounds.size.height).max(1.);
+        let windows: Vec<crate::model::regiondetect::IntRect> = self
+            .snaps
+            .iter()
+            .map(|snap| snap.bounds.intersect(&screen_bounds))
+            .filter(|b| b.size.width > px(0.) && b.size.height > px(0.))
+            .map(|b| {
+                let local = b.origin - screen_bounds.origin;
+                crate::model::regiondetect::IntRect {
+                    left: (f32::from(local.x) * sx).round() as i32,
+                    top: (f32::from(local.y) * sy).round() as i32,
+                    right: ((f32::from(local.x) + f32::from(b.size.width)) * sx).round() as i32,
+                    bottom: ((f32::from(local.y) + f32::from(b.size.height)) * sy).round() as i32,
+                }
+            })
+            .collect();
+        detector.add_window_rects(&windows);
+        self.screens[ix].detector = Some(Arc::new(detector));
+        self.cursor_screen = None; // re-pin on the next query
+        // The outline may light up under a pointer that has not moved
+        // since the analysis landed (mark-shot refreshes on arrival
+        // too — without this the first hover waits for motion).
+        if let Some(global) = self.pointer_global
+            && !self.blocked
+            && !self.selection.is_dragging()
+            && !self.selection.is_editing()
+            && !self.annotations.enabled()
+            && let Some(bounds) = self.smart_region_at(global)
+            && Some(bounds) != self.hovered
+        {
+            self.hovered = Some(bounds);
+        }
+    }
+
+    /// Query the smart layer at a global logical point: the hovered
+    /// region (debounced, wheel-level respected), as global logical
+    /// bounds. None when detection has not landed, the point has no
+    /// candidate (or only the full screen, which reads as "no hit" —
+    /// unless the user wheeled up to it explicitly).
+    fn smart_region_at(&mut self, global: Point<Pixels>) -> Option<Bounds<Pixels>> {
+        let ix = self.screen_index_at(global)?;
+        let detector = self.screens[ix].detector.clone()?;
+        if self.cursor_screen != Some(ix) {
+            self.smart_cursor.reset();
+            self.cursor_screen = Some(ix);
+        }
+        let (x, y) = Self::to_physical(&self.screens[ix], global);
+        let rect = self.smart_cursor.hover(&detector, x, y);
+        if rect == detector.image_bounds() && !self.smart_cursor.manual_level() {
+            return None; // full-screen = miss → fall back to snaps
+        }
+        Some(Self::to_logical_bounds(&self.screens[ix], rect))
+    }
+
+    /// Wheel step through the region hierarchy under the pointer:
+    /// positive grows to the parent, negative shrinks to the child.
+    /// Only meaningful in the pre-selection phase; returns whether the
+    /// event was consumed (a detector must have landed).
+    pub(crate) fn smart_step(&mut self, direction: i32) -> bool {
+        if self.blocked
+            || self.annotations.enabled()
+            || self.annotations.tool().is_some()
+            || self.selection.bounds().is_some()
+            || self.selection.is_dragging()
+            || self.selection.is_editing()
+        {
+            return false;
+        }
+        let Some(global) = self.pointer_global else {
+            return false;
+        };
+        let Some(ix) = self.screen_index_at(global) else {
+            return false;
+        };
+        let Some(detector) = self.screens[ix].detector.clone() else {
+            return false;
+        };
+        if self.cursor_screen != Some(ix) {
+            self.smart_cursor.reset();
+            self.cursor_screen = Some(ix);
+        }
+        let (x, y) = Self::to_physical(&self.screens[ix], global);
+        let rect = self.smart_cursor.step(&detector, x, y, direction);
+        self.hovered = Some(Self::to_logical_bounds(&self.screens[ix], rect));
+        true
     }
 
     pub(crate) fn cancel_drag(&mut self) {
@@ -700,6 +879,7 @@ impl ScreenshotSession {
         }
         self.press = None;
         self.hovered = None;
+        self.smart_cursor.reset();
         self.selection.cancel_drag();
     }
 
@@ -1581,7 +1761,6 @@ mod tests {
     use crate::platform::capture::Capture;
     use gpui_kit::{Bounds, point, px, size};
     use std::sync::Arc;
-
     #[gpui_kit::test]
     fn background_preview_preserves_release_and_never_reuses_a_cancelled_gesture(
         cx: &mut gpui_kit::TestAppContext,
@@ -2095,6 +2274,122 @@ mod tests {
         s.begin("right", point(px(30.), px(40.)));
         assert!(!s.hover_at("right", point(px(35.), px(45.))));
         assert!(s.hover_bounds("right").is_none());
+    }
+
+    // ── Smart regions (pixel-based candidates) ────────────────────
+
+    /// "right": global (0,0)-(100,100) logical, scale 2 → 200×200
+    /// physical. One detected UI region at logical (20,30)-(100,70)
+    /// (physical 40,60-200,140) plus a snap window at (0,0)-(100,80)
+    /// that `set_region_detector` injects as a parent candidate.
+    fn smart_session() -> ScreenshotSession {
+        use crate::model::regiondetect::{IntRect, RegionCandidate, RegionDetector, Sources};
+        let mut s = ScreenshotSession::new(
+            vec![screen("right", (0, 0), 2., [0, 255, 0, 255])],
+            vec![snap(0., 0., 100., 80.)],
+        );
+        s.set_region_detector(
+            "right",
+            RegionDetector::from_candidates(
+                200,
+                200,
+                vec![RegionCandidate::synthetic(
+                    IntRect::new(40, 60, 200, 140),
+                    0.9,
+                    Sources::CONTOUR,
+                )],
+            ),
+        );
+        s
+    }
+
+    #[test]
+    fn smart_hover_outlines_the_detected_region() {
+        let mut s = smart_session();
+        // entering the region: outline in local coordinates
+        assert!(s.hover_at("right", point(px(50.), px(50.))));
+        let b = s.hover_bounds("right").unwrap();
+        assert_eq!(b.origin, point(px(20.), px(30.)));
+        assert_eq!(b.size, size(px(80.), px(40.)));
+        // same region: no repaint
+        assert!(!s.hover_at("right", point(px(51.), px(51.))));
+        // inside the injected window but outside the region: the window
+        // candidate (the smart layer) outlines the whole window
+        assert!(s.hover_at("right", point(px(5.), px(5.))));
+        let b = s.hover_bounds("right").unwrap();
+        assert_eq!(b.origin, point(px(0.), px(0.)));
+        assert_eq!(b.size, size(px(100.), px(80.)));
+        // a point no candidate covers: no outline (the plain-snap
+        // fallback path is covered by hover_tracks_windows_…)
+        assert!(s.hover_at("right", point(px(5.), px(90.))));
+        assert!(s.hover_bounds("right").is_none());
+    }
+
+    #[test]
+    fn click_snaps_to_the_smart_region_and_drag_still_wins() {
+        let mut s = smart_session();
+        s.begin("right", point(px(50.), px(50.)));
+        s.end("right", point(px(51.), px(51.))); // click → the region
+        let b = s.selection().bounds().unwrap();
+        assert_eq!(b.origin, point(px(20.), px(30.)));
+        assert_eq!(b.size, size(px(80.), px(40.)));
+        // freehand still beats snapping
+        s.cancel_drag();
+        s.begin("right", point(px(50.), px(50.)));
+        s.drag_to("right", point(px(90.), px(90.)));
+        s.end("right", point(px(90.), px(90.)));
+        let b = s.selection().bounds().unwrap();
+        assert_eq!(b.origin, point(px(50.), px(50.)));
+        assert_eq!(b.size, size(px(40.), px(40.)));
+    }
+
+    #[test]
+    fn wheel_steps_the_smart_hierarchy_and_click_keeps_the_level() {
+        let mut s = smart_session();
+        s.pointer_move("right", point(px(50.), px(50.)), false);
+        // up: the detected region → its parent (the injected window)
+        assert!(s.smart_step(1));
+        let b = s.hover_bounds("right").unwrap();
+        assert_eq!(b.origin, point(px(0.), px(0.)));
+        assert_eq!(b.size, size(px(100.), px(80.)));
+        // up again: no larger parent → the whole screen
+        assert!(s.smart_step(1));
+        assert_eq!(
+            s.hover_bounds("right").unwrap().size,
+            size(px(100.), px(100.))
+        );
+        // down: back through the window into the region
+        assert!(s.smart_step(-1));
+        assert_eq!(
+            s.hover_bounds("right").unwrap().size,
+            size(px(100.), px(80.))
+        );
+        assert!(s.smart_step(-1));
+        let b = s.hover_bounds("right").unwrap();
+        assert_eq!(b.origin, point(px(20.), px(30.)));
+        assert_eq!(b.size, size(px(80.), px(40.)));
+        // a click accepts the wheel-chosen level (the region)
+        s.begin("right", point(px(50.), px(50.)));
+        s.end("right", point(px(51.), px(51.)));
+        let b = s.selection().bounds().unwrap();
+        assert_eq!(b.origin, point(px(20.), px(30.)));
+        assert_eq!(b.size, size(px(80.), px(40.)));
+    }
+
+    #[test]
+    fn smart_step_is_gated_to_the_selection_phase() {
+        let mut s = smart_session();
+        assert!(!s.smart_step(1)); // no pointer seen yet
+        s.pointer_move("right", point(px(50.), px(50.)), false);
+        assert!(s.smart_step(1));
+        // a finalized selection ends the phase
+        s.begin("right", point(px(10.), px(10.)));
+        s.end("right", point(px(60.), px(60.)));
+        assert!(s.selection().is_selected());
+        assert!(!s.smart_step(1));
+        // so does a lit annotation tool (the wheel steps its size there)
+        s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
+        assert!(!s.smart_step(-1));
     }
 
     // ── In-place selection editing (move / resize) ────────────────

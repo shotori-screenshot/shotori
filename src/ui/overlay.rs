@@ -1406,14 +1406,14 @@ impl Render for Overlay {
                     cx.notify();
                 });
             }))
-            // Wheel steps the active tool's S/M/L size preset (issue #3,
-            // phase 1: preset stepping with toolbar highlight sync). Only
-            // consumed while an annotation tool is active and no text
-            // editor owns the pointer; otherwise the event bubbles.
+            // Wheel has two phases. (1) Pre-selection with no annotation
+            // tool lit: step the smart-region hierarchy under the
+            // pointer (child ↔ parent ↔ whole window/screen). (2) With
+            // a tool lit: step its S/M/L size preset (issue #3). Only
+            // consumed in the phase that can use it; otherwise the
+            // event bubbles.
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let usable = this.text_editing.is_none()
-                    && this.session.read(cx).annotations().edit_kind().is_some();
-                if !usable {
+                if this.text_editing.is_some() {
                     cx.propagate();
                     return;
                 }
@@ -1432,8 +1432,31 @@ impl Render for Overlay {
                 // /40 divisor, while touchpads (many small events)
                 // still accumulate to full steps below.
                 let lines = lines.clamp(-1., 1.);
-                // accumulate touchpad-scale deltas; one notch = one preset
                 this.size_scroll_acc += lines;
+                if this.session.read(cx).annotations().tool().is_none() {
+                    // phase 1 — hierarchy stepping (drains whole units)
+                    let mut consumed = false;
+                    while this.size_scroll_acc >= 1.0 {
+                        consumed |= this.session.update(cx, |s, _| s.smart_step(1));
+                        this.size_scroll_acc -= 1.0;
+                    }
+                    while this.size_scroll_acc <= -1.0 {
+                        consumed |= this.session.update(cx, |s, _| s.smart_step(-1));
+                        this.size_scroll_acc += 1.0;
+                    }
+                    if consumed {
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    cx.propagate();
+                    return;
+                }
+                if !this.session.read(cx).annotations().edit_kind().is_some() {
+                    cx.propagate();
+                    return;
+                }
+                // phase 2 — preset stepping
                 let mut changed = false;
                 while this.size_scroll_acc >= 1.0 {
                     this.session.update(cx, |s, _| {
@@ -2324,7 +2347,7 @@ mod multi_output_tests {
             gpui_kit::base::init(cx);
             gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
-            crate::actions::bind_keys(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
         });
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "main".into();
@@ -2885,7 +2908,7 @@ mod multi_output_tests {
             gpui_kit::base::init(cx);
             gpui_kit::component::init(cx);
             crate::actions::init_annotation_keybindings(cx);
-            crate::actions::bind_keys(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
         });
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "screen".into();

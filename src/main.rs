@@ -158,8 +158,15 @@ fn main() {
             shotori::ui::ocr_setup::init(cx);
             shotori::actions::init_annotation_keybindings(cx);
 
-            // Keybindings are scoped by key_context (see actions.rs)
-            shotori::actions::bind_keys(cx);
+            // Keybindings are scoped by key_context (see actions.rs);
+            // the configurable commands honor settings.toml [keys]
+            let (settings, warnings) = shotori::model::settings::Settings::load(
+                shotori::model::settings::config_path().as_deref(),
+            );
+            for warning in &warnings {
+                eprintln!("[shotori] settings: {warning}");
+            }
+            shotori::actions::bind_keys(cx, settings.keys());
             // Backstop: Esc still exits if the overlay somehow loses focus.
             // Note: dispatch_action inside a window does NOT bubble up here
             // (actions stop at the focus path — measured); the overlay's own
@@ -188,6 +195,55 @@ fn main() {
                             snaps.unwrap_or_default(),
                         )
                     });
+                    // Smart region detection: analyze each frozen output
+                    // once on the background executor (pure pixel work,
+                    // panic-free by contract — the pipeline indexes
+                    // through checked accessors). Results land in the
+                    // session per output; hover/click snapping lights up
+                    // silently wherever the analysis found candidates.
+                    // Until then the compositor snap rects alone serve
+                    // the same interaction.
+                    {
+                        let caps: Vec<std::sync::Arc<shotori::platform::capture::Capture>> =
+                            targets.iter().map(|(cap, _)| cap.clone()).collect();
+                        let session = session.clone();
+                        cx.spawn(async move |cx| {
+                            let results = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    caps.iter()
+                                        .filter(|cap| {
+                                            cap.width >= 3 && cap.height >= 3 && !cap.rgba.is_empty()
+                                        })
+                                        .map(|cap| {
+                                            (
+                                                cap.output_name.clone(),
+                                                shotori::model::regiondetect::RegionDetector::analyze(
+                                                    &cap.rgba,
+                                                    cap.width,
+                                                    cap.height,
+                                                ),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .await;
+                            cx.update(|cx| {
+                                session.update(cx, |session, cx| {
+                                    for (name, detector) in results {
+                                        println!(
+                                            "[shotori] smart regions: {} candidate(s) on {name}",
+                                            detector.candidate_count()
+                                        );
+                                        session.set_region_detector(&name, detector);
+                                    }
+                                    cx.notify();
+                                });
+                            });
+                        })
+                        .detach();
+                    }
+                    shotori::boot_mark("region detection dispatched");
                     for (cap, did) in targets {
                         if did.is_none() {
                             eprintln!(

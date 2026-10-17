@@ -11,6 +11,8 @@
 //! │  ├─ export                crop → PNG → disk/clipboard bytes
 //! │  ├─ placement             two-zone chrome geometry (label top,
 //! │  │                        toolbar bottom — disjoint by construction)
+//! │  ├─ regiondetect          pixel-based smart-selection candidates
+//! │  │                        (hover / click snap / wheel hierarchy)
 //! │  └─ settings              persistent user settings (toolbar layout)
 //!                           in ~/.config/shotori/settings.toml
 //! ├─ platform/                compositor & desktop integration
