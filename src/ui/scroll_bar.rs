@@ -6,12 +6,15 @@
 //!
 //! - the **region frame** — ONE full-output transparent layer surface
 //!   drawing four accent strokes around the selection. Its input region
-//!   covers ONLY the strokes (the pin's `set_input_region` trick), so
+//!   covers ONLY the move handle (plus the chrome-free toolbar), so
 //!   wheel events over the captured content pass through to the app —
-//!   manual scrolling keeps working. Dragging a stroke MOVES the region:
-//!   the shared capture rect updates live and the engine follows the
-//!   frame to content that never scrolled into view (for the sheet,
-//!   "frame moves down" is indistinguishable from "content scrolls up").
+//!   manual scrolling keeps working. The ⇕ handle slides the region
+//!   VERTICALLY: the shared capture rect updates live and the engine
+//!   follows the frame to content that never scrolled into view (for
+//!   the sheet, "frame moves down" is indistinguishable from "content
+//!   scrolls up"). Horizontal motion is deliberately NOT offered — a
+//!   sideways jump desyncs the stitch (the folded columns stop
+//!   matching), and free frame movement shipped broken long screenshots.
 //! - the **capture HUD** — a floating action bar in the selection
 //!   toolbar's own vocabulary (grip-free, 30 px icon tiles, accent
 //!   primary) above a strip of the growing long image. Status and live
@@ -40,8 +43,11 @@
 //! wlr-screencopy captures the fully-COMPOSITED output — our layer
 //! surfaces included. Anything drawn over the selection burns into every
 //! captured frame (the "full-screen long screenshot contains the layer
-//! chrome" bug): the panel docks only where a full side strip is free
-//! ([`crate::model::placement::plan_scroll_panel`]), the frame toolbar
+//! chrome" bug): the panel floats only on a side with a full free strip
+//! ([`crate::model::placement::plan_scroll_panel`]) and hangs BESIDE the
+//! region — its launch-time position is frozen and the frame's x is
+//! frozen with it, so the region can never slide under the panel. The
+//! frame toolbar
 //! climbs a placement ladder that never enters the region
 //! ([`crate::model::placement::frame_toolbar`]) and hides when nowhere
 //! fits, and on a single monitor with a full-screen selection the
@@ -62,8 +68,8 @@ use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOpti
 use gpui_kit::*;
 
 use crate::model::placement::{
-    SCROLL_PANEL_MARGIN, ScrollPanelDock, clamp_moved_rect, frame_grab_bands, frame_grab_chip,
-    frame_strokes, frame_toolbar, legacy_scroll_panel, plan_scroll_panel,
+    SCROLL_PANEL_MARGIN, ScrollPanelDock, clamp_moved_rect, frame_grab_chip, frame_strokes,
+    frame_toolbar, legacy_scroll_panel, plan_scroll_panel, scroll_panel_margins,
 };
 use crate::model::scroll_sheet::{Axis, Phase, SheetLimits};
 use crate::model::session::ScrollRect;
@@ -240,10 +246,6 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
         }
         _ => (chrome.display_id, chrome.output_height),
     };
-    let side = match dock {
-        ScrollPanelDock::Left => Side::Left,
-        _ => Side::Right,
-    };
     // A floating card, not a full-height sidebar: the deck reads as one
     // object instead of a screen-wide slab, and keeps the output's
     // vertical rhythm. Tall enough for a useful preview on a 1080p
@@ -251,6 +253,21 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     let panel_h = (panel_out_h * 0.40)
         .clamp(320., 500.)
         .min((panel_out_h - 2. * SCROLL_PANEL_MARGIN).max(120.));
+    // The panel hangs BESIDE the capture rect (user-reported: pinned to
+    // the output edge it read as disconnected from the region it
+    // previews) — vertically centered on the rect, horizontally hugging
+    // its planned side across SCROLL_PANEL_GAP. Layer surfaces ignore
+    // `window_bounds` origins, so the position rides the TOP|LEFT
+    // margins. It is frozen for the session, and the frame's x is
+    // frozen with it (vertical-only drags), so the region can never
+    // slide under the panel.
+    let (panel_top, panel_left) = scroll_panel_margins(
+        rect_now,
+        chrome.output_width,
+        chrome.output_height,
+        panel_h,
+        dock,
+    );
     let panel_options = WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: None,
@@ -267,30 +284,16 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "shotori-scroll-preview".into(),
             layer: Layer::Overlay,
-            anchor: Anchor::TOP | side_anchor(side),
+            anchor: Anchor::TOP | Anchor::LEFT,
             exclusive_zone: Some(px(-1.)),
             // The panel owns the keyboard so the shortcuts match the
             // selection flow. NOTE: if the compositor routes wheel by
             // keyboard focus (niri does for virtual pointers), scrolling
             // degrades to frame-dragging — deliberately shipped both.
             keyboard_interactivity: KeyboardInteractivity::Exclusive,
-            // CSS order: top, right, bottom, left. The side margin
-            // keeps the card off the output edge; the top margin
-            // matches the old dock's breathing room.
-            margin: Some(match side {
-                Side::Left => (
-                    px(SCROLL_PANEL_MARGIN),
-                    px(0.),
-                    px(0.),
-                    px(SCROLL_PANEL_MARGIN),
-                ),
-                Side::Right => (
-                    px(SCROLL_PANEL_MARGIN),
-                    px(SCROLL_PANEL_MARGIN),
-                    px(0.),
-                    px(0.),
-                ),
-            }),
+            // CSS order: top, right, bottom, left — (top, left) carry
+            // the beside-the-rect position.
+            margin: Some((px(panel_top), px(0.), px(0.), px(panel_left))),
             ..Default::default()
         }),
         #[cfg(not(target_os = "linux"))]
@@ -327,21 +330,6 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn side_anchor(side: Side) -> Anchor {
-    match side {
-        Side::Left => Anchor::LEFT,
-        Side::Right => Anchor::RIGHT,
-    }
-}
-
-/// Which screen edge the preview panel docks to.
-#[derive(Clone, Copy, PartialEq)]
-enum Side {
-    Left,
-    Right,
-}
-
 // ── the region frame ─────────────────────────────────────────────────
 
 /// One full-output transparent surface drawing the region frame and
@@ -361,10 +349,11 @@ pub(crate) struct FrameView {
     /// Chrome-free only: the engine lifecycle this window hosts when no
     /// panel exists (saving flag + terminal-event guard).
     host: Option<FrameHost>,
-    /// (press point, rect at press, vertical-only?) — the flag marks
-    /// drags started from the toolbar's grab button (the user drags
-    /// the frame's VERTICAL position through it).
-    drag: Option<(Point<Pixels>, ScrollRect, bool)>,
+    /// (press point, rect at press) — the ⇕ handle's drag: the frame
+    /// follows the pointer's VERTICAL position only. Horizontal motion
+    /// would desync the stitch (folded columns stop matching) and could
+    /// slide the region under the frozen preview panel.
+    drag: Option<(Point<Pixels>, ScrollRect)>,
     /// Late-bound by `launch` (the panel starts the engine after the
     /// frame exists): toolbar exits without cross-window dispatch.
     controls: Option<ScrollControls>,
@@ -568,26 +557,15 @@ impl FrameView {
         }
     }
 
-    /// The GRAB button: press-and-hold enters drag mode — the frame
-    /// then follows the mouse's vertical position until release
-    /// (the existing window-level drag listeners carry the gesture,
-    /// implicit grab included). Same machinery as dragging a strip,
-    /// flagged vertical-only.
-    ///
-    /// The side strips a drag must keep the capture rect out of — the
-    /// docked panel's strip (it cannot re-anchor at runtime).
-    fn panel_reserve(&self) -> (f32, f32) {
-        let strip = crate::model::placement::scroll_panel_strip();
-        match self.dock {
-            ScrollPanelDock::Left => (strip, 0.),
-            ScrollPanelDock::Right => (0., strip),
-            _ => (0., 0.),
-        }
-    }
-
     /// The chrome painter: four strokes + the toolbar (when the
     /// placement ladder found room outside the capture region).
     /// `&mut self` with listeners (buttons need entity access).
+    ///
+    /// The ⇕ handles here and on the chip start a press-and-hold drag:
+    /// the frame follows the mouse's VERTICAL position until release
+    /// (window-level listeners carry the gesture, implicit grab
+    /// included). Horizontal motion is not offered — the stitch cannot
+    /// follow a sideways jump.
     fn render(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         // Transparent full-output surface; the strokes and toolbar are
         // the only painted pixels. The input region (set in Render)
@@ -617,7 +595,7 @@ impl FrameView {
             })
             .flatten();
         let grab = cx.listener(|this, event: &MouseDownEvent, _, _| {
-            this.drag = Some((event.position, this.rect, true));
+            this.drag = Some((event.position, this.rect));
         });
         let copy = cx.listener(|this, _: &MouseDownEvent, _, _| {
             if let Some(controls) = &this.controls {
@@ -633,7 +611,7 @@ impl FrameView {
             }
         });
         let chip_grab = cx.listener(|this, event: &MouseDownEvent, _, _| {
-            this.drag = Some((event.position, this.rect, true));
+            this.drag = Some((event.position, this.rect));
         });
         let pause = cx.listener(|this, _: &MouseDownEvent, _, cx| {
             if let Some(controls) = &this.controls {
@@ -655,11 +633,7 @@ impl FrameView {
             .on_action(cx.listener(Self::pause_key))
             // FIRST child: the sink canvas must sit under the toolbar
             // in paint order so the buttons win the element hit-test.
-            .child(pointer_sink(
-                cx.entity().downgrade(),
-                self.output,
-                self.panel_reserve(),
-            ))
+            .child(pointer_sink(cx.entity().downgrade(), self.output))
             .children(chip.map(|chip| {
                 div()
                     .id("frame-grab-chip")
@@ -701,7 +675,6 @@ impl FrameView {
                     .top(s.origin.y)
                     .w(s.size.width)
                     .h(s.size.height)
-                    .cursor(CursorStyle::OpenHand)
                     .bg(rgba(theme::c().accent))
             }))
             .children(toolbar.map(|toolbar| {
@@ -851,62 +824,29 @@ fn frame_button(
 /// once in `new` and every registration was dead by the first event,
 /// so neither strip drags nor the ⇕ button ever moved the frame).
 /// Window-level, not element handlers: the implicit grab delivers the
-/// whole gesture — including out-of-bounds releases — to the press
-/// window, and element hit-testing would drop exactly those.
+/// whole gesture — including releases outside the handle — to the
+/// press window, and element hit-testing would drop exactly those.
 ///
-/// `reserve` carries the docked panel's side strip: a drag that slid
-/// the capture region under the panel would burn the panel into every
-/// frame (the panel cannot re-anchor; see `clamp_moved_rect`).
-fn pointer_sink(
-    weak: gpui_kit::WeakEntity<FrameView>,
-    output: Size<Pixels>,
-    reserve: (f32, f32),
-) -> impl IntoElement {
+/// The gesture is VERTICAL-only (see [`clamp_moved_rect`]): the press
+/// lands on a ⇕ handle (the only interactive pixels, via the input
+/// region) and the frame follows the pointer's y until release.
+fn pointer_sink(weak: gpui_kit::WeakEntity<FrameView>, output: Size<Pixels>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, (), window, _| {
-            let sink = weak.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                    return;
-                }
-                let _ = sink.update(cx, |this, _| {
-                    // A press on a grab BAND starts a free drag. The ⇕
-                    // button starts its own vertical-only drag in its
-                    // element handler — its press position is over the
-                    // toolbar, never a band, so the two cannot collide.
-                    if frame_grab_bands(this.rect)
-                        .iter()
-                        .any(|band| band.contains(&event.position))
-                    {
-                        this.drag = Some((event.position, this.rect, false));
-                    }
-                });
-            });
             let sink = weak.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
                 let _ = sink.update(cx, |this, cx| {
-                    let Some((start, origin, vertical_only)) = this.drag else {
+                    let Some((start, origin)) = this.drag else {
                         return;
-                    };
-                    let (dx, dy) = if vertical_only {
-                        (0., f32::from(event.position.y - start.y))
-                    } else {
-                        (
-                            f32::from(event.position.x - start.x),
-                            f32::from(event.position.y - start.y),
-                        )
                     };
                     let next = clamp_moved_rect(
                         origin,
-                        dx,
-                        dy,
-                        f32::from(output.width),
+                        f32::from(event.position.y - start.y),
                         f32::from(output.height),
-                        reserve,
                     );
                     this.rect = next;
                     *this
@@ -935,11 +875,13 @@ fn pointer_sink(
 
 impl Render for FrameView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The input region must track the moving strokes and toolbar —
-        // re-set every frame (cheap), same-source geometry as the
-        // visuals. The toolbar only joins when the placement ladder
-        // found room for it OUTSIDE the capture region.
-        let mut hit: Vec<Bounds<Pixels>> = frame_grab_bands(self.rect).into();
+        // The input region must track the moving handle — re-set every
+        // frame (cheap), same-source geometry as the visuals. Strokes
+        // are paint-only: the ⇕ handle (docked) or the toolbar
+        // (chrome-free) is the ONLY interactive area, so wheel and
+        // clicks anywhere else pass through to the app beneath and
+        // manual scrolling keeps working.
+        let mut hit: Vec<Bounds<Pixels>> = Vec::new();
         if self.dock != ScrollPanelDock::Hidden
             && let Some(chip) = frame_grab_chip(
                 self.rect,
