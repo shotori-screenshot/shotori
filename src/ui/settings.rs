@@ -46,7 +46,9 @@ use gpui_kit::component::sidebar::{
     Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Collapsible, Icon, Root, Sizable, Theme, ThemeMode};
+use gpui_kit::component::{
+    ActiveTheme, Collapsible, Icon, Root, Sizable, TITLE_BAR_HEIGHT, Theme, ThemeMode, TitleBar,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -276,10 +278,16 @@ fn window_options() -> WindowOptions {
     // so height is forgiving.
     WindowOptions {
         app_id: Some(crate::APP_ID.into()),
+        // Same title (for the compositor's task list), but the BAR is
+        // ours: `title_bar` draws it, so the platform must not stack a
+        // system title bar on top (`WindowDecorations::Client`) and must
+        // not treat it as a native move region (`app_owns_titlebar_drag`
+        // from `TitleBar::window_options`).
         titlebar: Some(TitlebarOptions {
             title: Some(crate::i18n::t!("settings.title").to_string().into()),
-            ..Default::default()
+            ..TitleBar::title_bar_options()
         }),
+        window_decorations: Some(WindowDecorations::Client),
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
             size: size(px(WINDOW_W), px(WINDOW_H)),
@@ -290,7 +298,7 @@ fn window_options() -> WindowOptions {
         // the sidebar collapses to an icon rail and the toolbar preview
         // pans in its own strip.
         focus: true,
-        ..Default::default()
+        ..TitleBar::window_options()
     }
 }
 
@@ -1159,6 +1167,7 @@ impl Render for SettingsWindow {
             .id("settings-root")
             .size_full()
             .flex()
+            .flex_col()
             .bg(rgba(t.toolbar_bg))
             .text_color(rgba(t.toolbar_text))
             .track_focus(&self.focus)
@@ -1179,8 +1188,18 @@ impl Render for SettingsWindow {
                 }
                 window.remove_window();
             }))
-            .child(self.sidebar(window, cx))
-            .child(self.page(cx))
+            .child(self.title_bar(window, cx))
+            .child(
+                // The navigation column and the page share the height
+                // BELOW the title bar; min_h_0 lets the page scroll in
+                // a short window instead of overflowing the column.
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.sidebar(window, cx))
+                    .child(self.page(cx)),
+            )
     }
 }
 
@@ -1404,7 +1423,128 @@ static ABOUT_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
         png_render_image(include_bytes!("../../assets/app/shotori-256.png"))
     });
 
+/// One title-bar control (34px wide, full height), styled like the
+/// component's cluster: the quiet secondary hover for minimize /
+/// maximize, the theme's danger tint for close.
+fn window_control(
+    id: &'static str,
+    icon: IconName,
+    danger: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let hover_bg = if danger {
+        theme.danger
+    } else {
+        theme.secondary_hover
+    };
+    let hover_fg = if danger {
+        theme.danger_foreground
+    } else {
+        theme.secondary_foreground
+    };
+    div()
+        .id(id)
+        .flex()
+        .w(TITLE_BAR_HEIGHT)
+        .h_full()
+        .flex_shrink_0()
+        .justify_center()
+        .items_center()
+        .text_color(theme.foreground)
+        .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+        // Keep the bar's drag handler from treating a control press as
+        // the start of a window move.
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+        .child(Icon::new(icon).size_4())
+}
+
+/// The title bar's control cluster for a server-decorated window that
+/// has no system bar (see [`SettingsWindow::title_bar`]). Only the
+/// controls the compositor advertises through `wm_capabilities` are
+/// offered; close is always ours.
+fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
+    let supported = window.window_controls();
+    let mut controls = div()
+        .id("title-bar-controls")
+        .flex()
+        .items_center()
+        .h_full()
+        .flex_shrink_0();
+    if supported.minimize {
+        controls = controls.child(window_control(
+            "title-bar-minimize",
+            IconName::WindowMinimize,
+            false,
+            |_, window, _| window.minimize_window(),
+            cx,
+        ));
+    }
+    if supported.maximize {
+        let icon = if window.is_maximized() {
+            IconName::WindowRestore
+        } else {
+            IconName::WindowMaximize
+        };
+        controls = controls.child(window_control(
+            "title-bar-maximize",
+            icon,
+            false,
+            |_, window, _| window.zoom_window(),
+            cx,
+        ));
+    }
+    controls.child(window_control(
+        "title-bar-close",
+        IconName::WindowClose,
+        true,
+        |_, window, _| window.remove_window(),
+        cx,
+    ))
+}
+
 impl SettingsWindow {
+    /// The self-drawn title bar: brand mark plus window title on the
+    /// left, the window controls on the right. The app owns it because
+    /// the window asks for client-side decorations; the branding lives
+    /// here (not in the sidebar header) so it never moves or shrinks
+    /// when the navigation rail collapses. `TitleBar` supplies the drag
+    /// / double-click-zoom behavior and the component's control cluster
+    /// wherever the compositor honors client decorations.
+    fn title_bar(&self, window: &Window, cx: &App) -> TitleBar {
+        let brand = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            // The app icon master (the same 64px asset the tray
+            // embeds), decoded once — 64px stays crisp at the title
+            // bar's 16px logical size on HiDPI.
+            .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4())
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .child(crate::i18n::t!("settings.title").to_string()),
+            );
+        // `TitleBar` hides its own control cluster when the compositor
+        // claims server-side decorations — it must not duplicate a
+        // system title bar. But some compositors claim that while
+        // drawing nothing (niri with `prefer-no-csd`), so OUR bar is the
+        // only chrome the window ever gets and has to carry the
+        // controls itself. In client-decorated mode the component's
+        // cluster handles it (outside the drag region, same as here).
+        let own_controls = matches!(window.window_decorations(), Decorations::Server)
+            .then(|| window_controls(window, cx));
+        TitleBar::new().child(brand).children(own_controls)
+    }
+
     /// The navigation sidebar: one item per section, the active page
     /// highlighted, About pinned to the footer. Takes the window:
     /// SidebarMenuItem only becomes an element through
@@ -1433,84 +1573,47 @@ impl SettingsWindow {
             };
             item.active(selected).on_click(click)
         };
-        // The header/footer wiring is the component's demo shape. The
-        // expanded header carries the component's collapse button — the
-        // logo alone is a hover-only hit target that reads as a missing
-        // control. The collapsed rail keeps only the logo, which swaps to
-        // the expand glyph while hovered: an expand button next to it
-        // would be a second, wider control in a 48px rail, and the swap
-        // states what the click does without spending the space.
-        let mut identity = SidebarHeader::new().collapsed(collapsed);
-        // The logo: the app icon master (the same 64px asset the tray
-        // embeds), decoded once — 64px stays crisp at the header's 16px
-        // logical size on HiDPI. Clicking it toggles the sidebar.
-        let logo_button = |label: &'static str, expand_on_hover: bool| {
-            let mark = div().relative().size_4().child(
-                div()
-                    .when(expand_on_hover, |this| {
-                        this.group_hover("sidebar-logo", |s| s.opacity(0.))
-                    })
-                    .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4()),
-            );
-            let mark = if expand_on_hover {
-                mark.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(0.)
-                        .group_hover("sidebar-logo", |s| s.opacity(1.))
-                        .child(Icon::new(IconName::PanelLeftOpen).size_4()),
-                )
+        // Header: the expand/collapse control and nothing else. The
+        // branding moved to the window title bar (the one strip whose
+        // width does not change when the rail collapses), so the header
+        // is the same one-button row whether the rail is open or shut.
+        let toggle = |collapsed_state: bool| {
+            let label = if collapsed_state {
+                crate::i18n::t!("settings.nav.expand")
             } else {
-                mark
+                crate::i18n::t!("settings.nav.collapse")
             };
-            div()
-                .id("sidebar-logo")
-                .when(expand_on_hover, |this| this.group("sidebar-logo"))
-                .cursor_pointer()
-                .p(px(4.))
-                .rounded(px(6.))
-                .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-                .aria_label(crate::i18n::t!(label).to_string())
+            SidebarToggleButton::new()
+                .collapsed(collapsed_state)
+                .accessibility_label(label.to_string())
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    // write-through like every other control in this window
                     this.toggle_sidebar(cx);
                 }))
-                .child(mark)
         };
+        let mut identity = SidebarHeader::new().collapsed(collapsed);
         if collapsed {
-            // icon rail: the clickable logo is the expand affordance —
-            // it becomes the expand glyph under the pointer.
+            // The 48px rail centers the expand button over the icons.
             identity = identity.child(
                 div()
                     .flex()
-                    .flex_col()
                     .items_center()
+                    .justify_center()
                     .w_full()
-                    .child(logo_button("settings.nav.expand", true)),
+                    .child(toggle(true)),
             );
         } else {
-            // A real button with the panel-close icon, not just the
-            // logo's hover state — at the header's trailing edge.
-            let collapse = SidebarToggleButton::new()
-                .collapsed(false)
-                .accessibility_label(crate::i18n::t!("settings.nav.collapse").to_string())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.toggle_sidebar(cx);
-                }));
-            identity = identity
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(logo_button("settings.nav.collapse", false))
-                        .child(div().text_size(px(13.)).child("Shotori")),
-                )
-                .child(collapse);
+            // Expanded: the button sits in the item column's leading
+            // edge — the same x it occupies centered on the collapsed
+            // rail. A trailing-edge button jumps ~200px sideways when
+            // the rail opens and reads as unrelated chrome.
+            identity = identity.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_start()
+                    .w_full()
+                    .child(toggle(false)),
+            );
         }
         // Built BEFORE the sidebar chain: the `item` helper holds a
         // shared cx borrow (cx.listener), while the footer's

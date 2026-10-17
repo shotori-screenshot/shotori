@@ -54,7 +54,15 @@ gpui_kit::assets::icon_assets!(
         Palette,
         Info,
         PanelLeftOpen,
-        PanelLeftClose
+        PanelLeftClose,
+        // The settings title bar's own control cluster (it draws one
+        // when the compositor claims server decorations but draws none,
+        // e.g. niri's `prefer-no-csd`; the component's cluster is
+        // suppressed in that mode).
+        WindowMinimize,
+        WindowMaximize,
+        WindowRestore,
+        WindowClose
     ]
 );
 
@@ -965,6 +973,28 @@ mod tests {
                 "{} ({}) is missing from the asset source",
                 path,
                 meta.debug_id
+            );
+        }
+    }
+
+    #[test]
+    fn title_bar_control_icons_are_bundled() {
+        use gpui_kit::AssetSource;
+        use gpui_kit::assets::IconName;
+        // The settings title bar draws its own minimize/maximize/close
+        // cluster when the compositor claims server decorations without
+        // drawing a bar; the `IconName` constants compile even when the
+        // whitelist omits them, so pin the assets here.
+        for icon in [
+            IconName::WindowMinimize,
+            IconName::WindowMaximize,
+            IconName::WindowRestore,
+            IconName::WindowClose,
+        ] {
+            assert!(
+                super::ToolbarSource.load(&icon.path()).unwrap().is_some(),
+                "{:?} is missing from the asset source",
+                icon
             );
         }
     }
