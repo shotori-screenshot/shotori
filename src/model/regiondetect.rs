@@ -37,6 +37,13 @@
 //! Debug builds run the pixel loops without optimization (~10× slower);
 //! the feature simply lights up a moment later. Release analysis of a
 //! 2560×1440 frame is on the order of a hundred milliseconds.
+//!
+//! Offline tuning: `SHOTORI_REGIONDUMP=<dir>` (read in main.rs) makes the
+//! analysis save its input pixels, edge map and every scored proposal —
+//! accepted or not, with the gate that rejected it — via
+//! [`DetectTrace::save_artifacts`]. Score and diagnose the dumps with
+//! `scripts/regiondetect_eval.py`; draw ground truth with
+//! `scripts/regiondetect_annotate.py`.
 
 // ── Geometry ─────────────────────────────────────────────────────────
 
@@ -74,6 +81,10 @@ impl IntRect {
     /// inclusive QRect — immaterial for hit-tests).
     fn contains_point(self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+    /// `[left, top, right, bottom]` — the dump/JSON representation.
+    fn array(self) -> [i32; 4] {
+        [self.left, self.top, self.right, self.bottom]
     }
     /// Full containment (borders may touch).
     fn contains_rect(self, other: IntRect) -> bool {
@@ -1239,13 +1250,31 @@ const MAX_CANDIDATES: usize = 512;
 
 /// One-shot region detection over a capture. Returns scored candidates
 /// in original-image pixels (refined), sorted by area ascending.
+/// Test-only convenience; production enters through
+/// [`RegionDetector::analyze_with_trace`].
+#[cfg(test)]
 fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
+    detect_regions_traced(view, None)
+}
+
+/// [`detect_regions`] with an optional diagnostics trace: every scored
+/// proposal is recorded with its measurements and the gate that rejected
+/// it (see [`DetectTrace`]). Pure observation — the result is identical
+/// either way.
+fn detect_regions_traced(
+    view: RgbaView<'_>,
+    mut trace: Option<&mut DetectTrace>,
+) -> Vec<RegionCandidate> {
     let (width, height) = (view.width, view.height);
     if width < 3 || height < 3 {
         return Vec::new();
     }
 
     let (analysis_w, analysis_h) = analysis_size(width, height);
+    if let Some(t) = &mut trace {
+        t.image = [width, height];
+        t.analysis = [analysis_w, analysis_h];
+    }
     // Conditional borrow: at native resolution the pipeline reads the
     // caller's buffer directly; only a real downscale allocates.
     let downscaled;
@@ -1257,6 +1286,10 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     };
 
     let field = build_edge_field(analysis);
+    if let Some(t) = &mut trace {
+        t.threshold = field.threshold;
+        t.edge_field = field.combined.pixels.clone();
+    }
     let closed = close_linf1(&field.combined);
     let mut proposals = contour_proposals(&closed);
     proposals.extend(component_proposals(&closed, false));
@@ -1277,19 +1310,31 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     let min_width = ((12.0f32 / scale).ceil() as i32).max(5);
     let min_height = ((12.0f32 / scale).ceil() as i32).max(5);
     let full_area = i64::from(analysis_w) * i64::from(analysis_h);
-    proposals.retain(|proposal| {
-        proposal.rect.width() >= min_width
+    let mut sized: Vec<Proposal> = Vec::with_capacity(proposals.len());
+    for proposal in proposals {
+        let fits = proposal.rect.width() >= min_width
             && proposal.rect.height() >= min_height
-            && proposal.rect.area() < full_area * 995 / 1000
-    });
+            && proposal.rect.area() < full_area * 995 / 1000;
+        if fits {
+            sized.push(proposal);
+        } else if let Some(t) = &mut trace {
+            t.record(&proposal, None, Some("size"));
+        }
+    }
+    proposals = sized;
 
     // Keep both ends of the size spectrum: dropping only the middle
     // preserves small controls AND large panels within the budget.
     proposals.sort_by_key(|p| p.rect.area());
     if proposals.len() > MAX_PROPOSALS {
         let keep = MAX_PROPOSALS / 2;
-        let mut trimmed = Vec::with_capacity(MAX_PROPOSALS);
         let split = proposals.len() - keep;
+        if let Some(t) = &mut trace {
+            for proposal in &proposals[keep..split] {
+                t.record(proposal, None, Some("budget"));
+            }
+        }
+        let mut trimmed = Vec::with_capacity(MAX_PROPOSALS);
         trimmed.extend_from_slice(&proposals[..keep]);
         trimmed.extend_from_slice(&proposals[split..]);
         proposals = trimmed;
@@ -1305,30 +1350,58 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
         let support = (sides[0] + sides[1] + sides[2] + sides[3]) / 4.;
         // A real region has SOME edge on every side (sorted[0]) and a
         // decent majority on at least three (sorted[1]).
-        if sorted[1] < 0.48 || sorted[0] < 0.18 || support < 0.58 {
-            continue;
-        }
-        // Line-pairing proposals are hypothesis-grade: demand more.
-        if proposal.source.has(Sources::LINES) && (sorted[0] < 0.70 || support < 0.85) {
-            continue;
-        }
-        let density = interior_density(&field.combined, rect);
-        let inset = inset_support(&field, rect);
-        let compact = rect.width().min(rect.height()) as f32 * scale < 32.0;
-        // Compact + busy inside = text block or icon grid, not a panel.
-        if compact && (density > 0.30 || (density > 0.12 && inset > 0.60)) {
-            continue;
+        let mut rejected = if sorted[1] < 0.48 {
+            Some("second_side")
+        } else if sorted[0] < 0.18 {
+            Some("weakest_side")
+        } else if support < 0.58 {
+            Some("support")
+        } else if proposal.source.has(Sources::LINES) && (sorted[0] < 0.70 || support < 0.85) {
+            // Line-pairing proposals are hypothesis-grade: demand more.
+            Some("lines_gate")
+        } else {
+            None
+        };
+        let (mut density, mut inset, mut compact) = (0f32, 0f32, false);
+        if rejected.is_none() {
+            density = interior_density(&field.combined, rect);
+            inset = inset_support(&field, rect);
+            compact = rect.width().min(rect.height()) as f32 * scale < 32.0;
+            // Compact + busy inside = text block or icon grid, not a panel.
+            if compact && (density > 0.30 || (density > 0.12 && inset > 0.60)) {
+                rejected = Some("texture");
+            }
         }
         let texture_penalty = if compact {
             density * 0.30 + inset * 0.18
         } else {
             density * 0.08
         };
+        let quality = (support * 0.65 + sorted[0] * 0.25 + 0.10 - texture_penalty).clamp(0., 1.);
+        if let Some(t) = &mut trace {
+            t.record(
+                &proposal,
+                Some(&ProposalScore {
+                    sides,
+                    weakest: sorted[0],
+                    second: sorted[1],
+                    support,
+                    density,
+                    inset,
+                    compact,
+                    quality,
+                }),
+                rejected,
+            );
+        }
+        if rejected.is_some() {
+            continue;
+        }
         merge_candidate(
             &mut candidates,
             RegionCandidate {
                 rect: scale_rect(rect, analysis_w, analysis_h, width, height),
-                quality: (support * 0.65 + sorted[0] * 0.25 + 0.10 - texture_penalty).clamp(0., 1.),
+                quality,
                 sources: proposal.source,
             },
             merge_tolerance,
@@ -1350,7 +1423,225 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     for candidate in candidates {
         merge_candidate(&mut refined, candidate, 2);
     }
+    if let Some(t) = &mut trace {
+        t.candidates = refined
+            .iter()
+            .map(|c| TracedCandidate {
+                rect: c.rect.array(),
+                quality: c.quality,
+                sources: sources_label(c.sources),
+            })
+            .collect();
+    }
     refined
+}
+
+// ── Diagnostics trace ────────────────────────────────────────────────
+
+/// One proposal's scoring measurements, recorded wholesale in the dump.
+struct ProposalScore {
+    sides: [f32; 4],
+    weakest: f32,
+    second: f32,
+    support: f32,
+    density: f32,
+    inset: f32,
+    compact: bool,
+    quality: f32,
+}
+
+/// A scored proposal as it looked at the scoring gate. `rejected` names
+/// the gate that killed it — `size`/`budget` mean it never reached
+/// scoring, so its measurements are zeros.
+#[derive(serde::Serialize)]
+struct TracedProposal {
+    rect_analysis: [i32; 4],
+    rect_image: [i32; 4],
+    source: &'static str,
+    sides: [f32; 4],
+    weakest_side: f32,
+    second_side: f32,
+    support: f32,
+    density: f32,
+    inset_support: f32,
+    compact: bool,
+    quality: f32,
+    rejected: Option<&'static str>,
+}
+
+/// A final candidate (refined, merged), pre window-injection.
+#[derive(serde::Serialize)]
+struct TracedCandidate {
+    rect: [i32; 4],
+    quality: f32,
+    sources: String,
+}
+
+/// The full scoring ledger of one `detect_regions` run: every proposal
+/// with the gate that rejected it, plus the surviving candidates. Only
+/// populated when the caller asks (`RegionDetector::analyze_with_trace`,
+/// wired to `SHOTORI_REGIONDUMP` in main.rs); the pipeline result is
+/// bit-identical either way. Consumed offline by
+/// `scripts/regiondetect_eval.py` for IoU scoring and miss diagnosis —
+/// "the region I expected is missing" becomes "gate X killed the closest
+/// proposal with weakest side 0.31", which is where to turn the screw.
+#[derive(serde::Serialize)]
+pub struct DetectTrace {
+    image: [i32; 2],
+    analysis: [i32; 2],
+    threshold: u8,
+    /// The combined binary edge field, row-major at `analysis`
+    /// resolution (rendered to `-edges.png`, skipped in the JSON).
+    #[serde(skip_serializing)]
+    edge_field: Vec<u8>,
+    proposals: Vec<TracedProposal>,
+    candidates: Vec<TracedCandidate>,
+}
+
+impl DetectTrace {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            image: [width as i32, height as i32],
+            analysis: [0, 0],
+            threshold: 0,
+            edge_field: Vec::new(),
+            proposals: Vec::new(),
+            candidates: Vec::new(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        proposal: &Proposal,
+        score: Option<&ProposalScore>,
+        rejected: Option<&'static str>,
+    ) {
+        let zero = ProposalScore {
+            sides: [0.; 4],
+            weakest: 0.,
+            second: 0.,
+            support: 0.,
+            density: 0.,
+            inset: 0.,
+            compact: false,
+            quality: 0.,
+        };
+        let s = score.unwrap_or(&zero);
+        self.proposals.push(TracedProposal {
+            rect_analysis: proposal.rect.array(),
+            rect_image: scale_rect(
+                proposal.rect,
+                self.analysis[0],
+                self.analysis[1],
+                self.image[0],
+                self.image[1],
+            )
+            .array(),
+            source: source_label(proposal.source),
+            sides: s.sides,
+            weakest_side: s.weakest,
+            second_side: s.second,
+            support: s.support,
+            density: s.density,
+            inset_support: s.inset,
+            compact: s.compact,
+            quality: s.quality,
+            rejected,
+        });
+    }
+
+    /// Write `<stem>-input.png` (the analyzed capture), `<stem>-edges.png`
+    /// (combined edge field at analysis resolution) and `<stem>-trace.json`
+    /// into `dir`. The JSON goes LAST on purpose: its existence marks a
+    /// complete dump (a process dying mid-save leaves orphan PNGs, not a
+    /// half-written ledger for the eval script to trust). Runs on the
+    /// analysis thread — debug-path I/O by contract, the dump only
+    /// exists because the developer asked for it. `stem` must be
+    /// filename-safe (Wayland output names are).
+    pub fn save_artifacts(
+        &self,
+        dir: &std::path::Path,
+        stem: &str,
+        rgba: &[u8],
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        if self.image[0] > 0 && rgba.len() >= self.image[0] as usize * self.image[1] as usize * 4 {
+            crate::model::export::save_png(
+                &dir.join(format!("{stem}-input.png")),
+                self.image[0] as u32,
+                self.image[1] as u32,
+                rgba,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        }
+        if let [w, h] = self.analysis
+            && w > 0
+            && self.edge_field.len() == (w * h) as usize
+        {
+            write_gray_png(
+                &dir.join(format!("{stem}-edges.png")),
+                w,
+                h,
+                &self.edge_field,
+            )?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        std::fs::write(dir.join(format!("{stem}-trace.json")), json)?;
+        Ok(())
+    }
+}
+
+/// Single-channel PNG for the diagnostics edge map.
+fn write_gray_png(path: &std::path::Path, w: i32, h: i32, gray: &[u8]) -> std::io::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    writer
+        .write_image_data(gray)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    writer
+        .finish()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(())
+}
+
+/// Stable label for a single-source proposal (the dump's JSON).
+fn source_label(source: Sources) -> &'static str {
+    if source.has(Sources::WINDOW) {
+        "window"
+    } else if source.has(Sources::CONTOUR) {
+        "contour"
+    } else if source.has(Sources::COMPONENT) {
+        "component"
+    } else if source.has(Sources::BACKGROUND) {
+        "background"
+    } else if source.has(Sources::LINES) {
+        "lines"
+    } else {
+        "unknown"
+    }
+}
+
+/// '+'-joined labels for merged sources (candidates can merge several).
+fn sources_label(sources: Sources) -> String {
+    let mut names: Vec<&'static str> = Vec::new();
+    for (bit, name) in [
+        (Sources::CONTOUR, "contour"),
+        (Sources::COMPONENT, "component"),
+        (Sources::BACKGROUND, "background"),
+        (Sources::LINES, "lines"),
+        (Sources::WINDOW, "window"),
+    ] {
+        if sources.has(bit) {
+            names.push(name);
+        }
+    }
+    names.join("+")
 }
 
 // ── Detector & cursor ────────────────────────────────────────────────
@@ -1368,10 +1659,22 @@ pub struct RegionDetector {
 impl RegionDetector {
     /// Analyze a capture (RGBA8, `width`×`height`).
     pub fn analyze(rgba: &[u8], width: u32, height: u32) -> Self {
+        Self::analyze_with_trace(rgba, width, height, false).0
+    }
+
+    /// [`Self::analyze`] with the diagnostics trace (see [`DetectTrace`]).
+    pub fn analyze_with_trace(
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+        trace: bool,
+    ) -> (Self, Option<DetectTrace>) {
         let (w, h) = (width as i32, height as i32);
-        let mut candidates = RgbaView::new(rgba, w, h)
-            .map(detect_regions)
-            .unwrap_or_default();
+        let mut detect_trace = trace.then(|| DetectTrace::new(width, height));
+        let mut candidates = match RgbaView::new(rgba, w, h) {
+            Some(view) => detect_regions_traced(view, detect_trace.as_mut()),
+            None => Vec::new(),
+        };
         // Best-first for the cap, then stable area order for hierarchy
         // queries (children before parents).
         candidates.sort_by(|a, b| {
@@ -1382,11 +1685,14 @@ impl RegionDetector {
         });
         candidates.truncate(MAX_CANDIDATES);
         candidates.sort_by_key(|c| c.rect.area());
-        Self {
-            image_width: w,
-            image_height: h,
-            candidates,
-        }
+        (
+            Self {
+                image_width: w,
+                image_height: h,
+                candidates,
+            },
+            detect_trace,
+        )
     }
 
     /// Build from fixed candidates — the test injection path.
@@ -1823,5 +2129,25 @@ mod tests {
         assert!(detector.candidates().is_empty());
         let view = RgbaView::new(&[0u8; 16], 100, 100);
         assert!(view.is_none());
+    }
+
+    #[test]
+    fn trace_records_proposals_candidates_and_rejections() {
+        let image = panel_image(240, 160, IntRect::new(40, 30, 160, 90));
+        let (detector, trace) = RegionDetector::analyze_with_trace(&image.data, 240, 160, true);
+        let trace = trace.expect("trace was requested");
+        assert_eq!(trace.image, [240, 160]);
+        assert_eq!(trace.analysis, [240, 160]); // below the 1280 cap
+        assert!((5..=18).contains(&trace.threshold));
+        assert!(!trace.edge_field.is_empty());
+        // scoring saw proposals and accepted at least one
+        assert!(!trace.proposals.is_empty());
+        assert!(trace.proposals.iter().any(|p| p.rejected.is_none()));
+        assert!(trace.proposals.iter().any(|p| p.rejected.is_some()));
+        // the final ledger mirrors the detector's candidates
+        assert_eq!(trace.candidates.len(), detector.candidates().len());
+        // the no-trace path stays clean
+        let (_, none) = RegionDetector::analyze_with_trace(&image.data, 240, 160, false);
+        assert!(none.is_none());
     }
 }

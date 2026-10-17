@@ -203,6 +203,19 @@ fn main() {
                     // silently wherever the analysis found candidates.
                     // Until then the compositor snap rects alone serve
                     // the same interaction.
+                    // Optional diagnostics dump (offline region-detect
+                    // tuning): every analyzed output saves its input
+                    // pixels, edge map and full scoring trace for
+                    // scripts/regiondetect_eval.py. Pure observation —
+                    // detection results are identical with or without it.
+                    let mut dump_dir =
+                        std::env::var_os("SHOTORI_REGIONDUMP").map(std::path::PathBuf::from);
+                    if let Some(dir) = &dump_dir
+                        && let Err(error) = std::fs::create_dir_all(dir)
+                    {
+                        eprintln!("[shotori] region dump disabled: {error}");
+                        dump_dir = None;
+                    }
                     {
                         let caps: Vec<std::sync::Arc<shotori::platform::capture::Capture>> =
                             targets.iter().map(|(cap, _)| cap.clone()).collect();
@@ -216,14 +229,23 @@ fn main() {
                                             cap.width >= 3 && cap.height >= 3 && !cap.rgba.is_empty()
                                         })
                                         .map(|cap| {
-                                            (
-                                                cap.output_name.clone(),
-                                                shotori::model::regiondetect::RegionDetector::analyze(
+                                            let (detector, trace) =
+                                                shotori::model::regiondetect::RegionDetector::analyze_with_trace(
                                                     &cap.rgba,
                                                     cap.width,
                                                     cap.height,
-                                                ),
-                                            )
+                                                    dump_dir.is_some(),
+                                                );
+                                            if let (Some(dir), Some(trace)) = (&dump_dir, trace)
+                                                && let Err(error) =
+                                                    trace.save_artifacts(dir, &cap.output_name, &cap.rgba)
+                                            {
+                                                eprintln!(
+                                                    "[shotori] region dump failed on {}: {error}",
+                                                    cap.output_name
+                                                );
+                                            }
+                                            (cap.output_name.clone(), detector)
                                         })
                                         .collect::<Vec<_>>()
                                 })
