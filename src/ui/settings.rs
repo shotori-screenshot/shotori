@@ -43,7 +43,7 @@ use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPick
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem,
+    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
 };
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Collapsible, Icon, Root, Sizable, Theme, ThemeMode};
@@ -1433,18 +1433,43 @@ impl SettingsWindow {
             };
             item.active(selected).on_click(click)
         };
-        // The header/footer wiring is the component's demo shape, minus
-        // the toggle button: the LOGO is the expand/collapse control
-        // (click it — the rail keeps its icons, the expanded list keeps
-        // text-only labels). The header, footer are plain elements —
-        // the app owns the bool and threads it into each of them.
+        // The header/footer wiring is the component's demo shape. The
+        // expanded header carries the component's collapse button — the
+        // logo alone is a hover-only hit target that reads as a missing
+        // control. The collapsed rail keeps only the logo, which swaps to
+        // the expand glyph while hovered: an expand button next to it
+        // would be a second, wider control in a 48px rail, and the swap
+        // states what the click does without spending the space.
         let mut identity = SidebarHeader::new().collapsed(collapsed);
         // The logo: the app icon master (the same 64px asset the tray
         // embeds), decoded once — 64px stays crisp at the header's 16px
         // logical size on HiDPI. Clicking it toggles the sidebar.
-        let logo_button = |label: &'static str| {
+        let logo_button = |label: &'static str, expand_on_hover: bool| {
+            let mark = div().relative().size_4().child(
+                div()
+                    .when(expand_on_hover, |this| {
+                        this.group_hover("sidebar-logo", |s| s.opacity(0.))
+                    })
+                    .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4()),
+            );
+            let mark = if expand_on_hover {
+                mark.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(0.)
+                        .group_hover("sidebar-logo", |s| s.opacity(1.))
+                        .child(Icon::new(IconName::PanelLeftOpen).size_4()),
+                )
+            } else {
+                mark
+            };
             div()
                 .id("sidebar-logo")
+                .when(expand_on_hover, |this| this.group("sidebar-logo"))
                 .cursor_pointer()
                 .p(px(4.))
                 .rounded(px(6.))
@@ -1454,28 +1479,38 @@ impl SettingsWindow {
                     // write-through like every other control in this window
                     this.toggle_sidebar(cx);
                 }))
-                .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_4())
+                .child(mark)
         };
         if collapsed {
-            // icon rail: just the clickable logo (branding + the only
-            // affordance — click to expand)
+            // icon rail: the clickable logo is the expand affordance —
+            // it becomes the expand glyph under the pointer.
             identity = identity.child(
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .w_full()
-                    .child(logo_button("settings.nav.expand")),
+                    .child(logo_button("settings.nav.expand", true)),
             );
         } else {
-            identity = identity.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(logo_button("settings.nav.collapse"))
-                    .child(div().text_size(px(13.)).child("Shotori")),
-            );
+            // A real button with the panel-close icon, not just the
+            // logo's hover state — at the header's trailing edge.
+            let collapse = SidebarToggleButton::new()
+                .collapsed(false)
+                .accessibility_label(crate::i18n::t!("settings.nav.collapse").to_string())
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.toggle_sidebar(cx);
+                }));
+            identity = identity
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(logo_button("settings.nav.collapse", false))
+                        .child(div().text_size(px(13.)).child("Shotori")),
+                )
+                .child(collapse);
         }
         // Built BEFORE the sidebar chain: the `item` helper holds a
         // shared cx borrow (cx.listener), while the footer's
