@@ -9,8 +9,13 @@
   stroke-linecap="round"
   stroke-linejoin="round"
 >
-  <path d="M7 3h10a2 2 0 0 1 2 2v2H5V5a2 2 0 0 1 2-2z" />
-  <path d="M5 13v-2M19 13v-2" />
-  <path d="M12 9v9" />
-  <path d="m9 15 3 3 3-3" />
+  <!-- Long (scrolling) capture. Doesn't exist in Lucide, so shotori
+       keeps its own: a tall page, a downward arrow and a dashed bottom
+       edge — the capture continues past the viewport. User-picked from
+       the candidate sheet (the earlier framed-page variant read as a
+       download glyph). -->
+  <rect x="5" y="2" width="14" height="20" rx="2" />
+  <path d="M12 6v7" />
+  <path d="m9 10 3 3 3-3" />
+  <path d="M8 17h8" stroke-dasharray="2.5 3" />
 </svg>
