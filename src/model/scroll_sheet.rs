@@ -655,11 +655,13 @@ impl ScrollSheet {
         }
 
         // Sticky evidence rides on the same accepted match — stillness
-        // is only meaningful against the base that produced it.
+        // is only meaningful against the base that produced it, and the
+        // displacement probe needs the step that was accepted.
         {
-            let still = stillness_grid(&self.stable_profile, profile, &self.options);
-            if !still.is_empty() {
-                self.sticky.update(&still, next.position);
+            let evidence =
+                stillness_grid(&self.stable_profile, profile, &self.options, estimate.dy);
+            if !evidence.still.is_empty() {
+                self.sticky.update(&evidence, next.position);
                 if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
                     self.commit_top_band(t, frame);
                 }
@@ -1463,6 +1465,41 @@ mod tests {
         assert_eq!(s.canvas(), expected(95).as_slice());
         // The highlight reports the CONTENT segment, below the band.
         assert_eq!(s.viewport_span(), (HDR + 95, H2 - HDR));
+    }
+
+    /// Flat page background directly beneath the chrome must never join
+    /// the band: a featureless strip matches the base at EVERY offset,
+    /// so offset-0 stillness alone extended the run into it, and every
+    /// band-growth commit spliced that moment's slice into the canvas
+    /// top — torn copies of chrome and content piling up at the image
+    /// start (the dark-theme GitHub capture). The displaced comparison
+    /// is what rejects it: background matches translated too.
+    #[test]
+    fn flat_background_below_the_chrome_never_pins() {
+        const H2: u32 = 800;
+        const HDR: u32 = 48;
+        const FLAT: u32 = 200;
+        let band = chrome_band(HDR);
+        let flat_row: Vec<u8> = [24, 24, 28, 255].repeat(W as usize);
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for _ in 0..FLAT {
+                v.extend_from_slice(&flat_row);
+            }
+            for row in top..top + H2 - HDR - FLAT {
+                v.extend_from_slice(&source_row(row).repeat(W as usize));
+            }
+            v
+        };
+
+        let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
+        let out = s.push(&frame(30));
+        assert!(matches!(out, Fold::GrewBottom { dy: 30, .. }), "{out:?}");
+        let out = s.push(&frame(60));
+        assert!(matches!(out, Fold::GrewBottom { dy: 30, .. }), "{out:?}");
+        // The band is exactly the chrome (step = 1 at this size, no
+        // grid coarseness); the flat strip below never joined the run.
+        assert_eq!(s.sticky.top, HDR);
     }
 
     /// The mid-scroll pin: the navbar travels WITH the content until it

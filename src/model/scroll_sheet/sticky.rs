@@ -17,10 +17,20 @@ use super::profile::RowProfile;
 ///
 /// - **Evidence** — on every accepted frame with dy ≠ 0 (a MOVING page
 ///   is what makes "still at the same viewport row" mean "fixed
-///   chrome" instead of "nothing scrolled"), each sampled row that is
-///   near-identical to the comparison base at offset 0 accumulates a
-///   stillness run. Content rows cannot stay identical while the page
-///   moves under them.
+///   chrome" instead of "nothing scrolled"), each sampled row is
+///   probed against the comparison base twice: at offset 0 and at the
+///   accepted translation dy. The offset-0 mask keeps the run (and the
+///   live prefix) contiguous — band padding and self-similar chrome
+///   interiors are still. The TRANSLATION probe separates what the
+///   offset-0 mask cannot: page content matches TRANSLATED (it IS the
+///   translation, mad ≈ 0), featureless background matches BOTH, and
+///   only pinned chrome matches offset 0 but misfits dy. Commit height
+///   stops at the last translation-verified grid: trusting offset 0
+///   alone once pinned dark-theme background strips and slow-scroll
+///   content slices under the real chrome, and every band-growth
+///   commit then spliced that moment's slice into the canvas top —
+///   torn copies of chrome and content piled up at the image start
+///   (the GitHub capture report).
 /// - **Commit** — a run of [`STILL_FRAMES`] over a top-anchored prefix
 ///   of rows, backed by at least one structured row (a band that is
 ///   uniformly flat is indistinguishable from flat CONTENT — pure-white
@@ -46,9 +56,16 @@ use super::profile::RowProfile;
 /// it, so the pin line — the only row where band meets content — stays
 /// pixel-continuous.
 const STILL_FRAMES: u16 = 2;
-/// A committed band must span at least this many sampled rows — noise
-/// (a caret row, a one-row border) must not pin.
+/// A committed band must end in a cluster of at least this many
+/// displacement-verified grids — noise (a caret row, a one-row border)
+/// must not pin.
 const MIN_BAND_GRIDS: usize = 2;
+/// Unverified-but-still grids tolerated between verified grids inside
+/// one cluster: a band's flat stretches (padding rows, a uniform
+/// navbar body) misfit nothing dy away when their translated partner
+/// lands back inside the band. Past this many grids a stretch is
+/// disconnected background, not interior.
+const VERIFIED_GAP_GRIDS: usize = 4;
 /// Bands taller than a quarter of the viewport are content, not chrome
 /// (the matcher's overlap budget could not survive them anyway).
 const MAX_BAND_FRACTION: f32 = 0.25;
@@ -78,6 +95,14 @@ pub(super) struct StickyBands {
     pub(super) run: Vec<u16>,
     /// Same, counted from the bottom edge upward.
     pub(super) bot_run: Vec<u16>,
+    /// Same as `run`, counting only displacement-VERIFIED frames — see
+    /// [`RowStillness::verified`]. The commit height stops at the last
+    /// grid this counter attests: offset-0-still rows whose translated
+    /// partner also matched (background strips, slow-tail content,
+    /// self-similar band interiors) never grow it.
+    pub(super) verified: Vec<u16>,
+    /// Bottom-anchored mirror of `verified`.
+    pub(super) bot_verified: Vec<u16>,
     /// Content positions of the frames processed since the top prefix
     /// went still — the raw material for the commit surgery's duplicate
     /// segments. Reset whenever the prefix breaks (a row moved again)
@@ -99,30 +124,46 @@ impl StickyBands {
             bot: 0,
             run: Vec::new(),
             bot_run: Vec::new(),
+            verified: Vec::new(),
+            bot_verified: Vec::new(),
             pending: Vec::new(),
             prefix: 0,
         }
     }
 
-    /// Fold one frame's stillness evidence in. `still` is per-sampled-row
-    /// stillness against the comparison base at offset 0; `position` is
-    /// the frame's content position (post-transition). Sized on first
-    /// use — the sheet is constructed before any evidence exists.
-    pub(super) fn update(&mut self, still: &[bool], position: i64) {
+    /// Fold one frame's stillness evidence in. `evidence` is per-sampled-row
+    /// stillness against the comparison base (offset 0 and translated);
+    /// `position` is the frame's content position (post-transition).
+    /// Sized on first use — the sheet is constructed before any evidence
+    /// exists.
+    pub(super) fn update(&mut self, evidence: &RowStillness, position: i64) {
+        let still = &evidence.still;
         if self.run.len() != still.len() {
             self.run = vec![0; still.len()];
             self.bot_run = vec![0; still.len()];
+            self.verified = vec![0; still.len()];
+            self.bot_verified = vec![0; still.len()];
         }
         let monotone = self.pending.last().is_none_or(|&p| position > p);
         for (j, &s) in still.iter().enumerate() {
             self.run[j] = if s { self.run[j].saturating_add(1) } else { 0 };
+            self.verified[j] = if s && evidence.verified[j] {
+                self.verified[j].saturating_add(1)
+            } else {
+                0
+            };
         }
-        // bot_run counts from the BOTTOM edge: index k is the k-th
-        // sampled row up from the bottom.
+        // The bottom masks count from the BOTTOM edge: index k is the
+        // k-th sampled row up from the bottom.
         for k in 0..still.len() {
-            let still_from_bottom = still[still.len() - 1 - k];
-            self.bot_run[k] = if still_from_bottom {
+            let j = still.len() - 1 - k;
+            self.bot_run[k] = if still[j] {
                 self.bot_run[k].saturating_add(1)
+            } else {
+                0
+            };
+            self.bot_verified[k] = if still[j] && evidence.verified[j] {
+                self.bot_verified[k].saturating_add(1)
             } else {
                 0
             };
@@ -140,13 +181,14 @@ impl StickyBands {
     }
 
     /// Whether the top band should commit now, and at what height (in
-    /// canvas rows). Requires the full prefix to have been still for
-    /// [`STILL_FRAMES`] frames, structure inside the band, and a height
-    /// between the current band and the fraction cap.
+    /// canvas rows). Requires the still prefix to hold at least
+    /// [`MIN_BAND_GRIDS`] displacement-verified grids, structure inside
+    /// the band, and a height between the current band and the fraction
+    /// cap.
     pub(super) fn top_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
         let step = cur.step.max(1);
         let skip = (self.top as usize).div_ceil(step);
-        let rows = self.commit_height(&self.run, skip, step, viewport_height)?;
+        let rows = self.commit_height(&self.run, &self.verified, skip, step, viewport_height)?;
         // At least one structured row must attest the band (the
         // flat-content guard — see the struct docs).
         // Strictly INSIDE the band: the row just past it is the first
@@ -166,7 +208,13 @@ impl StickyBands {
     pub(super) fn bot_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
         let step = cur.step.max(1);
         let skip = (self.bot as usize).div_ceil(step);
-        let rows = self.commit_height(&self.bot_run, skip, step, viewport_height)?;
+        let rows = self.commit_height(
+            &self.bot_run,
+            &self.bot_verified,
+            skip,
+            step,
+            viewport_height,
+        )?;
         let last = cur.height as usize - 1;
         let structured = (skip..)
             .take_while(|&j| (j * step) as u32 <= rows)
@@ -174,32 +222,65 @@ impl StickyBands {
         (structured && rows > self.bot).then_some(rows)
     }
 
-    /// Shared commit-height test for one edge's run table: how many
-    /// rows from the anchored edge have been still for
-    /// [`STILL_FRAMES`] frames, capped by the fraction limit. `skip`
-    /// is how many anchored grids the already-committed band covers;
-    /// grid `j` attests to rows `[j·step, (j+1)·step)` from the edge,
-    /// so the committed height is the last attested grid's far edge —
-    /// at most `step − 1` rows coarser than the true band, which only
-    /// ever pins a sliver of content beyond the chrome.
+    /// Shared commit-height test for one edge's run tables: how far the
+    /// still prefix extends from the anchored edge, TRIMMED to the last
+    /// contiguous cluster of displacement-verified grids. The offset-0
+    /// run may run far past it (flat background strips are still too —
+    /// that is exactly what the translation probe is for); rows past
+    /// the cluster stay content, so no band-growth commit can splice
+    /// them into the canvas top. Three shapes matter:
+    ///
+    /// - A self-similar band interior collides with its own rows dy
+    ///   away (chrome row vs chrome row) and never verifies — grids
+    ///   before the FIRST verified one are a free lead, so uniform
+    ///   chrome still commits at its full extent.
+    /// - A flat strip below the chrome is still but verifies only at
+    ///   its bottom edge, where its translated partner crosses into
+    ///   real content — a disconnected cluster. The gap limit drops
+    ///   it, and the height stops at the chrome.
+    /// - Grids after a non-still grid (page content moving through)
+    ///   are unreachable — bands stay edge-anchored.
+    ///
+    /// `skip` is how many anchored grids the already-committed band
+    /// covers; grid `j` attests to rows `[j·step, (j+1)·step)` from
+    /// the edge.
     pub(super) fn commit_height(
         &self,
         run: &[u16],
+        verified: &[u16],
         skip: usize,
         step: usize,
         viewport_height: u32,
     ) -> Option<u32> {
-        let mut grids = 0usize;
-        for &r in run.iter().skip(skip) {
+        let mut far = skip;
+        let mut cluster = 0usize;
+        let mut cluster_end = skip;
+        let mut gap = 0usize;
+        for (i, &r) in run.iter().enumerate().skip(skip) {
             if r < STILL_FRAMES {
                 break;
             }
-            grids += 1;
+            if verified[i] >= STILL_FRAMES {
+                cluster += 1;
+                cluster_end = i + 1;
+                gap = 0;
+            } else if cluster > 0 {
+                gap += 1;
+                if gap > VERIFIED_GAP_GRIDS {
+                    break;
+                }
+            }
+            // else: still the pre-first-verified lead — self-similar
+            // band interior colliding with its own rows dy away. Free:
+            // the verified grids below attest the rows above them.
         }
-        if grids < MIN_BAND_GRIDS {
+        if cluster >= MIN_BAND_GRIDS {
+            far = cluster_end;
+        }
+        if far == skip {
             return None;
         }
-        let rows = ((skip + grids) * step) as u32;
+        let rows = (far * step) as u32;
         let cap = (viewport_height as f32 * MAX_BAND_FRACTION) as u32;
         (rows <= cap).then_some(rows)
     }
@@ -223,32 +304,77 @@ pub(super) fn grid_row_structured(profile: &RowProfile, j: usize) -> bool {
         })
 }
 
-/// Per-sampled-row stillness of `cur` against `base` at offset 0 (same
-/// viewport position). Only meaningful on frames accepted with dy ≠ 0 —
-/// see [`StickyBands`]. The grid matches `cur.step` so the band
+/// Per-sampled-row stillness evidence of `cur` against `base`, probed
+/// at the same viewport position (offset 0) AND at the accepted
+/// translation (offset `dy`). The grid matches `cur.step` so the band
 /// geometry and the matcher's scan share one coordinate system.
+pub(super) struct RowStillness {
+    /// Offset-0 stillness: the row is near-identical to the base at the
+    /// same viewport position. On an accepted moving frame this means
+    /// "pinned or featureless" — never "nothing scrolled". Keeps the
+    /// run (and the live prefix) contiguous.
+    pub(super) still: Vec<bool>,
+    /// Displacement-verified stillness: `still` AND a misfit against
+    /// the base at offset dy. The three row kinds separate only under
+    /// the second probe — page content matches TRANSLATED (it IS the
+    /// translation), featureless background matches BOTH, pinned
+    /// chrome matches ONLY offset 0. A row whose translated partner
+    /// falls outside the frame inherits `still`: the edge opposite the
+    /// scroll cannot testify (a top band on an up-scroll, a footer on
+    /// a down-scroll), and those rows are chrome in practice.
+    pub(super) verified: Vec<bool>,
+}
+
 pub(super) fn stillness_grid(
     base: &RowProfile,
     cur: &RowProfile,
     options: &SheetLimits,
-) -> Vec<bool> {
+    dy: i32,
+) -> RowStillness {
     if base.stride != cur.stride || base.height != cur.height {
-        return Vec::new();
+        return RowStillness {
+            still: Vec::new(),
+            verified: Vec::new(),
+        };
     }
     let h = cur.height as usize;
     let mut still = Vec::with_capacity(h.div_ceil(cur.step.max(1)));
+    let mut verified = Vec::with_capacity(still.capacity());
     let mut j = 0usize;
     while j < h {
         let c = &cur.data[j * cur.stride..(j + 1) * cur.stride];
         let b = &base.data[j * cur.stride..(j + 1) * cur.stride];
-        let mad = c
-            .iter()
-            .zip(b.iter())
-            .map(|(a, b)| u32::from(a.abs_diff(*b)))
-            .sum::<u32>() as f32
-            / cur.stride as f32;
-        still.push(mad <= options.cost_threshold);
+        let s = row_mad(c, b) <= options.cost_threshold;
+        let v = if !s {
+            false
+        } else {
+            // Displacement verification: under the accepted step, the
+            // content of viewport row j pairs with base row j + dy. The
+            // matcher's own "these rows align" bar doubles as the "this
+            // row moved with the page" bar.
+            let t = j as i64 + i64::from(dy);
+            if t < 0 || t >= i64::from(cur.height) {
+                // Off the frame: the edge opposite the scroll cannot
+                // testify; inherit the offset-0 verdict.
+                true
+            } else {
+                let t = t as usize;
+                row_mad(c, &base.data[t * cur.stride..(t + 1) * cur.stride])
+                    >= options.cost_threshold
+            }
+        };
+        still.push(s);
+        verified.push(v);
         j += cur.step;
     }
-    still
+    RowStillness { still, verified }
+}
+
+/// Mean absolute difference of two luma rows.
+fn row_mad(a: &[u8], b: &[u8]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| u32::from(x.abs_diff(*y)))
+        .sum::<u32>() as f32
+        / a.len() as f32
 }
