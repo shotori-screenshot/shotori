@@ -6,7 +6,7 @@ use gpui_kit::*;
 
 use crate::ui::theme;
 
-use super::{PAGE_PAD, SettingsWindow, open_external, png_render_image};
+use super::{SettingsWindow, open_external, page_body, png_render_image};
 
 /// The About page's hero logo (256px master — plenty for a 128px
 /// display size on HiDPI).
@@ -45,17 +45,17 @@ impl SettingsWindow {
                 .child(label)
         };
         let repository = env!("CARGO_PKG_REPOSITORY");
-        div()
-            .id("page-about")
+        // `.pt(48).p(PAGE_PAD)` used to cancel itself (p sets the top
+        // too), so the hero sat flush under the header. The page is now
+        // the shared scrolling body with one centered column capped at a
+        // comfortable measure.
+        let body = div()
             .flex()
             .flex_col()
             .items_center()
             .gap(px(8.))
-            .pt(px(48.))
-            .p(px(PAGE_PAD))
-            .size_full()
-            .overflow_y_scroll()
-            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size(px(128.)))
+            .max_w(px(440.))
+            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size(px(96.)))
             .child(
                 div()
                     .text_size(px(22.))
@@ -111,6 +111,7 @@ impl SettingsWindow {
                     .line_height(relative(1.5))
                     .pt(px(6.))
                     .child(crate::i18n::t!("settings.about.credits").to_string()),
-            )
+            );
+        page_body("page-about").child(body)
     }
 }

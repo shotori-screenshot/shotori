@@ -6,7 +6,6 @@
 //! model (`Settings::apply_drop`); everything here is presentation
 //! and gesture plumbing around it.
 
-use gpui_kit::base::Button;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -14,7 +13,7 @@ use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster, ToolbarIte
 use crate::ui::theme;
 use crate::ui::toolbar;
 
-use super::{PAGE_PAD, SettingsWindow, page_header};
+use super::{SettingsWindow, card_group, page_body, page_header};
 
 /// The drag-and-drop payload: what is being carried and where it came
 /// from (`None` = palette: a fresh insert; `Some(i)` = the preview
@@ -89,7 +88,8 @@ impl Render for DragGhost {
 }
 
 impl SettingsWindow {
-    fn reset(&mut self, cx: &mut Context<Self>) {
+    /// Restore the factory row (the shell footer's "reset this page").
+    pub(super) fn reset_toolbar(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
     }
     /// A drop landed in preview slot `i` (slot i sits before row item
@@ -411,50 +411,6 @@ impl SettingsWindow {
             .child(item_name(item))
     }
 
-    fn footer(&self, cx: &Context<Self>) -> Div {
-        let entity = cx.entity();
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .pt(px(12.))
-            .child(
-                Button::new("settings-reset")
-                    .accessibility_label(crate::i18n::t!("settings.toolbar_page.reset").to_string())
-                    .px(px(12.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(rgba(theme::c().btn_text))
-                    .border_1()
-                    .border_color(rgba(theme::c().toolbar_border))
-                    .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-                    .focus_visible(|s| s.border_color(rgba(theme::c().accent)))
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.reset(cx));
-                    })
-                    .child(crate::i18n::t!("settings.toolbar_page.reset").to_string()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_right()
-                    .text_size(px(11.))
-                    // errors only — where the file lives is one click
-                    // away (General's config buttons); an always-on
-                    // path line was clutter
-                    .when_some(self.error.clone(), |el, error| {
-                        el.text_color(rgba(theme::c().accent)).child(error)
-                    }),
-            )
-    }
-    /// Toolbar: the drag-and-drop editor. The page itself NEVER
-    /// scrolls — the header, the preview strip (+ its scrollbar rail),
-    /// the hint and the footer are pinned, and only the palette below
-    /// pans vertically in its own area. (A scrolling page carried the
-    /// bar away with it — the bar must stay put under any scrolling;
-    /// "only the toolbar scrolls, the rest does not move", horizontally
-    /// AND vertically.)
     pub(super) fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme::c();
         // Releasing anywhere on the page confirms the PREVIEWED slot:
@@ -473,40 +429,40 @@ impl SettingsWindow {
                 }
             },
         );
-        div()
-            .id("page-toolbar")
+        let body = div()
             .flex()
             .flex_col()
-            .gap(px(10.))
-            .p(px(PAGE_PAD))
-            .size_full()
-            .on_drop(page_fallback)
-            // header
+            .gap(px(18.))
+            // A canvas page legitimately runs wider than the reading
+            // measure: the factory row is ~703px and gets its own
+            // horizontal pan inside the card.
+            .max_w(px(780.))
             .child(page_header(
-                "Toolbar",
+                crate::i18n::t!("settings.toolbar_page.title").as_ref(),
                 crate::i18n::t!("settings.toolbar_page.blurb").as_ref(),
             ))
-            // the live preview, in its own horizontally-scrolling strip
-            .child(self.preview_strip(cx))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.toolbar_page.hint").to_string()),
-            )
-            // the palette — the only vertically scrolling part; `min_h(0)`
-            // lets the flex item shrink below its content (an
-            // overflow:visible flex item refuses to, pushing the footer
-            // off instead)
-            .child(
-                div()
-                    .id("palette-scroll")
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .child(self.palette(cx)),
-            )
-            .child(self.footer(cx))
+            .child(card_group(
+                Some(crate::i18n::t!("settings.toolbar_page.group.current").as_ref()),
+                vec![
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .p(px(12.))
+                        .child(self.preview_strip(cx))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgba(t.hint_text))
+                                .child(crate::i18n::t!("settings.toolbar_page.hint").to_string()),
+                        ),
+                ],
+            ))
+            .child(card_group(
+                Some(crate::i18n::t!("settings.toolbar_page.group.palette").as_ref()),
+                vec![div().p(px(12.)).child(self.palette(cx))],
+            ));
+        page_body("page-toolbar").child(body).on_drop(page_fallback)
     }
 
     /// The preview bar's scroll viewport. The bar hugs its content (the

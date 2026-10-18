@@ -5,7 +5,6 @@
 //! change (the write-through contract of [`super::SettingsWindow`],
 //! pointed at a different file).
 
-use gpui_kit::base::Button;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::slider::{
     Slider, SliderEvent, SliderState, SliderThumb, SliderTrack, SliderValue,
@@ -14,57 +13,62 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::ui::theme::load::{self, ThemeFile};
 use crate::ui::theme::{self, ColorKey};
 
-use super::{AppearanceState, BaseItem, PAGE_PAD, SettingsWindow, page_header, sync_shell_palette};
+use super::{
+    AppearanceState, BaseItem, CONTENT_MAX, ROW_MIN_H, SettingsWindow, card_group, card_row,
+    page_body, page_header, sync_shell_palette,
+};
 
 impl SettingsWindow {
     /// Appearance: theme base + per-field colors, live-applied to this
     /// window's own chrome.
     pub(super) fn page_appearance(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        div()
-            .id("page-appearance")
+        let body = div()
             .flex()
             .flex_col()
-            .gap(px(14.))
-            .p(px(PAGE_PAD))
-            .size_full()
-            .overflow_y_scroll()
+            .gap(px(18.))
+            .max_w(px(CONTENT_MAX))
             .child(page_header(
                 crate::i18n::t!("settings.appearance.title").as_ref(),
                 crate::i18n::t!("settings.appearance.blurb").as_ref(),
             ))
-            .child(self.base_control(cx))
-            .child(self.color_grid(cx))
-            .child(self.opacity_row(cx))
-            .child(self.appearance_footer(cx))
-    }
-
-    fn base_control(&self, _: &Context<Self>) -> Div {
-        let t = theme::c();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.appearance.base_palette").to_string()),
-            )
-            .child(
-                div().w(px(280.)).child(
-                    Select::new(&self.appearance.base_select)
-                        .accessibility_label(
-                            crate::i18n::t!("settings.appearance.base_palette").to_string(),
-                        )
-                        .menu_width(px(280.)),
-                ),
-            )
+            .child(card_group(
+                Some(crate::i18n::t!("settings.appearance.group.base").as_ref()),
+                vec![card_row(
+                    crate::i18n::t!("settings.appearance.base_palette").to_string(),
+                    None::<String>,
+                    div().w_full().child(
+                        Select::new(&self.appearance.base_select)
+                            .accessibility_label(
+                                crate::i18n::t!("settings.appearance.base_palette").to_string(),
+                            )
+                            .menu_width(px(280.)),
+                    ),
+                )],
+            ))
+            .child(card_group(
+                Some(crate::i18n::t!("settings.appearance.group.dim").as_ref()),
+                vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .min_h(px(ROW_MIN_H))
+                        .px(px(14.))
+                        .py(px(10.))
+                        .child(self.opacity_row(cx)),
+                ],
+            ))
+            // The colour grid is the long block, so it is the part that
+            // scrolls off the bottom — a clipped slider read as broken.
+            .child(card_group(
+                Some(crate::i18n::t!("settings.appearance.group.colors").as_ref()),
+                vec![div().p(px(12.)).child(self.color_grid(cx))],
+            ));
+        page_body("page-appearance").child(body)
     }
 
     /// One row per [`ColorKey`]: label + picker showing the resolved
@@ -73,21 +77,23 @@ impl SettingsWindow {
         let t = theme::c();
         let mut grid = div().flex().flex_wrap().gap(px(4.));
         for (key, state) in &self.appearance.pickers {
+            // Swatch first, label next, both left-aligned: the picker
+            // used to sit 280px away from the name it belongs to, which
+            // read as two unrelated columns.
             grid = grid.child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(8.))
+                    .gap(px(10.))
                     .w(px(300.))
-                    .py(px(3.))
+                    .py(px(5.))
+                    .child(ColorPicker::new(state).small())
                     .child(
                         div()
                             .text_size(px(12.))
                             .text_color(rgba(t.btn_text))
                             .child(key.label()),
-                    )
-                    .child(ColorPicker::new(state).small()),
+                    ),
             );
         }
         grid
@@ -148,45 +154,6 @@ impl SettingsWindow {
                     .text_size(px(12.))
                     .text_color(rgba(t.hint_text))
                     .child(format!("{:.0}%", theme::c().dim_opacity * 100.)),
-            )
-    }
-
-    fn appearance_footer(&self, cx: &mut Context<Self>) -> Div {
-        let t = theme::c();
-        let entity = cx.entity();
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .pt(px(6.))
-            .child(
-                Button::new("appearance-reset")
-                    .accessibility_label("Reset colors to the base palette")
-                    .px(px(12.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .text_size(px(13.))
-                    .text_color(rgba(t.btn_text))
-                    .border_1()
-                    .border_color(rgba(t.toolbar_border))
-                    .hover(|s| s.bg(rgba(t.toolbar_hover)))
-                    .focus_visible(|s| s.border_color(rgba(t.accent)))
-                    .on_click(move |_, window, cx| {
-                        entity.update(cx, |this, cx| this.appearance_reset(window, cx));
-                    })
-                    .child(crate::i18n::t!("settings.appearance.reset_colors").to_string()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_right()
-                    .text_size(px(11.))
-                    // errors only — where the file lives is one click
-                    // away (General's config buttons); an always-on
-                    // path line was clutter
-                    .when_some(self.appearance.error.clone(), |el, error| {
-                        el.text_color(rgba(t.accent)).child(error)
-                    }),
             )
     }
 }
@@ -324,7 +291,7 @@ impl SettingsWindow {
     }
 
     /// Drop every override, keep the chosen base.
-    fn appearance_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn appearance_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let base = self.appearance.file.base.clone();
         self.appearance.file = ThemeFile {
             base,

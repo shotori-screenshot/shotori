@@ -43,20 +43,18 @@ use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::AutoScroll;
+use gpui_kit::base::Button;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::slider::SliderState;
 use gpui_kit::component::color_picker::ColorPickerState;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
-use gpui_kit::component::sidebar::{
-    Sidebar, SidebarHeader, SidebarItem, SidebarMenu, SidebarMenuItem, SidebarToggleButton,
-};
-use gpui_kit::component::{
-    ActiveTheme, Collapsible, Icon, Root, TITLE_BAR_HEIGHT, Theme, ThemeMode, TitleBar,
-};
+use gpui_kit::component::sidebar::SidebarToggleButton;
+use gpui_kit::component::{ActiveTheme, Icon, Root, TITLE_BAR_HEIGHT, Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
 use crate::model::settings::{OcrModel, Settings, ToolbarItem};
+use crate::ui::e2e;
 use crate::ui::theme::load::{self, ThemeFile};
 use crate::ui::theme::{self, ColorKey};
 
@@ -66,7 +64,24 @@ gpui_kit::actions!([CloseSettings]);
 
 const WINDOW_W: f32 = 1024.;
 const WINDOW_H: f32 = 640.;
-const PAGE_PAD: f32 = 24.;
+/// Page gutter. The content column is capped separately, so this carries
+/// breathing room instead of line length.
+const PAGE_PAD: f32 = 28.;
+/// Reading measure. Rows stretch with the window; nothing that has to be
+/// READ (prose, paths, a label plus its explanation) goes past this.
+const CONTENT_MAX: f32 = 640.;
+/// Group-card anatomy: one radius, one row height, one control column —
+/// the reason the pages read as one widget family instead of four.
+const CARD_RADIUS: f32 = 10.;
+const ROW_MIN_H: f32 = 52.;
+const CONTROL_W: f32 = 200.;
+const SIDEBAR_W: f32 = 232.;
+/// Collapsed navigation rail: wide enough for the 16px icons to sit
+/// centered, narrow enough to stay out of the way on a tiled window.
+const RAIL_W: f32 = 56.;
+const NAV_ROW_H: f32 = 34.;
+/// Status / reset strip under the page, shared by every section.
+const FOOTER_H: f32 = 36.;
 
 /// One page of the settings window. The sidebar switches `section`;
 /// each page owns the state it needs on [`SettingsWindow`] (today the
@@ -83,6 +98,23 @@ enum Section {
     /// The identity card — a footer entry, not main navigation (the
     /// nav is for working sections; About is reference material).
     About,
+}
+
+impl Section {
+    /// Sidebar name → section, for the `SHOTORI_DEBUG_SETTINGS_PAGE`
+    /// backdoor (docs/headless-e2e.md). Unknown names are ignored so a
+    /// stale env var cannot break a normal launch.
+    fn from_debug_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "general" => Self::General,
+            "toolbar" => Self::Toolbar,
+            "keys" => Self::Keys,
+            "ocr" => Self::Ocr,
+            "appearance" => Self::Appearance,
+            "about" => Self::About,
+            _ => return None,
+        })
+    }
 }
 
 /// One row of the language Select. `title` resolves through `t!` on
@@ -488,7 +520,9 @@ impl SettingsWindow {
             }
         }));
         Self {
-            section: Section::Toolbar,
+            section: e2e::debug_settings_page()
+                .and_then(|page| Section::from_debug_name(&page))
+                .unwrap_or(Section::Toolbar),
             sidebar_collapsed: settings.sidebar_collapsed(),
             settings,
             path: crate::model::settings::config_path(),
@@ -590,17 +624,28 @@ impl Render for SettingsWindow {
                 }
                 window.remove_window();
             }))
-            .child(self.title_bar(window, cx))
+            .child(self.header(window, cx))
             .child(
-                // The navigation column and the page share the height
-                // BELOW the title bar; min_h_0 lets the page scroll in
-                // a short window instead of overflowing the column.
+                // Navigation column and the page share the height below
+                // the header; min_h_0 lets the page scroll in a short
+                // window instead of overflowing the column. The footer
+                // is INSIDE the content column so the navigation keeps
+                // its full height and the reset action sits under the
+                // page it resets.
                 div()
                     .flex()
                     .flex_1()
                     .min_h(px(0.))
                     .child(self.sidebar(window, cx))
-                    .child(self.page(cx)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(self.page(cx))
+                            .child(self.status_bar(window, cx)),
+                    ),
             )
     }
 }
@@ -624,17 +669,21 @@ fn open_external(target: String) {
     });
 }
 
-/// One page's heading.
+/// One page's heading: a 20px title with a short blurb under it. Every
+/// page opens the same way — the old 16px title next to a same-size label
+/// was indistinguishable from the row labels below it.
 fn page_header(title: &str, blurb: &str) -> Div {
     let t = theme::c();
     div()
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(px(4.))
+        .pb(px(18.))
         .child(
             div()
-                .text_size(px(16.))
-                .text_color(rgba(t.btn_text))
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgba(t.toolbar_text))
                 .child(title.to_string()),
         )
         .child(
@@ -643,6 +692,131 @@ fn page_header(title: &str, blurb: &str) -> Div {
                 .text_color(rgba(t.hint_text))
                 .child(blurb.to_string()),
         )
+}
+
+/// Re-tint a palette token. Theme colours are `0xRRGGBBAA` (alpha in the
+/// LOW byte — see `--print-theme`), so the wash keeps the RGB and swaps
+/// the alpha byte: hairlines and card backgrounds are shades of the
+/// palette that already exists, not new palette entries.
+fn alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0xffff_ff00) | u32::from(alpha)
+}
+
+/// A grouped card: an optional caption plus rows separated by hairlines.
+/// Design direction A — every page is a stack of these, so the same
+/// "label, explanation, control on the right" anatomy appears on all six
+/// pages instead of four different container idioms.
+fn card_group(caption: Option<&str>, rows: impl IntoIterator<Item = impl IntoElement>) -> Div {
+    let t = theme::c();
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(rgba(alpha(t.toolbar_border, 0x59)))
+        .bg(rgba(alpha(t.toolbar_text, 0x0c)))
+        .overflow_hidden();
+    let rows: Vec<_> = rows.into_iter().collect();
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 && index <= last {
+            card = card.child(
+                div()
+                    .h(px(1.))
+                    .mx(px(14.))
+                    .bg(rgba(alpha(t.toolbar_border, 0x40))),
+            );
+        }
+        card = card.child(row);
+    }
+    let mut group = div().flex().flex_col().gap(px(8.));
+    if let Some(caption) = caption {
+        group = group.child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgba(t.hint_text))
+                .child(caption.to_string()),
+        );
+    }
+    group.child(card)
+}
+
+/// One row of a group card: the label (with an optional explanation under
+/// it) on the left, a fixed-width control column on the right. The fixed
+/// column is what stops three Selects from ending at three different x.
+fn card_row(
+    label: impl Into<SharedString>,
+    description: Option<impl Into<SharedString>>,
+    control: impl IntoElement,
+) -> Div {
+    let t = theme::c();
+    let label = label.into();
+    let mut left = div()
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .flex_1()
+        .min_w(px(0.))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(rgba(t.btn_text))
+                .child(label),
+        );
+    if let Some(description) = description {
+        left = left.child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgba(t.hint_text))
+                .child(description.into()),
+        );
+    }
+    div()
+        .flex()
+        .items_center()
+        .gap(px(16.))
+        .min_h(px(ROW_MIN_H))
+        .px(px(14.))
+        .py(px(10.))
+        .child(left)
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .items_center()
+                .flex_shrink_0()
+                .w(px(CONTROL_W))
+                .child(control),
+        )
+}
+
+/// A card that hosts a custom block instead of rows (the toolbar editor,
+/// the colour grid): same frame, inset padding. Wired up as those two
+/// pages move onto the group system.
+#[allow(dead_code)]
+fn card_block(child: impl IntoElement) -> Div {
+    let t = theme::c();
+    div()
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(rgba(alpha(t.toolbar_border, 0x59)))
+        .bg(rgba(alpha(t.toolbar_text, 0x0c)))
+        .p(px(14.))
+        .child(child)
+}
+
+/// The scrolling column every page renders into: gutter, capped measure.
+fn page_body(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_col()
+        .gap(px(18.))
+        .p(px(PAGE_PAD))
+        .size_full()
+        .min_w(px(0.))
+        .overflow_y_scroll()
 }
 /// Decode an embedded PNG into a RenderImage via the img() BGRA path.
 fn png_render_image(bytes: &'static [u8]) -> std::sync::Arc<RenderImage> {
@@ -705,6 +879,25 @@ fn window_control(
         .child(Icon::new(icon).size_4())
 }
 
+/// The footer's page-reset action. One button, one place, every page —
+/// it used to exist only inside two pages, at two different heights.
+fn reset_button(on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Button {
+    let t = theme::c();
+    Button::new("footer-reset")
+        .accessibility_label(crate::i18n::t!("settings.footer.reset_page").to_string())
+        .px(px(10.))
+        .py(px(3.))
+        .rounded(px(6.))
+        .text_size(px(12.))
+        .text_color(rgba(t.btn_text))
+        .border_1()
+        .border_color(rgba(t.toolbar_border))
+        .hover(|s| s.bg(rgba(t.toolbar_hover)))
+        .focus_visible(|s| s.border_color(rgba(t.accent)))
+        .on_click(on_click)
+        .child(crate::i18n::t!("settings.footer.reset_page").to_string())
+}
+
 /// The title bar's control cluster for a server-decorated window that
 /// has no system bar (see [`SettingsWindow::title_bar`]). Only the
 /// controls the compositor advertises through `wm_capabilities` are
@@ -757,7 +950,7 @@ impl SettingsWindow {
     /// when the navigation rail collapses. `TitleBar` supplies the drag
     /// / double-click-zoom behavior and the component's control cluster
     /// wherever the compositor honors client decorations.
-    fn title_bar(&self, window: &Window, cx: &App) -> TitleBar {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> TitleBar {
         let brand = div()
             .flex()
             .items_center()
@@ -771,6 +964,27 @@ impl SettingsWindow {
                     .text_size(px(12.))
                     .child(crate::i18n::t!("settings.title").to_string()),
             );
+        // The rail toggle lives here, next to the brand, instead of in
+        // the navigation column: the logo used to double as the toggle,
+        // which read as "click the app icon" rather than "collapse the
+        // sidebar".
+        let toggle = SidebarToggleButton::new()
+            .collapsed(self.sidebar_collapsed)
+            .accessibility_label(
+                if self.sidebar_collapsed {
+                    crate::i18n::t!("settings.nav.expand")
+                } else {
+                    crate::i18n::t!("settings.nav.collapse")
+                }
+                .to_string(),
+            )
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_sidebar(cx)));
+        let leading = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .child(brand)
+            .child(toggle);
         // `TitleBar` hides its own control cluster when the compositor
         // claims server-side decorations — it must not duplicate a
         // system title bar. But some compositors claim that while
@@ -780,148 +994,206 @@ impl SettingsWindow {
         // cluster handles it (outside the drag region, same as here).
         let own_controls = matches!(window.window_decorations(), Decorations::Server)
             .then(|| window_controls(window, cx));
-        TitleBar::new().child(brand).children(own_controls)
+        TitleBar::new().child(leading).children(own_controls)
     }
 
-    /// The navigation sidebar: one item per section, the active page
-    /// highlighted, About pinned to the footer. Takes the window:
-    /// SidebarMenuItem only becomes an element through
-    /// [`SidebarItem::render`], which needs one.
-    fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Sidebar<SidebarMenu> {
-        let active = self.section;
-        let collapsed = self.sidebar_collapsed;
-        // `label` is a translation KEY (settings.general.title etc.) —
-        // the sidebar translates on render, so a live locale flip
-        // relabels the navigation with everything else. Icons ride only
-        // on the collapsed rail: expanded, the label text carries the
-        // meaning and an icon column next to it read as clutter.
-        let item = |key: &'static str, icon: IconName, target: Section| {
-            let selected = active == target;
-            let click = cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
+    /// One navigation entry. Hand-built rather than `SidebarMenuItem`:
+    /// the component's row metrics (a 44px pitch, a highlight running
+    /// flush into the divider, icons only on the collapsed rail) are what
+    /// made the column read as a list of links instead of navigation.
+    fn nav_item(
+        &self,
+        key: &'static str,
+        icon: IconName,
+        target: Section,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = theme::c();
+        let active = self.section == target;
+        let label = crate::i18n::t!(key).to_string();
+        let fill = if active {
+            // The accent wash marks the current section without turning
+            // the row into a loud primary button.
+            rgba(alpha(t.accent, 0x2b))
+        } else {
+            rgba(0x00000000)
+        };
+        let item = div()
+            .id(SharedString::from(format!("nav-{key}")))
+            .flex()
+            .items_center()
+            .h(px(NAV_ROW_H))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .text_size(px(13.))
+            .bg(fill)
+            .text_color(rgba(if active { t.toolbar_text } else { t.btn_text }))
+            .aria_label(label.clone())
+            .hover(|this| this.bg(rgba(alpha(t.toolbar_hover, 0x66))))
+            .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                 if this.section != target {
                     this.section = target;
                     cx.notify();
                 }
-            });
-            let item = SidebarMenuItem::new(crate::i18n::t!(key).to_string());
-            let item = if collapsed {
-                item.icon(Icon::new(icon))
+            }))
+            .child(Icon::new(icon).size_4().text_color(rgba(if active {
+                t.accent
             } else {
-                item
-            };
-            item.active(selected).on_click(click)
-        };
-        // Header: the expand/collapse control and nothing else. The
-        // branding moved to the window title bar (the one strip whose
-        // width does not change when the rail collapses), so the header
-        // is the same one-button row whether the rail is open or shut.
-        let toggle = |collapsed_state: bool| {
-            let label = if collapsed_state {
-                crate::i18n::t!("settings.nav.expand")
-            } else {
-                crate::i18n::t!("settings.nav.collapse")
-            };
-            SidebarToggleButton::new()
-                .collapsed(collapsed_state)
-                .accessibility_label(label.to_string())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.toggle_sidebar(cx);
-                }))
-        };
-        let mut identity = SidebarHeader::new().collapsed(collapsed);
+                t.hint_text
+            })));
         if collapsed {
-            // The 48px rail centers the expand button over the icons.
-            identity = identity.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w_full()
-                    .child(toggle(true)),
-            );
+            item.justify_center()
         } else {
-            // Expanded: the button sits in the item column's leading
-            // edge — the same x it occupies centered on the collapsed
-            // rail. A trailing-edge button jumps ~200px sideways when
-            // the rail opens and reads as unrelated chrome.
-            identity = identity.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .w_full()
-                    .child(toggle(false)),
-            );
+            item.gap(px(10.)).px(px(10.)).child(label)
         }
-        // Built BEFORE the sidebar chain: the `item` helper holds a
-        // shared cx borrow (cx.listener), while the footer's
-        // SidebarItem::render below needs cx mutably — the menu must
-        // be done borrowing before the chain evaluates the footer.
-        let menu = SidebarMenu::new()
-            .child(item(
+    }
+
+    /// The navigation column: the working sections, a divider, then the
+    /// About entry with the version under it — reference material is
+    /// visibly a different kind of thing from a section, but still one
+    /// click away (it used to be the same row style, pinned at the
+    /// bottom with nothing saying why).
+    fn sidebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let t = theme::c();
+        let collapsed = self.sidebar_collapsed;
+        let mut nav = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px(px(8.))
+            .pt(px(8.))
+            .flex_1()
+            .min_h(px(0.));
+        for (key, icon, target) in [
+            (
                 "settings.general.title",
                 IconName::Settings2,
                 Section::General,
-            ))
-            .child(item(
+            ),
+            (
                 "settings.toolbar_page.title",
                 IconName::PanelTop,
                 Section::Toolbar,
-            ))
-            .child(item(
+            ),
+            (
                 "settings.keys_page.title",
                 IconName::Keyboard,
                 Section::Keys,
-            ))
-            .child(item(
-                "settings.ocr_page.title",
-                IconName::ScanText,
-                Section::Ocr,
-            ))
-            .child(item(
+            ),
+            ("settings.ocr_page.title", IconName::ScanText, Section::Ocr),
+            (
                 "settings.appearance.title",
                 IconName::Palette,
                 Section::Appearance,
-            ));
-        // About (the footer item): same shape as every nav item, and
-        // like them it carries an icon only on the collapsed rail —
-        // expanded is text-only.
-        let about = SidebarMenuItem::new(crate::i18n::t!("settings.about.nav").to_string())
-            .collapsed(collapsed)
-            .active(active == Section::About)
-            .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
-                if this.section != Section::About {
-                    this.section = Section::About;
-                    cx.notify();
-                }
-            }));
-        let about = if collapsed {
-            about.icon(Icon::new(IconName::Info))
-        } else {
-            about
-        };
-        Sidebar::new("settings-sidebar")
-            .collapsible(true)
-            .collapsed(collapsed)
-            .header(identity)
-            .footer(
-                // About lives in the footer SLOT (reference material,
-                // not a working section) but is the SAME element as
-                // every nav item: a bare SidebarMenuItem, no
-                // SidebarFooter wrapper. That wrapper is a user-card
-                // shaped box — double padding, plus its own
-                // hover/selected states stacked on the item's — which
-                // made the entry read as a different kind of thing and
-                // sat its text 8px off the nav grid. The slot itself
-                // contributes only the bottom pinning and the shared
-                // px_3 insets; collapsed it still degrades to the icon
-                // + managed tooltip. The icon rides only on the
-                // collapsed rail (same rule as the nav items —
-                // expanded is text-only).
-                about.render("sidebar-about", window, cx),
+            ),
+        ] {
+            nav = nav.child(self.nav_item(key, icon, target, collapsed, cx));
+        }
+        let about = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .px(px(8.))
+            .pb(px(10.))
+            .child(
+                div()
+                    .h(px(1.))
+                    .mx(px(6.))
+                    .mb(px(6.))
+                    .bg(rgba(alpha(t.toolbar_border, 0x59))),
             )
-            .child(menu)
+            .child(self.nav_item(
+                "settings.about.nav",
+                IconName::Info,
+                Section::About,
+                collapsed,
+                cx,
+            ));
+        let about = if collapsed {
+            about
+        } else {
+            about.child(
+                div()
+                    .px(px(10.))
+                    .text_size(px(11.))
+                    .text_color(rgba(t.hint_text))
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+            )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .flex_shrink_0()
+            .w(px(if collapsed { RAIL_W } else { SIDEBAR_W }))
+            .border_r_1()
+            .border_color(rgba(alpha(t.toolbar_border, 0x80)))
+            .child(nav)
+            .child(about)
     }
+
+    /// The status strip under every page: "changes save immediately" (or
+    /// the last save failure) on the left, the page's reset action on the
+    /// right. Before this, the reset button lived inside two pages at two
+    /// different heights and every page ended in dead space.
+    fn status_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let t = theme::c();
+        let entity = cx.entity();
+        let (status, color) = match self.error.clone() {
+            Some(error) => (
+                crate::i18n::t!("settings.footer.not_saved", error = error).to_string(),
+                t.accent,
+            ),
+            None => (
+                crate::i18n::t!("settings.footer.saved").to_string(),
+                t.hint_text,
+            ),
+        };
+        let reset = match self.section {
+            Section::Toolbar => Some(reset_button({
+                let entity = entity.clone();
+                move |_: &ClickEvent, _, cx: &mut App| {
+                    entity.update(cx, |this, cx| this.reset_toolbar(cx));
+                }
+            })),
+            Section::Keys => Some(reset_button({
+                let entity = entity.clone();
+                move |_: &ClickEvent, _, cx: &mut App| {
+                    entity.update(cx, |this, cx| {
+                        this.settings.reset_keys();
+                        this.persist(cx);
+                    });
+                }
+            })),
+            Section::Appearance => Some(reset_button({
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |this, cx| this.appearance_reset(window, cx));
+                }
+            })),
+            _ => None,
+        };
+        let _ = window;
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .h(px(FOOTER_H))
+            .flex_shrink_0()
+            .px(px(PAGE_PAD))
+            .border_t_1()
+            .border_color(rgba(alpha(t.toolbar_border, 0x59)))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgba(color))
+                    .child(status),
+            )
+            .children(reset)
+    }
+
     /// The content pane: the active section's page. This match is the
     /// section registry — a new section is a variant, a page fn and a
     /// sidebar item above. `min_w(0)` lets the pane shrink below its

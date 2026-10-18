@@ -81,6 +81,38 @@ settings:
       body:
         en: Hover outlines and click snapping propose regions detected in the frozen capture — windows, panels, controls. Turn off to draw every selection by hand.
         zh-CN: 悬停高亮与点击吸附会提议冻结画面中识别出的区域（窗口、面板、控件）。关闭后全部手动框选。
+    group:
+      files:
+        en: Config files
+        zh-CN: 配置文件
+      interface:
+        en: Interface
+        zh-CN: 界面
+      selection:
+        en: Selection
+        zh-CN: 选区
+    file:
+      settings:
+        desc:
+          en: Toolbar layout, shortcuts, language, sidebar state
+          zh-CN: 工具栏布局、快捷键、语言、侧栏状态
+      theme:
+        desc:
+          en: Colour overrides — the Appearance page edits this same file
+          zh-CN: 配色覆盖——外观页改的就是这个文件
+      open:
+        en: Open
+        zh-CN: 打开
+  footer:
+    saved:
+      en: Changes save immediately
+      zh-CN: 修改即时保存
+    reset_page:
+      en: Reset this page
+      zh-CN: 恢复本页默认
+    not_saved:
+      en: "not saved — {error}"
+      zh-CN: "未保存——{error}"
   about:
     nav:
       en: About
@@ -104,6 +136,9 @@ settings:
     title:
       en: Shortcuts
       zh-CN: 快捷键
+    group:
+      en: Commands
+      zh-CN: 命令
     blurb:
       en: Rebind the screenshot commands. Click a key cap, press the new chord — applies to the next screenshot.
       zh-CN: 重新绑定截图命令。点击键帽后按下新组合键——下次截图时生效。
@@ -144,6 +179,13 @@ settings:
       en: Reset to defaults
       zh-CN: 恢复默认
   toolbar_page:
+    group:
+      current:
+        en: Current toolbar
+        zh-CN: 当前工具栏
+      palette:
+        en: Palette
+        zh-CN: 按钮
     title:
       en: Toolbar
       zh-CN: 工具栏
@@ -166,6 +208,16 @@ settings:
     title:
       en: OCR
       zh-CN: 文字识别
+    group:
+      model:
+        en: Model
+        zh-CN: 模型
+      direction:
+        en: Orientation
+        zh-CN: 识别方向
+      cache:
+        en: Cache
+        zh-CN: 缓存
     model:
       en: Model set
       zh-CN: 模型集
@@ -189,6 +241,16 @@ settings:
         en: Skip the orientation check — screenshot text is almost always upright. Saves one inference stage and one model download; rotated text (photo of a page) is then read garbled.
         zh-CN: 跳过方向检测——截图里的文字几乎总是正立的。省去一级推理和一个模型下载；旋转文字（如拍摄的书页）将无法正确识别。
   appearance:
+    group:
+      base:
+        en: Scheme
+        zh-CN: 配色方案
+      colors:
+        en: Colours
+        zh-CN: 颜色
+      dim:
+        en: Backdrop
+        zh-CN: 背景
     title:
       en: Appearance
       zh-CN: 外观

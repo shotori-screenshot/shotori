@@ -3,13 +3,11 @@
 //! (or is refused inline). The chord canonicalization and display
 //! helpers live with the page that uses them.
 
-use gpui_kit::base::Button;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::ui::theme;
 
-use super::{PAGE_PAD, SettingsWindow, page_header};
+use super::{CONTENT_MAX, SettingsWindow, alpha, card_group, card_row, page_body, page_header};
 
 /// The localized display name of a configurable shortcut id. The ids
 /// live in `actions::CONFIGURABLE_KEYS`; the test below pins that
@@ -108,68 +106,24 @@ impl SettingsWindow {
     /// here — the next screenshot binds from the file (each capture is
     /// a fresh process; there is no live rebinding to do).
     pub(super) fn page_keys(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = theme::c();
-        let entity = cx.entity();
-        div()
-            .id("page-keys")
+        let mut rows = Vec::with_capacity(crate::actions::CONFIGURABLE_KEYS.len());
+        for (id, factory) in crate::actions::CONFIGURABLE_KEYS {
+            rows.push(self.key_row(id, factory, cx));
+        }
+        let body = div()
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .p(px(PAGE_PAD))
-            .size_full()
-            .overflow_y_scroll()
+            .gap(px(18.))
+            .max_w(px(CONTENT_MAX))
             .child(page_header(
                 crate::i18n::t!("settings.keys_page.title").as_ref(),
                 crate::i18n::t!("settings.keys_page.blurb").as_ref(),
             ))
-            .children({
-                let mut rows = Vec::with_capacity(crate::actions::CONFIGURABLE_KEYS.len());
-                for (id, factory) in crate::actions::CONFIGURABLE_KEYS {
-                    rows.push(self.key_row(id, factory, cx));
-                }
-                rows
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .pt(px(12.))
-                    .child(
-                        Button::new("keys-reset")
-                            .accessibility_label(
-                                crate::i18n::t!("settings.keys_page.reset").to_string(),
-                            )
-                            .px(px(12.))
-                            .py(px(4.))
-                            .rounded(px(6.))
-                            .text_size(px(13.))
-                            .text_color(rgba(t.btn_text))
-                            .border_1()
-                            .border_color(rgba(t.toolbar_border))
-                            .hover(|s| s.bg(rgba(t.toolbar_hover)))
-                            .focus_visible(|s| s.border_color(rgba(t.accent)))
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.settings.reset_keys();
-                                        this.persist(cx);
-                                    });
-                                }
-                            })
-                            .child(crate::i18n::t!("settings.keys_page.reset").to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_right()
-                            .text_size(px(11.))
-                            .when_some(self.error.clone(), |el, error| {
-                                el.text_color(rgba(t.accent)).child(error)
-                            }),
-                    ),
-            )
+            .child(card_group(
+                Some(crate::i18n::t!("settings.keys_page.group").as_ref()),
+                rows,
+            ));
+        page_body("page-keys").child(body)
     }
 
     /// One shortcut row: the command's label (plus its factory
@@ -177,7 +131,7 @@ impl SettingsWindow {
     /// right. Only the RECORDING row tracks focus — one shared handle,
     /// attached to whichever row is listening; without focus the
     /// keydown listener is dead weight on the others.
-    fn key_row(&self, id: &str, factory: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn key_row(&self, id: &str, factory: &str, cx: &mut Context<Self>) -> Div {
         let t = theme::c();
         let entity = cx.entity();
         let recording = self.recording.as_deref() == Some(id);
@@ -197,84 +151,58 @@ impl SettingsWindow {
         } else {
             pretty_keystroke(&keystroke)
         };
-        div()
+        let description = if recording || !customized {
+            None
+        } else {
+            Some(
+                crate::i18n::t!(
+                    "settings.keys_page.default",
+                    keys = pretty_keystroke(factory)
+                )
+                .to_string(),
+            )
+        };
+        let mut cap = div()
             .flex()
             .items_center()
-            .gap(px(12.))
+            .justify_center()
+            .w(px(110.))
+            .h(px(28.))
             .px(px(10.))
-            .py(px(8.))
             .rounded(px(6.))
+            .text_size(px(12.))
+            .cursor_pointer()
             .border_1()
             .border_color(rgba(if recording {
                 t.accent
             } else {
                 t.toolbar_border
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgba(t.btn_text))
-                            .child(key_label(id)),
-                    )
-                    .when(customized, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgba(t.hint_text))
-                                .child(
-                                    crate::i18n::t!(
-                                        "settings.keys_page.default",
-                                        keys = pretty_keystroke(factory)
-                                    )
-                                    .to_string(),
-                                ),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("key-cap-{id}")))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .min_w(px(110.))
-                    .h(px(26.))
-                    .px(px(10.))
-                    .rounded(px(6.))
-                    .text_size(px(12.))
-                    .cursor_pointer()
-                    .border_1()
-                    .border_color(rgba(if recording {
-                        t.accent
-                    } else {
-                        t.toolbar_border
-                    }))
-                    .bg(rgba(if recording {
-                        t.toolbar_hover
-                    } else {
-                        t.toolbar_bg
-                    }))
-                    .text_color(rgba(if recording { t.accent } else { t.btn_text }))
-                    .hover(|s| s.border_color(rgba(t.accent)))
-                    .when(recording, |el| {
-                        el.track_focus(&self.record_focus)
-                            .on_key_down(cx.listener(Self::capture_key))
-                    })
-                    .on_click({
-                        let id = id.to_owned();
-                        move |_, window, cx| {
-                            entity.update(cx, |this, cx| this.toggle_recording(&id, window, cx));
-                        }
-                    })
-                    .child(cap_label),
-            )
+            .bg(rgba(if recording {
+                alpha(t.toolbar_hover, 0x88)
+            } else {
+                0x00000000
+            }))
+            .text_color(rgba(if recording { t.accent } else { t.btn_text }))
+            .hover(|s| s.border_color(rgba(t.accent)));
+        if recording {
+            // Only the RECORDING cap listens: one shared focus handle,
+            // attached to whichever row is armed — without focus the
+            // keydown listener is dead weight on the others.
+            cap = cap
+                .track_focus(&self.record_focus)
+                .on_key_down(cx.listener(Self::capture_key));
+        }
+        let cap = cap
+            .id(SharedString::from(format!("key-cap-{id}")))
+            .on_click({
+                let id = id.to_owned();
+                move |_, window, cx| {
+                    entity.update(cx, |this, cx| this.toggle_recording(&id, window, cx));
+                }
+            })
+            .child(cap_label);
+        card_row(key_label(id), description, cap)
     }
 
     /// Key-cap click: start recording (focusing the cap so the chord

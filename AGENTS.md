@@ -167,17 +167,32 @@ libwayland-dev` (see CI).
 - `cargo test` covers pure logic (model/, annotation geometry, args) —
   no compositor required. New interactive logic should be extractable
   and tested there.
-- Do NOT use the `#[gpui_kit::test]` attribute (the `test-support`
-  dev-dependency invites it): its proc macro recurses infinitely
-  inside `gpui_macros` and crashes rustc with SIGSEGV — minutes of
-  "my code segfaulted the compiler" before you look at the backtrace.
-  Keep tests pure-logic; verify shell/widget wiring by running the
-  real window.
+- `#[gpui_kit::test]` was once unusable — its proc macro recursed
+  infinitely inside `gpui_macros` and crashed rustc with SIGSEGV ("my
+  code segfaulted the compiler"). On the pinned gpui-kit 0.7 it works:
+  ten in-tree uses drive real widgets headlessly (`src/ui/text_input.rs`,
+  `src/ui/text_editor.rs`, `src/model/session.rs`). If a future bump
+  makes rustc die while expanding it, that is the regression to report —
+  do not silently fall back to `unwrap`-and-pray logic tests.
+- **To look at the UI yourself, use `docs/headless-e2e.md`** — a private
+  headless wlroots session (sway, `WLR_BACKENDS=headless`), the app inside
+  it, `grim` inside it. Never spawn shotori windows on the maintainer's
+  live desktop to see them: that steals focus and switches their
+  workspaces. Write the PNG inside the repo (`target/headless/`) — the
+  sandbox `/tmp` is a private tmpfs the agent cannot read back. The
+  session must be started from the compositor's own session
+  (`niri msg action spawn`), because the sandbox masks `/dev/dri` and
+  Vulkan has no software fallback. A headless seat has **no input at
+  all** (`capabilities: 0`: neither pointer nor keyboard injection
+  reaches the app), so drive it through the `SHOTORI_DEBUG_*` backdoors —
+  add one rather than faking clicks.
 - Headless e2e drives the real pipeline through the `ui/e2e.rs`
   backdoors: `SHOTORI_DEBUG_TARGET=<output>` (restrict to one overlay —
   several firing fight each other), `SHOTORI_DEBUG_SELECTION=x,y,w,h`,
   `SHOTORI_DEBUG_ACTION=copy|quit|save|ocr|ocrsetup` (fires ~1.5 s after
-  startup), `SHOTORI_DEBUG_SAVE_PATH=<file>` (skips the dialog). Read
+  startup), `SHOTORI_DEBUG_SAVE_PATH=<file>` (skips the dialog),
+  `SHOTORI_DEBUG_SETTINGS_PAGE=<section>` (opens the settings window on
+  that page — the sidebar cannot be clicked headlessly). Read
   back with `wl-paste --type image/png`; compare captures with `grim`.
 - Don't hardcode pixel coordinates in probe assertions — prove the
   overlay is up first, then probe relative geometry (a rounding change

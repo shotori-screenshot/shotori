@@ -14,6 +14,10 @@
 //!   (opens the dialog since models are missing), then
 //!   OcrSetupConfirm at 6s (starts the download); "clear" fires the
 //!   clear-all annotations action (issue #15)
+//! - `SHOTORI_DEBUG_SETTINGS_PAGE=general|toolbar|keys|ocr|appearance|about`
+//!   — open the settings window on that page. A headless seat has no
+//!   pointer AND no keyboard (docs/headless-e2e.md), so without this
+//!   there is no way to reach a page while reviewing it
 
 use gpui_kit::*;
 
@@ -45,6 +49,14 @@ pub(crate) fn debug_selection(targeted: bool) -> Selection {
             })
         })
         .unwrap_or(Selection::Idle)
+}
+
+/// Which settings page to open on. `None` (unset or unknown name) keeps
+/// the normal default — the settings window maps the name itself.
+pub(crate) fn debug_settings_page() -> Option<String> {
+    std::env::var("SHOTORI_DEBUG_SETTINGS_PAGE")
+        .ok()
+        .filter(|page| !page.is_empty())
 }
 
 /// Fire the configured action(s) after 1.5s.

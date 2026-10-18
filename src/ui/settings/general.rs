@@ -1,7 +1,12 @@
-//! The General page: the config-file open buttons, the UI language
-//! picker, the smart-region switch and the write-through hint — the
-//! installation-level controls (everything else on this page is
-//! reference, not configuration).
+//! The General page: the config-file rows, the UI language picker and
+//! the smart-region switch — installation-level facts and the two
+//! controls that change how the app behaves everywhere.
+//!
+//! Layout is the shared group-card system (see `super::card_group`):
+//! one card per concern, one row per setting, the control in a fixed
+//! right-hand column. The old page mixed bare labels, one-control cards
+//! and a trailing hint paragraph, which is what made it read as
+//! arbitrarily placed.
 
 use gpui_kit::base::Button;
 use gpui_kit::component::select::Select;
@@ -11,9 +16,11 @@ use gpui_kit::*;
 use crate::ui::theme;
 use crate::ui::theme::load::{self, ThemeFile};
 
-use super::{PAGE_PAD, SettingsWindow, open_external, page_header};
+use super::{
+    CONTENT_MAX, SettingsWindow, card_group, card_row, open_external, page_body, page_header,
+};
 
-/// Which config file an action targets (General page's edit buttons).
+/// Which config file a row opens.
 #[derive(Clone, Copy)]
 enum ConfigFile {
     Settings,
@@ -26,7 +33,7 @@ impl SettingsWindow {
     /// out, theme a base-only shotori file — so "edit my config" never
     /// hands the editor a void. Materialization failures land in the
     /// usual error slot; opening failures surface as a notification
-    /// from [`open_config_file`]'s thread.
+    /// from [`open_external`]'s thread.
     fn open_config(&mut self, file: ConfigFile, cx: &mut Context<Self>) {
         let Some(path) = (match file {
             ConfigFile::Settings => self.path.clone(),
@@ -57,94 +64,80 @@ impl SettingsWindow {
         }
         open_external(path.display().to_string());
     }
-    /// General: read-only facts about this installation plus the UI
-    /// language picker (the one control here that changes something).
+
+    /// General: the two config files, the UI language, smart region.
     pub(super) fn page_general(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = theme::c();
-        div()
-            .id("page-general")
+        let body = div()
             .flex()
             .flex_col()
-            .gap(px(14.))
-            .p(px(PAGE_PAD))
-            .size_full()
-            .overflow_y_scroll()
+            .gap(px(18.))
+            .max_w(px(CONTENT_MAX))
             .child(page_header(
                 crate::i18n::t!("settings.general.title").as_ref(),
                 crate::i18n::t!("settings.general.blurb").as_ref(),
             ))
-            .child(self.config_files_row(cx))
-            .child(self.language_control(cx))
-            .child(self.smart_region_control(cx))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.general.write_through").to_string()),
-            )
+            .child(card_group(
+                Some(crate::i18n::t!("settings.general.group.files").as_ref()),
+                vec![
+                    self.file_row(
+                        "settings.toml",
+                        crate::i18n::t!("settings.general.file.settings.desc").to_string(),
+                        ConfigFile::Settings,
+                        cx,
+                    ),
+                    self.file_row(
+                        "theme.toml",
+                        crate::i18n::t!("settings.general.file.theme.desc").to_string(),
+                        ConfigFile::Theme,
+                        cx,
+                    ),
+                ],
+            ))
+            .child(card_group(
+                Some(crate::i18n::t!("settings.general.group.interface").as_ref()),
+                vec![card_row(
+                    crate::i18n::t!("settings.general.language.label").to_string(),
+                    Some(crate::i18n::t!("settings.general.language.blurb").to_string()),
+                    div().w_full().child(
+                        Select::new(&self.language_select)
+                            .accessibility_label(
+                                crate::i18n::t!("settings.general.language.label").to_string(),
+                            )
+                            .menu_width(px(240.)),
+                    ),
+                )],
+            ))
+            .child(card_group(
+                Some(crate::i18n::t!("settings.general.group.selection").as_ref()),
+                vec![card_row(
+                    crate::i18n::t!("settings.general.smart_region.title").to_string(),
+                    Some(crate::i18n::t!("settings.general.smart_region.body").to_string()),
+                    self.smart_region_switch(cx),
+                )],
+            ));
+        page_body("page-general").child(body)
     }
 
-    /// The smart-region switch (General page). Same write-through
-    /// contract as the OCR upright toggle: the flip saves the file and
-    /// the next capture reads it — a live overlay is not rewired
-    /// mid-session (its detectors, if any, simply stay unused: the
-    /// session queries the setting on every hover/press/wheel).
-    fn smart_region_control(&self, cx: &Context<Self>) -> Div {
+    /// One config file: the file name, what it holds, and the button
+    /// that opens it. The name IS the label — a "Config files" heading
+    /// plus two anonymous buttons made the reader match buttons to
+    /// files by guesswork.
+    fn file_row(
+        &self,
+        name: &'static str,
+        description: String,
+        file: ConfigFile,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let t = theme::c();
         let entity = cx.entity();
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .p(px(10.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(rgba(t.toolbar_border))
-            .child(
-                Switch::new("smart-region")
-                    .checked(self.settings.smart_region())
-                    .on_click(move |checked, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.settings.set_smart_region(*checked);
-                            this.persist(cx);
-                        });
-                    })
-                    .color(rgba(t.accent)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .flex_1()
-                    .min_w(px(0.))
-                    .child(
-                        div().text_size(px(13.)).text_color(rgba(t.btn_text)).child(
-                            crate::i18n::t!("settings.general.smart_region.title").to_string(),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgba(t.hint_text))
-                            .child(
-                                crate::i18n::t!("settings.general.smart_region.body").to_string(),
-                            ),
-                    ),
-            )
-    }
-    /// The config-file row (General page): one compact button per
-    /// file, opening it in the system editor. Replaces the old
-    /// read-only path rows — the location is discovered by opening the
-    /// file, and always-on paths everywhere was clutter.
-    fn config_files_row(&self, cx: &mut Context<Self>) -> Div {
-        let t = theme::c();
-        let entity = cx.entity();
-        let button = |label: &'static str, file: ConfigFile| {
-            Button::new(SharedString::from(label))
+        card_row(
+            name,
+            Some(description),
+            Button::new(SharedString::from(name))
                 .accessibility_label(format!(
-                    "{}: {label}",
-                    crate::i18n::t!("settings.general.config_files")
+                    "{}: {name}",
+                    crate::i18n::t!("settings.general.file.open")
                 ))
                 .px(px(10.))
                 .py(px(3.))
@@ -155,65 +148,29 @@ impl SettingsWindow {
                 .border_color(rgba(t.toolbar_border))
                 .hover(|s| s.bg(rgba(t.toolbar_hover)))
                 .focus_visible(|s| s.border_color(rgba(t.accent)))
-                .on_click({
-                    let entity = entity.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.open_config(file, cx));
-                    }
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.open_config(file, cx));
                 })
-                .child(label)
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.general.config_files").to_string()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(button("settings.toml", ConfigFile::Settings))
-                    .child(button("theme.toml", ConfigFile::Theme)),
-            )
+                .child(crate::i18n::t!("settings.general.file.open").to_string()),
+        )
     }
 
-    /// The language picker (General page). A Confirm writes through,
-    /// flips the process-global locale and refreshes every window —
-    /// `t!` resolves on render, so the whole window including the
-    /// component-library texts switches live, no restart.
-    fn language_control(&self, _: &Context<Self>) -> Div {
+    /// The smart-region switch. Same write-through contract as the OCR
+    /// upright toggle: the flip saves the file and the next capture reads
+    /// it — a live overlay is not rewired mid-session (its detectors, if
+    /// any, simply stay unused: the session queries the setting on every
+    /// hover/press/wheel).
+    fn smart_region_switch(&self, cx: &Context<Self>) -> Switch {
         let t = theme::c();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.general.language.label").to_string()),
-            )
-            .child(
-                div().w(px(280.)).child(
-                    Select::new(&self.language_select)
-                        .accessibility_label(
-                            crate::i18n::t!("settings.general.language.label").to_string(),
-                        )
-                        .menu_width(px(280.)),
-                ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.general.language.blurb").to_string()),
-            )
+        let entity = cx.entity();
+        Switch::new("smart-region")
+            .checked(self.settings.smart_region())
+            .on_click(move |checked, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.settings.set_smart_region(*checked);
+                    this.persist(cx);
+                });
+            })
+            .color(rgba(t.accent))
     }
 }
