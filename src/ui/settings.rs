@@ -714,8 +714,12 @@ fn card_group(caption: Option<&str>, rows: impl IntoIterator<Item = impl IntoEle
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(rgba(alpha(t.toolbar_border, 0x59)))
-        .bg(rgba(alpha(t.toolbar_text, 0x0c)))
-        .overflow_hidden();
+        .bg(rgba(alpha(t.toolbar_text, 0x0c)));
+    // No `overflow_hidden` here: it turns the card into a clipping
+    // (scrollable) container, which focusable/hit-testable children —
+    // the toolbar editor's drag targets, the opacity slider — have to
+    // survive. Nothing in a card needs corner clipping: rows carry no
+    // background and the hairlines are inset.
     let rows: Vec<_> = rows.into_iter().collect();
     let last = rows.len().saturating_sub(1);
     for (index, row) in rows.into_iter().enumerate() {
