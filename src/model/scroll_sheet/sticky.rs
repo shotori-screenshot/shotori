@@ -31,10 +31,13 @@ use super::profile::RowProfile;
 ///   commit then spliced that moment's slice into the canvas top —
 ///   torn copies of chrome and content piled up at the image start
 ///   (the GitHub capture report).
-/// - **Commit** — a run of [`STILL_FRAMES`] over a top-anchored prefix
-///   of rows, backed by at least one structured row (a band that is
-///   uniformly flat is indistinguishable from flat CONTENT — pure-white
-///   margins must not get pinned), commits the band.
+/// - **Commit** — a still run over a top-anchored prefix of rows whose
+///   tail has stayed displacement-verified for [`COMMIT_FRAMES`] frames
+///   (persistence is what separates chrome from stale damage blocks,
+///   which verify exactly like chrome until they repaint), backed by at
+///   least one structured row (a band that is uniformly flat is
+///   indistinguishable from flat CONTENT — pure-white margins must not
+///   get pinned), commits the band.
 /// - **Canvas semantics** — a committed top band is written ONCE, from
 ///   the committing frame, and pinned at the canvas top: the band covers
 ///   only the content that does NOT track with scrolling, so a second
@@ -56,6 +59,15 @@ use super::profile::RowProfile;
 /// it, so the pin line — the only row where band meets content — stays
 /// pixel-continuous.
 const STILL_FRAMES: u16 = 2;
+/// Displacement-verified persistence a commit demands. Stale compositor
+/// damage blocks misfit dy exactly like chrome for a frame or two (the
+/// rows simply have not repainted), and a two-frame bar then spliced
+/// the stale block into the canvas as band growth — sheared, duplicated
+/// content below the pinned header (the second GitHub capture). Real
+/// chrome keeps verifying for as long as it stays pinned; a block that
+/// stays unmoved through this many accepted frames is chrome by
+/// definition.
+const COMMIT_FRAMES: u16 = 6;
 /// A committed band must end in a cluster of at least this many
 /// displacement-verified grids — noise (a caret row, a one-row border)
 /// must not pin.
@@ -260,7 +272,7 @@ impl StickyBands {
             if r < STILL_FRAMES {
                 break;
             }
-            if verified[i] >= STILL_FRAMES {
+            if verified[i] >= COMMIT_FRAMES {
                 cluster += 1;
                 cluster_end = i + 1;
                 gap = 0;

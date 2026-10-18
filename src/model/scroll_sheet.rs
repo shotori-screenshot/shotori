@@ -120,8 +120,8 @@ pub use preview::{
 };
 
 /// Tuning knobs for [`ScrollSheet`]. Defaults are tuned for text
-/// content under *our* auto-scroll (small, roughly known steps); manual
-/// scrolling only widens the offset distribution, the thresholds hold.
+/// content under manual scrolling (the step is whatever the user's
+/// finger did); the thresholds hold across the whole admissible window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SheetLimits {
     /// Offsets above this fraction of the viewport height are never
@@ -145,7 +145,7 @@ pub struct SheetLimits {
     pub ambiguity_margin: f32,
     /// Minimum rows of overlap required to trust any offset.
     pub min_overlap: u32,
-    /// Hard cap on canvas height — the auto-scroll loop stops (and
+    /// Hard cap on canvas height — the capture loop stops (and
     /// reports) when the sheet would exceed it. Guards against
     /// runaway captures on infinite-scroll feeds.
     pub max_height: u32,
@@ -1386,8 +1386,7 @@ mod tests {
         let (mut lo, mut hi) = (top, top);
         for _ in 0..200 {
             // Steps stay inside the matcher's admissible window
-            // (≤ 40 down / 30 up, overlap ≥ 56 rows) — auto-scroll runs
-            // smaller steps than this even at maximum wheel speed.
+            // (≤ 40 down / 30 up, overlap ≥ 56 rows).
             let delta = match rand() % 10 {
                 0..=1 => 0, // dwell (poll duplicate)
                 2..=3 => -i64::from(rand() % 20 + 1),
@@ -1455,16 +1454,17 @@ mod tests {
         };
 
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        // Run 1 on the second frame, run 2 → committed on the third.
-        s.push(&frame(30));
-        s.push(&frame(60));
-        s.push(&frame(95));
+        // The verified-persistence bar (COMMIT_FRAMES) needs six moving
+        // frames before the band commits.
+        for top in [30u32, 60, 90, 120, 150, 180] {
+            s.push(&frame(top));
+        }
         // Band written ONCE at the top (the seed frame already had it
         // there — no splice), content stream exact beneath it.
-        assert_eq!(s.dimensions(), (W, HDR + (95 + H2 - HDR)));
-        assert_eq!(s.canvas(), expected(95).as_slice());
+        assert_eq!(s.dimensions(), (W, HDR + (180 + H2 - HDR)));
+        assert_eq!(s.canvas(), expected(180).as_slice());
         // The highlight reports the CONTENT segment, below the band.
-        assert_eq!(s.viewport_span(), (HDR + 95, H2 - HDR));
+        assert_eq!(s.viewport_span(), (HDR + 180, H2 - HDR));
     }
 
     /// Flat page background directly beneath the chrome must never join
@@ -1493,12 +1493,82 @@ mod tests {
         };
 
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        let out = s.push(&frame(30));
-        assert!(matches!(out, Fold::GrewBottom { dy: 30, .. }), "{out:?}");
-        let out = s.push(&frame(60));
-        assert!(matches!(out, Fold::GrewBottom { dy: 30, .. }), "{out:?}");
+        for top in [30u32, 60, 90, 120, 150, 180] {
+            let out = s.push(&frame(top));
+            assert!(matches!(out, Fold::GrewBottom { dy: 30, .. }), "{out:?}");
+        }
         // The band is exactly the chrome (step = 1 at this size, no
         // grid coarseness); the flat strip below never joined the run.
+        assert_eq!(s.sticky.top, HDR);
+    }
+
+    /// A compositor repaint stall under committed chrome: damage blocks
+    /// repaint late, so a band of rows hugging the pinned header can
+    /// show the PREVIOUS position for a few accepted frames. Those rows
+    /// are offset-0 still AND misfit the translation — displacement-
+    /// verified, exactly like chrome — and with a two-frame commit bar
+    /// they grew the band over themselves and were spliced into the
+    /// canvas: sheared, duplicated content right below the header (the
+    /// second GitHub capture). Chrome persists for as long as it is
+    /// pinned; a repaint stall does not — so committing demands a
+    /// verified run longer than any plausible stall.
+    #[test]
+    fn stalled_damage_blocks_under_the_chrome_never_grow_the_band() {
+        const H2: u32 = 800;
+        const HDR: u32 = 48;
+        const BLOCK: u32 = 16; // stale rows hugging the band's bottom edge
+        let band = chrome_band(HDR);
+        // Per-pixel ink rows: like real text, each row carries in-row
+        // structure, so a stale block of them passes every per-frame
+        // signal chrome can — stillness, displacement misfit, structure.
+        let ink_row = |y: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity(W as usize * 4);
+            for x in 0..W {
+                let h = ink_hash(x, y);
+                let l = if h % 100 < 42 {
+                    30 + (h % 60) as u8
+                } else {
+                    238 + (h % 8) as u8
+                };
+                v.extend_from_slice(&[l, l, l, 255]);
+            }
+            v
+        };
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for row in top..top + H2 - HDR {
+                v.extend_from_slice(&ink_row(row));
+            }
+            v
+        };
+        // `lag` rows of the block still show the older position.
+        let damaged = |top: u32, lag: u32| -> Vec<u8> {
+            let mut v = band.clone();
+            for row in top - lag..top - lag + BLOCK {
+                v.extend_from_slice(&ink_row(row));
+            }
+            for row in top + BLOCK..top + H2 - HDR {
+                v.extend_from_slice(&ink_row(row));
+            }
+            v
+        };
+
+        let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
+        for top in [40u32, 80, 120, 160, 200, 240] {
+            let out = s.push(&frame(top));
+            assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
+        }
+        assert_eq!(s.sticky.top, HDR);
+        // Three accepted frames with the same stale block hugging the
+        // band: offset-0 still, misfits the translation.
+        for (top, lag) in [(280u32, 40u32), (320u32, 80u32), (360u32, 120u32)] {
+            let out = s.push(&damaged(top, lag));
+            assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
+        }
+        assert_eq!(s.sticky.top, HDR, "a repaint stall must not grow the band");
+        // Capture recovers once the block repaints.
+        let out = s.push(&frame(400));
+        assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
         assert_eq!(s.sticky.top, HDR);
     }
 
@@ -1560,7 +1630,7 @@ mod tests {
         // frames later, so the commit happens while scrolling through
         // pinned territory.
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        for c in [20u32, 40, 60, 90] {
+        for c in [20u32, 40, 60, 90, 120, 150, 180, 210] {
             let out = s.push(&frame(c));
             assert!(matches!(out, Fold::GrewBottom { .. }), "frame {c}: {out:?}");
         }
@@ -1568,8 +1638,8 @@ mod tests {
         // ends at last + H (pinned frames contribute H − NAV viewport
         // rows, but the first frame's full H rows seed the plane): the
         // navbar's own placeholder rows [40, 52) appear exactly once.
-        assert_eq!(s.dimensions(), (W, NAV + 90 + H2));
-        assert_eq!(s.canvas(), expected(90).as_slice());
+        assert_eq!(s.dimensions(), (W, NAV + 210 + H2));
+        assert_eq!(s.canvas(), expected(210).as_slice());
     }
 
     /// A tall fixed footer (taller than the static bottom trim) is
@@ -1588,13 +1658,13 @@ mod tests {
             v
         };
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        let out = s.push(&frame(40));
-        assert!(matches!(out, Fold::GrewBottom { .. }), "{out:?}");
-        let out = s.push(&frame(80)); // second still frame → bot mask commits
-        assert!(matches!(out, Fold::GrewBottom { .. }), "{out:?}");
+        for top in [40u32, 80, 120, 160, 200, 240] {
+            let out = s.push(&frame(top));
+            assert!(matches!(out, Fold::GrewBottom { .. }), "{out:?}");
+        } // sixth verified frame → bot mask commits
         // No top band ever: the header scrolls.
-        assert_eq!(s.viewport_span().0, 80);
-        assert_eq!(s.dimensions(), (W, H2 + 80));
+        assert_eq!(s.viewport_span().0, 240);
+        assert_eq!(s.dimensions(), (W, H2 + 240));
     }
 
     // === Fixed-sidebar motion mask =====================================
@@ -1662,18 +1732,18 @@ mod tests {
             v
         };
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        for top in [40u32, 80, 120, 160] {
+        for top in [40u32, 80, 120, 160, 200, 240] {
             s.push(&frame(top));
         }
         let (_, h) = s.dimensions();
         let canvas = s.canvas();
         let row = W as usize * 4;
         let mut ideal = Vec::new();
-        for r in 0..160 + H2 - FTR {
+        for r in 0..240 + H2 - FTR {
             ideal.extend_from_slice(&source_row(r).repeat(W as usize));
         }
         ideal.extend_from_slice(&band);
-        assert_eq!(h, 160 + H2);
+        assert_eq!(h, 240 + H2);
         let mut first = None;
         for y in 0..h as usize {
             let got = &canvas[y * row..(y + 1) * row];
@@ -1702,14 +1772,15 @@ mod tests {
             v
         };
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        for top in [40u32, 80, 120, 40] {
+        for top in [40u32, 80, 120, 160, 200, 240] {
             s.push(&frame(top));
         }
+        s.push(&frame(160)); // scroll back up mid-list
         let (_, h) = s.dimensions();
         let canvas = s.canvas();
         let row = W as usize * 4;
         let mut ideal = Vec::new();
-        for r in 0..120 + H2 - FTR {
+        for r in 0..240 + H2 - FTR {
             ideal.extend_from_slice(&source_row(r).repeat(W as usize));
         }
         ideal.extend_from_slice(&band);
@@ -1722,7 +1793,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(h, 120 + H2);
+        assert_eq!(h, 240 + H2);
         assert!(
             first.is_none(),
             "first up-scroll footer mismatch at row {first:?}"
@@ -1747,16 +1818,17 @@ mod tests {
             v
         };
         let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
-        for top in [40u32, 80, 120, 40] {
+        for top in [40u32, 80, 120, 160, 200, 240] {
             s.push(&frame(top));
         }
+        s.push(&frame(120)); // scroll back up mid-list
         let mut ideal = Vec::new();
         ideal.extend_from_slice(&band);
-        for row in 0..120 + H2 - HDR - FTR {
+        for row in 0..240 + H2 - HDR - FTR {
             ideal.extend_from_slice(&source_row(row).repeat(W as usize));
         }
         ideal.extend_from_slice(&band);
-        assert_eq!(s.dimensions(), (W, H2 + 120));
+        assert_eq!(s.dimensions(), (W, H2 + 240));
         assert_eq!(s.canvas(), ideal.as_slice());
     }
 
