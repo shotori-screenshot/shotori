@@ -1034,7 +1034,6 @@ impl SettingsWindow {
             .bg(fill)
             .text_color(rgba(if active { t.toolbar_text } else { t.btn_text }))
             .aria_label(label.clone())
-            .hover(|this| this.bg(rgba(alpha(t.toolbar_hover, 0x66))))
             .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                 if this.section != target {
                     this.section = target;
@@ -1046,6 +1045,15 @@ impl SettingsWindow {
             } else {
                 t.hint_text
             })));
+        // Hover tints only inactive rows. `.hover` REPLACES the
+        // background, so leaving it on the active row wiped its accent
+        // wash: the pointer over the current section made it read as
+        // unselected. The pointer cursor still advertises clickability.
+        let item = if active {
+            item
+        } else {
+            item.hover(|this| this.bg(rgba(alpha(t.toolbar_hover, 0x66))))
+        };
         if collapsed {
             item.justify_center()
         } else {
