@@ -112,6 +112,15 @@ impl SettingsWindow {
                     .pt(px(6.))
                     .child(crate::i18n::t!("settings.about.credits").to_string()),
             );
-        page_body("page-about").child(body)
+        // Centered in the pane, both axes: this is an identity card, not
+        // a form. Left-aligned under the pages' gutter it looked like it
+        // had failed to fill the space; top-aligned it crowded the
+        // header in a tall window. `justify_center` on the scroll body
+        // keeps it in the optical middle and still scrolls when the
+        // window is shorter than the card.
+        page_body("page-about")
+            .items_center()
+            .justify_center()
+            .child(body)
     }
 }
