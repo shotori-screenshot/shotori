@@ -35,8 +35,8 @@ pub const CONFIGURABLE_KEYS: &[(&str, &str)] = &[
     ("save", "ctrl-s"),
     ("pin", "ctrl-p"),
     ("ocr", "ctrl-o"),
-    // the fifth exit: auto-scroll the selection into a long
-    // screenshot (plain keys are all annotation tools, hence ctrl-l)
+    // the fifth exit: fold the selection into a long screenshot as the
+    // user scrolls it (plain keys are all annotation tools, hence ctrl-l)
     ("scroll", "ctrl-l"),
     ("select_screen", "ctrl-a"),
     // the conventional accelerator; the toolbar's gear button

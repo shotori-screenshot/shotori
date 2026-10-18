@@ -66,8 +66,7 @@ use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOpti
 use gpui_kit::*;
 
 use crate::model::placement::{
-    SCROLL_PANEL_MARGIN, ScrollPanelDock, legacy_scroll_panel, plan_scroll_panel,
-    scroll_panel_margins,
+    SCROLL_PANEL_MARGIN, ScrollPanelDock, plan_scroll_panel, scroll_panel_margins,
 };
 use crate::model::scroll_sheet::SheetLimits;
 use crate::platform::scroll_capture::{self, ScrollControls, ScrollEvent, ScrollSpec};
@@ -123,16 +122,9 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
 
     // Where may chrome live? Nothing painted over the capture rect can
     // be excluded from wlr-screencopy's composite — plan first, open
-    // windows second. Auto/debug mode keeps the legacy center heuristic:
-    // a chrome-free frame holding the keyboard eats injected wheel on
-    // compositors that route virtual pointers by keyboard focus (niri).
+    // windows second.
     let other_output = crate::ui::pin::other_output_than(chrome.display_id);
-    let dock = match spec.mode {
-        scroll_capture::ScrollMode::Manual => {
-            plan_scroll_panel(rect_now, chrome.output_width, other_output.is_some())
-        }
-        scroll_capture::ScrollMode::Auto => legacy_scroll_panel(rect_now, chrome.output_width),
-    };
+    let dock = plan_scroll_panel(rect_now, chrome.output_width, other_output.is_some());
     let chrome_free = dock == ScrollPanelDock::Hidden;
 
     // The engine starts HERE (not inside the panel): whichever window
@@ -159,9 +151,7 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     // Region frame first: the user must never lose sight of WHAT is
     // being captured, not even for the frames before the panel maps.
     // Chrome-free sessions take the keyboard here (Exclusive + focus):
-    // manual wheel follows the pointer, so real scrolling survives —
-    // only injected (virtual-pointer) wheel is keyboard-routed, and
-    // auto mode never goes chrome-free (see the dock planning above).
+    // real wheel follows the pointer, so scrolling survives.
     let frame_options = WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: None,

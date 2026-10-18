@@ -325,17 +325,6 @@ pub(crate) fn plan_scroll_panel(
     }
 }
 
-/// The legacy center heuristic (Auto/debug mode keeps it: a chrome-free
-/// frame holding the keyboard eats injected wheel on compositors that
-/// route virtual pointers by keyboard focus — niri, measured).
-pub(crate) fn legacy_scroll_panel(rect: ScrollRect, out_w: f32) -> ScrollPanelDock {
-    if (rect.x + rect.width / 2) as f32 > out_w / 2. {
-        ScrollPanelDock::Left
-    } else {
-        ScrollPanelDock::Right
-    }
-}
-
 /// The preview panel's layer-shell position as `(top, left)` margins of
 /// a `TOP | LEFT` anchor (layer surfaces ignore `window_bounds`
 /// origins): floating BESIDE the capture rect instead of pinned to the
@@ -350,9 +339,10 @@ pub(crate) fn legacy_scroll_panel(rect: ScrollRect, out_w: f32) -> ScrollPanelDo
 /// panel. The other-output dock has no rect to hug and keeps the
 /// historical edge corner.
 ///
-/// A dock that does not fit can only come from the auto/debug
-/// heuristic; the clamps then keep the panel fully on-screen (possibly
-/// over the rect — the same exposure the old edge dock had).
+/// A dock that does not fit is defensive only — the planner returns
+/// [`ScrollPanelDock::Hidden`] instead; the clamps then keep the panel
+/// fully on-screen (possibly over the rect — the same exposure the old
+/// edge dock had).
 pub(crate) fn scroll_panel_margins(
     rect: ScrollRect,
     out_w: f32,
@@ -485,7 +475,7 @@ mod tests {
         FRAME_CHIP_GAP, FRAME_CHIP_H, FRAME_CHIP_W, FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H,
         SCROLL_PANEL_GAP, SCROLL_PANEL_MARGIN, SCROLL_PANEL_W, ScrollPanelDock, TB_H, TB_W,
         TB_W_ROW1, clamp_moved_rect, frame_grab_chip, frame_toolbar, label_anchor,
-        legacy_scroll_panel, plan_scroll_panel, scroll_panel_margins, toolbar_anchor, toolbar_size,
+        plan_scroll_panel, scroll_panel_margins, toolbar_anchor, toolbar_size,
     };
     use crate::model::session::ScrollRect;
     use gpui_kit::{Bounds, Pixels, point, px, size};
@@ -692,8 +682,9 @@ mod tests {
             ScrollPanelDock::OtherOutput,
         );
         assert_eq!((top, left), (SCROLL_PANEL_MARGIN, SCROLL_PANEL_MARGIN));
-        // A dock that does not fit (auto/debug only) clamps against the
-        // output instead of going off-screen.
+        // A dock that does not fit (defensive — the planner would have
+        // returned Hidden) clamps against the output instead of going
+        // off-screen.
         let (_, left) =
             scroll_panel_margins(rect(100, 200), 1920., 1080., 400., ScrollPanelDock::Left);
         assert_eq!(left, 0.);
@@ -915,23 +906,6 @@ mod tests {
         assert_eq!(
             plan_scroll_panel(full(1920), 1920., false),
             ScrollPanelDock::Hidden
-        );
-        // legacy center heuristic (auto/debug): center decides, fit ignored
-        assert_eq!(
-            legacy_scroll_panel(full(1000), 1920.),
-            ScrollPanelDock::Right
-        );
-        assert_eq!(
-            legacy_scroll_panel(
-                ScrollRect {
-                    x: 920,
-                    y: 0,
-                    width: 1000,
-                    height: 1080
-                },
-                1920.
-            ),
-            ScrollPanelDock::Left
         );
     }
 }

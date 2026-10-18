@@ -90,19 +90,7 @@ impl Overlay {
             output: self.capture.output_name.clone(),
             rect: shared_rect,
             preview_rows,
-            // Auto-scroll is shelved behind an env flag until the
-            // injection story works on niri (see inject_step); the
-            // shipped UX is manual scrolling. The e2e backdoor needs
-            // the self-contained auto mode (a headless run has no hands
-            // to scroll with).
             axis: crate::model::scroll_sheet::Axis::Vertical,
-            mode: if std::env::var_os("SHOTORI_SCROLL_AUTO").is_some()
-                || std::env::var_os("SHOTORI_DEBUG_ACTION").is_some()
-            {
-                crate::platform::scroll_capture::ScrollMode::Auto
-            } else {
-                crate::platform::scroll_capture::ScrollMode::Manual
-            },
         };
         let chrome = crate::ui::scroll_bar::ScrollChrome {
             display_id,

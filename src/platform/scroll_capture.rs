@@ -1,24 +1,19 @@
 //! # Scroll capture engine: the Wayland half of long screenshots
 //!
-//! One dedicated thread owns ONE wayland connection that does both jobs
-//! of the capture loop — injecting wheel events (`zwlr_virtual_pointer_v1`)
-//! and re-capturing the selection (`zwlr_screencopy_manager_v1`
-//! `.capture_output_region`, in LOGICAL px per the protocol). Sharing a
-//! connection is deliberate: injection and capture serialize through the
-//! same event queue, so a capture can never race the scroll it is
-//! supposed to follow.
+//! One dedicated thread owns ONE wayland connection that re-captures
+//! the selection (`zwlr_screencopy_manager_v1.capture_output_region`, in
+//! LOGICAL px per the protocol) and folds the frames through
+//! [`crate::model::scroll_sheet`] (the pure decision core). The user
+//! scrolls; the engine only watches — there is no wheel injection here,
+//! so a capture can never race a scroll the engine did not cause.
 //!
-//! The engine is wire code around [`crate::model::scroll_sheet`]
-//! (the pure decision core). The platform→model import here is a
-//! conscious exception to the "ui → model → platform" arrows: the
-//! sheet imports nothing platform-side, and keeping the engine next
-//! to the other compositor clients beats inventing a trait seam for
-//! exactly one consumer.
+//! The platform→model import here is a conscious exception to the
+//! "ui → model → platform" arrows: the sheet imports nothing
+//! platform-side, and keeping the engine next to the other compositor
+//! clients beats inventing a trait seam for exactly one consumer.
 //!
-//! Compositor requirements: `zwlr_screencopy` (as the rest of shotori)
-//! plus `zwlr_virtual_pointer_v1` — broadly implemented (sway, Hyprland,
-//! niri, KWin, COSMIC, labwc, river, Wayfire, Weston…), NOT by GNOME
-//! Mutter. Without it the engine fails fast with a clear message.
+//! Compositor requirements: `zwlr_screencopy`, the same protocol every
+//! shotori overlay already depends on.
 
 use std::fs::File;
 use std::os::fd::AsFd;
@@ -29,15 +24,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow, bail};
 use async_channel::{Receiver, Sender};
 use wayland_client::globals::{Global, GlobalListContents, registry_queue_init};
-use wayland_client::protocol::wl_pointer::Axis;
-use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool};
+use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
-};
-use wayland_protocols_wlr::virtual_pointer::v1::client::{
-    zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1,
 };
 
 use super::capture::convert_to_rgba;
@@ -54,10 +45,6 @@ pub struct ScrollSpec {
     /// frame rewrites it and the next poll captures the new spot (w/h
     /// stay fixed — drags move, never resize).
     pub rect: std::sync::Arc<std::sync::Mutex<ScrollRect>>,
-    /// Manual: the user scrolls, the engine only captures + folds
-    /// (works everywhere, no injection). Auto: the engine injects wheel
-    /// steps itself — currently niri-hostile (see inject_step).
-    pub mode: ScrollMode,
     /// Initial growth direction; the HUD can switch it until the first
     /// frame is accepted.
     pub axis: ScrollAxis,
@@ -68,12 +55,6 @@ pub struct ScrollSpec {
     /// so the strip is exactly as tall as the well and never rescales
     /// mid-scroll.
     pub preview_rows: Arc<AtomicU32>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ScrollMode {
-    Manual,
-    Auto,
 }
 
 /// What the engine reports to the UI. `Finished` carries the folded
@@ -223,38 +204,20 @@ pub fn start(
 }
 
 // ── timing / tuning ──────────────────────────────────────────────────
-/// Pause after injecting before the first stability poll: the scroll
-/// must land and repaint first.
-const POST_INJECT_DELAY: Duration = Duration::from_millis(60);
-/// Stability polling cadence.
-const POLL_INTERVAL: Duration = Duration::from_millis(40);
-/// A scroll step must settle within this budget (smooth-scroll apps
-/// animate; infinite feeds never do — the matcher judges the rest).
-const SETTLE_DEADLINE: Duration = Duration::from_millis(1500);
 /// One screencopy frame must arrive within this.
 const FRAME_DEADLINE: Duration = Duration::from_millis(2000);
-/// Whole-session budget — a runaway scroll on an infinite feed stops
-/// here even without the height cap.
-const SESSION_DEADLINE: Duration = Duration::from_secs(60);
-/// Consecutive Still outcomes before declaring the bottom reached.
-const BOTTOM_NO_MOTION: u32 = 3;
-/// Wheel "lines" injected on the first probe (calibrated afterwards).
-const INITIAL_LINES: i32 = 3;
-/// Aim for this step size as a fraction of the viewport (must stay
-/// below the sheet's max_motion_ratio for overlap to survive).
-const TARGET_STEP_RATIO: f32 = 0.45;
-/// Manual-mode polling cadence. This is the whole sync story: one
-/// capture interval is the largest scroll step the matcher ever has to
-/// bridge, and it is also the preview's refresh period. The old 60 ms
-/// sat ON TOP of the capture's own latency (a screencopy roundtrip), so
-/// a cycle was 90–150 ms — one brisk flick then moved more rows than
-/// the overlap budget could cover, the frame was refused, the strip
-/// froze, and the gap poisoned a whole viewport of good rows. Smaller
-/// is better up to the point where screencopies start costing more than
-/// they reveal; the sleep is only the REMAINDER of this budget (see
-/// `run_manual`), so the cadence is honest whatever the capture costs.
+/// Polling cadence. This is the whole sync story: one capture interval
+/// is the largest scroll step the matcher ever has to bridge, and it is
+/// also the preview's refresh period. The old 60 ms sat ON TOP of the
+/// capture's own latency (a screencopy roundtrip), so a cycle was
+/// 90–150 ms — one brisk flick then moved more rows than the overlap
+/// budget could cover, the frame was refused, the strip froze, and the
+/// gap poisoned a whole viewport of good rows. Smaller is better up to
+/// the point where screencopies start costing more than they reveal; the
+/// sleep is only the REMAINDER of this budget (see `run_manual`), so the
+/// cadence is honest whatever the capture costs.
 const MANUAL_POLL: Duration = Duration::from_millis(28);
-/// Manual-mode wall budget (the user pauses to read; this is a
+/// Wall budget for the whole session (the user pauses to read; this is a
 /// safety valve, not a target).
 const MANUAL_DEADLINE: Duration = Duration::from_secs(600);
 /// Polls with nothing changed for this long read as "the user stopped
@@ -281,78 +244,12 @@ fn fail_with_partial(
     });
     Ok(())
 }
-/// How the wheel is injected. Discrete (axis_discrete) is the modern
-/// form; some compositors only honor the plain axis value — if two
-/// cycles produce no motion we degrade gracefully instead of failing.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum InjectStyle {
-    Discrete,
-    Plain,
-}
-
-/// Real CLOCK_MONOTONIC milliseconds — the clock Wayland input
-/// timestamps are defined against. Synthetic counters (vptr-style
-/// 1000, 1030, …) can trip compositor gesture heuristics that group
-/// axis events by timestamp gaps (measured: repeated small injections
-/// went dead after the first on niri).
-fn now_ms() -> u32 {
-    let t = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    (t.tv_sec as u64 * 1_000 + t.tv_nsec as u64 / 1_000_000) as u32
-}
-
-/// Inject ONE wheel step over a FRESH connection. niri accumulates axis
-/// events per client connection into a single gesture — the first
-/// injection scrolls and every later one vanishes (measured with
-/// vptr's scrollloop: six events from one client all die; six separate
-/// invocations all work). Connection-per-step reproduces the only
-/// semantics compositors actually deliver; the ~1 ms connect cost is
-/// noise next to the settle wait.
-fn inject_step(axis: ScrollAxis, lines: i32, sign: f64, style: InjectStyle) -> anyhow::Result<()> {
-    let conn = Connection::connect_to_env().context("injector connection")?;
-    let (globals, mut queue) =
-        registry_queue_init::<EngineState>(&conn).map_err(|e| anyhow!("injector registry: {e}"))?;
-    let qh = queue.handle();
-    let mut state = EngineState::default();
-    let mut seat: Option<wl_seat::WlSeat> = None;
-    let mut manager: Option<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1> = None;
-    for Global {
-        interface, version, ..
-    } in globals.contents().clone_list()
-    {
-        match interface.as_str() {
-            "wl_seat" => seat = Some(globals.bind(&qh, version.min(7)..=7, ())?),
-            "zwlr_virtual_pointer_manager_v1" => {
-                manager = Some(globals.bind(&qh, version.min(2)..=2, ())?)
-            }
-            _ => {}
-        }
-    }
-    let manager = manager.context("no virtual pointer manager for injection")?;
-    let ptr = manager.create_virtual_pointer(seat.as_ref(), &qh, ());
-    queue.roundtrip(&mut state).ok();
-    let clock = now_ms();
-    let value = sign * 15.0 * f64::from(lines);
-    let wheel_axis = match axis {
-        ScrollAxis::Vertical => Axis::VerticalScroll,
-        ScrollAxis::Horizontal => Axis::HorizontalScroll,
-    };
-    match style {
-        InjectStyle::Discrete => ptr.axis_discrete(clock, wheel_axis, value, (sign as i32) * lines),
-        InjectStyle::Plain => ptr.axis(clock, wheel_axis, value),
-    }
-    ptr.frame();
-    queue.roundtrip(&mut state).ok();
-    Ok(())
-}
-
 fn run(
     spec: &ScrollSpec,
     options: &SheetLimits,
     events: &Sender<ScrollEvent>,
     cmds: &Receiver<Cmd>,
 ) -> anyhow::Result<()> {
-    let session_deadline = Instant::now() + SESSION_DEADLINE;
-
     // ── connection + globals ────────────────────────────────────────
     let conn = Connection::connect_to_env().context("connecting to the compositor")?;
     let (globals, mut queue) =
@@ -374,10 +271,6 @@ fn run(
                 state.screencopy_version = v;
                 state.screencopy = Some(globals.bind(&qh, v..=v, ())?)
             }
-            "zwlr_virtual_pointer_manager_v1" => {
-                state.pointer_manager = Some(globals.bind(&qh, version.min(2)..=2, ())?)
-            }
-            "wl_seat" => state.seat = Some(globals.bind(&qh, version.min(7)..=7, ())?),
             "zxdg_output_manager_v1" => {
                 state.xdg_manager = Some(globals.bind(&qh, version.min(3)..=3, ())?)
             }
@@ -411,13 +304,6 @@ fn run(
         .screencopy
         .clone()
         .ok_or_else(|| anyhow!("compositor does not support zwlr_screencopy_manager_v1"))?;
-    // Virtual-pointer support is an AUTO-mode requirement only. Manual
-    // mode never injects — and creating a virtual pointer to "park"
-    // would WARP the user's cursor (motion_absolute is a real pointer
-    // motion), which manual mode must never do (the "starting a long
-    // screenshot moves my mouse" bug). GNOME/Mutter lacks the protocol
-    // entirely; manual mode works there regardless.
-    let pointer_manager = state.pointer_manager.clone();
 
     // ── the target output ───────────────────────────────────────────
     let idx = state
@@ -429,8 +315,7 @@ fn run(
     // 90°-family rotations swap the output's axes — the logical region
     // math and the row-based sheet both break there. Flips are fine:
     // screencopy buffers come orientation-normalized (measured on niri's
-    // winit backend, which advertises Flipped180 with upright buffers),
-    // and the engine's direction calibration absorbs any inversion.
+    // winit backend, which advertises Flipped180 with upright buffers).
     if matches!(
         target.transform,
         wl_output::Transform::_90
@@ -463,64 +348,13 @@ fn run(
         bail!("selection region {initial_rect:?} is outside the output");
     }
 
-    // ── virtual pointer, parked on the region center ────────────────
-    // motion_absolute maps FRACTIONS onto the whole desktop (measured:
-    // tools/vptr's "coordinate-mapping trap"), so the denominator is the
-    // union of all outputs' logical rects, not this output's size.
-    // AUTO only (see the pointer_manager note above): manual mode must
-    // never create a pointer, let alone move it.
-    let ptr = if spec.mode == ScrollMode::Auto {
-        let pointer_manager = pointer_manager.ok_or_else(|| {
-            anyhow!("compositor does not support zwlr_virtual_pointer_v1 (GNOME/Mutter?) — automatic scrolling is unavailable")
-        })?;
-        Some(pointer_manager.create_virtual_pointer(state.seat.as_ref(), &qh, ()))
-    } else {
-        None
-    };
-    let (mut union_x0, mut union_y0, mut union_x1, mut union_y1) =
-        (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for o in &state.outputs {
-        let Some((w, h)) = o.logical_size else {
-            continue;
-        };
-        union_x0 = union_x0.min(o.logical_pos.0);
-        union_y0 = union_y0.min(o.logical_pos.1);
-        union_x1 = union_x1.max(o.logical_pos.0 + w);
-        union_y1 = union_y1.max(o.logical_pos.1 + h);
-    }
-    let union_size = if union_x1 > union_x0 && union_y1 > union_y0 {
-        Some(((union_x1 - union_x0) as u32, (union_y1 - union_y0) as u32))
-    } else {
-        None
-    };
-    let center = (
-        target.logical_pos.0 + initial_rect.x + initial_rect.width / 2 - union_x0,
-        target.logical_pos.1 + initial_rect.y + initial_rect.height / 2 - union_y0,
-    );
-
     // ── capture machinery ───────────────────────────────────────────
-    // Grace before the first capture AND (auto) the pointer parking:
-    // the overlays unmapped when this engine started, and their destroy
-    // requests need a few loop passes to reach the compositor (same
-    // flush lag the save flow's 150 ms quit delay exists for). Parking
-    // the pointer any earlier aims it at the still-mapped overlay, and
-    // a pointer focused on a since-destroyed surface never recovers on
-    // niri — every later wheel event dies with it (measured).
+    // Grace before the first capture: the overlays unmapped when this
+    // engine started, and their destroy requests need a few loop passes
+    // to reach the compositor (same flush lag the save flow's 150 ms
+    // quit delay exists for). Capturing any earlier folds overlay chrome
+    // into the seed frame.
     std::thread::sleep(Duration::from_millis(400));
-    if let Some(ptr) = ptr.as_ref()
-        && let Some((uw, uh)) = union_size
-        && center.0 >= 0
-        && center.1 >= 0
-    {
-        // vptr-exact mapping (measured on niri — see tools/vptr's
-        // "coordinate-mapping trap"): the fractions x/x_extent map onto
-        // the DESKTOP UNION, so extents = the union's logical size and
-        // coordinates are relative to its origin.
-        ptr.motion_absolute(now_ms(), center.0 as u32, center.1 as u32, uw, uh);
-        ptr.frame();
-        queue.roundtrip(&mut state).ok();
-        std::thread::sleep(Duration::from_millis(100));
-    }
     let mut capturer = Capturer {
         conn: &conn,
         queue: &mut queue,
@@ -539,7 +373,7 @@ fn run(
         }
     }
     .map_err(|r| anyhow!("selection too small for a scroll sheet ({r:?})"))?;
-    let mut axis = spec.axis;
+    let axis = spec.axis;
     println!("[shotori] scroll: started {fw}x{fh} on {}", spec.output);
     let _ = events.try_send(ScrollEvent::Started {
         width: fw,
@@ -550,214 +384,8 @@ fn run(
         locked: false,
     });
 
-    // ── the scroll loop ─────────────────────────────────────────────
-    // sign: vptr-measured on niri — a negative vertical axis value
-    // scrolls DOWN. The first GrewBottom/GrewTop verdict calibrates the
-    // direction for real; apps disagree no further than that.
-    let mut sign = -1.0f64;
-    let mut style = InjectStyle::Discrete;
-    let mut lines = INITIAL_LINES;
-    let mut no_motion = 0u32;
-    let mut rejects = 0u32;
-    let mut flips = 0u32;
-    // Has any injection produced motion yet? Gates the proactive
-    // direction flip (see the no-motion arm).
-    let mut direction_validated = false;
-    let step_len = |axis: ScrollAxis| match axis {
-        ScrollAxis::Vertical => fh,
-        ScrollAxis::Horizontal => fw,
-    };
-    let mut target_step = (step_len(axis) as f32 * TARGET_STEP_RATIO).max(40.);
-    let mut anchor = first;
-    let mut paused = false;
     let mut preview = Preview::new(spec.preview_rows.clone());
-
-    if spec.mode == ScrollMode::Manual {
-        return run_manual(&mut sheet, &mut capturer, events, cmds, &mut preview);
-    }
-
-    loop {
-        if !paused && Instant::now() > session_deadline {
-            return fail_with_partial(
-                events,
-                &mut sheet,
-                "The scroll session timed out before reaching the bottom.",
-            );
-        }
-        match cmds.try_recv() {
-            Ok(Cmd::Finish) => return deliver(events, &mut sheet),
-            Ok(Cmd::Cancel) => {
-                let _ = events.try_send(ScrollEvent::Cancelled);
-                return Ok(());
-            }
-            Ok(Cmd::Pause) => {
-                paused = true;
-                println!("[shotori] scroll: paused");
-                continue;
-            }
-            Ok(Cmd::Resume) => {
-                paused = false;
-                println!("[shotori] scroll: resumed");
-                continue;
-            }
-            Ok(Cmd::SetAxis(next)) => {
-                if sheet.set_axis(next) {
-                    axis = next;
-                    target_step = (step_len(axis) as f32 * TARGET_STEP_RATIO).max(40.);
-                }
-                let _ = events.try_send(ScrollEvent::Axis {
-                    axis: sheet.axis(),
-                    locked: sheet.axis_locked(),
-                });
-                continue;
-            }
-            Ok(Cmd::Peek(delta)) => {
-                preview.peek(delta, &sheet, events);
-                continue;
-            }
-            Err(_) => {}
-        }
-        if paused {
-            std::thread::sleep(POLL_INTERVAL);
-            continue;
-        }
-
-        if let Err(e) = inject_step(axis, lines, sign, style) {
-            return fail_with_partial(
-                events,
-                &mut sheet,
-                &format!("Scrolling the selection failed: {e:#}"),
-            );
-        }
-
-        let frame = match capturer.settle(&mut anchor) {
-            Ok(frame) => frame,
-            Err(e) => {
-                return fail_with_partial(
-                    events,
-                    &mut sheet,
-                    &format!("The compositor stopped delivering frames: {e:#}"),
-                );
-            }
-        };
-        let outcome = sheet.push(&frame);
-        println!(
-            "[shotori] scroll: frame #{} → {:?} (lines={lines}, sign={sign}, style={style:?})",
-            sheet.stats().0,
-            outcome
-        );
-        // E2E backdoor: dump every pushed frame for offline matcher
-        // analysis (see ui/e2e.rs conventions).
-        if let Ok(dir) = std::env::var("SHOTORI_SCROLL_DUMP") {
-            let n = sheet.stats().0;
-            if let Ok(png) = crate::model::export::encode_png(
-                capturer.frame_size.0,
-                capturer.frame_size.1,
-                &frame,
-            ) {
-                let _ = std::fs::write(
-                    std::path::Path::new(&dir).join(format!("frame_{n:03}.png")),
-                    png,
-                );
-            }
-        }
-        match outcome {
-            Fold::GrewBottom { dy, .. } => {
-                no_motion = 0;
-                rejects = 0;
-                direction_validated = true;
-                preview.report(Phase::Following, events);
-                // Calibrate the step size toward the target (bounded
-                // adaptation: never below one line, never absurd).
-                if dy > 0 {
-                    lines = ((lines as f32 * target_step / dy as f32).round() as i32).clamp(1, 16);
-                }
-                let _ = events.try_send(ScrollEvent::Progress {
-                    extent: sheet.captured_extent(),
-                    total: sheet.dimensions().1,
-                });
-            }
-            Fold::GrewTop { .. } => {
-                // We scrolled the wrong way (or the app inverted us):
-                // flip once, fail if direction never stabilizes.
-                flips += 1;
-                if flips > 2 {
-                    return fail_with_partial(
-                        events,
-                        &mut sheet,
-                        "The content scrolled both ways and never settled on a direction.",
-                    );
-                }
-                sign = -sign;
-                no_motion = 0;
-                rejects = 0;
-                direction_validated = true;
-                preview.report(Phase::Following, events);
-                println!("[shotori] scroll: direction flipped (sign now {sign})");
-            }
-            Fold::Shifted { .. } => {
-                no_motion = 0;
-            }
-            Fold::Unchanged | Fold::Still => {
-                no_motion += 1;
-                // Discrete injection ignored twice ⇒ try the plain axis
-                // value (niri ignores zwlr_virtual_pointer.axis_discrete
-                // — vptr only ever uses plain axis) and give the new
-                // style a full bottom-detection window of its own.
-                if no_motion == 2 && style == InjectStyle::Discrete {
-                    style = InjectStyle::Plain;
-                    no_motion = 0;
-                    println!(
-                        "[shotori] scroll: axis_discrete produced no motion, falling back to plain axis"
-                    );
-                }
-                // Boundary dead-lock escape: before ANY motion has been
-                // seen, the wrong sign at a scroll boundary (top when
-                // aiming down) produces no feedback at all — nothing
-                // would ever flip the direction. Flip proactively.
-                if no_motion == 2 && !direction_validated {
-                    sign = -sign;
-                    flips += 1;
-                    no_motion = 0;
-                    println!(
-                        "[shotori] scroll: no response yet, flipping direction (sign now {sign})"
-                    );
-                    if flips > 4 {
-                        return fail_with_partial(
-                            events,
-                            &mut sheet,
-                            "The selection does not respond to scrolling.",
-                        );
-                    }
-                }
-                if no_motion >= BOTTOM_NO_MOTION {
-                    // Bottom reached (or the region ignores the wheel —
-                    // either way, nothing more will happen).
-                    return deliver(events, &mut sheet);
-                }
-            }
-            Fold::Refused(reason @ (Refusal::Unclear | Refusal::Mismatch | Refusal::NoOverlap)) => {
-                // Same rule as manual mode: a refusal is a state, not an
-                // error. Nothing was written; keep turning the wheel and
-                // a settled frame usually links up. `NoOverlap` here means
-                // the app scrolled further than the wheel asked (an
-                // anchor jump, a lazy-load reflow) — still recoverable.
-                rejects = rejects.saturating_add(1);
-                preview.report(phase_of(rejects, reason), events);
-            }
-            Fold::Refused(Refusal::TooTall) => {
-                println!("[shotori] scroll: height cap reached");
-                return deliver(events, &mut sheet);
-            }
-            Fold::Refused(other) => {
-                return fail_with_partial(
-                    events,
-                    &mut sheet,
-                    &format!("The capture region changed mid-session ({other:?})."),
-                );
-            }
-        }
-    }
+    run_manual(&mut sheet, &mut capturer, events, cmds, &mut preview)
 }
 
 /// Ship the finished canvas and log the session summary.
@@ -923,9 +551,9 @@ impl Preview {
     }
 }
 
-/// Manual mode: the user scrolls, the engine watches. Pure capture +
-/// fold polling — no injection, no direction logic. Termination is the
-/// user's Finish/Cancel, the height cap or the manual deadline.
+/// The capture loop: the user scrolls, the engine watches. Pure capture
+/// and fold polling — the engine never injects input. Termination is the
+/// user's Finish/Cancel, the height cap or the session deadline.
 ///
 /// Nothing the MATCHER says is fatal any more. A frame that cannot be
 /// placed — a tear mid-animation, a flick faster than the overlap
@@ -942,7 +570,7 @@ fn run_manual(
     cmds: &Receiver<Cmd>,
     preview: &mut Preview,
 ) -> anyhow::Result<()> {
-    println!("[shotori] scroll: manual mode — you scroll, the engine folds");
+    println!("[shotori] scroll: started — you scroll, the engine folds");
     let deadline = Instant::now() + MANUAL_DEADLINE;
     preview.push(sheet, events, true);
     // (frames in a row that could not be placed, why the newest one
@@ -1146,30 +774,6 @@ impl Capturer<'_> {
             cur.y_invert,
         ))
     }
-
-    /// Wait until the capture stops changing: two consecutive identical
-    /// polls (the scroll animation settled), or the deadline. `anchor`
-    /// tracks the newest frame for the NEXT settle's first comparison.
-    fn settle(&mut self, anchor: &mut Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        std::thread::sleep(POST_INJECT_DELAY);
-        let deadline = Instant::now() + SETTLE_DEADLINE;
-        let mut previous: Option<Vec<u8>> = None;
-        loop {
-            let cap = self.capture_once()?;
-            if previous.as_ref() == Some(&cap) {
-                *anchor = cap.clone();
-                return Ok(cap);
-            }
-            previous = Some(cap.clone());
-            *anchor = cap.clone();
-            if Instant::now() >= deadline {
-                // Unstable content (video, infinite animation): hand the
-                // latest frame over — the matcher decides if it aligns.
-                return Ok(cap);
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        }
-    }
 }
 
 /// The bounded socket wait from `capture_all_outputs`, tightened: flush →
@@ -1229,8 +833,6 @@ struct EngineState {
     /// The bound screencopy manager version (gates the buffer_done
     /// handshake; see [`EngineState::handle_buffer`]).
     screencopy_version: u32,
-    pointer_manager: Option<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1>,
-    seat: Option<wl_seat::WlSeat>,
     xdg_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     outputs: Vec<OutputInfo>,
     /// The persistent region buffer (created on the first Buffer event,
@@ -1375,13 +977,10 @@ macro_rules! noop_dispatch {
     )* };
 }
 noop_dispatch!(
-    wl_seat::WlSeat,
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
 );
 

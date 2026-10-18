@@ -20,13 +20,13 @@ run against a real compositor yet.
 
 ### 1. The ten-minute timeout is wall clock, and its message is wrong
 
-`MANUAL_DEADLINE = 600 s` (`platform/scroll_capture.rs:259`) is measured
-from session start (`:946`), not from the last accepted frame, so an
+`MANUAL_DEADLINE = 600 s` (`platform/scroll_capture.rs:222`) is measured
+from session start (`:574`), not from the last accepted frame, so an
 *actively scrolling* user is cut off at ten minutes. The failure string
 says the opposite: "Nothing new was captured for ten minutes"
-(`:960`). Fix: refresh the deadline on every accepted fold (a real idle
+(`:588`). Fix: refresh the deadline on every accepted fold (a real idle
 timeout), and make the string truthful. Note the string is inline English,
-not a `locales/ui.yml` key — see defect 7.
+not a `locales/ui.yml` key — see defect 6.
 
 ### 2. The height cap is counted in physical rows, and hitting it is silent
 
@@ -35,7 +35,7 @@ not a `locales/ui.yml` key — see defect 7.
 display ~6 700 — a long article reaches it. Memory at that point is
 `20 000 × captured_width × 4` (192 MB for a 2 400 px-wide selection).
 Hitting it is worse than the limit: `Fold::Refused(TooTall)` goes straight
-to `deliver()` (`platform/scroll_capture.rs:1031`) with only a log line,
+to `deliver()` (`platform/scroll_capture.rs:392`) with only a log line,
 so the user is handed a truncated long image that looks complete. Fix:
 express the cap in logical px (or raise it and lower the capture width),
 and surface the truncation in the panel instead of the log.
@@ -49,19 +49,11 @@ page rows are still ahead and get captured normally
 (`a_stalled_session_resumes_exactly_after_one_nudge_back` proves the
 canvas stays byte-identical during the stall and reconstructs exactly
 afterwards). The chip only says "Can't advance"
-(`ui/scroll_bar.rs:1185`, `locales/ui.yml:231`), so the cure is
+(`locales/ui.yml:231`), so the cure is
 undiscoverable. Fix: say it in the chip ("scroll back a little to
 resume"). Alternative, unbuilt: auto re-link with a visible splice.
 
-### 4. Automatic mode's refusal counter never clears
-
-`rejects` (`platform/scroll_capture.rs:561`) is reset only in the two
-growth arms (`:667`, `:693`); `Unchanged`/`Still` leave it set, so the
-dev-only `SHOTORI_SCROLL_AUTO` session reproduces the "chip stuck on a
-warning" bug that manual mode no longer has. Mirror manual mode's
-`streak = None` on `Unchanged | Still`.
-
-### 5. HiDPI: the preview's sample width ignores the scale factor
+### 4. HiDPI: the preview's sample width ignores the scale factor
 
 `PREVIEW_DISPLAY_W = 254` (`model/scroll_sheet.rs:1697`) is logical and
 `PREVIEW_SAMPLE_W = 480` (`:1703`) is physical, and
@@ -73,23 +65,22 @@ machines. Fix: have the panel publish its sample width the way it already
 publishes its well height (`preview_rows`), derived from the window scale
 factor, and keep every consumer on that one number.
 
-### 6. A dropped event desynchronises the HUD permanently
+### 5. A dropped event desynchronises the HUD permanently
 
-The engine's channel is `bounded(64)` (`platform/scroll_capture.rs:205`)
+The engine's channel is `bounded(64)` (`platform/scroll_capture.rs:186`)
 and both publishers record state *before* `try_send`:
-`Preview::report` sets `self.phase` (`:918`) and `Preview::push` sets
-`self.shown` (`:829`). If the send fails, the UI never learns about that
+`Preview::report` sets `self.phase` (`:548`) and `Preview::push` sets
+`self.shown` (`:486`). If the send fails, the UI never learns about that
 change and — because both are deduplicated — will not be told again until
 the next *different* state. The bitmap case self-heals on the next
 accepted frame; the phase case can leave a wrong chip indefinitely. Fix:
 record the state only after a successful send (retry next tick), or make
 the channel unbounded.
 
-### 7. Session failure strings bypass the locale file
+### 6. Session failure strings bypass the locale file
 
 `fail_with_partial` callers pass inline English
-(`platform/scroll_capture.rs:960`, `:1008`, `:1038`, and the whole
-automatic-mode ladder from `:581`). Everything the
+(`platform/scroll_capture.rs:585`, `:634`, `:663`). Everything the
 *panel* says goes through `locales/ui.yml`; these reach the user through
 the "stopped early" notification, so they are user-visible text that
 cannot be translated. Fix: move them to `scroll.fail.*` keys.
@@ -102,7 +93,7 @@ means shrinking it. One strip row covers about `254 / (pw · k)` logical px
 k)`) — call it `254 / capture_width`. On a 1× display the page itself
 moves 1 logical px per captured row, so a 1 200 px-wide selection advances
 at ~21 % of the page's speed and a 1 000 px-wide one at ~25 %; on a 2×
-display both roughly double (defect 5 again). That is geometry, not a
+display both roughly double (defect 4 again). That is geometry, not a
 bug: a thumbnail cannot move at the speed of the thing it is a thumbnail
 of. Options:
 
@@ -114,7 +105,7 @@ of. Options:
 - **widen the panel** into the free side strip (`plan_scroll_panel` already
   knows how much room there is) — halves the shrink, still not 1:1.
 
-Whichever wins, defect 5 has to be fixed in the same pass.
+Whichever wins, defect 4 has to be fixed in the same pass.
 
 ## Tradeoffs already documented in code
 
@@ -135,7 +126,7 @@ Re-read these before changing behaviour; the reasons are next to the logic:
 
 - **screencopy roundtrip cost.** Every cadence number above assumes the
   capture is cheap; `MANUAL_POLL = 28 ms`
-  (`platform/scroll_capture.rs:256`) sleeps only the *remainder*, so the
+  (`platform/scroll_capture.rs:219`) sleeps only the *remainder*, so the
   real rate is `max(capture, 28 ms)`. If a frame takes 40 ms+, the loop is
   capture-bound and the step sizes are bigger than the fixtures assume.
   The manual loop now logs `frame #N → … (NNms)` — read that first.
