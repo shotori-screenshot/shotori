@@ -111,6 +111,9 @@
 
 use matcher::{Placement, estimate_offset};
 use profile::{MotionMask, RowProfile};
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use sticky::{StickyBands, stillness_grid};
 
 pub(crate) use preview::phase_of;
@@ -302,6 +305,40 @@ impl ViewportState {
                 Branch::Within,
                 0,
             )
+        }
+    }
+}
+
+/// Decision-log sink for a live capture,
+/// `SHOTORI_DEBUG_SHEET_LOG=<path>`: one line per pushed frame and one
+/// per band splice. When a stitched output looks wrong, this is the
+/// recording of every judgment the sheet made — measured step, costs,
+/// refusals, splices — which is the only way to debug a session after
+/// the fact (the frames themselves are gone). Best-effort by design:
+/// an unwritable path must never touch the capture. Release builds
+/// with the variable unset do not read it.
+fn sheet_log_path() -> &'static Option<PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var("SHOTORI_DEBUG_SHEET_LOG")
+            .ok()
+            .map(PathBuf::from)
+    })
+}
+
+fn sheet_log(msg: &str) {
+    if let Some(path) = sheet_log_path() {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                if let Err(err) = writeln!(file, "{msg}") {
+                    eprintln!("sheet log write failed: {err}");
+                }
+            }
+            Err(err) => eprintln!("sheet log open failed: {err}"),
         }
     }
 }
@@ -593,6 +630,10 @@ impl ScrollSheet {
             &self.motion.weights,
             self.last_dy,
         ) else {
+            sheet_log(&format!(
+                "#{} NoOverlap (no admissible candidate)",
+                self.frames_pushed
+            ));
             return Placement::Reject(Refusal::NoOverlap);
         };
         if estimate.cost > self.options.cost_threshold {
@@ -602,14 +643,30 @@ impl ScrollSheet {
             // changed on its own". The distinction is the HUD's whole
             // message — "slow down" versus "this area will not sit still".
             if estimate.dy.abs() >= estimate.window - 2 {
+                sheet_log(&format!(
+                    "#{} Refused(NoOverlap) dy={} cost={:.2} at window edge {}",
+                    self.frames_pushed, estimate.dy, estimate.cost, estimate.window
+                ));
                 return Placement::Reject(Refusal::NoOverlap);
             }
+            sheet_log(&format!(
+                "#{} Refused(Mismatch) dy={} cost={:.2}",
+                self.frames_pushed, estimate.dy, estimate.cost
+            ));
             return Placement::Reject(Refusal::Mismatch);
         }
         if estimate.dy == 0 {
             return Placement::Still;
         }
         if estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
+            sheet_log(&format!(
+                "#{} Refused(Unclear) dy={} cost={:.2} runner={:.2} margin={:.2}",
+                self.frames_pushed,
+                estimate.dy,
+                estimate.cost,
+                estimate.runner_up,
+                estimate.runner_up - estimate.cost
+            ));
             return Placement::Reject(Refusal::Unclear);
         }
         Placement::Match(estimate)
@@ -764,6 +821,17 @@ impl ScrollSheet {
         self.last_dy = estimate.dy;
         // The accepted frame is the new stable base (see `place`).
         self.stable_profile = profile.clone();
+        sheet_log(&format!(
+            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} ins={} prefix={}",
+            self.frames_pushed,
+            estimate.dy,
+            estimate.cost,
+            estimate.runner_up - estimate.cost,
+            self.state.position,
+            self.sticky.top,
+            self.sticky.inserted,
+            self.sticky.prefix,
+        ));
         match branch {
             Branch::Below => Fold::GrewBottom {
                 dy: estimate.dy.unsigned_abs(),
@@ -817,6 +885,10 @@ impl ScrollSheet {
             self.canvas[at..t_bytes].copy_from_slice(&frame[at..t_bytes]);
             self.sticky.inserted += g;
             self.top_shifts = self.top_shifts.saturating_add(1);
+            sheet_log(&format!(
+                "SPLICE band rows {m0}→{t} (+{g}, inserted={}, pos={})",
+                self.sticky.inserted, self.state.position
+            ));
         }
         self.sticky.top = t;
         self.sticky.pending.clear();
@@ -851,6 +923,22 @@ mod tests {
             ((x >> 16) & 0xff) as u8,
             0xff,
         ]
+    }
+
+    /// A text-like ink row: dark glyphs on a light ground, in-row
+    /// structure, aperiodic — the per-row shape of real content.
+    fn ink_row(y: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity(W as usize * 4);
+        for x in 0..W {
+            let h = ink_hash(x, y);
+            let l = if h % 100 < 42 {
+                30 + (h % 60) as u8
+            } else {
+                238 + (h % 8) as u8
+            };
+            v.extend_from_slice(&[l, l, l, 255]);
+        }
+        v
     }
 
     /// The viewport at `top` over an infinite deterministic source page.
@@ -1521,19 +1609,6 @@ mod tests {
         // Per-pixel ink rows: like real text, each row carries in-row
         // structure, so a stale block of them passes every per-frame
         // signal chrome can — stillness, displacement misfit, structure.
-        let ink_row = |y: u32| -> Vec<u8> {
-            let mut v = Vec::with_capacity(W as usize * 4);
-            for x in 0..W {
-                let h = ink_hash(x, y);
-                let l = if h % 100 < 42 {
-                    30 + (h % 60) as u8
-                } else {
-                    238 + (h % 8) as u8
-                };
-                v.extend_from_slice(&[l, l, l, 255]);
-            }
-            v
-        };
         let frame = |top: u32| -> Vec<u8> {
             let mut v = band.clone();
             for row in top..top + H2 - HDR {
@@ -1570,6 +1645,68 @@ mod tests {
         let out = s.push(&frame(400));
         assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
         assert_eq!(s.sticky.top, HDR);
+    }
+
+    /// A compositor tear the trim absorbs: the top strip of the frame
+    /// still shows the previous position (painted first, scrolled
+    /// later) while the rest aligns at the true step. The trimmed row
+    /// mean accepts the frame — by design, one sticky navbar must not
+    /// be able to refuse the session — and the wholesale write then
+    /// stamped the stale strip over canvas rows that already held the
+    /// right page content: a sheared sliver nothing ever revisits (the
+    /// third GitHub capture). Matching may absorb misaligned rows; the
+    /// write may not. A skipped row keeps the canvas it already had,
+    /// and the row↔page mapping makes that the correct pixels.
+    #[test]
+    fn absorbed_tear_frames_do_not_stamp_their_stale_strip() {
+        const H2: u32 = 800;
+        const TEAR: u32 = 16; // well under the 1/7 trim
+        let frame = |top: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            for row in top..top + H2 {
+                v.extend_from_slice(&ink_row(row));
+            }
+            v
+        };
+        // A TEAR-row block mid-frame still shows `top − lag`: the
+        // compositor repainted around it but not it. Rows above the
+        // block moved, so the offset-0 still prefix is zero and the
+        // wholesale write reaches straight over it — this is the case
+        // the prefix skip cannot see.
+        let torn_mid = |top: u32, lag: u32| -> Vec<u8> {
+            let mut v = Vec::with_capacity((W * H2 * 4) as usize);
+            let at = 300usize;
+            for row in 0..at {
+                v.extend_from_slice(&ink_row(top + row as u32));
+            }
+            for row in top - lag..top - lag + TEAR {
+                v.extend_from_slice(&ink_row(row));
+            }
+            for row in top + at as u32 + TEAR..top + H2 {
+                v.extend_from_slice(&ink_row(row));
+            }
+            v
+        };
+
+        let mut s = ScrollSheet::new(W, H2, &frame(0), SheetLimits::default()).unwrap();
+        for top in [40u32, 80] {
+            let out = s.push(&frame(top));
+            assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
+        }
+        let out = s.push(&torn_mid(120, 40));
+        assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
+        let out = s.push(&frame(160));
+        assert!(matches!(out, Fold::GrewBottom { dy: 40, .. }), "{out:?}");
+        // The canvas must be an exact page prefix: canvas row c is page
+        // row c.
+        let (_, h) = s.dimensions();
+        assert_eq!(h, 160 + H2);
+        let canvas = s.canvas();
+        for c in 0..h as usize {
+            let want = ink_row(c as u32);
+            let got = &canvas[c * W as usize * 4..(c + 1) * W as usize * 4];
+            assert_eq!(got, want.as_slice(), "canvas row {c} diverged");
+        }
     }
 
     /// The mid-scroll pin: the navbar travels WITH the content until it
