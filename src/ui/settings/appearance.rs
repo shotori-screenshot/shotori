@@ -7,7 +7,7 @@
 
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::slider::{
-    Slider, SliderEvent, SliderState, SliderThumb, SliderTrack, SliderValue,
+    Slider, SliderEvent, SliderIndicator, SliderState, SliderThumb, SliderTrack, SliderValue,
 };
 use gpui_kit::component::Sizable;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
@@ -134,7 +134,22 @@ impl SettingsWindow {
                                 .w(px(TRACK_W - THUMB))
                                 .h(px(4.))
                                 .rounded_full()
-                                .bg(rgba(t.toolbar_border)),
+                                .bg(rgba(t.toolbar_border))
+                                // The indicator is the only thing that
+                                // records `SliderState::bounds` (see
+                                // `SliderIndicator::render`'s on_prepaint).
+                                // Without it the state kept a 0x0 rect, so
+                                // pointer -> value divided by zero and the
+                                // thumb never moved: the slider was dead on
+                                // this page while the overlay's copy (which
+                                // has this line) worked. It doubles as the
+                                // filled portion up to the value.
+                                .child(
+                                    SliderIndicator::new(state)
+                                        .size_full()
+                                        .rounded_full()
+                                        .bg(rgba(t.accent)),
+                                ),
                         )
                         .child(
                             SliderThumb::new(state)
