@@ -424,6 +424,26 @@ struct SettingsWindow {
     /// Drives the preview strip's horizontal scroll (see
     /// [`SettingsWindow::preview_strip`]).
     preview_scroll: ScrollHandle,
+    /// Whether the preview bar overflows its pane right now. The rail's
+    /// height is layout state, and layout only changes on a re-render —
+    /// which a window resize does not trigger. The strip's prepaint
+    /// reports the freshly laid-out flag here and asks for the render
+    /// that applies it (`window.defer` + notify — see
+    /// [`SettingsWindow::preview_strip`]).
+    rail_has_overflow: Option<bool>,
+    /// Pointer over the preview rail. The thumb is painted by a
+    /// `canvas`, so its hover brightening cannot ride an element
+    /// `.hover()` style (a style repaints its own box, not canvas
+    /// quads drawn from a closure): the hover listener records the
+    /// state and the render re-binds the color. See
+    /// [`SettingsWindow::scrollbar_rail`].
+    rail_hovered: bool,
+    /// Where inside the preview rail's thumb the arming press landed
+    /// (px from the thumb's left edge), recorded by the press listener
+    /// and held for the whole scrub — the thumb moves WITH the pointer
+    /// from that contact point instead of re-centering under it. See
+    /// [`SettingsWindow::scrub_rail_to`].
+    rail_grab: Option<Pixels>,
     /// The shortcut row currently recording a new keystroke (the
     /// configurable action's registry id), `None` outside recordings.
     recording: Option<String>,
@@ -532,6 +552,9 @@ impl SettingsWindow {
             language_select,
             ocr_select,
             preview_scroll: ScrollHandle::new(),
+            rail_has_overflow: None,
+            rail_hovered: false,
+            rail_grab: None,
             recording: None,
             record_error: None,
             record_focus: cx.focus_handle(),
