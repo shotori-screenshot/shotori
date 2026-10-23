@@ -106,6 +106,11 @@ pub struct Settings {
     /// classifier — screenshots almost always are, so this trades a
     /// rare rotated-line fixup for one inference stage less.
     ocr_assume_upright: bool,
+    /// Path to a user-written rapidocr TOML config (`[ocr]
+    /// custom_config`). When set it overrides the curated model
+    /// dropdown entirely — the engine is built from this file instead
+    /// of a registry set. Normalized to None when absent or blank.
+    ocr_custom_config: Option<String>,
     /// UI language (`language` top-level key; Auto = system locale).
     language: Language,
     /// Settings-window sidebar collapsed (written through on every
@@ -132,6 +137,7 @@ impl Default for Settings {
             row: DEFAULT_ROW.to_vec(),
             ocr_model: DEFAULT_OCR_MODEL,
             ocr_assume_upright: false,
+            ocr_custom_config: None,
             language: Language::Auto,
             sidebar_collapsed: false,
             smart_region: true,
@@ -183,6 +189,11 @@ struct OcrFile {
     /// Skip the text-line orientation classifier (screenshots are
     /// upright); absent = false.
     assume_upright: Option<bool>,
+    /// User-written rapidocr TOML config overriding the curated
+    /// dropdown; absent or blank = off. Existence is NOT checked at
+    /// load — the file may sit on a mount that is not up yet, and a
+    /// stale path must not poison every other setting's load.
+    custom_config: Option<String>,
 }
 
 impl Settings {
@@ -237,6 +248,20 @@ impl Settings {
 
     pub fn set_ocr_assume_upright(&mut self, assume: bool) {
         self.ocr_assume_upright = assume;
+    }
+
+    /// The user's custom rapidocr config path (`[ocr] custom_config`),
+    /// when active. Raw (un-expanded `~`); the engine side resolves it
+    /// — see `crate::ocr::custom_config`.
+    pub fn ocr_custom_config(&self) -> Option<&str> {
+        self.ocr_custom_config.as_deref()
+    }
+
+    /// Set the custom config path; None or blank turns the feature
+    /// off. Trimmed so trailing newlines from editors don't leak into
+    /// the saved file.
+    pub fn set_ocr_custom_config(&mut self, path: Option<String>) {
+        self.ocr_custom_config = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     }
 
     /// The UI language (default Auto = follow the system).
@@ -408,6 +433,13 @@ impl Settings {
             },
         };
         let ocr_assume_upright = file.ocr.assume_upright.unwrap_or(false);
+        // [ocr] custom_config: blank means off (a hand-edited "" should
+        // not wedge the engine into a missing-filename error).
+        let ocr_custom_config = file
+            .ocr
+            .custom_config
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         // [toolbar] colors: the swatch board. Same degrade contract as
         // every other field — any problem (wrong count, bad hex,
         // translucent color) falls back to the factory board with a
@@ -448,6 +480,7 @@ impl Settings {
                 row,
                 ocr_model,
                 ocr_assume_upright,
+                ocr_custom_config,
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 smart_region: file.smart_region.unwrap_or(true),
@@ -522,6 +555,17 @@ impl Settings {
             "assume_upright".into(),
             toml::Value::from(self.ocr_assume_upright),
         );
+        // custom_config: written only when active; removed when off so
+        // turning the feature off in the editor does not leave a stale
+        // path behind (the file keeps unknown keys, this one is ours).
+        match &self.ocr_custom_config {
+            Some(path) => {
+                ocr.insert("custom_config".into(), toml::Value::from(path.as_str()));
+            }
+            None => {
+                ocr.remove("custom_config");
+            }
+        }
         // [keys]: overwrite the known ids, keep unknown ones (the same
         // forward-compat contract as every other section)
         let keys = table
@@ -850,6 +894,41 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[ocr]"));
         assert!(text.contains("ppocrv5-en-mobile"));
+    }
+
+    #[test]
+    fn custom_config_round_trips_and_blank_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+
+        // absent key = off
+        let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
+        assert_eq!(fresh.ocr_custom_config(), None);
+
+        // set → survives a save/load cycle verbatim (trailing spaces
+        // from hand edits are trimmed, not preserved)
+        let mut s = Settings::default();
+        s.set_ocr_custom_config(Some("~/models/ocr.toml  ".into()));
+        assert_eq!(s.ocr_custom_config(), Some("~/models/ocr.toml"));
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(back.ocr_custom_config(), Some("~/models/ocr.toml"));
+
+        // blank in the file = off, silently (a deliberate hand edit,
+        // not a problem to warn about)
+        std::fs::write(&path, "[ocr]\ncustom_config = \"  \"\n").unwrap();
+        let (blank, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert_eq!(blank.ocr_custom_config(), None);
+
+        // turning it off in the editor removes the key instead of
+        // leaving an empty string behind
+        let mut off = back.clone();
+        off.set_ocr_custom_config(None);
+        off.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("custom_config"), "{text}");
     }
 
     #[test]

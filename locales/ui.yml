@@ -54,15 +54,6 @@ settings:
     advanced_hint:
       en: Open configuration files in your editor
       zh-CN: 在编辑器中打开配置文件
-    interface:
-      en: Interface
-      zh-CN: 界面
-    theme:
-      en: Theme
-      zh-CN: 主题
-    theme_hint:
-      en: Follow your desktop or choose a built-in palette
-      zh-CN: 跟随系统外观，或选择内置配色
     custom_colors:
       en: Customize colors
       zh-CN: 自定义配色
@@ -72,9 +63,6 @@ settings:
     no_results:
       en: No matching settings
       zh-CN: 没有匹配的设置
-    error_status:
-      en: Check configuration
-      zh-CN: 配置需要处理
     config_error:
       en: Configuration could not be read or saved; view details
       zh-CN: 配置读取或保存遇到问题，点击查看详情
@@ -110,19 +98,7 @@ settings:
     alpha:
       en: Opacity
       zh-CN: 不透明度
-  resize:
-    en: Drag to resize the window
-    zh-CN: 拖动以调整窗口大小
   general:
-    title:
-      en: General
-      zh-CN: 通用
-    blurb:
-      en: Choose your interface language and selection behavior
-      zh-CN: 设置界面语言和截图选区行为
-    config_files:
-      en: Config files
-      zh-CN: 配置文件
     open_failed:
       title:
         en: Couldn't open the config file
@@ -130,9 +106,6 @@ settings:
       body:
         en: "xdg-open: %{error}"
         zh-CN: "xdg-open：%{error}"
-    write_through:
-      en: Edits anywhere in this window write straight through to the config files — the next screenshot picks them up
-      zh-CN: 本窗口中的任何修改都会立即写入配置文件——下次截图即生效
     language:
       label:
         en: Language
@@ -154,9 +127,6 @@ settings:
       files:
         en: Config files
         zh-CN: 配置文件
-      interface:
-        en: Preferences
-        zh-CN: 使用偏好
       selection:
         en: Selection
         zh-CN: 选区
@@ -164,16 +134,6 @@ settings:
       open:
         en: Open
         zh-CN: 打开
-  footer:
-    saved:
-      en: Changes save immediately
-      zh-CN: 修改即时保存
-    reset_page:
-      en: Reset this page
-      zh-CN: 恢复本页默认
-    not_saved:
-      en: "not saved — {error}"
-      zh-CN: "未保存——{error}"
   about:
     nav:
       en: About
@@ -244,12 +204,6 @@ settings:
       palette:
         en: Add buttons
         zh-CN: 添加按钮
-    title:
-      en: Toolbar
-      zh-CN: 工具栏
-    blurb:
-      en: Arrange the selection toolbar; changes apply the next time you take a screenshot
-      zh-CN: 调整选区工具栏，下次截图时生效
     hint:
       en: "Drag to reorder; click to hide; shortcuts stay available"
       zh-CN: "拖动排序，点击隐藏，快捷键不受影响"
@@ -267,15 +221,12 @@ settings:
       en: OCR
       zh-CN: 文字识别
     group:
-      model:
-        en: Model
-        zh-CN: 模型
-      direction:
-        en: Orientation
-        zh-CN: 识别方向
       cache:
         en: Cache
         zh-CN: 缓存
+    cache_row:
+      en: Model cache
+      zh-CN: 模型缓存
     model:
       en: Recognition model
       zh-CN: 识别模型
@@ -289,8 +240,27 @@ settings:
       en: Downloads on first OCR
       zh-CN: 首次识别时下载
     cache_hint:
-      en: "Uncached models download on first use; cache: %{dir}"
-      zh-CN: "首次使用时下载模型，缓存：%{dir}"
+      en: Models download on first use; files here are safe to delete when the app is closed
+      zh-CN: 模型在首次使用时下载；应用未运行时可以放心删除这里的文件
+    custom:
+      title:
+        en: Custom model
+        zh-CN: 自定义模型
+      off:
+        # the "reopen" clause matters: the window persists its open-time
+        # snapshot on every toggle, which would erase a hand edit made
+        # while it sits open
+        en: "Off — set [ocr] custom_config in settings.toml to a rapidocr config TOML, then reopen this window"
+        zh-CN: "关闭——在 settings.toml 中把 [ocr] custom_config 指向 rapidocr 配置文件，然后重新打开本设置窗口"
+      overridden:
+        en: Superseded by the custom config below
+        zh-CN: 已被下方自定义配置接管
+      broken:
+        en: "Unusable: %{reason}"
+        zh-CN: "不可用：%{reason}"
+      open:
+        en: Open config
+        zh-CN: 打开配置
     upright:
       title:
         en: "Skip orientation detection"
@@ -308,40 +278,10 @@ settings:
     dark:
       en: Dark
       zh-CN: 深色
-    system_hint:
-      en: Automatically switch between the default light and dark palettes
-      zh-CN: 根据系统外观，自动切换默认浅色与深色配色
-    presets_hint:
-      en: Select a palette to preview it immediately
-      zh-CN: 选择后立即预览，截图工具同步使用此配色
-    more:
-      en: More palettes
-      zh-CN: 更多配色
-    fewer:
-      en: Show fewer palettes
-      zh-CN: 收起其他配色
-    effects:
-      en: Capture appearance
-      zh-CN: 截图效果
-    effects_hint:
-      en: Adjust the backdrop outside the selection
-      zh-CN: 调整选区以外屏幕的遮罩
     dim_hint:
       en: Darken the area outside the selection
       zh-CN: 调暗选区外的区域
     custom:
-      title:
-        en: Custom colors
-        zh-CN: 自定义颜色
-      hint:
-        en: Fine-tune individual parts; all color controls remain available here
-        zh-CN: 按用途微调各部分颜色，也可以使用上面的预设
-      show:
-        en: Edit custom colors
-        zh-CN: 调整自定义颜色
-      hide:
-        en: Hide color controls
-        zh-CN: 收起颜色设置
       selection:
         en: Selection and pins
         zh-CN: 选区与贴图
@@ -391,25 +331,7 @@ settings:
       swatch_border:
         en: Swatch border
         zh-CN: 色块边框
-    preview:
-      en: Toolbar preview
-      zh-CN: 工具栏配色预览
     group:
-      base:
-        en: Scheme
-        zh-CN: 配色方案
-      colors:
-        en: Colours
-        zh-CN: 颜色
-      dim:
-        en: Backdrop
-        zh-CN: 背景
-    title:
-      en: Appearance
-      zh-CN: 外观
-    blurb:
-      en: Make screenshots feel right with visual palettes and focused controls
-      zh-CN: 选择适合你的截图配色，调整遮罩和工具栏外观
     base_palette:
       en: Base palette
       zh-CN: 基础配色
@@ -506,13 +428,6 @@ scroll:
       title:
         en: Long screenshot failed
         zh-CN: 长截图失败
-    waiting:
-      title:
-        en: Long screenshot waiting
-        zh-CN: 长截图等待中
-      body:
-        en: Scroll the content inside the selection to capture. Esc cancels.
-        zh-CN: 在选区内滚动页面以捕获内容。Esc 取消。
     copy_failed:
       title:
         en: Couldn’t copy the long screenshot
@@ -680,6 +595,9 @@ ocr:
     downloading:
       en: Downloading models…
       zh-CN: 正在下载模型…
+    overall:
+      en: "%{idx}/%{count} files"
+      zh-CN: 第 %{idx}/%{count} 个文件
     failed:
       en: OCR setup failed
       zh-CN: OCR 初始化失败
@@ -785,5 +703,5 @@ notify:
         en: Couldn’t recognize text
         zh-CN: 无法识别文字
       body:
-        en: Try again or select a clearer area.
-        zh-CN: 请重试，或选择更清晰的区域。
+        en: "%{reason} Try again or select a clearer area."
+        zh-CN: "%{reason} 请重试，或选择更清晰的区域。"

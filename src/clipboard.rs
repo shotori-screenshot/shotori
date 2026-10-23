@@ -67,10 +67,17 @@ mod imp {
         if data.is_empty() {
             anyhow::bail!("refusing to copy empty data");
         }
-        if !manager_available() {
-            anyhow::bail!(
+        // Two failure modes with different fixes: no Wayland connection
+        // is the environment (WAYLAND_DISPLAY), a missing manager is the
+        // compositor — blaming the wrong one sends users chasing ghosts.
+        match manager_support() {
+            Some(true) => {}
+            Some(false) => anyhow::bail!(
                 "compositor does not support zwlr_data_control_manager_v1, cannot copy to clipboard"
-            );
+            ),
+            None => anyhow::bail!(
+                "cannot connect to the Wayland display (is WAYLAND_DISPLAY set?), cannot copy to clipboard"
+            ),
         }
 
         let exe = std::env::current_exe().context("cannot locate own executable")?;
@@ -79,7 +86,10 @@ mod imp {
             .arg(mime) // the daemon decides what to offer based on this
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // stderr inherited like the notify child: the daemon's
+            // anyhow diagnostics ("no WAYLAND_DISPLAY", protocol
+            // missing) must land somewhere — nulling them turned a
+            // fixable environment problem into an unobservable one.
             .spawn()
             .context("failed to spawn clipboard daemon")?;
 
@@ -109,16 +119,19 @@ mod imp {
 
     /// A quick probe for data-control support (one roundtrip, ~1ms) so that
     /// "unsupported" becomes a human-readable error at copy time instead of
-    /// failing silently inside the daemon
-    fn manager_available() -> bool {
+    /// failing silently inside the daemon. `None` = cannot reach a Wayland
+    /// display at all (environment, e.g. WAYLAND_DISPLAY unset) — a
+    /// different problem from a compositor without the protocol, and the
+    /// copy-time error must not blame the compositor for it.
+    fn manager_support() -> Option<bool> {
         let Ok(conn) = Connection::connect_to_env() else {
-            return false;
+            return None;
         };
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
         conn.display().get_registry(&qh, ());
         let mut probe = Probe::default();
-        queue.roundtrip(&mut probe).is_ok() && probe.manager
+        Some(queue.roundtrip(&mut probe).is_ok() && probe.manager)
     }
 
     #[derive(Default)]

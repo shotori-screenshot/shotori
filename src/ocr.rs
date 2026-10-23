@@ -76,8 +76,210 @@ fn model_dir() -> anyhow::Result<PathBuf> {
     Ok(base.join("shotori/ocr-models"))
 }
 
+/// Make sure the cache directory exists and return it — the settings
+/// page's "open" button runs before a first download, and xdg-open on
+/// a missing directory either fails or opens something else entirely.
+pub fn open_model_dir() -> anyhow::Result<PathBuf> {
+    let dir = model_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The user's custom rapidocr config (`[ocr] custom_config`), with
+/// `~/` expanded against `$HOME` — hand-edited settings naturally
+/// write `~`, but no library involved expands it.
+/// The configured custom-config path, normalized: `~`/`~/…` expand
+/// against `$HOME`, and a bare relative value resolves against `$HOME`
+/// too — a desktop-launched app's CWD is arbitrary (see the rebase
+/// comment below), so a CWD-relative reading would point nowhere.
+pub fn custom_config() -> Option<PathBuf> {
+    let path = expand_tilde(settings::current().ocr_custom_config()?)?;
+    // A bare relative value resolves against $HOME (a desktop-launched
+    // app's CWD is arbitrary, see the rebase comment below) — but a
+    // `~name` value is another user's home: leave it unjoined so the
+    // engine's error names the mistake, matching the rebase rule.
+    let tildeish = path.to_str().is_some_and(|s| s.starts_with('~'));
+    if path.is_relative() && !tildeish {
+        return Some(match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(path),
+            None => path, // no HOME to anchor to; the engine's error will name it
+        });
+    }
+    Some(path)
+}
+
+/// `~` and `~/…` resolve against `$HOME`; `Some` carries the expanded
+/// path, `None` means "not a tilde path we own" (absolute, or `~name`
+/// — another user's home, which we cannot know and must not mangle
+/// into `$HOME/name`). Callers that just want a path use
+/// [`expand_tilde`], which passes non-tilde shapes through.
+fn tilde_path(raw: &str) -> Option<PathBuf> {
+    let rest = match raw.strip_prefix('~')? {
+        "" => return std::env::var_os("HOME").map(PathBuf::from),
+        rest => rest,
+    };
+    let rest = rest.strip_prefix('/')?; // `~name` is another user's home — not ours
+    // `~//x` must not fall through with an absolute remainder: pushing
+    // that onto HOME would REPLACE the buffer (HOME//x → /x).
+    let rest = rest.trim_start_matches('/');
+    let home = std::env::var_os("HOME")?;
+    let mut path = PathBuf::from(home);
+    path.push(rest);
+    Some(path)
+}
+
+/// A missing `$HOME` leaves a tilde path unexpanded (the engine's
+/// error then names it — more actionable than silently dropping the
+/// feature, which would fall back to the registry models the user
+/// opted out of).
+fn expand_tilde(raw: &str) -> Option<PathBuf> {
+    Some(tilde_path(raw).unwrap_or_else(|| PathBuf::from(raw)))
+}
+
+/// Load and normalize a custom rapidocr config:
+/// - relative model paths resolve against the config file's directory
+///   (the process CWD of a desktop-launched app is arbitrary, so a
+///   bare relative path would otherwise point nowhere);
+/// - the upright-assume toggle still applies (it can only turn the
+///   classifier OFF — a config that already skipped it stays skipped).
+///
+/// Pure in its arguments so it stays unit-testable without touching
+/// the process-wide settings.
+fn load_custom_config(
+    path: &Path,
+    assume_upright: bool,
+) -> anyhow::Result<rapidocr_core::config::RapidOcrConfig> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading custom OCR config {}", path.display()))?;
+    let mut cfg = rapidocr_core::config::RapidOcrConfig::from_toml_str(&text)
+        .with_context(|| format!("parsing custom OCR config {}", path.display()))?;
+    let base = path.parent().unwrap_or(Path::new("."));
+    let rebase = |p: &mut PathBuf| {
+        // `~`/`~/…` expand against $HOME first (the docs promise this
+        // for model paths too); `~name` is returned untouched by
+        // tilde_path and must not fall through to the config-dir join,
+        // which would bury the typo as `<config dir>/~name/…`.
+        if let Some(raw) = p.to_str()
+            && raw.starts_with('~')
+        {
+            if let Some(home_path) = tilde_path(raw) {
+                *p = home_path;
+            }
+            return;
+        }
+        if p.is_relative() {
+            *p = base.join(&*p);
+        }
+    };
+    if let Some(det) = cfg.det.as_mut() {
+        rebase(&mut det.model_path);
+    }
+    if let Some(cls) = cfg.cls.as_mut() {
+        rebase(&mut cls.model_path);
+    }
+    if let Some(rec) = cfg.rec.as_mut() {
+        rebase(&mut rec.model_path);
+        rebase(&mut rec.dict_path);
+    }
+    if assume_upright {
+        cfg.pipeline.use_cls = false;
+    }
+    Ok(cfg)
+}
+
+/// Validate the custom config the way the settings page's readiness
+/// chip shows it: file parses, every enabled stage's model files
+/// exist. `upright` comes from the caller (the page passes its live
+/// toggle, not the startup global — `persist()` never reinstalls the
+/// global, so a mid-session toggle would otherwise leave the chip
+/// stale). `None` = no custom config set; `Some(Err)` carries the
+/// first problem found (parse errors beat file checks — an
+/// unparseable config's paths are not trustworthy).
+pub fn custom_config_status(assume_upright: bool) -> Option<Result<PathBuf, String>> {
+    let path = custom_config()?;
+    cached_custom_status(path, assume_upright)
+}
+
+/// Last (path, mtime, upright) verdict of [`custom_config_status_for`].
+type StatusCacheEntry = (
+    PathBuf,
+    Option<std::time::SystemTime>,
+    bool,
+    Result<PathBuf, String>,
+);
+
+/// `custom_config_status_for` behind a (path, mtime, upright) cache:
+/// `page_ocr` renders on every settings-window interaction, and a
+/// full TOML parse + up to four stats per frame is wasteful. A
+/// changed mtime, different path or flipped toggle re-validates.
+fn cached_custom_status(path: PathBuf, assume_upright: bool) -> Option<Result<PathBuf, String>> {
+    static CACHE: std::sync::Mutex<Option<StatusCacheEntry>> = std::sync::Mutex::new(None);
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+    // A poisoned lock only means "recompute"; losing the cache is
+    // never worth panicking over.
+    let Ok(mut slot) = CACHE.lock() else {
+        return custom_config_status_for(&path, assume_upright);
+    };
+    if let Some((cached_path, cached_mtime, cached_upright, cached)) = slot.as_ref()
+        && *cached_path == path
+        && *cached_mtime == mtime
+        && *cached_upright == assume_upright
+    {
+        return Some(cached.clone());
+    }
+    let fresh = custom_config_status_for(&path, assume_upright)?;
+    *slot = Some((path, mtime, assume_upright, fresh.clone()));
+    Some(fresh)
+}
+
+/// [`custom_config_status`]'s uncached core — the pure shape the
+/// tests drive. Only enabled stages are checked: rapidocr skips
+/// disabled stages entirely (their files never get opened), so a
+/// stale `[det]` section under `use_det = false` must not flag a
+/// working config broken.
+fn custom_config_status_for(path: &Path, assume_upright: bool) -> Option<Result<PathBuf, String>> {
+    let cfg = match load_custom_config(path, assume_upright) {
+        Ok(cfg) => cfg,
+        Err(e) => return Some(Err(format!("{e:#}"))),
+    };
+    let mut paths = Vec::new();
+    if cfg.pipeline.use_det
+        && let Some(det) = &cfg.det
+    {
+        paths.push(&det.model_path);
+    }
+    if cfg.pipeline.use_cls
+        && let Some(cls) = &cfg.cls
+    {
+        paths.push(&cls.model_path);
+    }
+    if cfg.pipeline.use_rec
+        && let Some(rec) = &cfg.rec
+    {
+        paths.push(&rec.model_path);
+        paths.push(&rec.dict_path);
+    }
+    for p in paths {
+        if !p.is_file() {
+            return Some(Err(format!("missing model file: {}", p.display())));
+        }
+    }
+    Some(Ok(path.to_path_buf()))
+}
+
 /// Initialize cached models without starting an unconfirmed download.
 fn init_engine() -> anyhow::Result<Mutex<rapidocr_core::RapidOcr>> {
+    // Custom config: the user owns the files — no registry assets, no
+    // download lock, no checksum repair. Errors carry the config path
+    // and surface through the OCR-failed notification and the
+    // settings page's readiness chip.
+    if let Some(path) = custom_config() {
+        let upright = settings::current().ocr_assume_upright();
+        let cfg = load_custom_config(&path, upright)?;
+        return rapidocr_core::RapidOcr::new(cfg)
+            .map(Mutex::new)
+            .context("custom OCR engine init failed; check the config in settings → OCR");
+    }
     let dir = model_dir()?;
     anyhow::ensure!(
         assets_missing(&dir) == 0,
@@ -136,6 +338,13 @@ fn assets_missing(dir: &std::path::Path) -> usize {
 /// Whether any model files are missing (cheap existence check; used to
 /// decide between "run OCR" and "show the setup dialog")
 pub fn models_missing() -> bool {
+    // Custom config: never route to the download dialog — it installs
+    // registry models the user explicitly opted out of. A broken
+    // custom config fails at engine init instead, and the settings
+    // page's readiness chip catches it at edit time.
+    if custom_config().is_some() {
+        return false;
+    }
     model_dir().map(|d| assets_missing(&d) > 0).unwrap_or(true)
 }
 
@@ -183,6 +392,9 @@ pub struct DownloadProgress {
     pub total: AtomicU64,
     /// 1-based index of the file currently downloading
     pub file_idx: AtomicU8,
+    /// Bytes already installed from earlier files in the set — the UI
+    /// adds the current file's `bytes` on top for a set-wide total
+    pub done_bytes: AtomicU64,
     /// Number of files in the set
     pub file_count: u8,
     status: AtomicU8, // 0 running, 1 ok, 2 failed
@@ -199,6 +411,7 @@ impl Default for DownloadProgress {
             bytes: AtomicU64::new(0),
             total: AtomicU64::new(0),
             file_idx: AtomicU8::new(0),
+            done_bytes: AtomicU64::new(0),
             file_count: 0,
             status: AtomicU8::new(0),
             error: Mutex::new(String::new()),
@@ -348,6 +561,11 @@ fn download_models_in(
             progress.total.store(len, Ordering::Relaxed);
         }
         install_download(&mut resp, &dest, asset.sha256, progress)?;
+        // Set-wide running total: the UI shows it so a 5-file set doesn't
+        // look stalled on file 1. `bytes` ends at this file's size on Ok.
+        progress
+            .done_bytes
+            .fetch_add(progress.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     check_cancelled(progress)
 }
@@ -455,6 +673,15 @@ fn engine() -> anyhow::Result<MutexGuard<'static, rapidocr_core::RapidOcr>> {
 /// selection. Only runs when models are already cached — a first-ever run
 /// must not surprise the user with a 31MB download during a plain screenshot.
 pub fn warmup() {
+    // Custom config: warmable whenever the config file itself is
+    // readable — the registry's missing-asset check does not apply
+    // (its files may legitimately be absent).
+    if let Some(path) = custom_config() {
+        if path.is_file() {
+            drop(engine());
+        }
+        return;
+    }
     if let Ok(dir) = model_dir()
         && assets_missing(&dir) == 0
     {
@@ -526,9 +753,21 @@ pub fn deliver_text(w: u32, h: u32, result: anyhow::Result<String>) {
         }
         Err(e) => {
             eprintln!("[shotori] OCR failed: {e:#}");
+            // The notification is the only feedback surface for this
+            // path, and the generic “try again” hid model problems
+            // (corrupt cache, broken custom config) it can't fix —
+            // lead with the first line of the error chain instead.
+            let chain = format!("{e:#}");
+            let first = chain.lines().next().unwrap_or(&chain);
+            let cut: String = first.chars().take(120).collect();
+            let reason = if cut.len() < first.len() {
+                format!("{cut}…")
+            } else {
+                cut
+            };
             crate::notify::send(
                 crate::i18n::t!("notify.ocr.failed.title").as_ref(),
-                crate::i18n::t!("notify.ocr.failed.body").as_ref(),
+                crate::i18n::t!("notify.ocr.failed.body", reason = reason).as_ref(),
             );
         }
     }
@@ -542,6 +781,7 @@ mod tests {
     };
     use crate::model::settings::OcrModel;
     use std::io::{self, Read};
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
@@ -778,5 +1018,210 @@ mod tests {
 
         download_models_in(dir.path(), &[asset], &progress, &client).unwrap();
         assert_eq!(progress.bytes.load(Ordering::Relaxed), 0);
+    }
+
+    // ── Custom model config (`[ocr] custom_config`) ──────────────────
+
+    /// A minimal valid rec-only rapidocr config (the smallest pipeline
+    /// that validates) whose model paths are relative on purpose.
+    fn write_rec_only_config(dir: &std::path::Path, extra: &str) -> std::path::PathBuf {
+        std::fs::write(dir.join("rec.onnx"), b"onnx").unwrap();
+        std::fs::write(dir.join("dict.txt"), b"a\n").unwrap();
+        let path = dir.join("custom.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "text_score = 0.5\nmin_side_len = 30\nmax_side_len = 2000\n\
+                 min_height = 30\nwidth_height_ratio = 8.0\n\n\
+                 [pipeline]\nuse_det = false\nuse_cls = false\nuse_rec = true\n\n\
+                 [rec]\nmodel_path = \"rec.onnx\"\ndict_path = \"dict.txt\"\n\
+                 image_shape = [3, 48, 320]\nbatch_size = 16\n{extra}"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn custom_config_rebases_relative_paths_against_the_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rec_only_config(dir.path(), "");
+
+        let cfg = super::load_custom_config(&path, false).unwrap();
+        let rec = cfg.rec.unwrap();
+        assert_eq!(rec.model_path, dir.path().join("rec.onnx"));
+        assert_eq!(rec.dict_path, dir.path().join("dict.txt"));
+        // already-absolute paths must survive untouched
+        let abs = dir.path().join("elsewhere.onnx");
+        std::fs::write(&abs, b"onnx").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap().replace(
+            "model_path = \"rec.onnx\"",
+            &format!("model_path = \"{}\"", abs.display()),
+        );
+        std::fs::write(&path, text).unwrap();
+        let cfg = super::load_custom_config(&path, false).unwrap();
+        assert_eq!(cfg.rec.unwrap().model_path, abs);
+    }
+
+    #[test]
+    fn custom_config_upright_toggle_only_disables_cls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rec_only_config(dir.path(), "");
+
+        // rec-only stays rec-only (the toggle must never re-enable cls
+        // — there is no cls model to load)
+        let cfg = super::load_custom_config(&path, true).unwrap();
+        assert!(!cfg.pipeline.use_cls);
+        assert!(!cfg.pipeline.use_det);
+        assert!(cfg.pipeline.use_rec);
+
+        // a full pipeline loses its classifier
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("use_det = false", "use_det = true")
+            .replace("use_cls = false", "use_cls = true");
+        // needs det+cls model files to validate
+        std::fs::write(dir.path().join("det.onnx"), b"onnx").unwrap();
+        std::fs::write(dir.path().join("cls.onnx"), b"onnx").unwrap();
+        let text = format!(
+            "{text}\n[det]\nmodel_path = \"det.onnx\"\nlimit_side_len = 960\n\
+             limit_type = \"Max\"\nmean = [0.485, 0.456, 0.406]\n\
+             std = [0.229, 0.224, 0.225]\nthresh = 0.3\nbox_thresh = 0.6\n\
+             max_candidates = 1000\nunclip_ratio = 1.6\nmin_size = 3\n\n\
+             [cls]\nmodel_path = \"cls.onnx\"\nimage_shape = [3, 48, 192]\n\
+             batch_size = 6\nthresh = 0.9\nlabels = [\"0\", \"180\"]\n"
+        );
+        let full_path = dir.path().join("full.toml");
+        std::fs::write(&full_path, text).unwrap();
+        let cfg = super::load_custom_config(&full_path, true).unwrap();
+        assert!(!cfg.pipeline.use_cls, "upright must drop the classifier");
+        assert!(cfg.pipeline.use_det && cfg.pipeline.use_rec);
+    }
+
+    #[test]
+    fn custom_config_status_reports_missing_model_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rec_only_config(dir.path(), "");
+        std::fs::remove_file(dir.path().join("rec.onnx")).unwrap();
+
+        let status = super::custom_config_status_for(&path, false);
+        let err = status.unwrap().unwrap_err();
+        assert!(err.contains("rec.onnx"), "names the missing file: {err}");
+
+        std::fs::write(dir.path().join("rec.onnx"), b"onnx").unwrap();
+        assert!(
+            super::custom_config_status_for(&path, false)
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn custom_config_status_ignores_disabled_stages_files() {
+        // A stale [det] section pointing at a deleted file must not
+        // flag a rec-only config broken: rapidocr never opens files
+        // of stages whose use_* flag is off — and assume_upright
+        // turns cls off the same way, so a config carrying [cls]
+        // without the file stays ready under the toggle.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rec_only_config(
+            dir.path(),
+            "\n[det]\nmodel_path = \"gone.onnx\"\nlimit_side_len = 960\n\
+             limit_type = \"Max\"\nmean = [0.485, 0.456, 0.406]\n\
+             std = [0.229, 0.224, 0.225]\nthresh = 0.3\nbox_thresh = 0.6\n\
+             max_candidates = 1000\nunclip_ratio = 1.6\nmin_size = 3\n",
+        );
+        assert!(
+            super::custom_config_status_for(&path, false)
+                .unwrap()
+                .is_ok(),
+            "disabled det must not require its file"
+        );
+
+        // the same section enabled for real does require it
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("use_det = false", "use_det = true");
+        std::fs::write(&path, text).unwrap();
+        let err = super::custom_config_status_for(&path, false)
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("gone.onnx"), "names the missing file: {err}");
+    }
+
+    #[test]
+    fn custom_config_status_reports_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.toml");
+        std::fs::write(&path, "not = a = valid = config").unwrap();
+        let err = super::custom_config_status_for(&path, false)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            err.contains("broken.toml"),
+            "carries the config path: {err}"
+        );
+    }
+
+    #[test]
+    fn tilde_expansion_resolves_against_home() {
+        let home = std::env::var_os("HOME").expect("tests run with HOME set");
+        let mut expected = PathBuf::from(&home);
+        expected.push("models/ocr.toml");
+        assert_eq!(
+            super::expand_tilde("~/models/ocr.toml"),
+            Some(expected.clone())
+        );
+        // bare ~ is HOME itself
+        assert_eq!(super::expand_tilde("~"), Some(PathBuf::from(&home)));
+        // absolute paths pass through untouched
+        assert_eq!(
+            super::expand_tilde("/etc/ocr.toml"),
+            Some(PathBuf::from("/etc/ocr.toml"))
+        );
+        // ~name is another user's home — never mangled into $HOME/name
+        assert_eq!(
+            super::expand_tilde("~other/ocr.toml"),
+            Some(PathBuf::from("~other/ocr.toml"))
+        );
+    }
+
+    #[test]
+    fn custom_config_rebase_expands_tilde_model_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::env::var_os("HOME").expect("tests run with HOME set");
+        std::fs::write(dir.path().join("rec.onnx"), b"onnx").unwrap();
+        std::fs::write(dir.path().join("dict.txt"), b"a\n").unwrap();
+        let path = dir.path().join("custom.toml");
+        std::fs::write(
+            &path,
+            "text_score = 0.5\nmin_side_len = 30\nmax_side_len = 2000\n\
+             min_height = 30\nwidth_height_ratio = 8.0\n\n\
+             [pipeline]\nuse_det = false\nuse_cls = false\nuse_rec = true\n\n\
+             [rec]\nmodel_path = \"~/rec.onnx\"\ndict_path = \"dict.txt\"\n\
+             image_shape = [3, 48, 320]\nbatch_size = 16\n",
+        )
+        .unwrap();
+        let mut expected = PathBuf::from(&home);
+        expected.push("rec.onnx");
+        let cfg = super::load_custom_config(&path, false).unwrap();
+        assert_eq!(cfg.rec.as_ref().unwrap().model_path, expected);
+        // the non-tilde dict path still rebases against the config dir
+        assert_eq!(
+            cfg.rec.as_ref().unwrap().dict_path,
+            dir.path().join("dict.txt")
+        );
+
+        // `~name` (another user's home) survives the rebase untouched —
+        // the early return must not bury it as <config dir>/~other/…
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"~/rec.onnx\"", "\"~other/rec.onnx\"");
+        std::fs::write(&path, text).unwrap();
+        let cfg = super::load_custom_config(&path, false).unwrap();
+        assert_eq!(
+            cfg.rec.as_ref().unwrap().model_path,
+            PathBuf::from("~other/rec.onnx")
+        );
     }
 }

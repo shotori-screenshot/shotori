@@ -153,14 +153,19 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
     let (title, body, buttons): (String, Vec<AnyElement>, Vec<AnyElement>) = match &setup.stage {
         Stage::Confirm => (
             crate::i18n::t!("ocr.setup.title").to_string(),
-            vec![text_line(&format!(
-                "{}\n{}",
-                crate::i18n::t!(
+            // Two lines on purpose: the question and the cache path are
+            // separate statements, and text_line flattens \n — one run-on
+            // paragraph here read badly with long cache paths.
+            vec![
+                text_line(&crate::i18n::t!(
                     "ocr.setup.confirm",
                     model = crate::model::settings::current().ocr_model().label()
-                ),
-                crate::i18n::t!("ocr.setup.stored_at", dir = crate::ocr::model_dir_display())
-            ))],
+                )),
+                text_line(&crate::i18n::t!(
+                    "ocr.setup.stored_at",
+                    dir = crate::ocr::model_dir_display()
+                )),
+            ],
             vec![
                 action_button(
                     "ocr-setup-go",
@@ -188,9 +193,19 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
                 0.
             };
             let mb = |v: u64| format!("{:.1} MB", v as f64 / 1e6);
+            // Set-wide line: with only the per-file bar, file 1 of a
+            // 5-file set looks stalled for hundreds of MB.
+            let done = p.done_bytes.load(Ordering::Relaxed);
+            let overall = format!(
+                "{} · {} + {}",
+                crate::i18n::t!("ocr.setup.overall", idx = idx, count = p.file_count),
+                mb(done),
+                mb(bytes)
+            );
             (
                 crate::i18n::t!("ocr.setup.downloading").to_string(),
                 vec![
+                    text_line(&overall),
                     text_line(&format!("{file} ({idx}/{})", p.file_count)),
                     progress_bar(pct, CARD_W - 64.),
                     text_line(&if total > 0 {

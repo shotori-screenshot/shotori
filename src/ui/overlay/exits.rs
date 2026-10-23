@@ -70,7 +70,7 @@ impl Overlay {
             println!("[shotori] scroll: the selection must sit fully inside one screen");
             crate::notify::send(
                 crate::i18n::t!("notify.scroll.start_failed.title").as_ref(),
-                crate::i18n::t!("notify.scroll.cross_screen").as_ref(),
+                crate::i18n::t!("notify.scroll.start_failed.cross_screen").as_ref(),
             );
             return;
         };
@@ -101,7 +101,7 @@ impl Overlay {
             eprintln!("[shotori] scroll: could not open the control bar: {e:#}");
             crate::notify::send(
                 crate::i18n::t!("notify.scroll.start_failed.title").as_ref(),
-                crate::i18n::t!("notify.scroll.no_bar").as_ref(),
+                crate::i18n::t!("notify.scroll.start_failed.no_bar").as_ref(),
             );
             return;
         }

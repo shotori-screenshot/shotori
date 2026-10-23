@@ -150,11 +150,16 @@ fn spawn_child(
     if let Some(path) = open_path {
         cmd.arg(path);
     }
-    let _ = cmd
+    if let Err(e) = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // stderr inherited: real failures stay visible in the terminal
-        .spawn();
+        .spawn()
+    {
+        // Silent-by-design covers missing daemons, not a broken exec
+        // path — without this line a bad install fails invisibly.
+        eprintln!("[shotori] notify: spawn failed: {e:#}");
+    }
     // Detached: dropping the handle leaves the child running; the parent
     // usually exits a moment later and the OS reaps it.
 }

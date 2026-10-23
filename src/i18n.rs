@@ -93,6 +93,14 @@ mod tests {
         // The notify child resolves this label at click time; a missing
         // key would surface as the raw key on the button.
         assert_eq!(t!("notify.open_text").to_string(), "Open text");
+        // YAML 1.1 parsers read a bare `off:` as the boolean false —
+        // rust-i18n must keep it a string key or this lookup degrades
+        // to the raw key on the OCR page.
+        assert!(
+            t!("settings.ocr_page.custom.off")
+                .to_string()
+                .starts_with("Off —")
+        );
         assert_eq!(t!("no.such.key").to_string(), "no.such.key");
     }
 
@@ -121,5 +129,222 @@ mod tests {
         rust_i18n::set_locale("en");
         assert_eq!(locale, "zh-CN");
         assert_eq!(view, "查看图片");
+    }
+}
+
+#[cfg(test)]
+mod key_audit {
+    //! The table is resolved at runtime, so a typo'd key compiles fine
+    //! and only surfaces as raw key text in the UI (the
+    //! `notify.scroll.cross_screen` bug). These tests pin the yml and
+    //! the source together, in both directions.
+
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    /// Keys built with `format!` never appear as a `t!("…")` literal.
+    /// Everything under these prefixes is exempt from the dead-key
+    /// direction (they are still covered in the other direction: the
+    /// literal fragments like `ocr.model.{}.label` must exist, which
+    /// `every_t_literal_exists_in_yml` checks via the concrete ids
+    /// used in tests).
+    const DYNAMIC_PREFIXES: &[&str] = &["ocr.model."];
+
+    /// Locale keys = every yml node whose children are the language
+    /// columns. The file uses strict 2-space indentation with no
+    /// block scalars, so an indentation walk is exact.
+    fn yml_keys() -> BTreeSet<String> {
+        let text = std::fs::read_to_string(yml_path()).unwrap();
+        let mut keys = BTreeSet::new();
+        // (indent, segment) path down to the current line
+        let mut stack: Vec<(usize, String)> = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((name, _value)) = trimmed.split_once(':') else {
+                continue;
+            };
+            let indent = line.len() - trimmed.len();
+            let name = name.trim();
+            while stack.last().is_some_and(|(d, _)| *d >= indent) {
+                stack.pop();
+            }
+            // A language column closes its parent as a complete key.
+            if name == "en" || name == "zh-CN" {
+                if !stack.is_empty() {
+                    keys.insert(
+                        stack
+                            .iter()
+                            .map(|(_, s)| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                    );
+                }
+                continue;
+            }
+            stack.push((indent, name.to_string()));
+        }
+        keys
+    }
+
+    fn yml_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("locales/ui.yml")
+    }
+
+    /// Source-referenced keys, two sets:
+    /// - `t_literals`: keys passed literally to `t!` (asserted to exist);
+    /// - `dotted`: every dotted lowercase string literal anywhere
+    ///   (covers keys built through `match`/tuple tables — the sidebar
+    ///   section keys, the theme color labels).
+    fn referenced() -> (BTreeSet<String>, BTreeSet<String>) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut t_literals = BTreeSet::new();
+        let mut dotted = BTreeSet::new();
+        let mut files = Vec::new();
+        collect_rs(&src, &mut files);
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i..].starts_with(b"t!(") {
+                    let mut j = i + 3;
+                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len()
+                        && bytes[j] == b'"'
+                        && let Some((key, _)) = read_literal(bytes, j)
+                    {
+                        // `format!(` also ends in `t!(` — only
+                        // key-shaped literals are t! candidates
+                        if looks_like_key(&key) {
+                            t_literals.insert(key);
+                        }
+                    }
+                }
+                if bytes[i] == b'"' {
+                    if let Some((literal, _end)) = read_literal(bytes, i) {
+                        if looks_like_key(&literal) {
+                            dotted.insert(literal);
+                        }
+                        i = end_of_string(bytes, i);
+                        continue;
+                    }
+                    // malformed literal: skip to its closing quote so
+                    // escaped text is never re-scanned as key material
+                    i = end_of_string(bytes, i);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+        (t_literals, dotted)
+    }
+
+    /// Locale keys are lowercase dotted paths; anything else (format
+    /// strings, hex colors, `{}` placeholders) is not a key candidate.
+    fn looks_like_key(literal: &str) -> bool {
+        !literal.is_empty()
+            && literal.contains('.')
+            && literal
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+    }
+
+    /// Read a plain string literal starting at `open` (the `"`).
+    /// Returns (content, index after closing quote), or None when the
+    /// literal contains escapes this audit doesn't model.
+    fn read_literal(bytes: &[u8], open: usize) -> Option<(String, usize)> {
+        let mut out = String::new();
+        let mut i = open + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => return Some((out, i + 1)),
+                b'\\' => return None,
+                _ => out.push(bytes[i] as char),
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn end_of_string(bytes: &[u8], open: usize) -> usize {
+        let mut i = open + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                // skip the escaped byte so `\"` doesn't end the literal
+                b'\\' => i += 1,
+                b'"' => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        i
+    }
+
+    fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The fallback-degradation test above passes a deliberately
+    /// absent key; exempt it from the exists check.
+    const INTENTIONAL_MISSES: &[&str] = &["no.such.key"];
+
+    #[test]
+    fn every_t_literal_exists_in_yml() {
+        let keys = yml_keys();
+        let (t_literals, _) = referenced();
+        let missing: Vec<&String> = t_literals
+            .iter()
+            .filter(|k| !keys.contains(*k) && !INTENTIONAL_MISSES.contains(&k.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "t! keys with no yml entry (rust-i18n would print the raw key in the UI): {missing:?}"
+        );
+    }
+
+    #[test]
+    fn every_yml_key_is_referenced_somewhere() {
+        let (_, dotted) = referenced();
+        let dead: Vec<String> = yml_keys()
+            .into_iter()
+            .filter(|k| {
+                !dotted.contains(k) && !DYNAMIC_PREFIXES.iter().any(|prefix| k.starts_with(prefix))
+            })
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "locale keys no source code references (delete them or fix the reference): {dead:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_model_keys_exist_for_every_offered_model() {
+        // The whitelisted `ocr.model.*` family, expanded against the
+        // real model list: each id must have all three columns.
+        let keys = yml_keys();
+        let expected_suffixes = [".label", ".langs", ".tier"];
+        for model in crate::model::settings::OcrModel::ALL {
+            for suffix in expected_suffixes {
+                let key = format!("ocr.model.{}{suffix}", model.id());
+                assert!(keys.contains(&key), "missing locale key: {key}");
+            }
+        }
     }
 }

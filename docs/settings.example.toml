@@ -22,3 +22,27 @@ items = [
   "clear", "separator", "ocr", "pin", "scroll", "save", "copy",
   "separator", "settings", "cancel",
 ]
+
+[ocr]
+# Which bundled model set OCR uses. Missing models download on first
+# use into the cache directory (Settings → OCR → Cache → Open shows
+# it: $XDG_DATA_HOME/shotori/ocr-models, usually
+# ~/.local/share/shotori/ocr-models).
+#
+# Known ids: ppocrv6-tiny, ppocrv6-small (default), ppocrv6-medium,
+#   ppocrv5-en-mobile, ppocrv5-ch-mobile, ppocrv5-ch-server
+model = "ppocrv6-small"
+
+# Skip the orientation classifier — faster, for upright text only.
+# Also applies to custom configs (it can only turn the classifier OFF;
+# it never re-enables one the config skipped).
+assume_upright = false
+
+# Advanced: point this at your own rapidocr config TOML to run your
+# own ONNX models — it overrides `model` entirely (the settings
+# window's dropdown disables while it is active). Relative model
+# paths inside the TOML resolve against the TOML's own directory; a
+# leading ~ expands to your home directory. See docs/ocr-custom-model.md
+# for a worked example. Delete the key (or leave it empty) to go back
+# to the bundled models.
+# custom_config = "~/models/my-ocr.toml"
