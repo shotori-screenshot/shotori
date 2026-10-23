@@ -5,7 +5,7 @@
 # base picks a complete palette (surfaces and control states switch
 # together by construction); every other key is an optional single-field
 # override on top of that base. Colors are opaque #RRGGBB or #RRGGBBAA.
-base = "shotori" # shotori (follows the system) | catppuccin-{frappe,macchiato,mocha,latte} | dracula | gruvbox-dark | nord | rose-pine | tokyo-night
+base = "shotori-dark" # shotori-dark (default) | shotori-light | catppuccin-{frappe,macchiato,mocha,latte} | dracula | gruvbox-{dark,light} | nord | rose-pine{-dawn} | tokyo-night{-day} | solarized-light | github-light
 
 # Any subset of the fields below, e.g.:
 # accent = "#FF6A00"

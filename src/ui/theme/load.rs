@@ -5,7 +5,6 @@
 //! fallback read it.
 use super::{ColorKey, Theme};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Every solid-color field is an optional hex override keyed by
@@ -176,6 +175,11 @@ pub const BUILT_INS: &[BuiltIn] = &[
         palette: Theme::gruvbox_dark,
     },
     BuiltIn {
+        name: "gruvbox-light",
+        display: "Gruvbox Light",
+        palette: Theme::gruvbox_light,
+    },
+    BuiltIn {
         name: "nord",
         display: "Nord",
         palette: Theme::nord,
@@ -186,18 +190,43 @@ pub const BUILT_INS: &[BuiltIn] = &[
         palette: Theme::rose_pine,
     },
     BuiltIn {
+        name: "rose-pine-dawn",
+        display: "Rosé Pine Dawn",
+        palette: Theme::rose_pine_dawn,
+    },
+    BuiltIn {
         name: "tokyo-night",
         display: "Tokyo Night",
         palette: Theme::tokyo_night,
+    },
+    BuiltIn {
+        name: "tokyo-night-day",
+        display: "Tokyo Night Day",
+        palette: Theme::tokyo_night_day,
+    },
+    BuiltIn {
+        name: "solarized-light",
+        display: "Solarized Light",
+        palette: Theme::solarized_light,
+    },
+    BuiltIn {
+        name: "github-light",
+        display: "GitHub Light",
+        palette: Theme::github_light,
     },
 ];
 
 pub fn built_in(name: &str) -> Result<Theme, String> {
     // Hidden legacy names (2026-10): the factory palettes stopped being
-    // selectable presets when the auto pair became "the shotori
-    // theme"; theme.toml files written by older editors still carry
-    // them, so they keep resolving — silently, just not listed.
+    // selectable presets when the shotori pair became light/dark rows;
+    // theme.toml files written by older editors still carry them, so
+    // they keep resolving — silently, just not listed. `shotori` and
+    // `auto` (the retired system-following pair) resolve to its dark
+    // half in [`ThemeFile::palette`].
     let theme = match name {
+        "shotori-dark" => Some(Theme::dark()),
+        "shotori-light" => Some(Theme::light()),
+        // hidden legacy spellings, kept resolvable for old theme.toml files
         "dark" => Some(Theme::dark()),
         "light" => Some(Theme::light()),
         "high_contrast" => Some(Theme::high_contrast()),
@@ -207,7 +236,8 @@ pub fn built_in(name: &str) -> Result<Theme, String> {
             .map(|built_in| (built_in.palette)()),
     };
     theme.ok_or_else(|| {
-        let names = std::iter::once("shotori")
+        let names = ["shotori-dark", "shotori-light"]
+            .into_iter()
             .chain(BUILT_INS.iter().map(|b| b.name))
             .collect::<Vec<_>>()
             .join(" | ");
@@ -248,27 +278,23 @@ fn apply(theme: &mut Theme, file: &ThemeFile) -> Vec<String> {
 }
 
 impl ThemeFile {
-    /// The resolved palettes this file describes (`shotori` — the
-    /// default — and its legacy alias `auto` = the dark/light pair; a
-    /// fixed base = one palette). Errors are the per-field override
-    /// problems, shared by both palettes' applies.
-    pub(crate) fn palettes(&self) -> (Theme, Option<Theme>, Vec<String>) {
-        let base = self.base.as_deref().unwrap_or("shotori");
-        // "auto" is the legacy spelling of the shotori pair — every
-        // theme.toml written before the rename carries it.
-        let (mut dark, mut light, mut errors) = if matches!(base, "shotori" | "auto") {
-            (Theme::dark(), Some(Theme::light()), Vec::new())
+    /// The resolved palette this file describes: one fixed theme. The
+    /// default (and the legacy `shotori` / `auto` spellings of the
+    /// retired system-following pair) is `shotori-dark`; every other
+    /// base is a fixed palette. Errors are the per-field override
+    /// problems.
+    pub(crate) fn palette(&self) -> (Theme, Vec<String>) {
+        let base = self.base.as_deref().unwrap_or("shotori-dark");
+        let (mut theme, mut errors) = if matches!(base, "shotori-dark" | "shotori" | "auto") {
+            (Theme::dark(), Vec::new())
         } else {
             match built_in(base) {
-                Ok(theme) => (theme, None, Vec::new()),
-                Err(error) => (Theme::dark(), Some(Theme::light()), vec![error]),
+                Ok(theme) => (theme, Vec::new()),
+                Err(error) => (Theme::dark(), vec![error]),
             }
         };
-        errors.extend(apply(&mut dark, self));
-        if let Some(light) = &mut light {
-            apply(light, self);
-        }
-        (dark, light, errors)
+        errors.extend(apply(&mut theme, self));
+        (theme, errors)
     }
 }
 
@@ -301,7 +327,7 @@ pub fn save(path: &Path, file: &ThemeFile) -> Result<(), String> {
     let mut table = toml::Table::new();
     table.insert(
         "base".into(),
-        toml::Value::String(file.base.clone().unwrap_or_else(|| "shotori".into())),
+        toml::Value::String(file.base.clone().unwrap_or_else(|| "shotori-dark".into())),
     );
     for key in ColorKey::ALL {
         if let Some(value) = file.color(key) {
@@ -320,7 +346,7 @@ pub fn save(path: &Path, file: &ThemeFile) -> Result<(), String> {
     let body = table.to_string();
     let text = format!(
         "# Shotori theme — managed by `shotori settings`; base + overrides.\n\
-         # base = shotori (follows the system) or a preinstalled palette, every other key is optional.\n{body}"
+         # base = shotori-dark (default), shotori-light or a preinstalled palette; every other key is optional.\n{body}"
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -377,27 +403,16 @@ pub fn init(args: &crate::args::Cli) {
              (moved to settings.toml [toolbar] colors); the key was ignored"
         );
     }
-    let (dark, light, palette_errors) = file.palettes();
+    let (theme, palette_errors) = file.palette();
     errors.extend(palette_errors);
     for error in &errors {
         eprintln!("[shotori] theme: {error}");
     }
     if args.print_theme {
-        if let Some(light) = &light {
-            let _ = writeln!(
-                std::io::stdout(),
-                "shotori follows the system appearance; both complete palettes are shown below"
-            );
-            let _ = writeln!(std::io::stdout(), "[dark appearance]");
-            print_theme(&dark, &source);
-            let _ = writeln!(std::io::stdout(), "[light appearance]");
-            print_theme(light, &source);
-        } else {
-            print_theme(&dark, &source);
-        }
+        print_theme(&theme, &source);
         std::process::exit(i32::from(!errors.is_empty()));
     }
-    super::set(dark, light);
+    super::set(theme);
 }
 
 /// `--print-theme` output: source line, one line per field, palette tail.
@@ -407,7 +422,7 @@ fn print_theme(theme: &Theme, source: &Source) {
     // broken pipe, a truncated dump is the expected outcome there
     let mut out = std::io::stdout().lock();
     let src = match source {
-        Source::Default => "default (shotori)".to_string(),
+        Source::Default => "default (shotori-dark)".to_string(),
         Source::BuiltIn(n) => format!("built-in {n}"),
         Source::File(p) => p.display().to_string(),
     };
@@ -436,22 +451,32 @@ fn print_theme(theme: &Theme, source: &Source) {
 mod tests {
     use super::*;
     #[test]
-    fn auto_and_fixed_palettes() {
-        let (_, light, errors) = ThemeFile::default().palettes();
-        assert!(light.is_some() && errors.is_empty());
+    fn default_and_legacy_palettes() {
+        // no base = shotori-dark, one fixed palette (the
+        // system-following pair is retired)
+        let (theme, errors) = ThemeFile::default().palette();
+        assert!(errors.is_empty());
+        assert_eq!(theme.toolbar_bg, Theme::dark().toolbar_bg);
         // dark/light/high_contrast are hidden legacy names now — files
         // written by older editors must keep resolving.
-        for base in ["dark", "light", "high_contrast", "catppuccin-mocha"] {
+        for base in [
+            "dark",
+            "light",
+            "high_contrast",
+            "catppuccin-mocha",
+            "shotori-light",
+        ] {
             let file: ThemeFile = toml::from_str(&format!("base = {base:?}")).unwrap();
-            let (theme, auto, errors) = file.palettes();
-            assert!(auto.is_none() && errors.is_empty());
+            let (theme, errors) = file.palette();
+            assert!(errors.is_empty());
             assert_eq!(theme.toolbar_bg, built_in(base).unwrap().toolbar_bg);
         }
-        // the legacy spellings resolve to the same auto pair
+        // the legacy auto-pair spellings resolve to its dark half
         for base in ["shotori", "auto"] {
             let file: ThemeFile = toml::from_str(&format!("base = '{base}'")).unwrap();
-            let (_, light, errors) = file.palettes();
-            assert!(light.is_some() && errors.is_empty(), "{base}");
+            let (theme, errors) = file.palette();
+            assert!(errors.is_empty(), "{base}");
+            assert_eq!(theme.toolbar_bg, Theme::dark().toolbar_bg, "{base}");
         }
     }
     #[test]
@@ -473,7 +498,7 @@ mod tests {
         let file: ThemeFile =
             toml::from_str("base = 'dark'\ntoolbar_bg = '#FAFAFC'\ntoolbar_text = '#30343B'")
                 .unwrap();
-        let (theme, _, errors) = file.palettes();
+        let (theme, errors) = file.palette();
         assert!(errors.is_empty());
         assert_eq!(theme.toolbar_bg, 0xFAFAFCFF);
         assert_eq!(theme.toolbar_text, 0x30343BFF);
@@ -484,11 +509,10 @@ mod tests {
             "base = 'missing'\naccent = '#FFFFFF00'\ndim_opacity = nan\nannotation_colors = ['#123456']",
         )
         .unwrap();
-        let (theme, light, errors) = file.palettes();
+        let (theme, errors) = file.palette();
         // annotation_colors no longer reports (deprecated, ignored);
         // the other three bad values still do.
         assert_eq!(errors.len(), 3);
-        assert!(light.is_some());
         assert_eq!(theme.accent, Theme::dark().accent);
         assert_eq!(theme.dim_opacity, 0.55);
     }
@@ -497,45 +521,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("theme.toml");
         std::fs::write(&path, include_str!("../../../docs/theme.example.toml")).unwrap();
-        assert!(load_file(&path).unwrap().palettes().2.is_empty());
+        assert!(load_file(&path).unwrap().palette().1.is_empty());
         std::fs::write(&path,"# theme\nbase = 'light'\naccent = '#123456'\ndim_opacity = 0.2\nannotation_colors = ['#111111', '#222222', '#333333', '#444444', '#555555', '#666666', '#777777']").unwrap();
-        let (file, _, errors) = resolve(None, Some(path.clone()));
-        let (theme, auto, _) = file.palettes();
-        assert!(errors.is_empty() && auto.is_none());
+        let (file, _, _errors) = resolve(None, Some(path.clone()));
+        let (theme, _) = file.palette();
         assert_eq!(theme.accent, 0x123456FF);
         assert_eq!(theme.dim_opacity, 0.2);
         // annotation_colors parsed (old file shape) but no longer
         // applied by the theme — the board lives in settings now.
         let (file, _, _) = resolve(Some("dark"), Some(path));
-        assert_eq!(file.palettes().0.toolbar_bg, Theme::dark().toolbar_bg);
+        assert_eq!(file.palette().0.toolbar_bg, Theme::dark().toolbar_bg);
     }
     #[test]
     fn malformed_file_falls_back_without_partial_application() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.toml");
         // Invalid TOML syntax: the file never parses, resolve falls
-        // back to the default (auto) file with the error attached.
+        // back to the default file with the error attached.
         std::fs::write(&path, "base = 'light'\ntoolbar_text = ").unwrap();
         let (file, _, errors) = resolve(None, Some(path.clone()));
         assert_eq!(errors.len(), 1);
-        assert!(file.palettes().1.is_some());
+        let (theme, palette_errors) = file.palette();
+        assert!(palette_errors.is_empty());
+        assert_eq!(theme.toolbar_bg, Theme::dark().toolbar_bg);
         // A bad VALUE parses but applies nothing for that field —
-        // resolve stays quiet (the file loaded), palettes() reports
+        // resolve stays quiet (the file loaded), palette() reports
         // the per-field error.
         std::fs::write(&path, "base = 'light'\ntoolbar_text = 'whiteish'").unwrap();
         let (file, _, errors) = resolve(None, Some(path));
         assert!(errors.is_empty());
-        let (theme, _single, palette_errors) = file.palettes();
+        let (theme, palette_errors) = file.palette();
         assert_eq!(palette_errors.len(), 1);
         assert!(palette_errors[0].contains("toolbar_text"));
-        // fixed base = one palette; the bad field left it at the base
+        // the bad field left it at the base
         assert_eq!(theme.toolbar_text, Theme::light().toolbar_text);
     }
     #[test]
     fn explicit_overrides_beat_derivations() {
         // accent alone pulls pin_border and toolbar_selected along …
         let file: ThemeFile = toml::from_str("accent = '#123456'").unwrap();
-        let (theme, _, _) = file.palettes();
+        let (theme, _) = file.palette();
         assert_eq!(theme.accent, 0x123456FF);
         assert_eq!(theme.pin_border, 0x12345699);
         let mut derived = theme;
@@ -548,7 +573,7 @@ mod tests {
             "accent = '#123456'\npin_border = '#ABCDEFFF'\ntoolbar_selected = '#111111FF'",
         )
         .unwrap();
-        let (theme, _, _) = file.palettes();
+        let (theme, _) = file.palette();
         assert_eq!(theme.pin_border, 0xABCDEFFF);
         assert_eq!(theme.toolbar_selected, 0x111111FF);
     }
@@ -583,8 +608,8 @@ mod tests {
             // the same name through a theme file resolves to the same
             // palette (single palette, no auto pair, no errors)
             let file: ThemeFile = toml::from_str(&format!("base = '{}'", built.name)).unwrap();
-            let (from_file, auto, errors) = file.palettes();
-            assert!(auto.is_none() && errors.is_empty(), "{}", built.name);
+            let (from_file, errors) = file.palette();
+            assert!(errors.is_empty(), "{}", built.name);
             assert_eq!(from_file.toolbar_bg, direct.toolbar_bg, "{}", built.name);
             assert_eq!(from_file.accent, direct.accent, "{}", built.name);
             assert_eq!(
@@ -637,6 +662,8 @@ mod tests {
             .iter()
             .map(|b| (b.name, built_in(b.name).unwrap()))
             .chain([
+                ("shotori-dark", Theme::dark()),
+                ("shotori-light", Theme::light()),
                 ("dark", Theme::dark()),
                 ("light", Theme::light()),
                 ("high_contrast", Theme::high_contrast()),
@@ -655,10 +682,12 @@ mod tests {
             Ok(_) => panic!("unknown base resolved"),
             Err(error) => error,
         };
-        assert!(error.contains("shotori"));
+        assert!(error.contains("shotori-dark"));
+        assert!(error.contains("shotori-light"));
         assert!(error.contains("catppuccin-mocha"));
         assert!(error.contains("tokyo-night"));
-        // "auto" still resolves (legacy) but is no longer advertised
+        // the hidden legacy names still resolve but are not advertised
         assert!(!error.contains("auto"));
+        assert!(!error.contains("high_contrast"));
     }
 }

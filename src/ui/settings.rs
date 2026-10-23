@@ -226,14 +226,13 @@ fn window_options() -> WindowOptions {
 /// Align the component design system (the settings shell — sidebar,
 /// dropdowns, popovers, scrollbars, everything reading `cx.theme()`)
 /// with the ACTIVE shotori palette. The palette's inherent appearance
-/// picks the mode: `auto` already follows the system through
-/// [`theme::follow_system`], and a fixed base (say catppuccin-latte)
-/// must not inherit dark chrome from a dark system. Called by the
+/// picks the mode: every palette is fixed now, so this is purely a
+/// palette→chrome mapping (a light base like catppuccin-latte gets
+/// light chrome regardless of the system setting). Called by the
 /// settings window at startup and on appearance flips, by the overlay
 /// (its inline swatch editor's popover needs it too) and after every
 /// Appearance edit.
-pub(crate) fn sync_shell_theme(window: &mut Window, cx: &mut App) {
-    theme::follow_system(window.appearance());
+pub(crate) fn sync_shell_theme(cx: &mut App) {
     sync_shell_palette(cx);
 }
 
@@ -337,7 +336,7 @@ struct AppearanceState {
 
 impl SettingsWindow {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        sync_shell_theme(window, cx);
+        sync_shell_theme(cx);
         if let Some(font) = e2e::debug_settings_font() {
             gpui_kit::component::Theme::global_mut(cx).font_size = px(font);
             gpui_kit::component::Theme::sync_base(cx);
@@ -347,8 +346,10 @@ impl SettingsWindow {
         for warning in &warnings {
             eprintln!("[shotori] settings: {warning}");
         }
-        let subscriptions = vec![window.observe_window_appearance(|window, cx| {
-            sync_shell_theme(window, cx);
+        let subscriptions = vec![window.observe_window_appearance(|_, cx| {
+            // re-align the component design system after a system flip
+            // (the shotori palette itself is fixed)
+            sync_shell_theme(cx);
             cx.refresh_windows();
         })];
         let compact = window.viewport_size().width < window.rem_size() * 48.;

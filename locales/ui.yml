@@ -269,15 +269,12 @@ settings:
         en: Faster for upright text; turn off for rotated text
         zh-CN: 识别更快，旋转文字请关闭
   appearance:
-    system:
-      en: Follow system
-      zh-CN: 跟随系统
-    light:
-      en: Light
-      zh-CN: 浅色
-    dark:
-      en: Dark
-      zh-CN: 深色
+    shotori_light:
+      en: Shotori Light
+      zh-CN: Shotori Light
+    shotori_dark:
+      en: Shotori Dark
+      zh-CN: Shotori Dark
     dim_hint:
       en: Darken the area outside the selection
       zh-CN: 调暗选区外的区域

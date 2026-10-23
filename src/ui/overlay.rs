@@ -79,11 +79,10 @@ impl Overlay {
         cx: &mut Context<Self>,
     ) -> Self {
         crate::boot_mark("overlay constructed (window created)");
-        crate::ui::theme::follow_system(window.appearance());
         // The inline swatch editor's popover (gpui-component) must
         // follow the shotori palette, not the component default —
         // same push the settings window does at startup.
-        crate::ui::settings::sync_shell_theme(window, cx);
+        crate::ui::settings::sync_shell_theme(cx);
         let frozen =
             image_util::rgba_to_render_image(capture.rgba.clone(), capture.width, capture.height);
 
@@ -177,11 +176,11 @@ impl Overlay {
 
     fn attach_observers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._subscriptions = vec![
-            window.observe_window_appearance(|window, cx| {
-                crate::ui::theme::follow_system(window.appearance());
-                // the component theme tracks the flip too — the picker
-                // popover must not stay light when the system goes dark
-                crate::ui::settings::sync_shell_theme(window, cx);
+            window.observe_window_appearance(|_, cx| {
+                // a system appearance flip can reset the component design
+                // system — re-align it with the active palette (the
+                // shotori palette itself is fixed and ignores the flip)
+                crate::ui::settings::sync_shell_theme(cx);
                 cx.refresh_windows();
             }),
             cx.observe_in(&self.session, window, |this, _, window, cx| {

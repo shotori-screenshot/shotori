@@ -4,16 +4,18 @@
 //! [`Theme`] struct instead of loose constants, so the look can be
 //! swapped as a whole. Resolution order (see [`load`]):
 //!
-//! 1. the shotori theme — `shotori` (default, the dark/light orange
-//!    pair following the system appearance; `auto` is its legacy
-//!    spelling) or one of the preinstalled community palettes
-//!    registered in [`load::BUILT_INS`] (Catppuccin, Dracula, Gruvbox,
-//!    Nord, Rosé Pine, Tokyo Night)
+//! 1. a built-in palette — `shotori-dark` (the default, the orange
+//!    dark chips since v0.1) or `shotori-light`, plus the preinstalled
+//!    community palettes registered in [`load::BUILT_INS`] (Catppuccin,
+//!    Dracula, Gruvbox, Nord, Rosé Pine, Tokyo Night, Solarized, GitHub)
 //! 2. an optional TOML settings file — `--theme <file>` or the XDG
 //!    config fallback (`~/.config/shotori/theme.toml`)
 //!
 //! The theme is installed once at startup ([`set`]) and read everywhere
-//! ([`c`]); the overlay lives for seconds, so system appearance changes switch the complete palette.
+//! ([`c`]). A theme is ONE fixed palette: the old dark/light pair that
+//! followed the system appearance is retired (the legacy `shotori` /
+//! `auto` base spellings still load, resolving to its dark half), so a
+//! capture never changes look because the desktop switched modes.
 //!
 //! Colors are `u32` in gpui's `0xRRGGBBAA` layout (e.g. the orange
 //! accent is `0xFF6A00FF`).
@@ -263,6 +265,27 @@ impl Theme {
         }
     }
 
+    /// Gruvbox Light — the warm light ramp, gruvbox blue as the accent
+    /// (the dark flavor's yellow would vanish on these surfaces).
+    pub fn gruvbox_light() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0x076678FF,
+            pin_border: 0x07667899,
+            chip_bg: 0xFBF1C7E6,
+            hint_text: 0x7C6F64FF,
+            btn_text: 0x3C3836FF,
+            btn_hover_bg: 0x3C38361A,
+            toolbar_bg: 0xFBF1C7FF,
+            toolbar_text: 0x3C3836FF,
+            toolbar_border: 0xD5C4A1FF,
+            toolbar_hover: 0xEBDBB2FF,
+            toolbar_selected: 0xDDE0BDFF,
+            swatch_border: 0x3C383638,
+        }
+    }
+
     /// Nord — frost accent over nord0 surfaces; the chip steps one
     /// shade darker than the toolbar for depth (both canonical nord0
     /// would leave the OCR dialog flat against the toolbar).
@@ -305,6 +328,27 @@ impl Theme {
         }
     }
 
+    /// Rosé Pine Dawn — the light flavor; dim stays black like every
+    /// light palette here (dimming bright wallpapers, not darkening them).
+    pub fn rose_pine_dawn() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0xB4637AFF,
+            pin_border: 0xB4637A99,
+            chip_bg: 0xFAF4EDE6,
+            hint_text: 0x797593FF,
+            btn_text: 0x575279FF,
+            btn_hover_bg: 0x5752791A,
+            toolbar_bg: 0xFFFAF3FF,
+            toolbar_text: 0x575279FF,
+            toolbar_border: 0xDFDAD9FF,
+            toolbar_hover: 0xF2E9E1FF,
+            toolbar_selected: 0xF6E7E4FF,
+            swatch_border: 0x57527926,
+        }
+    }
+
     /// Tokyo Night — the blue accent over its deep navy ramp.
     pub fn tokyo_night() -> Self {
         Self {
@@ -322,6 +366,70 @@ impl Theme {
             toolbar_hover: 0x292E42FF,
             toolbar_selected: 0x252B3FFF,
             swatch_border: 0xC0CAF538,
+        }
+    }
+
+    /// Tokyo Night Day — the light flavor; half-step hover between the
+    /// background and the highlight ramp, comment gray for hints.
+    pub fn tokyo_night_day() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0x2E7DE9FF,
+            pin_border: 0x2E7DE999,
+            chip_bg: 0xE1E2E7E6,
+            hint_text: 0x848CB5FF,
+            btn_text: 0x3760BFFF,
+            btn_hover_bg: 0x3760BF21,
+            toolbar_bg: 0xE1E2E7FF,
+            toolbar_text: 0x3760BFFF,
+            toolbar_border: 0xC4C8DAFF,
+            toolbar_hover: 0xD2D5E0FF,
+            toolbar_selected: 0xCBD5E7FF,
+            swatch_border: 0x3760BF38,
+        }
+    }
+
+    /// Solarized Light — base3 canvas, base01 text, the classic blue
+    /// accent; base1 doubles as both hint and border (canonical colors
+    /// only — the ramp has no in-between step to soften it with).
+    pub fn solarized_light() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0x268BD2FF,
+            pin_border: 0x268BD299,
+            chip_bg: 0xEEE8D5E6,
+            hint_text: 0x93A1A1FF,
+            btn_text: 0x586E75FF,
+            btn_hover_bg: 0x586E7514,
+            toolbar_bg: 0xFDF6E3FF,
+            toolbar_text: 0x586E75FF,
+            toolbar_border: 0x93A1A1FF,
+            toolbar_hover: 0xEEE8D5FF,
+            toolbar_selected: 0xE3E9E0FF,
+            swatch_border: 0x586E7526,
+        }
+    }
+
+    /// GitHub Light — Primer's canvas ramp: white toolbar, subtle
+    /// surfaces, the default blue accent.
+    pub fn github_light() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.55,
+            accent: 0x0969DAFF,
+            pin_border: 0x0969DA99,
+            chip_bg: 0xF6F8FAE6,
+            hint_text: 0x59636EFF,
+            btn_text: 0x1F2328FF,
+            btn_hover_bg: 0x1F232814,
+            toolbar_bg: 0xFFFFFFFF,
+            toolbar_text: 0x1F2328FF,
+            toolbar_border: 0xD0D7DEFF,
+            toolbar_hover: 0xF6F8FAFF,
+            toolbar_selected: 0xE1EDFAFF,
+            swatch_border: 0x1F232826,
         }
     }
 
@@ -488,55 +596,25 @@ impl ColorKey {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Palettes {
-    fixed_or_dark: Theme,
-    light: Option<Theme>,
-}
 /// Replaceable on purpose: the settings window's Appearance editor
 /// writes the working theme here on every change, live-previewing the
 /// next capture's palette in its own chrome. (The overlay process is
 /// short-lived and never edits; it installs once at startup.)
-static ACTIVE: RwLock<Palettes> = RwLock::new(Palettes {
-    fixed_or_dark: Theme::dark(),
-    light: None,
-});
-static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-impl Palettes {
-    fn current(&self, dark: bool) -> Theme {
-        if dark {
-            self.fixed_or_dark
-        } else {
-            self.light.unwrap_or(self.fixed_or_dark)
-        }
-    }
-}
+static ACTIVE: RwLock<Theme> = RwLock::new(Theme::dark());
 
 /// The active palette. By value: the theme became replaceable (see
 /// [`set`]) and a reference into the lock cannot outlive the read —
 /// every field is `Copy`, so handing the struct out is free.
 pub fn c() -> Theme {
-    ACTIVE
+    *ACTIVE
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .current(SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// True when the system appearance currently selects the dark palette
-/// (the `auto` base follows it; the Appearance editor resolves its
-/// pickers through whichever palette this picks, like a capture would).
-pub fn system_dark() -> bool {
-    SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn set(theme: Theme, light: Option<Theme>) {
+pub fn set(theme: Theme) {
     *ACTIVE
         .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Palettes {
-        fixed_or_dark: theme,
-        light,
-    };
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = theme;
 }
 
 /// Re-tint a palette token. Theme colours are `0xRRGGBBAA` (alpha in the
@@ -546,17 +624,6 @@ pub fn set(theme: Theme, light: Option<Theme>) {
 /// (it used to be duplicated in settings.rs and scroll_bar/panel.rs).
 pub(crate) fn alpha(color: u32, alpha: u8) -> u32 {
     (color & 0xffff_ff00) | u32::from(alpha)
-}
-
-/// Called by GPUI on initial window creation and appearance changes.
-pub fn follow_system(appearance: gpui_kit::WindowAppearance) {
-    SYSTEM_DARK.store(
-        matches!(
-            appearance,
-            gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
-        ),
-        std::sync::atomic::Ordering::Relaxed,
-    );
 }
 
 /// WCAG relative luminance of an 0xRRGGBB(A) color.
@@ -603,6 +670,11 @@ mod tests {
             Theme::light(),
             Theme::high_contrast(),
             Theme::catppuccin_latte(),
+            Theme::gruvbox_light(),
+            Theme::rose_pine_dawn(),
+            Theme::tokyo_night_day(),
+            Theme::solarized_light(),
+            Theme::github_light(),
         ];
         for theme in darks {
             assert!(theme.is_dark(), "{:08X}", theme.toolbar_bg);
@@ -624,24 +696,6 @@ mod tests {
                 assert!(contrast(theme.toolbar_text, theme.toolbar_hover) >= 4.5);
             }
         }
-    }
-
-    #[test]
-    fn appearance_changes_switch_whole_palettes_but_fixed_theme_stays() {
-        let auto = Palettes {
-            fixed_or_dark: Theme::dark(),
-            light: Some(Theme::light()),
-        };
-        assert_eq!(auto.current(true).toolbar_bg, Theme::dark().toolbar_bg);
-        assert_eq!(
-            auto.current(false).toolbar_text,
-            Theme::light().toolbar_text
-        );
-        let fixed = Palettes {
-            fixed_or_dark: Theme::dark(),
-            light: None,
-        };
-        assert_eq!(fixed.current(false).toolbar_bg, Theme::dark().toolbar_bg);
     }
 
     /// dark().dim() must equal the original hard-coded DIM constant.

@@ -257,8 +257,8 @@ impl SettingsWindow {
     /// re-skins, previewing the next capture's palette — and write
     /// theme.toml through.
     pub(super) fn appearance_apply(&mut self, cx: &mut Context<Self>) {
-        let (dark, light, palette_errors) = self.appearance.file.palettes();
-        theme::set(dark, light);
+        let (theme, palette_errors) = self.appearance.file.palette();
+        theme::set(theme);
         // appearance edits re-skin the whole shell, not just accent
         sync_shell_palette(cx);
         self.appearance.error = match palette_errors.first() {
@@ -292,7 +292,14 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.appearance.file.base.as_deref().unwrap_or("shotori") == base {
+        if self
+            .appearance
+            .file
+            .base
+            .as_deref()
+            .unwrap_or("shotori-dark")
+            == base
+        {
             return;
         }
         self.appearance.file.base = Some(base.to_string());
@@ -311,15 +318,10 @@ impl SettingsWindow {
 }
 
 /// The palette a capture would show right now for this editing state
-/// (the auto base follows the system appearance, exactly like
-/// [`theme::c`]).
+/// (one fixed palette — the system-following pair is retired).
 fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
-    let (dark, light, _) = file.palettes();
-    if theme::system_dark() {
-        dark
-    } else {
-        light.unwrap_or(dark)
-    }
+    let (theme, _) = file.palette();
+    theme
 }
 
 use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};

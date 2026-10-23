@@ -88,7 +88,6 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        crate::ui::theme::follow_system(window.appearance());
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
 

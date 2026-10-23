@@ -5,16 +5,12 @@ impl SettingsWindow {
     pub(super) fn theme_choices(&self, window: &Window, cx: &Context<Self>) -> Div {
         let mut choices = vec![
             (
-                "shotori",
-                crate::i18n::t!("settings.appearance.system").to_string(),
+                "shotori-light",
+                crate::i18n::t!("settings.appearance.shotori_light").to_string(),
             ),
             (
-                "light",
-                crate::i18n::t!("settings.appearance.light").to_string(),
-            ),
-            (
-                "dark",
-                crate::i18n::t!("settings.appearance.dark").to_string(),
+                "shotori-dark",
+                crate::i18n::t!("settings.appearance.shotori_dark").to_string(),
             ),
         ];
         choices.extend(
@@ -23,7 +19,9 @@ impl SettingsWindow {
                 .map(|preset| (preset.name, preset.display.to_owned())),
         );
         let configured = match self.appearance.file.base.as_deref() {
-            None | Some("auto") => "shotori",
+            // the default, plus the legacy spellings of the retired
+            // system-following pair
+            None | Some("shotori-dark") | Some("shotori") | Some("auto") => "shotori-dark",
             Some(base) => base,
         };
         let columns = if window.viewport_size().width < window.rem_size() * 32. {
@@ -40,12 +38,7 @@ impl SettingsWindow {
                 base: Some(base.to_owned()),
                 ..Default::default()
             };
-            let (dark, light, _) = file.palettes();
-            let palette = if theme::system_dark() {
-                dark
-            } else {
-                light.unwrap_or(dark)
-            };
+            let (palette, _) = file.palette();
             // Sample foreground and accent on their real surface. Hover and
             // selected fills are interaction states, not standalone swatches.
             let preview = div()
