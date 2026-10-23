@@ -684,6 +684,7 @@ fn run_manual(
         // Phase: the refusal ladder is a pure model function; the
         // "waiting" reading is a clock and lives here.
         let phase = match streak {
+            None if sheet.has_incomplete_column() => Phase::Unstable,
             None if last_accept.elapsed() >= WAIT_HINT => Phase::Waiting,
             None => Phase::Following,
             Some((count, reason)) => phase_of(count, reason),

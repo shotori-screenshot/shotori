@@ -39,6 +39,15 @@
 //!   bands means the rest is fixed chrome: those bands leave both the
 //!   ranking score and the full-row verification, so an independently
 //!   painted sidebar can no longer refuse every frame.
+//! - **Separated sidebar composition** — a right-hand column separated by a
+//!   uniform gutter keeps its own accepted position and coherent pixel canvas.
+//!   It may scroll with the body, pin, resume or reverse without repeating its
+//!   text through the body's coordinate system. Column refusals retain the
+//!   column's last verified pixels while the body advances. Extra canvas uses
+//!   the captured gutter background; uncertain padding retains an incomplete
+//!   status. New content moving across the gutter restores document-flow
+//!   ownership; previously captured column pixels keep their column position.
+//!   Padding never claims to recover unobserved sidebar content.
 //! - **Refusal taxonomy** — a frame that cannot be placed is refused
 //!   *with a reason*, never force-fit: mid-animation frames (torn between
 //!   two scroll positions), periodic textures (code listings, striped
@@ -70,7 +79,8 @@
 //!   compositor does not invent missing text or paint a guessed background.
 //!   Stationary decorations connected to a confirmed bottom frame use a pixel
 //!   mask instead of a control's rectangular halo. The frame is kept once at
-//!   the output perimeter, outside the document plane.
+//!   the output perimeter, outside both document and independent column planes.
+//!   Covered column samples remain repairable when clear observations arrive.
 //! - **One position base, and refusals write nothing** — a frame is only
 //!   ever placed against the last frame the sheet actually advanced to
 //!   (`stable_profile`). Measuring the step against *any* nearer frame
@@ -123,6 +133,7 @@
 use floating::FloatingOverlays;
 use matcher::{Placement, estimate_offset};
 use profile::{MotionMask, RowProfile};
+use sidebar::Sidebar;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -391,6 +402,7 @@ pub(crate) struct ScrollSheet {
     /// pixels over rows that were already right (see `place`).
     stable_profile: RowProfile,
     floating: FloatingOverlays,
+    sidebar: Option<Box<Sidebar>>,
     /// Fixed-sidebar mask learned from consecutive frames (see
     /// [`MotionMask`]): bands that never move are chrome, not content.
     motion: MotionMask,
@@ -430,6 +442,17 @@ impl ScrollSheet {
         options: SheetLimits,
         axis: Axis,
     ) -> Result<Self, Refusal> {
+        Self::new_internal(width, viewport_height, first_frame, options, axis, true)
+    }
+
+    fn new_internal(
+        width: u32,
+        viewport_height: u32,
+        first_frame: &[u8],
+        options: SheetLimits,
+        axis: Axis,
+        detect_sidebar: bool,
+    ) -> Result<Self, Refusal> {
         let (sheet_w, sheet_h) = match axis {
             Axis::Vertical => (width, viewport_height),
             Axis::Horizontal => (viewport_height, width),
@@ -458,6 +481,11 @@ impl ScrollSheet {
             state: ViewportState {
                 position: 0,
                 max_position: 0,
+            },
+            sidebar: if detect_sidebar && axis == Axis::Vertical {
+                Sidebar::new(sheet_w, sheet_h, &seed, options)
+            } else {
+                None
             },
             floating: FloatingOverlays::new(&seed, sheet_w),
             prev_raw: seed,
@@ -508,6 +536,11 @@ impl ScrollSheet {
         self.prev_profile = RowProfile::from_rgba(&seed, self.width, self.viewport_height);
         self.stable_profile = self.prev_profile.clone();
         self.floating = FloatingOverlays::new(&seed, self.width);
+        self.sidebar = if axis == Axis::Vertical {
+            Sidebar::new(self.width, self.viewport_height, &seed, self.options)
+        } else {
+            None
+        };
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
@@ -571,6 +604,14 @@ impl ScrollSheet {
         )
     }
 
+    /// A separated column could not be placed or its uncovered canvas has no
+    /// observed plain background. The body can still advance independently.
+    pub(crate) fn has_incomplete_column(&self) -> bool {
+        self.sidebar
+            .as_ref()
+            .is_some_and(|column| column.is_incomplete())
+    }
+
     /// Content revision for prepends and occlusion repair. The live preview
     /// compares it to decide whether its cached window still matches.
     pub(crate) fn top_revision(&self) -> u32 {
@@ -586,6 +627,10 @@ impl ScrollSheet {
     /// Judge one capture of the selection rectangle (same size as the
     /// first frame) and fold it into the canvas.
     pub(crate) fn push(&mut self, frame: &[u8]) -> Fold {
+        self.push_with_document_motion(frame, None)
+    }
+
+    fn push_with_document_motion(&mut self, frame: &[u8], document_motion: Option<i32>) -> Fold {
         self.frames_pushed += 1;
         debug_assert_eq!(
             frame.len(),
@@ -610,7 +655,7 @@ impl ScrollSheet {
         }
 
         let profile = RowProfile::from_rgba(frame, self.width, self.viewport_height);
-        let outcome = self.place(frame, &profile);
+        let outcome = self.place(frame, &profile, document_motion);
         // Every non-duplicate frame becomes the previous-frame reference,
         // refused ones included: the fixed-column mask needs two ADJACENT
         // frames to tell "this band never moves" from "this band moved a
@@ -624,16 +669,29 @@ impl ScrollSheet {
     }
 
     /// One matcher verdict against a specific comparison base.
-    fn classify(&self, base: &RowProfile, cur: &RowProfile) -> Placement {
+    fn classify(
+        &self,
+        base: &RowProfile,
+        cur: &RowProfile,
+        document_motion: Option<i32>,
+    ) -> Placement {
         // Committed sticky bands extend the edge trim of the scan.
         let trim = (self.sticky.top, self.sticky.bot);
-        let Some(estimate) = estimate_offset(
+        let mut weights = self.motion.weights;
+        if let Some(sidebar) = &self.sidebar {
+            for (weight, &(_, end)) in weights.iter_mut().zip(&cur.bands) {
+                if self.width as usize / 8 + end > sidebar.left() {
+                    *weight = 0.;
+                }
+            }
+        }
+        let Some(mut estimate) = estimate_offset(
             base,
             cur,
             &self.options,
             trim,
-            &self.motion.weights,
-            self.last_dy,
+            &weights,
+            document_motion.unwrap_or(self.last_dy),
         ) else {
             sheet_log(&format!(
                 "#{} NoOverlap (no admissible candidate)",
@@ -641,6 +699,28 @@ impl ScrollSheet {
             ));
             return Placement::Reject(Refusal::NoOverlap);
         };
+        // A whole-frame candidate must also match the body independently.
+        // Its search neighbourhood covers abrupt reversals missed by sparse
+        // body signatures; a stationary sidebar cannot dictate the offset.
+        if self.sidebar.is_some()
+            && (estimate.cost > self.options.cost_threshold
+                || estimate.runner_up - estimate.cost < self.options.ambiguity_margin)
+            && let Some(full) = estimate_offset(
+                base,
+                cur,
+                &self.options,
+                trim,
+                &self.motion.weights,
+                document_motion.unwrap_or(self.last_dy),
+            )
+            && full.cost <= self.options.cost_threshold
+            && full.runner_up - full.cost >= self.options.ambiguity_margin
+            && let Some(body) = estimate_offset(base, cur, &self.options, trim, &weights, full.dy)
+            && body.dy == full.dy
+            && body.cost <= self.options.cost_threshold
+        {
+            estimate = full;
+        }
         if estimate.cost > self.options.cost_threshold {
             // A bad residual at the very EDGE of the search window means
             // the frame moved further than the window could bridge: the
@@ -663,7 +743,13 @@ impl ScrollSheet {
         if estimate.dy == 0 {
             return Placement::Still;
         }
-        if estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
+        // A synchronized column can use independently verified document
+        // motion to resolve a weak but unique pixel-perfect match. Exact
+        // periodic ties and columns already moving independently cannot.
+        let coherent_column = document_motion == Some(estimate.dy)
+            && estimate.cost <= f32::EPSILON
+            && estimate.runner_up > estimate.cost;
+        if !coherent_column && estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
             sheet_log(&format!(
                 "#{} Refused(Unclear) dy={} cost={:.2} runner={:.2} margin={:.2}",
                 self.frames_pushed,
@@ -677,7 +763,7 @@ impl ScrollSheet {
         Placement::Match(estimate)
     }
 
-    fn place(&mut self, frame: &[u8], profile: &RowProfile) -> Fold {
+    fn place(&mut self, frame: &[u8], profile: &RowProfile, document_motion: Option<i32>) -> Fold {
         // Low-information guard: a near-uniform anchor cannot be aligned
         // by any translation — the
         // conservative answer is Still; a later textured frame brings
@@ -701,9 +787,38 @@ impl ScrollSheet {
         // nothing is written, the canvas stays exactly as it was, and
         // the next frame that overlaps the (unchanged) base links up
         // again with its full displacement.
-        let estimate = match self.classify(&self.stable_profile, profile) {
+        let estimate = match self.classify(&self.stable_profile, profile, document_motion) {
             Placement::Match(e) => e,
-            Placement::Still => return Fold::Still,
+            Placement::Still => {
+                // A late column repaint can recover while the body is idle.
+                // Refresh that column alone and invalidate the preview cache.
+                let height = self.height();
+                if let Some(sidebar) = &mut self.sidebar
+                    && sidebar.is_incomplete()
+                {
+                    sidebar.observe(
+                        frame,
+                        0,
+                        0,
+                        height,
+                        self.sticky.top as usize..(self.viewport_height - self.sticky.bot) as usize,
+                        &self.floating.frame_edge,
+                    );
+                    sidebar.composite(
+                        &mut self.canvas,
+                        self.width as usize,
+                        self.sticky.bot as usize,
+                    );
+                    self.floating.frame_edge.composite(
+                        &mut self.canvas,
+                        frame,
+                        self.state.position as usize,
+                    );
+                    self.top_shifts = self.top_shifts.saturating_add(1);
+                    return Fold::Shifted { dy: 0 };
+                }
+                return Fold::Still;
+            }
             Placement::Reject(reason) => return Fold::Refused(reason),
         };
 
@@ -720,8 +835,24 @@ impl ScrollSheet {
             .sticky
             .seed_top
             .min(self.floating.frame_edge.seed_prefix_rows() as u32);
-        self.floating
-            .observe(frame, (self.width, self.viewport_height));
+        if let Some(sidebar) = &mut self.sidebar {
+            let prepend = if branch == Branch::Above { growth } else { 0 };
+            sidebar.observe(
+                frame,
+                estimate.dy,
+                prepend,
+                self.viewport_height + next.max_position as u32,
+                self.sticky.top as usize..(self.viewport_height - self.sticky.bot) as usize,
+                &self.floating.frame_edge,
+            );
+        }
+        self.floating.observe(
+            frame,
+            (self.width, self.viewport_height),
+            self.sidebar
+                .as_ref()
+                .and_then(|sidebar| sidebar.overlay_bounds()),
+        );
         if had_floating || !self.floating.is_empty() {
             // Occlusion repair changes pixels even inside a stationary preview.
             self.top_shifts = self.top_shifts.saturating_add(1);
@@ -823,6 +954,16 @@ impl ScrollSheet {
             self.canvas[footer_dst..footer_dst + bot * row]
                 .copy_from_slice(&frame[footer_src..self.viewport_height as usize * row]);
         }
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.composite(
+                &mut self.canvas,
+                self.width as usize,
+                self.sticky.bot as usize,
+            );
+            if sidebar.is_independent() {
+                self.top_shifts = self.top_shifts.saturating_add(1);
+            }
+        }
         self.floating
             .frame_edge
             .composite(&mut self.canvas, frame, next.position as usize);
@@ -877,6 +1018,7 @@ mod preview;
 mod profile;
 #[cfg(test)]
 mod scene_tests;
+mod sidebar;
 mod sticky;
 #[cfg(test)]
 mod tests {

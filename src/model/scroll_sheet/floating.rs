@@ -76,6 +76,10 @@ struct FrameRail {
 }
 
 impl FrameEdge {
+    pub(super) fn mask(&self) -> &[bool] {
+        &self.mask
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.first_row == self.mask.len() / self.width
     }
@@ -274,7 +278,8 @@ impl FrameEdge {
         }
     }
 
-    /// Preserve the captured frame once, outside the document plane.
+    /// Preserve the captured frame once, outside both document and column
+    /// planes. Call after column composition, which must not own the frame.
     pub(super) fn composite(&mut self, canvas: &mut [u8], frame: &[u8], position: usize) {
         let row = self.width * 4;
         let height = canvas.len() / row;
@@ -291,7 +296,7 @@ impl FrameEdge {
         {
             for y in viewport / FRAME_EDGE_FRACTION..height {
                 let at = y * row + x * 4;
-                // Only extend a rail across matching flat background. Keep
+                // Only extend a rail across synthetic column padding. Keep
                 // observed antialiased pixels over actual text and graphics.
                 if difference(&canvas[at..at + 4], &rail.background) <= STILL_TOLERANCE {
                     canvas[at..at + 4].copy_from_slice(&rail.color);
@@ -305,6 +310,19 @@ impl FrameEdge {
                     let target = (height - viewport + y) * row + x * 4;
                     canvas[target..target + 4]
                         .copy_from_slice(&self.bottom_pixels[source..source + 4]);
+                }
+            }
+        }
+    }
+
+    /// Window pixels are not observations of an independent column's content.
+    /// Its existing gutter supplies padding until an unobstructed row is seen.
+    pub(super) fn remove_from_frame(&self, frame: &mut [u8], background: [u8; 4]) {
+        for y in self.first_row..self.mask.len() / self.width {
+            for x in 0..self.width {
+                if self.contains(x, y) {
+                    let at = (y * self.width + x) * 4;
+                    frame[at..at + 4].copy_from_slice(&background);
                 }
             }
         }
@@ -392,7 +410,75 @@ impl FloatingOverlays {
         self.regions.is_empty() && self.frame_edge.is_empty()
     }
 
-    /// Observe window decorations before composing the accepted frame.
+    /// Retrospectively exclude confirmed outer chrome from a child column.
+    /// Provenance locates earlier copies; matching the seed pixels prevents
+    /// clearing content that was already observed without the decoration.
+    pub(super) fn remove_frame_edge(
+        &mut self,
+        canvas: &mut [u8],
+        width: usize,
+        left: usize,
+        edge: &FrameEdge,
+        background: [u8; 4],
+    ) {
+        for (y, previous) in self.samples.iter_mut().enumerate() {
+            let mut boundaries = vec![0, width];
+            let mut sources = Vec::new();
+            match &*previous {
+                RowSamples::Uniform(sample) => sources.push(sample.source_y),
+                RowSamples::Split(spans) => {
+                    boundaries.extend(spans.iter().map(|span| span.end));
+                    sources.extend(spans.iter().map(|span| span.sample.source_y));
+                }
+            }
+            if sources.iter().all(|&source| source < edge.first_row) {
+                continue;
+            }
+            for source in sources {
+                let mut full = Vec::new();
+                edge.split_row(source, &mut full);
+                boundaries.extend(
+                    full.into_iter()
+                        .filter(|x| (left..left + width).contains(x))
+                        .map(|x| x - left),
+                );
+            }
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            let mut selected: Vec<SampleSpan> = Vec::new();
+            for span in boundaries.windows(2) {
+                let mut sample = previous.source_at(span[0]);
+                if edge.contains(left + span[0], sample.source_y) {
+                    for x in span[0]..span[1] {
+                        let target = (y * width + x) * 4;
+                        let source = (sample.source_y * edge.width + left + x) * 4;
+                        if difference(&canvas[target..target + 4], &edge.seed[source..source + 4])
+                            <= STILL_TOLERANCE
+                        {
+                            canvas[target..target + 4].copy_from_slice(&background);
+                            sample.needs_repair = true;
+                        }
+                    }
+                }
+                if let Some(last) = selected.last_mut().filter(|last| last.sample == sample) {
+                    last.end = span[1];
+                } else {
+                    selected.push(SampleSpan {
+                        end: span[1],
+                        sample,
+                    });
+                }
+            }
+            *previous = if selected.len() == 1 {
+                RowSamples::Uniform(selected[0].sample)
+            } else {
+                RowSamples::Split(selected)
+            };
+        }
+    }
+
+    /// Window decoration evidence uses the whole capture, independently of
+    /// column ownership, before the column samples are stripped of chrome.
     pub(super) fn observe_frame_edge(&mut self, current: &[u8], dy: i32) {
         self.displacement += i64::from(dy);
         self.frame_edge
@@ -402,11 +488,26 @@ impl FloatingOverlays {
     /// Find localized edges that stay at viewport coordinates despite an
     /// independently verified page translation. Flat backgrounds cannot vote;
     /// edges that also match the page translation cannot vote either. Call
-    /// after observe_frame_edge;
+    /// after observe_frame_edge and the current column ownership update;
     /// the detection reference can span several accepted small movements.
-    pub(super) fn observe(&mut self, current: &[u8], size: (u32, u32)) {
+    /// An independently positioned column owns its own overlays; it cannot
+    /// vote for body occlusion or extend a halo back across its gutter.
+    pub(super) fn observe(
+        &mut self,
+        current: &[u8],
+        size: (u32, u32),
+        column: Option<(usize, Range<usize>)>,
+    ) {
         let previous = &self.reference;
         let (width, height) = (size.0 as usize, size.1 as usize);
+        let excluded = column.map(|(left, rows)| Region {
+            left,
+            right: width,
+            top: rows.start,
+            bottom: rows.end,
+        });
+        self.regions
+            .retain(|region| excluded.is_none_or(|column| !region.intersects(column)));
         let cols = width.div_ceil(TILE_PIXELS);
         let rows = height.div_ceil(TILE_PIXELS);
         let mut tiles = vec![false; cols * rows];
@@ -419,7 +520,10 @@ impl FloatingOverlays {
                 let mut stable_edges = 0;
                 for y in ty * TILE_PIXELS..((ty + 1) * TILE_PIXELS).min(height - 1) {
                     let shifted = y as i64 + self.displacement;
-                    for x in tx * TILE_PIXELS..((tx + 1) * TILE_PIXELS).min(width - 1) {
+                    let body_right = excluded
+                        .filter(|column| y + 1 >= column.top && y < column.bottom)
+                        .map_or(width, |column| column.left);
+                    for x in tx * TILE_PIXELS..((tx + 1) * TILE_PIXELS).min(body_right - 1) {
                         if self.frame_edge.contains(x, y) {
                             continue;
                         }
@@ -521,6 +625,16 @@ impl FloatingOverlays {
             region.top = region.top.saturating_sub(HALO_PIXELS);
             region.right = (region.right + HALO_PIXELS).min(width);
             region.bottom = (region.bottom + HALO_PIXELS).min(height);
+            if let Some(column) = excluded.filter(|column| region.intersects(*column)) {
+                if region.left >= column.left {
+                    region.top = region.top.max(column.bottom);
+                } else {
+                    region.right = column.left;
+                }
+            }
+            if region.top >= region.bottom || region.left >= region.right {
+                continue;
+            }
             if region.local(width, height) {
                 // Changing content behind a button changes which edge tiles
                 // testify. Preserve its extent while fresh evidence overlaps.

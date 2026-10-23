@@ -655,6 +655,969 @@ fn wide_capture_keeps_rules_exact_across_the_sample_grid() {
     }
 }
 
+#[test]
+fn sidebar_that_stops_scrolling_remains_one_complete_column() {
+    let (mut page, bar) = pinned_heading_scene(246);
+    // A finite metadata panel ends before the viewport bottom when it pins.
+    for y in 720..PAGE_HEIGHT {
+        for x in 340..WIDTH {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            page[i..i + 4].fill(255);
+        }
+    }
+    for step in [8u32, 40, 96] {
+        for resume in [false, true] {
+            let capture = |top: u32| {
+                let mut frame = viewport(&page, top);
+                let side_top = if resume && top > 600 {
+                    top - 400
+                } else {
+                    top.min(200)
+                };
+                for y in 0..HEIGHT {
+                    let dst = ((y * WIDTH + 336) * 4) as usize;
+                    let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+                    let bytes = ((WIDTH - 336) * 4) as usize;
+                    frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                }
+                if top >= 160 {
+                    frame[..bar.len()].copy_from_slice(&bar);
+                }
+                frame
+            };
+            let end = 800u32.div_ceil(step) * step;
+            let mut sheet =
+                ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+            for top in (step..=end).step_by(step as usize) {
+                let result = sheet.push(&capture(top));
+                assert!(
+                    matches!(result, Fold::GrewBottom { dy, .. } if dy == step),
+                    "step {step}, resume {resume}, at {top}: {result:?}"
+                );
+                let expected = &page[..((HEIGHT + top) * WIDTH * 4) as usize];
+                assert_pixels(sheet.canvas(), expected, 0, HEIGHT + top);
+            }
+            if step == 8 && !resume {
+                export_scene(
+                    "pinned-sidebar",
+                    &capture(end),
+                    &sheet,
+                    &page[..((HEIGHT + end) * WIDTH * 4) as usize],
+                );
+            }
+            for top in (0..end).step_by(step as usize).rev() {
+                let result = sheet.push(&capture(top));
+                assert!(
+                    matches!(result, Fold::Shifted { dy } if dy == -(step as i32)),
+                    "return step {step}, resume {resume}, at {top}: {result:?}"
+                );
+                assert_pixels(
+                    sheet.canvas(),
+                    &page[..((HEIGHT + end) * WIDTH * 4) as usize],
+                    0,
+                    HEIGHT + end,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pinned_column_keeps_observed_content_while_document_continues() {
+    let (page, _) = pinned_heading_scene(246);
+    let capture = |top: u32, pinned: bool| {
+        let mut frame = viewport(&page, top);
+        let side_top = if pinned { top.min(200) } else { top };
+        for y in 0..HEIGHT {
+            let dst = ((y * WIDTH + 336) * 4) as usize;
+            let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+            let bytes = ((WIDTH - 336) * 4) as usize;
+            frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+        }
+        frame
+    };
+    let mut sheet =
+        ScrollSheet::new(WIDTH, HEIGHT, &capture(0, true), SheetLimits::default()).unwrap();
+    for top in (40..=200).step_by(40) {
+        assert!(matches!(
+            sheet.push(&capture(top, true)),
+            Fold::GrewBottom { dy: 40, .. }
+        ));
+    }
+    let observed_side_bottom = HEIGHT + 200;
+    for top in [240, 280] {
+        assert!(matches!(
+            sheet.push(&capture(top, true)),
+            Fold::GrewBottom { dy: 40, .. }
+        ));
+        let mut expected = page[..((HEIGHT + top) * WIDTH * 4) as usize].to_vec();
+        for y in observed_side_bottom..HEIGHT + top {
+            for x in 336..WIDTH {
+                let i = ((y * WIDTH + x) * 4) as usize;
+                expected[i..i + 4].fill(255);
+            }
+        }
+        assert_pixels(sheet.canvas(), &expected, 0, HEIGHT + top);
+    }
+    assert!(matches!(
+        sheet.push(&capture(320, false)),
+        Fold::GrewBottom { dy: 40, .. }
+    ));
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 320) * WIDTH * 4) as usize],
+        0,
+        HEIGHT + 320,
+    );
+}
+
+#[test]
+fn sidebar_pinned_from_first_capture_is_not_repeated() {
+    let (mut page, _) = pinned_heading_scene(246);
+    for y in 500..PAGE_HEIGHT {
+        for x in 340..WIDTH {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            page[i..i + 4].fill(255);
+        }
+    }
+    let capture = |top: u32| {
+        let mut frame = viewport(&page, top);
+        for y in 0..HEIGHT {
+            let dst = ((y * WIDTH + 336) * 4) as usize;
+            let bytes = ((WIDTH - 336) * 4) as usize;
+            frame[dst..dst + bytes].copy_from_slice(&page[dst..dst + bytes]);
+        }
+        frame
+    };
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+    for top in (40..=640).step_by(40) {
+        let result = sheet.push(&capture(top));
+        assert!(
+            matches!(result, Fold::GrewBottom { dy: 40, .. }),
+            "{top}: {result:?}"
+        );
+        assert_pixels(
+            sheet.canvas(),
+            &page[..((HEIGHT + top) * WIDTH * 4) as usize],
+            0,
+            HEIGHT + top,
+        );
+    }
+}
+
+#[test]
+fn sparse_sidebar_below_a_wide_heading_pins_as_a_complete_column() {
+    for heading_height in [0, 160, 360, 480] {
+        let (mut page, bar) = pinned_heading_scene(246);
+        for y in 0..PAGE_HEIGHT {
+            for x in 0..WIDTH {
+                if y < heading_height || x >= 336 {
+                    let i = ((y * WIDTH + x) * 4) as usize;
+                    page[i..i + 4].fill(255);
+                }
+            }
+        }
+        if heading_height > 0 {
+            scene_label(
+                &mut page,
+                32.,
+                (heading_height / 2) as f32,
+                "A generated document heading spanning the article and metadata columns",
+            );
+        }
+        if heading_height > 0 {
+            assert!(
+                (heading_height / 2..heading_height / 2 + 18).any(|y| {
+                    (336..344).any(|x| {
+                        let i = ((y * WIDTH + x) * 4) as usize;
+                        page[i..i + 3] != [255; 3]
+                    })
+                }),
+                "heading must cross the column gutter"
+            );
+        }
+        for index in 0..5 {
+            let y = heading_height + 24 + index * 108;
+            scene_label(&mut page, 344., y as f32, &format!("Group {index}"));
+            scene_label(
+                &mut page,
+                344.,
+                (y + 20) as f32,
+                &format!("Data {}", index * 17 + 13),
+            );
+        }
+        // The last variant includes a fixed browser-like strip above the page.
+        if heading_height == 480 {
+            page[..bar.len()].copy_from_slice(&bar);
+        }
+        let pin_at = heading_height + 80;
+        let capture = |top: u32| {
+            let mut frame = viewport(&page, top);
+            let side_top = top.min(pin_at);
+            for y in 0..HEIGHT {
+                let dst = ((y * WIDTH + 336) * 4) as usize;
+                let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+                let bytes = ((WIDTH - 336) * 4) as usize;
+                frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+            }
+            if heading_height == 480 {
+                frame[..bar.len()].copy_from_slice(&bar);
+            }
+            frame
+        };
+        let mut sheet =
+            ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+        assert!(
+            sheet.sidebar.is_some(),
+            "undetected sidebar below heading {heading_height}"
+        );
+        assert!(
+            (312..344).contains(&sheet.sidebar.as_ref().unwrap().left()),
+            "split inside sidebar below heading {heading_height}"
+        );
+        for top in (40..=960).step_by(40) {
+            let result = sheet.push(&capture(top));
+            assert!(
+                matches!(result, Fold::GrewBottom { dy: 40, .. }),
+                "heading {heading_height}, top {top}: {result:?}"
+            );
+            assert_pixels(
+                sheet.canvas(),
+                &page[..((HEIGHT + top) * WIDTH * 4) as usize],
+                0,
+                HEIGHT + top,
+            );
+        }
+        if heading_height == 480 {
+            export_scene(
+                "sparse-sidebar",
+                &capture(960),
+                &sheet,
+                &page[..((HEIGHT + 960) * WIDTH * 4) as usize],
+            );
+        }
+    }
+}
+
+#[test]
+fn slow_scroll_continues_when_pinned_sidebar_ends_near_capture_bottom() {
+    let (mut page, _) = pinned_heading_scene(246);
+    for y in 720..PAGE_HEIGHT {
+        for x in 340..WIDTH {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            page[i..i + 4].fill(255);
+        }
+    }
+    for dark in [false, true] {
+        if dark {
+            for pixel in page.as_chunks_mut::<4>().0 {
+                for value in &mut pixel[..3] {
+                    *value = 255 - *value;
+                }
+            }
+        }
+        for step in [1u32, 4, 12] {
+            let capture = |top: u32| {
+                let mut frame = viewport(&page, top);
+                let side_top = top.min(80);
+                for y in 0..HEIGHT {
+                    let dst = ((y * WIDTH + 336) * 4) as usize;
+                    let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+                    let bytes = ((WIDTH - 336) * 4) as usize;
+                    frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                }
+                frame
+            };
+            let mut sheet =
+                ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+            let mut accepted_top = 0;
+            let mut uncertain = 0;
+            for top in (step..=240).step_by(step as usize) {
+                let result = sheet.push(&capture(top));
+                match result {
+                    Fold::GrewBottom { dy, .. } => {
+                        assert_eq!(dy, top - accepted_top);
+                        accepted_top = top;
+                        uncertain = 0;
+                    }
+                    Fold::Refused(super::Refusal::Unclear) => {
+                        uncertain += 1;
+                        assert!(uncertain <= 3, "slow scroll cannot remain stalled at {top}");
+                    }
+                    _ => panic!("step {step} at {top}: {result:?}"),
+                }
+                assert_pixels(
+                    sheet.canvas(),
+                    &page[..((HEIGHT + accepted_top) * WIDTH * 4) as usize],
+                    0,
+                    HEIGHT + accepted_top,
+                );
+                assert!(!sheet.has_incomplete_column());
+            }
+            assert_eq!(accepted_top, 240);
+            if step == 1 {
+                export_scene(
+                    if dark {
+                        "short-sidebar-margin-dark"
+                    } else {
+                        "short-sidebar-margin"
+                    },
+                    &capture(240),
+                    &sheet,
+                    &page[..((HEIGHT + 240) * WIDTH * 4) as usize],
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn column_repaint_failure_does_not_block_body_and_recovers_without_losing_rows() {
+    let (page, _) = pinned_heading_scene(246);
+    let mut sheet =
+        ScrollSheet::new(WIDTH, HEIGHT, &viewport(&page, 0), SheetLimits::default()).unwrap();
+    assert!(matches!(
+        sheet.push(&viewport(&page, 40)),
+        Fold::GrewBottom { dy: 40, .. }
+    ));
+    let before = sheet.canvas().to_vec();
+    for top in [80, 120] {
+        let mut frame = viewport(&page, top);
+        for y in 0..HEIGHT {
+            for x in 336..WIDTH {
+                let i = ((y * WIDTH + x) * 4) as usize;
+                let value = ((x * 71 + y * 193 + x * y * 17) % 251) as u8;
+                frame[i..i + 3].fill(value);
+            }
+        }
+        let result = sheet.push(&frame);
+        assert!(
+            matches!(result, Fold::GrewBottom { dy: 40, .. }),
+            "{top}: {result:?}"
+        );
+        assert!(
+            sheet.has_incomplete_column(),
+            "repeated rejected column stays incomplete"
+        );
+        for y in 0..HEIGHT + top {
+            let i = (y * WIDTH * 4) as usize;
+            assert_eq!(&sheet.canvas()[i..i + 312 * 4], &page[i..i + 312 * 4]);
+            if y < HEIGHT + 40 {
+                assert_eq!(
+                    &sheet.canvas()[i + 344 * 4..i + WIDTH as usize * 4],
+                    &before[i + 344 * 4..i + WIDTH as usize * 4]
+                );
+            }
+        }
+    }
+    let revision = sheet.top_revision();
+    assert!(matches!(
+        sheet.push(&viewport(&page, 120)),
+        Fold::Shifted { dy: 0 }
+    ));
+    assert!(sheet.top_revision() > revision);
+    assert!(!sheet.has_incomplete_column());
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 120) * WIDTH * 4) as usize],
+        0,
+        HEIGHT + 120,
+    );
+    let result = sheet.push(&viewport(&page, 160));
+    assert!(
+        matches!(result, Fold::GrewBottom { dy: 40, .. }),
+        "{result:?}"
+    );
+    assert!(!sheet.has_incomplete_column());
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 160) * WIDTH * 4) as usize],
+        0,
+        HEIGHT + 160,
+    );
+}
+
+#[test]
+fn patterned_column_uses_gutter_padding_and_reports_unobserved_extent() {
+    let (mut page, _) = pinned_heading_scene(246);
+    let mut random = 17u32;
+    for y in 0..PAGE_HEIGHT {
+        for x in 340..WIDTH {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            let value = 80 + (random % 150) as u8;
+            let i = ((y * WIDTH + x) * 4) as usize;
+            page[i..i + 3].fill(value);
+        }
+    }
+    let capture = |top: u32, pin: bool| {
+        let mut frame = viewport(&page, top);
+        let side_top = if pin { top.min(80) } else { top };
+        for y in 0..HEIGHT {
+            let dst = ((y * WIDTH + 336) * 4) as usize;
+            let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+            let bytes = ((WIDTH - 336) * 4) as usize;
+            frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+        }
+        frame
+    };
+    let mut sheet =
+        ScrollSheet::new(WIDTH, HEIGHT, &capture(0, true), SheetLimits::default()).unwrap();
+    for top in [40, 80, 120, 160] {
+        let result = sheet.push(&capture(top, true));
+        assert!(
+            matches!(result, Fold::GrewBottom { dy: 40, .. }),
+            "{top}: {result:?}"
+        );
+        assert_eq!(sheet.has_incomplete_column(), top > 80);
+        let left = sheet.sidebar.as_ref().unwrap().left();
+        for y in 0..HEIGHT + top {
+            let i = (y * WIDTH * 4) as usize;
+            assert_eq!(&sheet.canvas()[i..i + left * 4], &page[i..i + left * 4]);
+            let side = &sheet.canvas()[i + left * 4..i + WIDTH as usize * 4];
+            if y < HEIGHT + 80 {
+                assert_eq!(side, &page[i + left * 4..i + WIDTH as usize * 4]);
+            } else {
+                assert!(
+                    side.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|pixel| *pixel == [255; 4])
+                );
+            }
+        }
+    }
+    assert!(matches!(
+        sheet.push(&capture(200, false)),
+        Fold::GrewBottom { dy: 40, .. }
+    ));
+    assert!(!sheet.has_incomplete_column());
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 200) * WIDTH * 4) as usize],
+        0,
+        HEIGHT + 200,
+    );
+}
+
+#[test]
+fn moving_outer_scrollbar_does_not_stall_the_body_or_repeat_pinned_column_text() {
+    let (mut page, _) = pinned_heading_scene(246);
+    for y in 720..PAGE_HEIGHT {
+        for x in 340..WIDTH {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            page[i..i + 4].fill(255);
+        }
+    }
+    let capture = |top: u32| {
+        let mut frame = viewport(&page, top);
+        let side_top = top.min(80);
+        for y in 0..HEIGHT {
+            let dst = ((y * WIDTH + 336) * 4) as usize;
+            let src = (((side_top + y) * WIDTH + 336) * 4) as usize;
+            let bytes = ((WIDTH - 336) * 4) as usize;
+            frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+            for x in WIDTH - 4..WIDTH {
+                let i = ((y * WIDTH + x) * 4) as usize;
+                let value = if (24 + top / 3..104 + top / 3).contains(&y) {
+                    120
+                } else {
+                    240
+                };
+                frame[i..i + 3].fill(value);
+            }
+        }
+        frame
+    };
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+    for top in (8..=240).step_by(8) {
+        let result = sheet.push(&capture(top));
+        assert!(
+            matches!(result, Fold::GrewBottom { dy: 8, .. }),
+            "{top}: {result:?}"
+        );
+        let left = sheet.sidebar.as_ref().unwrap().left();
+        for y in 0..HEIGHT + top {
+            let i = (y * WIDTH * 4) as usize;
+            assert_eq!(&sheet.canvas()[i..i + left * 4], &page[i..i + left * 4]);
+            assert_eq!(
+                &sheet.canvas()[i + left * 4..i + (WIDTH - 4) as usize * 4],
+                &page[i + left * 4..i + (WIDTH - 4) as usize * 4]
+            );
+        }
+    }
+}
+
+#[test]
+fn sidebar_padding_is_opaque_and_later_full_width_sections_survive() {
+    for (background, contrasting) in [(255u8, true), (0, true), (255, false), (0, false)] {
+        for step in [8u32, 40, 96] {
+            let (mut page, _) = pinned_heading_scene(246);
+            for y in 720..PAGE_HEIGHT {
+                for x in 336..WIDTH {
+                    let i = ((y * WIDTH + x) * 4) as usize;
+                    page[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+            // Independently rasterized article content replaces the two-column
+            // layout, with both unchanged and contrasting section backgrounds.
+            let full_width = document();
+            let first = (1_000 * WIDTH * 4) as usize;
+            page[first..].copy_from_slice(&full_width[first..]);
+            scene_label(&mut page, 300., 1_002., "HHHHxxxxHHHH next section");
+            if contrasting {
+                for pixel in page[first..].as_chunks_mut::<4>().0 {
+                    if pixel[..3] == [255; 3] {
+                        pixel[..3].fill(218);
+                    }
+                }
+            }
+            if background != 255 {
+                for pixel in page.as_chunks_mut::<4>().0 {
+                    for channel in &mut pixel[..3] {
+                        *channel = 255 - *channel;
+                    }
+                }
+            }
+            let (_, mut chrome) = pinned_heading_scene(226);
+            scene_label(&mut chrome, 348., 10., "Fixed tools");
+            page[..chrome.len()].copy_from_slice(&chrome);
+            let capture = |top: u32| {
+                let mut frame = viewport(&page, top);
+                for y in 0..HEIGHT {
+                    if top + y < 1_000 {
+                        let dst = ((y * WIDTH + 336) * 4) as usize;
+                        let src = (((top.min(80) + y) * WIDTH + 336) * 4) as usize;
+                        let bytes = ((WIDTH - 336) * 4) as usize;
+                        frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                    }
+                    for x in WIDTH - 4..WIDTH {
+                        let i = ((y * WIDTH + x) * 4) as usize;
+                        let value = if (24 + top / 3..104 + top / 3).contains(&y) {
+                            120
+                        } else {
+                            240
+                        };
+                        frame[i..i + 3].fill(value);
+                    }
+                }
+                frame[..chrome.len()].copy_from_slice(&chrome);
+                frame
+            };
+            let mut sheet =
+                ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+            let end = 1_120u32.div_ceil(step) * step;
+            let mut accepted = 0;
+            let mut unclear = 0;
+            for top in (step..=end).step_by(step as usize) {
+                let result = sheet.push(&capture(top));
+                match result {
+                    Fold::GrewBottom { dy, .. } => {
+                        assert_eq!(dy, top - accepted);
+                        accepted = top;
+                        unclear = 0;
+                    }
+                    Fold::Refused(super::Refusal::Unclear) => {
+                        unclear += 1;
+                        assert!(unclear <= 3, "stalled at {top}");
+                    }
+                    _ => panic!("background {background}, step {step}, at {top}: {result:?}"),
+                }
+                assert!(
+                    sheet
+                        .canvas()
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|pixel| pixel[3] == 255),
+                    "transparent padding at {top}"
+                );
+            }
+            assert_eq!(accepted, end);
+            let assert_content = |sheet: &ScrollSheet| {
+                for y in 0..HEIGHT + end {
+                    let i = (y * WIDTH * 4) as usize;
+                    let bytes = (WIDTH - 4) as usize * 4;
+                    let wrong = sheet.canvas()[i..i + bytes]
+                        .iter()
+                        .zip(&page[i..i + bytes])
+                        .position(|(a, b)| a != b);
+                    assert!(
+                        wrong.is_none(),
+                        "background {background}, contrast {contrasting}, step {step}, row {y}, byte {wrong:?}"
+                    );
+                }
+            };
+            assert_content(&sheet);
+            for top in (0..end).step_by(step as usize).rev() {
+                let result = sheet.push(&capture(top));
+                match result {
+                    Fold::Shifted { dy } => {
+                        assert_eq!(dy, top as i32 - accepted as i32);
+                        accepted = top;
+                        unclear = 0;
+                    }
+                    Fold::Refused(super::Refusal::Unclear) => {
+                        unclear += 1;
+                        assert!(unclear <= 3, "return stalled at {top}");
+                    }
+                    _ => panic!("return {top}: {result:?}"),
+                }
+                assert_content(&sheet);
+            }
+            assert_eq!(accepted, 0);
+            if step == 40 {
+                export_scene(
+                    if background == 255 {
+                        "sidebar-to-full-width"
+                    } else {
+                        "sidebar-to-full-width-dark"
+                    },
+                    &capture(end),
+                    &sheet,
+                    &page[..((HEIGHT + end) * WIDTH * 4) as usize],
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_pinned_panel_resuming_with_a_wide_rule_is_not_new_document_content() {
+    for footer in [false, true] {
+        for dark in [false, true] {
+            for step in [8u32, 40, 96] {
+                let (mut page, _) = pinned_heading_scene(246);
+                for y in 980..PAGE_HEIGHT {
+                    for x in 326..WIDTH {
+                        let i = ((y * WIDTH + x) * 4) as usize;
+                        page[i..i + 4].fill(255);
+                    }
+                }
+                for x in 326..WIDTH {
+                    let i = ((300 * WIDTH + x) * 4) as usize;
+                    page[i..i + 3].fill(200);
+                }
+                if footer {
+                    let full_width = document();
+                    let first = (1_400 * WIDTH * 4) as usize;
+                    page[first..].copy_from_slice(&full_width[first..]);
+                    for pixel in page[first..].as_chunks_mut::<4>().0 {
+                        if pixel[..3] == [255; 3] {
+                            pixel[..3].fill(218);
+                        }
+                    }
+                }
+                if dark {
+                    for pixel in page.as_chunks_mut::<4>().0 {
+                        for channel in &mut pixel[..3] {
+                            *channel = 255 - *channel;
+                        }
+                    }
+                }
+                let (_, mut chrome) = pinned_heading_scene(226);
+                scene_label(&mut chrome, 348., 10., "Panel controls");
+                page[..chrome.len()].copy_from_slice(&chrome);
+                let capture = |top: u32| {
+                    let side_top = if top > 600 { top - 400 } else { top.min(200) };
+                    let mut frame = viewport(&page, top);
+                    for y in 0..HEIGHT {
+                        if footer && top + y >= 1_400 {
+                            continue;
+                        }
+                        let dst = ((y * WIDTH + 326) * 4) as usize;
+                        let src = (((side_top + y) * WIDTH + 326) * 4) as usize;
+                        let bytes = ((WIDTH - 326) * 4) as usize;
+                        frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                    }
+                    frame[..chrome.len()].copy_from_slice(&chrome);
+                    frame
+                };
+                let mut sheet =
+                    ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+                assert!(sheet.sidebar.is_some());
+                let end = 1_200u32.div_ceil(step) * step;
+                let mut accepted = 0;
+                let mut unclear = 0;
+                for top in (step..=end).step_by(step as usize) {
+                    match sheet.push(&capture(top)) {
+                        Fold::GrewBottom { dy, .. } => {
+                            assert_eq!(dy, top - accepted);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "stalled at {top}");
+                        }
+                        result => panic!(
+                            "footer {footer}, dark {dark}, step {step}, at {top}: {result:?}"
+                        ),
+                    }
+                }
+                assert_eq!(accepted, end);
+                let assert_content = |sheet: &ScrollSheet| {
+                    for y in 0..HEIGHT + end {
+                        for x in 0..WIDTH {
+                            let i = ((y * WIDTH + x) * 4) as usize;
+                            assert_eq!(
+                                &sheet.canvas()[i..i + 4],
+                                &page[i..i + 4],
+                                "footer {footer}, dark {dark}, step {step}: ({x}, {y})"
+                            );
+                        }
+                    }
+                };
+                assert_content(&sheet);
+                for top in (0..end).step_by(step as usize).rev() {
+                    match sheet.push(&capture(top)) {
+                        Fold::Shifted { dy } => {
+                            assert_eq!(dy, top as i32 - accepted as i32);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "return stalled at {top}");
+                        }
+                        result => panic!("return {top}: {result:?}"),
+                    }
+                    assert_content(&sheet);
+                }
+                assert_eq!(accepted, 0);
+                if step == 40 && !dark {
+                    export_scene(
+                        if footer {
+                            "resumed-panel-footer"
+                        } else {
+                            "resumed-panel"
+                        },
+                        &capture(end),
+                        &sheet,
+                        &page[..((HEIGHT + end) * WIDTH * 4) as usize],
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_resumed_column_recovers_after_partial_repaints_without_splitting_its_tail() {
+    for step in [8u32, 40, 96] {
+        for bad_frames in [1, 3] {
+            for dark in [false, true] {
+                let (mut page, _) = pinned_heading_scene(246);
+                for y in 980..PAGE_HEIGHT {
+                    for x in 326..WIDTH {
+                        let at = ((y * WIDTH + x) * 4) as usize;
+                        page[at..at + 4].fill(255);
+                    }
+                }
+                for y in [300, 810] {
+                    for x in 326..WIDTH {
+                        let at = ((y * WIDTH + x) * 4) as usize;
+                        page[at..at + 3].fill(200);
+                    }
+                }
+                let (_, mut chrome) = pinned_heading_scene(226);
+                scene_label(&mut chrome, 348., 10., "Panel controls");
+                page[..chrome.len()].copy_from_slice(&chrome);
+                if dark {
+                    for pixel in page.as_chunks_mut::<4>().0 {
+                        for value in &mut pixel[..3] {
+                            *value = 255 - *value;
+                        }
+                    }
+                    let bytes = chrome.len();
+                    chrome.copy_from_slice(&page[..bytes]);
+                }
+                let first_bad = (600 / step + 1) * step;
+                let bad = first_bad..first_bad + bad_frames * step;
+                let capture = |top: u32| {
+                    let side_top = if top > 600 { top - 400 } else { top.min(200) };
+                    let mut frame = viewport(&page, top);
+                    for y in 0..HEIGHT {
+                        let dst = ((y * WIDTH + 326) * 4) as usize;
+                        let src = (((side_top + y) * WIDTH + 326) * 4) as usize;
+                        let bytes = ((WIDTH - 326) * 4) as usize;
+                        frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                        if bad.contains(&top) && (48..440).contains(&y) {
+                            for (x, pixel) in frame[dst..dst + bytes]
+                                .as_chunks_mut::<4>()
+                                .0
+                                .iter_mut()
+                                .enumerate()
+                            {
+                                pixel[..3].fill(((y as usize * 17 + x * 37) % 160) as u8);
+                            }
+                        }
+                    }
+                    frame[..chrome.len()].copy_from_slice(&chrome);
+                    frame
+                };
+                let mut sheet =
+                    ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+                let end = 1_200u32.div_ceil(step) * step;
+                let mut accepted = 0;
+                let mut unclear = 0;
+                for top in (step..=end).step_by(step as usize) {
+                    match sheet.push(&capture(top)) {
+                        Fold::GrewBottom { dy, .. } => {
+                            assert_eq!(dy, top - accepted);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "body stalled at {top}");
+                        }
+                        result => panic!(
+                            "step {step}, bad {bad_frames}, dark {dark}, at {top}: {result:?}"
+                        ),
+                    }
+                }
+                assert_eq!(accepted, end);
+                let expected = &page[..((HEIGHT + end) * WIDTH * 4) as usize];
+                if step == 40 && bad_frames == 1 && !dark {
+                    export_scene("repainted-column", &capture(end), &sheet, expected);
+                }
+                assert_pixels(sheet.canvas(), expected, 0, HEIGHT + end);
+                for top in (0..end).step_by(step as usize).rev() {
+                    match sheet.push(&capture(top)) {
+                        Fold::Shifted { dy } => {
+                            assert_eq!(dy, top as i32 - accepted as i32);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "return stalled at {top}");
+                        }
+                        result => panic!("return {top}: {result:?}"),
+                    }
+                    if bad.contains(&top) {
+                        assert_pixels(sheet.canvas(), expected, 0, HEIGHT + end);
+                    }
+                }
+                assert_eq!(accepted, 0);
+                assert_pixels(sheet.canvas(), expected, 0, HEIGHT + end);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_document_rule_above_resumed_metadata_does_not_duplicate_the_panel() {
+    for step in [8u32, 40, 96] {
+        for dark in [false, true] {
+            for footer in [false, true] {
+                let (mut page, _) = pinned_heading_scene(246);
+                for y in 980..PAGE_HEIGHT {
+                    for x in 326..WIDTH {
+                        let at = ((y * WIDTH + x) * 4) as usize;
+                        page[at..at + 4].fill(255);
+                    }
+                }
+                if footer {
+                    let full_width = document();
+                    let first = (1_400 * WIDTH * 4) as usize;
+                    page[first..].copy_from_slice(&full_width[first..]);
+                    scene_label(&mut page, 300., 1_402., "Next full-width section");
+                }
+                let (_, mut chrome) = pinned_heading_scene(226);
+                page[..chrome.len()].copy_from_slice(&chrome);
+                if dark {
+                    for pixel in page.as_chunks_mut::<4>().0 {
+                        for value in &mut pixel[..3] {
+                            *value = 255 - *value;
+                        }
+                    }
+                    let bytes = chrome.len();
+                    chrome.copy_from_slice(&page[..bytes]);
+                }
+                let capture = |top: u32| {
+                    let side_top = if top > 600 { top - 400 } else { top.min(200) };
+                    let mut frame = viewport(&page, top);
+                    for y in 0..HEIGHT {
+                        if footer && top + y >= 1_400 {
+                            continue;
+                        }
+                        let dst = ((y * WIDTH + 326) * 4) as usize;
+                        let src = (((side_top + y) * WIDTH + 326) * 4) as usize;
+                        let bytes = ((WIDTH - 326) * 4) as usize;
+                        frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+                        // A wide document decoration can overlap a separately
+                        // positioned panel without owning its metadata below.
+                        let rule = if dark { 900..904 } else { 900..901 };
+                        if top >= 600 && rule.contains(&(top + y)) {
+                            for x in 321..WIDTH {
+                                let at = ((y * WIDTH + x) * 4) as usize;
+                                frame[at..at + 3].fill(if dark { 75 } else { 180 });
+                            }
+                        }
+                    }
+                    frame[..chrome.len()].copy_from_slice(&chrome);
+                    frame
+                };
+                let mut sheet =
+                    ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+                let end = 1_200u32.div_ceil(step) * step;
+                let mut accepted = 0;
+                let mut unclear = 0;
+                for top in (step..=end).step_by(step as usize) {
+                    match sheet.push(&capture(top)) {
+                        Fold::GrewBottom { dy, .. } => {
+                            assert_eq!(dy, top - accepted);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "body stalled at {top}");
+                        }
+                        result => panic!(
+                            "step {step}, dark {dark}, footer {footer}, at {top}: {result:?}"
+                        ),
+                    }
+                }
+                assert_eq!(accepted, end);
+                let expected = &page[..((HEIGHT + end) * WIDTH * 4) as usize];
+                if step == 40 && !dark {
+                    export_scene(
+                        if footer {
+                            "column-crossing-rule-footer"
+                        } else {
+                            "column-crossing-rule"
+                        },
+                        &capture(end),
+                        &sheet,
+                        expected,
+                    );
+                }
+                assert_pixels(sheet.canvas(), expected, 0, HEIGHT + end);
+                for top in (0..end).step_by(step as usize).rev() {
+                    match sheet.push(&capture(top)) {
+                        Fold::Shifted { dy } => {
+                            assert_eq!(dy, top as i32 - accepted as i32);
+                            accepted = top;
+                            unclear = 0;
+                        }
+                        Fold::Refused(super::Refusal::Unclear) => {
+                            unclear += 1;
+                            assert!(unclear <= 3, "return stalled at {top}");
+                        }
+                        result => panic!("return {top}: {result:?}"),
+                    }
+                    assert_pixels(sheet.canvas(), expected, 0, HEIGHT + end);
+                }
+                assert_eq!(accepted, 0);
+            }
+        }
+    }
+}
+
 /// A compositor frame over a captured window, with antialiased rounded corners
 /// and an opaque desktop behind it. The same geometry draws the expected outer
 /// perimeter of a finished long image; it never draws interior seams.
@@ -676,6 +1639,133 @@ fn rounded_window(pixels: &mut [u8], width: u32, radius: f32, border: [u8; 3]) {
             }
         }
     }
+}
+
+#[test]
+fn rounded_window_frame_stays_on_the_outer_perimeter_of_a_stitched_document() {
+    for dark in [false, true] {
+        for (step, radius) in [(8, 8.), (40, 24.), (96, 40.)] {
+            let border = if dark { [170, 80, 220] } else { [20, 130, 230] };
+            check_rounded_window_column(step, radius, dark, false, border);
+        }
+    }
+}
+
+#[test]
+fn rounded_window_preserves_pinned_column_glyphs_near_the_bottom_edge() {
+    for dark in [false, true] {
+        for (step, radius) in [(8, 8.), (40, 24.), (96, 40.)] {
+            let border = if dark { [170, 80, 220] } else { [20, 130, 230] };
+            check_rounded_window_column(step, radius, dark, true, border);
+        }
+        check_rounded_window_column(16, 24., dark, true, [if dark { 215 } else { 40 }; 3]);
+    }
+}
+
+fn check_rounded_window_column(
+    step: u32,
+    radius: f32,
+    dark: bool,
+    low_text: bool,
+    border: [u8; 3],
+) {
+    let (mut page, mut chrome) = pinned_heading_scene(226);
+    for y in 720..1_400 {
+        for x in 326..WIDTH {
+            let at = ((y * WIDTH + x) * 4) as usize;
+            page[at..at + 4].fill(255);
+        }
+    }
+    if low_text {
+        for y in (734..826).step_by(18) {
+            scene_label(&mut page, 344.25, y as f32 + 0.25, &format!("Tail {y}"));
+        }
+    }
+    let full_width = document();
+    let first = (1_400 * WIDTH * 4) as usize;
+    page[first..].copy_from_slice(&full_width[first..]);
+    scene_label(&mut page, 300., 1_402., "Wide footer content");
+    page[..chrome.len()].copy_from_slice(&chrome);
+    if dark {
+        for pixels in [&mut page, &mut chrome] {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
+                for channel in &mut pixel[..3] {
+                    *channel = 255 - *channel;
+                }
+            }
+        }
+    }
+    let capture = |top: u32| {
+        let mut frame = viewport(&page, top);
+        for y in 0..HEIGHT {
+            if top + y < 1_400 {
+                let dst = ((y * WIDTH + 326) * 4) as usize;
+                let src = (((top.min(200) + y) * WIDTH + 326) * 4) as usize;
+                let bytes = ((WIDTH - 326) * 4) as usize;
+                frame[dst..dst + bytes].copy_from_slice(&page[src..src + bytes]);
+            }
+        }
+        frame[..chrome.len()].copy_from_slice(&chrome);
+        rounded_window(&mut frame, WIDTH, radius, border);
+        frame
+    };
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &capture(0), SheetLimits::default()).unwrap();
+    let mut accepted = 0;
+    let mut unclear = 0;
+    for top in (step..1_200).step_by(step as usize).chain([1_200]) {
+        let result = sheet.push(&capture(top));
+        if low_text {
+            for y in HEIGHT - HEIGHT / 8..HEIGHT - 3 {
+                for x in 80..WIDTH - 80 {
+                    assert!(
+                        !sheet.floating.frame_edge.mask()[(y * WIDTH + x) as usize],
+                        "frame mask covers document at {x},{y}, scroll {top}"
+                    );
+                }
+            }
+        }
+        match result {
+            Fold::GrewBottom { dy, .. } => {
+                assert_eq!(dy, top - accepted);
+                accepted = top;
+                unclear = 0;
+            }
+            Fold::Refused(super::Refusal::Unclear) => {
+                unclear += 1;
+                assert!(unclear <= 3, "stalled at {top}");
+            }
+            result => panic!("step {step}, radius {radius}, dark {dark}, at {top}: {result:?}"),
+        }
+    }
+    assert_eq!(accepted, 1_200);
+    let mut expected = page[..((HEIGHT + 1_200) * WIDTH * 4) as usize].to_vec();
+    rounded_window(&mut expected, WIDTH, radius, border);
+    export_scene(
+        &format!("rounded-window-{step}-{dark}-{low_text}"),
+        &capture(1_200),
+        &sheet,
+        &expected,
+    );
+    assert_window_pixels(sheet.canvas(), &expected);
+    for top in (0..1_200).step_by(step as usize).rev() {
+        let result = sheet.push(&capture(top));
+        match result {
+            Fold::Shifted { dy } => {
+                assert_eq!(dy, top as i32 - accepted as i32);
+                accepted = top;
+                unclear = 0;
+            }
+            Fold::Refused(super::Refusal::Unclear) => {
+                unclear += 1;
+                assert!(unclear <= 3, "return stalled at {top}");
+            }
+            result => {
+                panic!("return step {step}, radius {radius}, dark {dark}, at {top}: {result:?}")
+            }
+        }
+        assert_window_pixels(sheet.canvas(), &expected);
+    }
+    assert_eq!(accepted, 0);
 }
 
 fn assert_window_pixels(actual: &[u8], expected: &[u8]) {
@@ -719,6 +1809,7 @@ fn rounded_window_preserves_content_when_captured_from_the_bottom() {
     };
     let mut sheet =
         ScrollSheet::new(WIDTH, HEIGHT, &capture(1_200), SheetLimits::default()).unwrap();
+    assert!(sheet.sidebar.is_none());
     for top in (0..1_200).step_by(40).rev() {
         assert!(
             matches!(sheet.push(&capture(top)), Fold::GrewTop { dy: 40, .. }),
@@ -790,4 +1881,52 @@ fn removed_window_frame_does_not_mask_later_document_content() {
         HEIGHT + 400,
         HEIGHT + 1_200,
     );
+}
+
+#[test]
+fn independent_column_exclusion_preserves_body_and_later_section_controls() {
+    let page = document();
+    let row = WIDTH as usize * 4;
+    for (step, opacity) in [(8, 1.), (40, 0.85)] {
+        let capture = |top| {
+            let mut frame = viewport(&page, top);
+            control(&mut frame, (180.25, 318.75), opacity);
+            control(&mut frame, (399.25, 510.75), opacity);
+            frame
+        };
+        let mut canvas = capture(0);
+        let mut floating = super::floating::FloatingOverlays::new(&canvas, WIDTH);
+        for top in (step..=400).step_by(step as usize) {
+            let frame = capture(top);
+            let retained = 0..canvas.len() / row;
+            canvas.resize((top + HEIGHT) as usize * row, 0);
+            floating.observe_frame_edge(&frame, step as i32);
+            floating.observe(&frame, (WIDTH, HEIGHT), Some((321, 0..400)));
+            floating.composite(
+                &mut canvas,
+                &frame,
+                WIDTH as usize,
+                top as usize,
+                0..HEIGHT as usize,
+                retained,
+            );
+        }
+        let expected = &page[..(400 + HEIGHT) as usize * row];
+        assert_pixels(&canvas, expected, 0, 400 + HEIGHT);
+        for top in (0..400).step_by(step as usize).rev() {
+            let frame = capture(top);
+            floating.observe_frame_edge(&frame, -(step as i32));
+            floating.observe(&frame, (WIDTH, HEIGHT), Some((321, 0..400)));
+            let retained = 0..canvas.len() / row;
+            floating.composite(
+                &mut canvas,
+                &frame,
+                WIDTH as usize,
+                top as usize,
+                0..HEIGHT as usize,
+                retained,
+            );
+            assert_pixels(&canvas, expected, 0, 400 + HEIGHT);
+        }
+    }
 }
