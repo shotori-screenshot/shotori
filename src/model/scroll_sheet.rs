@@ -55,10 +55,13 @@
 //!   commits as a band: masked out of matching, and written ONCE at the
 //!   sheet top — pinned chrome must not repeat down the long image. See
 //!   [`StickyBands`].
-//! - **Newest-wins sheet** — on every accepted frame the whole viewport
-//!   rectangle is rewritten into the sheet (not just the new band). Where
-//!   old and new overlap the fresh pixels win, so blinking carets and
-//!   lazy-loading images leave the *latest* state in the output.
+//! - **Visible-content composition** — accepted frames refresh the viewport,
+//!   except for localized stationary overlays detected from edges that stay
+//!   fixed while the surrounding page moves. These regions retain previously
+//!   captured pixels; later unobstructed observations repair seed occlusions.
+//!   A bounded halo includes the button face, antialiasing and nearby shadow.
+//!   Regions never observed unobstructed retain their captured pixels; the
+//!   compositor does not invent missing text or paint a guessed background.
 //! - **One position base, and refusals write nothing** — a frame is only
 //!   ever placed against the last frame the sheet actually advanced to
 //!   (`stable_profile`). Measuring the step against *any* nearer frame
@@ -95,20 +98,21 @@
 //! surgery is needed.)
 //!
 //! Known limitations (deliberate): integer offsets only (sub-pixel smooth
-//! scrolling can drop/duplicate one seam row per step), fixed elements
-//! in the middle of the frame (an in-table sticky header) are not
-//! detected (only edge-anchored bands are), collapsing toolbars keep
-//! their tallest extent (rows a shrunken band exposes are lost, not
-//! misplaced), single contiguous sheet (no tiling for multi-hundred-MB
-//! captures).
+//! scrolling can drop/duplicate one seam row per step), broad or animated
+//! floating panels and content never exposed by scrolling cannot be recovered,
+//! collapsing toolbars keep their tallest extent (rows a shrunken band exposes
+//! are lost, not misplaced), single contiguous sheet (no tiling for
+//! multi-hundred-MB captures).
 
 //! The impl is split by concern: [`profile`] (frame profiles + the
-//! band mask), [`sticky`] (fixed-chrome detection), [`matcher`] (the
-//! offset search and its refusal taxonomy) and [`preview`] (the live
+//! band mask), [`sticky`] (edge chrome), [`floating`] (local overlays and
+//! overlap composition), [`matcher`] (the offset search and its refusal
+//! taxonomy) and [`preview`] (the live
 //! panel's geometry and the HUD phase ladder). The tests stay in this
 //! file: one fixture set drives the whole pipeline through
 //! [`ScrollSheet::push`].
 
+use floating::FloatingOverlays;
 use matcher::{Placement, estimate_offset};
 use profile::{MotionMask, RowProfile};
 use std::io::Write as _;
@@ -378,6 +382,7 @@ pub(crate) struct ScrollSheet {
     /// remembered substitute, because a guessed position writes correct
     /// pixels over rows that were already right (see `place`).
     stable_profile: RowProfile,
+    floating: FloatingOverlays,
     /// Fixed-sidebar mask learned from consecutive frames (see
     /// [`MotionMask`]): bands that never move are chrome, not content.
     motion: MotionMask,
@@ -388,10 +393,8 @@ pub(crate) struct ScrollSheet {
     /// Diagnostics for the scroll loop's logs / progress UI.
     frames_pushed: usize,
     frames_accepted: usize,
-    /// How many times rows were spliced in ABOVE the sheet content — a
-    /// prepend, a fixed-band commit or an axis switch. The live preview
-    /// caches the pixels it holds; this is its staleness signal when the
-    /// window itself did not move.
+    /// Preview invalidation revision for prepends, band splices, axis
+    /// switches and floating-overlay repair within an existing viewport.
     top_shifts: u32,
 }
 
@@ -448,6 +451,7 @@ impl ScrollSheet {
                 position: 0,
                 max_position: 0,
             },
+            floating: FloatingOverlays::new(&seed),
             prev_raw: seed,
             prev_profile: profile.clone(),
             sticky: StickyBands::new(),
@@ -499,6 +503,7 @@ impl ScrollSheet {
         self.prev_raw = seed.clone();
         self.prev_profile = RowProfile::from_rgba(&seed, self.width, self.viewport_height);
         self.stable_profile = self.prev_profile.clone();
+        self.floating = FloatingOverlays::new(&seed);
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
@@ -566,7 +571,7 @@ impl ScrollSheet {
         )
     }
 
-    /// Content-splice counter (see the field docs): the live preview
+    /// Content revision for splices and occlusion repair. The live preview
     /// compares it to decide whether its cached window still matches.
     pub(crate) fn top_revision(&self) -> u32 {
         self.top_shifts
@@ -711,6 +716,14 @@ impl ScrollSheet {
             return Fold::Refused(Refusal::TooTall);
         }
 
+        let had_floating = !self.floating.is_empty();
+        self.floating
+            .observe(frame, (self.width, self.viewport_height), estimate.dy);
+        if had_floating || !self.floating.is_empty() {
+            // Occlusion repair changes pixels even inside a stationary preview.
+            self.top_shifts = self.top_shifts.saturating_add(1);
+        }
+
         // Sticky evidence rides on the same accepted match — stillness
         // is only meaningful against the base that produced it, and the
         // displacement probe needs the step that was accepted.
@@ -730,6 +743,12 @@ impl ScrollSheet {
 
         let row = self.width as usize * 4;
         let top = self.sticky.top as usize;
+        let prepend = if branch == Branch::Above {
+            growth as usize
+        } else {
+            0
+        };
+        let retained = top + prepend..self.canvas.len() / row - self.sticky.bot as usize + prepend;
         if branch == Branch::Above && growth > 0 {
             // Grow at the top of the CONTENT area: shift the content
             // rows down (memmove semantics — copy_within handles the
@@ -738,14 +757,15 @@ impl ScrollSheet {
             let shift = growth as usize * row;
             self.canvas.resize(self.canvas.len() + shift, 0);
             let len = self.canvas.len();
-            self.canvas.copy_within(top..len - shift, top + shift);
+            self.canvas
+                .copy_within(top * row..len - shift, top * row + shift);
             self.top_shifts = self.top_shifts.saturating_add(1);
         } else if branch == Branch::Below && growth > 0 {
             self.canvas
                 .resize(self.canvas.len() + growth as usize * row, 0);
         }
-        // Newest-wins: rewrite the whole viewport rectangle, not just the
-        // new band (see the module docs). With a committed top band the
+        // Refresh visible content across the viewport, preserving clean overlap
+        // under floating overlays. With a committed top band the
         // frame splits: rows [0, prefix) bottom-align into the band area
         // (rewritten every frame — a collapsing toolbar shrinks the live
         // prefix while the band keeps its tallest extent), rows from
@@ -795,12 +815,14 @@ impl ScrollSheet {
         // everything below moves down by `top`; a band pinned from the
         // first frame reuses the seed rows and shifts nothing). The
         // write destination must follow whichever happened.
-        let dst = (next.position as usize + start + self.sticky.inserted as usize) * row;
-        let src = start * row;
-        let content_bytes = (content_end - start) * row;
-        if content_bytes > 0 {
-            self.canvas[dst..dst + content_bytes].copy_from_slice(&frame[src..content_end * row]);
-        }
+        self.floating.composite(
+            &mut self.canvas,
+            frame,
+            self.width as usize,
+            next.position as usize + self.sticky.inserted as usize,
+            start..content_end,
+            retained,
+        );
         if bot > 0 && branch == Branch::Below {
             // One footer, at the growing bottom. Appends are the only
             // branch that grows the canvas downward, so this is the
@@ -895,6 +917,7 @@ impl ScrollSheet {
     }
 }
 
+mod floating;
 mod matcher;
 mod preview;
 mod profile;
@@ -1970,6 +1993,248 @@ mod tests {
     }
 
     // === Realistic manual-scroll probe =================================
+
+    /// An independently rasterized floating button: opaque face, dark glyph,
+    /// antialiased rim and translucent shadow over generated page content.
+    fn floating_button(frame: &mut [u8], center: (i32, i32)) {
+        let height = frame.len() / (TW as usize * 4);
+        for y in 0..height as i32 {
+            for x in 0..TW as i32 {
+                let dx = x - center.0;
+                let dy = y - center.1;
+                let radius = ((dx * dx + dy * dy) as f32).sqrt();
+                let (value, alpha) =
+                    if dx.abs() <= 1 && dy.abs() < 7 || (dy - 4).abs() < 2 && dx.abs() < 6 {
+                        (35., 1.)
+                    } else if radius < 12. {
+                        (250., 1.)
+                    } else if radius < 13. {
+                        (180., 13. - radius)
+                    } else if radius < 17. {
+                        (80., (17. - radius) * 0.06)
+                    } else {
+                        continue;
+                    };
+                let i = (y as usize * TW as usize + x as usize) * 4;
+                for channel in &mut frame[i..i + 3] {
+                    *channel = (f32::from(*channel) * (1. - alpha) + value * alpha).round() as u8;
+                }
+            }
+        }
+    }
+
+    fn assert_page_pixels(actual: &[u8], expected: &[u8]) {
+        assert_eq!(actual.len(), expected.len());
+        let differing = actual
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.as_chunks::<4>().0)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| (i % TW as usize, i / TW as usize))
+            .collect::<Vec<_>>();
+        assert!(
+            differing.is_empty(),
+            "{} incorrect pixels; first {:?}",
+            differing.len(),
+            differing.first()
+        );
+    }
+
+    #[test]
+    fn floating_button_recovers_seed_and_preserves_clean_overlap_in_both_directions() {
+        let page = text_page();
+        let viewport = 480;
+        let frame = |top| {
+            let mut frame = sample(&page, top as f32, viewport);
+            floating_button(&mut frame, (TW as i32 / 2, 240));
+            frame
+        };
+        let mut sheet =
+            ScrollSheet::new(TW, viewport, &frame(200), SheetLimits::default()).unwrap();
+        for top in (208..=360).step_by(8) {
+            let result = sheet.push(&frame(top));
+            assert!(
+                matches!(result, Fold::GrewBottom { dy: 8, .. }),
+                "{result:?}"
+            );
+        }
+        assert_page_pixels(sheet.canvas(), &sample(&page, 200., viewport + 160));
+        let revision = sheet.top_revision();
+        for top in (120..360).step_by(8).rev() {
+            let result = sheet.push(&frame(top));
+            assert!(
+                matches!(result, Fold::GrewTop { .. } | Fold::Shifted { .. }),
+                "{result:?}"
+            );
+        }
+        assert!(sheet.top_revision() > revision);
+        assert_page_pixels(sheet.canvas(), &sample(&page, 120., viewport + 240));
+    }
+
+    #[test]
+    fn floating_buttons_survive_small_steps_and_different_viewport_positions() {
+        let page = text_page();
+        let viewport = 640;
+        for step in [1, 2, 4, 16, 40] {
+            let frame = |top| {
+                let mut rgba = sample(&page, top as f32, viewport);
+                floating_button(&mut rgba, (85, 193));
+                floating_button(&mut rgba, (182, 507));
+                rgba
+            };
+            let mut sheet =
+                ScrollSheet::new(TW, viewport, &frame(0), SheetLimits::default()).unwrap();
+            for top in (step..=160).step_by(step as usize) {
+                let result = sheet.push(&frame(top));
+                assert!(
+                    matches!(result, Fold::GrewBottom { .. }),
+                    "step {step}: {result:?}"
+                );
+                if top >= 80 {
+                    assert_page_pixels(sheet.canvas(), &sample(&page, 0., viewport + top));
+                }
+            }
+            assert_page_pixels(sheet.canvas(), &sample(&page, 0., viewport + 160));
+        }
+    }
+
+    #[test]
+    fn floating_button_and_pinned_header_survive_prepending() {
+        let page = text_page();
+        let viewport = 640;
+        let header = sample(&page, 2_000., 32);
+        let frame = |top| {
+            let mut rgba = sample(&page, top as f32, viewport);
+            rgba[..header.len()].copy_from_slice(&header);
+            floating_button(&mut rgba, (120, 360));
+            rgba
+        };
+        let mut sheet =
+            ScrollSheet::new(TW, viewport, &frame(200), SheetLimits::default()).unwrap();
+        for top in (224..=440).step_by(24) {
+            assert!(matches!(sheet.push(&frame(top)), Fold::GrewBottom { .. }));
+        }
+        assert_eq!(sheet.sticky.top, 32);
+        for top in (128..440).step_by(24).rev() {
+            assert!(matches!(
+                sheet.push(&frame(top)),
+                Fold::GrewTop { .. } | Fold::Shifted { .. }
+            ));
+        }
+        let mut expected = header;
+        expected.extend_from_slice(&sample(&page, 160., 440 + viewport - 160));
+        assert_page_pixels(sheet.canvas(), &expected);
+    }
+
+    #[test]
+    fn floating_button_never_fabricates_pixels_without_an_unobstructed_observation() {
+        let page = text_page();
+        let viewport = 640;
+        let frame = |top| {
+            let mut rgba = sample(&page, top as f32, viewport);
+            floating_button(&mut rgba, (120, 550));
+            rgba
+        };
+        let mut sheet = ScrollSheet::new(TW, viewport, &frame(0), SheetLimits::default()).unwrap();
+        for top in [96, 192] {
+            let capture = frame(top);
+            let result = sheet.push(&capture);
+            assert!(matches!(result, Fold::GrewBottom { .. }), "{result:?}");
+            let src = (550 * TW as usize + 120) * 4;
+            let dst = ((top as usize + 550) * TW as usize + 120) * 4;
+            assert_eq!(&sheet.canvas()[dst..dst + 4], &capture[src..src + 4]);
+        }
+        // Earlier occlusions are now exposed; only the latest, never-visible
+        // patch may retain its captured foreground.
+        let known_rows = 700;
+        assert_page_pixels(
+            &sheet.canvas()[..known_rows * TW as usize * 4],
+            &sample(&page, 0., known_rows as u32),
+        );
+        assert!(
+            sheet
+                .canvas()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255)
+        );
+    }
+
+    #[test]
+    fn floating_button_appearance_disappearance_and_refused_frames_keep_the_page() {
+        let page = text_page();
+        let viewport = 480;
+        let frame = |top, button| {
+            let mut frame = sample(&page, top as f32, viewport);
+            if button {
+                floating_button(&mut frame, (TW as i32 / 2, 240));
+            }
+            frame
+        };
+        let mut sheet =
+            ScrollSheet::new(TW, viewport, &frame(0, false), SheetLimits::default()).unwrap();
+        for top in (24..=240).step_by(24) {
+            let result = sheet.push(&frame(top, true));
+            assert!(matches!(result, Fold::GrewBottom { .. }), "{result:?}");
+        }
+        let before = sheet.canvas().to_vec();
+        let bad = frame(3_000, true);
+        assert!(matches!(sheet.push(&bad), Fold::Refused(_)));
+        assert_eq!(sheet.canvas(), before);
+        for top in (264..=384).step_by(24) {
+            assert!(matches!(
+                sheet.push(&frame(top, true)),
+                Fold::GrewBottom { .. }
+            ));
+        }
+        for top in (240..384).step_by(24).rev() {
+            assert!(matches!(
+                sheet.push(&frame(top, false)),
+                Fold::Shifted { .. }
+            ));
+        }
+        assert!(sheet.floating.is_empty());
+        assert_page_pixels(sheet.canvas(), &sample(&page, 0., viewport + 384));
+    }
+
+    #[test]
+    fn page_local_button_is_preserved_and_horizontal_floating_button_is_removed() {
+        let mut page_frame = sample(&text_page(), 0., 1_200);
+        floating_button(&mut page_frame, (TW as i32 / 2, 280));
+        let frame =
+            |top: usize| page_frame[top * TW as usize * 4..(top + 480) * TW as usize * 4].to_vec();
+        let mut sheet = ScrollSheet::new(TW, 480, &frame(0), SheetLimits::default()).unwrap();
+        for top in (24..=240).step_by(24) {
+            assert!(matches!(sheet.push(&frame(top)), Fold::GrewBottom { .. }));
+            assert!(sheet.floating.is_empty());
+        }
+        assert_page_pixels(sheet.canvas(), &page_frame[..720 * TW as usize * 4]);
+
+        let page = text_page();
+        let horizontal = |top| {
+            let mut rgba = sample(&page, top as f32, 480);
+            floating_button(&mut rgba, (120, 240));
+            transpose_rgba(&rgba, TW, 480)
+        };
+        let mut sheet = ScrollSheet::new_with_axis(
+            480,
+            TW,
+            &horizontal(0),
+            SheetLimits::default(),
+            Axis::Horizontal,
+        )
+        .unwrap();
+        for top in (24..=240).step_by(24) {
+            assert!(matches!(
+                sheet.push(&horizontal(top)),
+                Fold::GrewBottom { .. }
+            ));
+        }
+        assert_page_pixels(sheet.canvas(), &sample(&page, 0., 720));
+    }
 
     const TW: u32 = 240;
     const TH: u32 = 6_000;
