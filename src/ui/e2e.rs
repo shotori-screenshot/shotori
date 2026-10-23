@@ -14,6 +14,8 @@
 //!   (opens the dialog since models are missing), then
 //!   OcrSetupConfirm at 6s (starts the download); "clear" fires the
 //!   clear-all annotations action (issue #15)
+//!   "textnew", "textmiddle", "textedit" and "textempty" open synthetic
+//!   text editing states through keyboard and pointer dispatch
 //! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel` —
 //!   seed annotation and crop interaction states on the target output
 //! - `SHOTORI_DEBUG_SETTINGS_PAGE=general|toolbar|keys|ocr|appearance|about`
@@ -167,6 +169,10 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
             || a == "ocrsetup"
             || a == "clear"
             || a == "scroll"
+            || matches!(
+                a.as_str(),
+                "textnew" | "textmiddle" | "textedit" | "textempty"
+            )
     }) else {
         return;
     };
@@ -175,6 +181,121 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
         cx.background_executor()
             .timer(std::time::Duration::from_millis(1500))
             .await;
+        if matches!(
+            action.as_str(),
+            "textnew" | "textmiddle" | "textedit" | "textempty"
+        ) {
+            let Some(bounds) = debug_selection(true).bounds() else {
+                eprintln!("[shotori] text review requires a debug selection");
+                return;
+            };
+            let position = bounds.origin + point(px(70.), px(60.));
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(crate::actions::ToggleText), cx);
+            }) {
+                eprintln!("[shotori] text review could not select the tool: {error}");
+                return;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        position,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }) {
+                eprintln!("[shotori] text review could not start: {error}");
+                return;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if action == "textempty" {
+                return;
+            }
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                for character in "canvas note".chars() {
+                    let key = if character == ' ' {
+                        "space".into()
+                    } else {
+                        character.to_string()
+                    };
+                    match Keystroke::parse(&key) {
+                        Ok(key) => {
+                            window.dispatch_keystroke(key, cx);
+                        }
+                        Err(error) => eprintln!("[shotori] text review key failed: {error}"),
+                    }
+                }
+                if action == "textedit" {
+                    if let Ok(key) = Keystroke::parse("enter") {
+                        window.dispatch_keystroke(key, cx);
+                    }
+                } else if action == "textmiddle" {
+                    for key in ["home", "right", "right", "right", "right", "right", "right"] {
+                        if let Ok(key) = Keystroke::parse(key) {
+                            window.dispatch_keystroke(key, cx);
+                        }
+                    }
+                }
+            }) {
+                eprintln!("[shotori] text review failed: {error}");
+                return;
+            }
+            if action == "textedit" {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                if let Err(error) = win.update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::actions::ToggleSelect), cx);
+                }) {
+                    eprintln!("[shotori] text review could not select the tool: {error}");
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                if let Err(error) = win.update(cx, |_, window, cx| {
+                    let position = position + point(px(30.), px(15.));
+                    window.dispatch_event(
+                        PlatformInput::MouseDown(MouseDownEvent {
+                            position,
+                            button: MouseButton::Left,
+                            click_count: 2,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            position,
+                            button: MouseButton::Left,
+                            click_count: 2,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }) {
+                    eprintln!("[shotori] text review could not reopen: {error}");
+                }
+            }
+            return;
+        }
         if action == "ocrsetup" {
             // phase 1: open the setup dialog (models must be missing)
             let _ = win.update(cx, |_, window, cx| {

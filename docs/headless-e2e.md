@@ -64,6 +64,14 @@ The scenes create synthetic marks inside the injected selection. `selected`
 includes a keyboard-sized translation; `cancel` restores the crop after a
 reselection drag. Use an isolated compositor and configuration directory.
 
+### Reviewing inline text
+
+Use the same target and selection with
+`SHOTORI_DEBUG_ACTION=textnew|textmiddle|textedit|textempty` to inspect a caret
+at the end or middle of synthetic text, reopen placed text, or start an empty
+editor. These actions use the overlay's input handlers and keep the editor open.
+Check integer and fractional display scales with an isolated background.
+
 ### Reviewing the settings window
 
 Settings write through immediately. Use a dedicated `HOME`, config, cache and

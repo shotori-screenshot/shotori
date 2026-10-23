@@ -6,6 +6,10 @@ osd:
   ocr_running:
     en: Recognizing…
     zh-CN: 识别中…
+text_input:
+  truncated:
+    en: Some text was not inserted — the selection is full.
+    zh-CN: 已到选区边界，部分文字未放入
 save:
   dialog_title:
     en: Save screenshot

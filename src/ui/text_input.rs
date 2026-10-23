@@ -4,6 +4,9 @@ use crate::{annotation::text, ui::theme};
 use cosmic_text::{Action as EditAction, Cursor, Edit, Editor, Metrics, Motion, Scroll, Selection};
 use gpui_kit::{base::input::InputEvent, *};
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
+
+const CARET_WIDTH_LOGICAL_PIXELS: f32 = 1.;
 
 pub(crate) struct TextInput {
     editor: Editor<'static>,
@@ -18,6 +21,7 @@ pub(crate) struct TextInput {
     text_color: u32,
     bounds: Bounds<Pixels>,
     dragging: bool,
+    truncated_input: bool,
 }
 impl EventEmitter<InputEvent> for TextInput {}
 impl Focusable for TextInput {
@@ -53,8 +57,56 @@ impl TextInput {
             text_color: 0,
             bounds: Bounds::default(),
             dragging: false,
+            truncated_input: false,
         }
     }
+    /// End editing without turning unfinished phonetic preedit into annotation text.
+    pub(crate) fn discard_preedit(&mut self, cx: &mut Context<Self>) {
+        if let Some(before) = self.composition_start.take() {
+            self.editor = before;
+            self.marked = None;
+            self.changed(cx);
+        }
+    }
+
+    pub(crate) fn input_was_truncated(&self) -> bool {
+        self.truncated_input
+    }
+
+    /// Insert the longest fitting prefix without splitting a grapheme cluster.
+    /// The original selection is retained when no input can fit.
+    fn replace_fitting(&mut self, range: Range<usize>, value: &str) -> bool {
+        let before = self.editor.clone();
+        self.replace(range.clone(), value);
+        if self.accept_edit(before.clone()) {
+            self.truncated_input = false;
+            return true;
+        }
+        let ends = value
+            .grapheme_indices(true)
+            .map(|(offset, grapheme)| offset + grapheme.len())
+            .collect::<Vec<_>>();
+        let (mut low, mut high) = (0, ends.len());
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            self.editor = before.clone();
+            self.replace(range.clone(), &value[..ends[mid - 1]]);
+            self.shape();
+            if self.layout_fits() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        self.editor = before;
+        if low > 0 {
+            self.replace(range, &value[..ends[low - 1]]);
+            self.shape();
+        }
+        self.truncated_input = true;
+        low > 0
+    }
+
     pub(crate) fn set_color(&mut self, color: u32, cx: &mut Context<Self>) {
         self.text_color = color;
         cx.notify();
@@ -82,7 +134,8 @@ impl TextInput {
     }
     pub(crate) fn content_width(&self) -> f32 {
         self.editor.with_buffer(|b| {
-            (b.layout_runs().map(|r| r.line_w).fold(0., f32::max) + 1.).min(self.width)
+            (b.layout_runs().map(|r| r.line_w).fold(0., f32::max) + CARET_WIDTH_LOGICAL_PIXELS)
+                .min(self.width)
         })
     }
     pub(crate) fn height(&self) -> f32 {
@@ -104,7 +157,7 @@ impl TextInput {
         let before = self.editor.clone();
         self.font_size = font_size;
         self.shape();
-        if self.layout_height() > self.limit + 0.01 {
+        if !self.layout_fits() {
             self.font_size = old_size;
             self.editor = before;
             return false;
@@ -113,11 +166,17 @@ impl TextInput {
         true
     }
 
-    // Validate actual shaped rows, not the clipped widget height. Reject the
-    // whole operation so a paste or IME commit never silently loses its tail.
+    fn layout_fits(&self) -> bool {
+        self.layout_height() <= self.limit + 0.01
+            && self
+                .editor
+                .with_buffer(|b| b.layout_runs().all(|run| run.line_w <= self.width + 0.01))
+    }
+
+    // Validate shaped geometry rather than the clipped widget dimensions.
     fn accept_edit(&mut self, before: Editor<'static>) -> bool {
         self.shape();
-        if self.layout_height() > self.limit + 0.01 {
+        if !self.layout_fits() {
             self.editor = before;
             false
         } else {
@@ -196,13 +255,16 @@ impl TextInput {
                     r.cursor_position(&cursor).map(|x| {
                         Bounds::new(
                             point(px(x), px(r.line_top)),
-                            size(px(2.), px(r.line_height)),
+                            size(px(CARET_WIDTH_LOGICAL_PIXELS), px(r.line_height)),
                         )
                     })
                 })
                 .unwrap_or_else(|| {
                     let top = cursor.line as f32 * single_line_h;
-                    Bounds::new(point(px(0.), px(top)), size(px(2.), px(single_line_h)))
+                    Bounds::new(
+                        point(px(0.), px(top)),
+                        size(px(CARET_WIDTH_LOGICAL_PIXELS), px(single_line_h)),
+                    )
                 })
         })
     }
@@ -287,7 +349,7 @@ impl TextInput {
                     self.action(EditAction::Enter);
                 }
                 "escape" => {
-                    window.dispatch_action(Box::new(crate::actions::CancelText), cx);
+                    window.dispatch_action(Box::new(crate::actions::EscapeOverlay), cx);
                 }
                 "backspace" | "delete" => {
                     record = true;
@@ -322,8 +384,9 @@ impl TextInput {
                 }
                 "v" if command => {
                     if let Some(value) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                        record = true;
-                        self.editor.insert_string(&value, None);
+                        self.replace_text_in_range(None, &value, window, cx);
+                        cx.stop_propagation();
+                        return;
                     }
                 }
                 "z" | "y" if command => {
@@ -348,7 +411,11 @@ impl TextInput {
         }
         let attempted = self.editor.clone();
         if self.accept_edit(before.clone()) {
+            if history_direction.is_some() {
+                self.truncated_input = false;
+            }
             if record {
+                self.truncated_input = false;
                 self.remember(before);
             }
         } else if let Some(redo) = history_direction {
@@ -401,10 +468,10 @@ impl EntityInputHandler for TextInput {
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
         self.marked.clone().map(|r| self.to_utf16(r))
     }
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.marked.take().is_some() {
-            self.remember(self.editor.clone());
-            self.changed(cx);
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(marked) = self.marked.clone() {
+            let value = self.value()[marked].to_owned();
+            self.replace_text_in_range(None, &value, window, cx);
         }
     }
     fn replace_text_in_range(
@@ -419,12 +486,10 @@ impl EntityInputHandler for TextInput {
             .or(self.marked.clone())
             .unwrap_or_else(|| self.selection());
         let before = self.editor.clone();
-        self.replace(range, value);
-        if self.accept_edit(before.clone()) {
+        if self.replace_fitting(range, value) {
             self.remember(before);
         } else if let Some(original) = self.composition_start.take() {
-            // The IME has finalized; restore committed text instead of leaving
-            // rejected phonetic preedit behind as ordinary annotation text.
+            // An empty accepted prefix must not leave phonetic preedit behind.
             self.editor = original;
         }
         self.marked = None;
@@ -444,10 +509,8 @@ impl EntityInputHandler for TextInput {
             .unwrap_or_else(|| self.selection());
         let before = self.editor.clone();
         self.replace(range.clone(), value);
-        if !self.accept_edit(before.clone()) {
-            cx.notify();
-            return;
-        }
+        // Keep the full preedit range even when its phonetic spelling is wider
+        // than the final candidate. Only committed text is fitted to the crop.
         if self.composition_start.is_none() {
             self.composition_start = Some(before);
         }
@@ -556,18 +619,11 @@ impl Render for TextInput {
                                 r.size.height = px(1.);
                                 window.paint_quad(fill(r, rgba(theme::c().accent)));
                             }
-                            if focus.is_focused(window) {
-                                let mut r = caret;
-                                r.origin += bounds.origin;
-                                let accent = theme::c().accent;
-                                let caret_color = compute_caret_color(text_color, accent);
-                                // Subtle dark halo backing ensures contrast against white or busy desktop backgrounds
-                                let halo = Bounds::new(
-                                    point(r.origin.x - px(0.5), r.origin.y),
-                                    size(r.size.width + px(1.0), r.size.height),
-                                );
-                                window.paint_quad(fill(halo, rgba(0x00000088)));
-                                window.paint_quad(fill(r, rgba(caret_color)));
+                            if focus.is_focused(window)
+                                && let Some(stroke) =
+                                    caret_stroke(caret, bounds, window.scale_factor())
+                            {
+                                window.paint_quad(fill(stroke, rgba(text_color | 0xff)));
                             }
                         });
                     },
@@ -577,93 +633,257 @@ impl Render for TextInput {
     }
 }
 
-/// Pick a vibrant caret color that maximizes visual contrast against both the
-/// user's chosen text color and the active theme accent border color.
-fn compute_caret_color(text_color: u32, accent: u32) -> u32 {
-    let [tr, tg, tb, _] = text_color.to_be_bytes();
-    let candidates: [u32; 6] = [
-        0x00D8FFFF, // Vivid Cyan
-        0xFFDD00FF, // Bright Yellow
-        0xFF2D55FF, // Vivid Rose
-        0x30E880FF, // Spring Green
-        0xFFFFFFFF, // Pure White
-        0xA855F7FF, // Purple
-    ];
-    let distance = |c1: [u8; 4], c2: [u8; 4]| -> i32 {
-        let dr = c1[0] as i32 - c2[0] as i32;
-        let dg = c1[1] as i32 - c2[1] as i32;
-        let db = c1[2] as i32 - c2[2] as i32;
-        dr * dr + dg * dg + db * db
-    };
-    let t_rgb = [tr, tg, tb, 255];
-    let a_rgb = accent.to_be_bytes();
-    *candidates
-        .iter()
-        .max_by_key(|&&c: &&u32| {
-            let c_rgb = c.to_be_bytes();
-            distance(c_rgb, t_rgb).min(distance(c_rgb, a_rgb))
-        })
-        .unwrap_or(&0x00D8FFFF)
+/// Align the caret to device pixels and keep its full width inside the editor.
+fn caret_stroke(
+    caret: Bounds<Pixels>,
+    editor: Bounds<Pixels>,
+    scale: f32,
+) -> Option<Bounds<Pixels>> {
+    let left = (f32::from(editor.left()) * scale).ceil();
+    let right = (f32::from(editor.right()) * scale).floor();
+    let width = (CARET_WIDTH_LOGICAL_PIXELS * scale).round().max(1.);
+    if right - left < width {
+        return None;
+    }
+    let x = (f32::from(editor.left() + caret.left()) * scale)
+        .round()
+        .clamp(left, right - width);
+    let top = (f32::from(editor.top() + caret.top()) * scale)
+        .round()
+        .max((f32::from(editor.top()) * scale).ceil());
+    let bottom = (f32::from(editor.top() + caret.bottom()) * scale)
+        .round()
+        .min((f32::from(editor.bottom()) * scale).floor());
+    (bottom > top).then(|| {
+        Bounds::new(
+            point(px(x / scale), px(top / scale)),
+            size(px(width / scale), px((bottom - top) / scale)),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::TextInput;
     use cosmic_text::Edit;
+    use gpui_kit::ClipboardItem;
     use gpui_kit::{Bounds, EntityInputHandler, TestAppContext, point, px, size};
 
+    struct CaretHarness {
+        input: gpui_kit::Entity<TextInput>,
+    }
+    impl gpui_kit::Render for CaretHarness {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement, Styled};
+            let input = self.input.read(cx);
+            gpui_kit::div().size_full().child(
+                gpui_kit::div()
+                    .absolute()
+                    .left(px(20.2))
+                    .top(px(24.3))
+                    .w(px(input.content_width().max(9.)))
+                    .h(px(input.height()))
+                    .child(self.input.clone()),
+            )
+        }
+    }
+
     #[gpui_kit::test]
-    fn text_input_rejects_overflow_without_hidden_text_or_history(cx: &mut TestAppContext) {
+    fn focused_caret_keeps_one_unclipped_stroke_at_every_text_position(cx: &mut TestAppContext) {
+        use gpui_kit::AppContext;
+        const COLOR: u32 = 0x395ea8ff;
+        let input = cx.new(|cx| TextInput::new(160., 240., 24., cx));
+        let (_, cx) = cx.add_window_view(|_, _| CaretHarness {
+            input: input.clone(),
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |s, cx| {
+                s.set_color(COLOR, cx);
+                s.focus(window, cx);
+            })
+        });
+        for scale in [1., 1.25, 1.5, 1.75, 2.] {
+            cx.simulate_scale_factor_change(scale);
+            for value in ["", "Canvas", "Wide and narrow"] {
+                cx.update(|_, cx| input.update(cx, |s, cx| s.set_value(value, cx)));
+                for index in 0..=value.len() {
+                    cx.update(|_, cx| {
+                        input.update(cx, |s, cx| {
+                            s.editor.set_cursor(cosmic_text::Cursor::new(0, index));
+                            s.editor.set_selection(cosmic_text::Selection::None);
+                            cx.notify();
+                        })
+                    });
+                    let quads = cx.update(|window, cx| {
+                        window.draw(cx).clear(cx);
+                        window.painted_quads()
+                    });
+                    assert_eq!(
+                        quads.len(),
+                        1,
+                        "one caret without a halo at {scale}: {index}"
+                    );
+                    let caret = &quads[0];
+                    let color: gpui_kit::Background = gpui_kit::rgba(COLOR).into();
+                    assert_eq!(caret.background, color);
+                    assert_eq!(caret.bounds.size.width.0, scale.round().max(1.));
+                    assert_eq!(caret.bounds.origin.x.0.fract(), 0.);
+                    assert_eq!(caret.bounds.origin.y.0.fract(), 0.);
+                    assert_eq!(
+                        caret.bounds.intersect(&caret.content_mask.bounds),
+                        caret.bounds
+                    );
+                }
+            }
+        }
+        cx.update(|window, cx| window.blur(cx));
+        let quads = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.painted_quads()
+        });
+        assert!(quads.is_empty(), "an unfocused editor has no caret");
+    }
+
+    #[gpui_kit::test]
+    fn committed_input_fills_remaining_space_as_one_undo_step(cx: &mut TestAppContext) {
         crate::annotation::text::with_test_font(|| {
-            let (input, cx) =
-                cx.add_window_view(|_, cx| TextInput::new(120., 24. * 1.35 * 2., 24., cx));
+            let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(120., 64.8, 24., cx));
             cx.update(|window, cx| {
                 input.update(cx, |s, cx| {
                     s.focus(window, cx);
                     s.replace_text_in_range(None, "one\ntwo", window, cx);
-                    assert!((s.layout_height() - s.limit).abs() < 0.01);
-                    let history_len = s.undo.len();
                     s.replace_text_in_range(None, "\nthird", window, cx);
                     assert_eq!(s.value(), "one\ntwo");
-                    assert_eq!(s.undo.len(), history_len);
-                    assert!(!s.set_font_size(48., cx));
-                    assert_eq!(s.font_size, 24.);
-                    assert!(f32::from(s.caret(s.editor.cursor()).bottom()) <= s.limit + 0.01);
-                })
-            });
-            cx.simulate_keystrokes("shift-enter");
-            cx.update(|_, cx| {
-                input.update(cx, |s, _| {
-                    assert_eq!(s.value(), "one\ntwo");
                     assert_eq!(s.undo.len(), 1);
+                    assert!(s.input_was_truncated());
+                    assert!(!s.set_font_size(48., cx));
+                    cx.write_to_clipboard(ClipboardItem::new_string("W".repeat(200)));
                 })
-            });
-            cx.update(|_, cx| {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("W".repeat(200)))
             });
             cx.simulate_keystrokes("ctrl-v");
+            let filled = cx.update(|_, cx| {
+                let s = input.read(cx);
+                assert!(s.value().starts_with("one\ntwoW"));
+                assert!(s.value().len() < 207);
+                assert!(s.layout_height() <= s.limit + 0.01);
+                assert_eq!(s.undo.len(), 2);
+                assert!(s.input_was_truncated());
+                s.value()
+            });
+            cx.simulate_keystrokes("ctrl-z");
+            cx.update(|_, cx| assert_eq!(input.read(cx).value(), "one\ntwo"));
+            cx.simulate_keystrokes("ctrl-y");
             cx.update(|window, cx| {
                 input.update(cx, |s, cx| {
-                    assert_eq!(s.value(), "one\ntwo");
-                    assert_eq!(s.undo.len(), 1);
-                    s.replace_and_mark_text_in_range(None, "n", Some(1..1), window, cx);
-                    assert_eq!(s.marked_text_range(window, cx), Some(7..8));
+                    assert_eq!(s.value(), filled);
                     s.replace_and_mark_text_in_range(
                         None,
-                        &"W".repeat(200),
-                        Some(200..200),
+                        &"phonetic".repeat(30),
+                        None,
                         window,
                         cx,
                     );
-                    assert_eq!(s.value(), "one\ntwon");
-                    assert_eq!(s.marked_text_range(window, cx), Some(7..8));
+                    assert!(s.marked.is_some());
                     s.replace_text_in_range(None, &"W".repeat(200), window, cx);
-                    assert_eq!(s.value(), "one\ntwo");
+                    assert_eq!(s.value(), filled);
                     assert!(s.marked.is_none());
-                    // Deletion/replacement remains usable at the boundary.
-                    s.replace_text_in_range(Some(0..7), "short", window, cx);
-                    s.replace_text_in_range(None, "\nline", window, cx);
+                    assert_eq!(s.undo.len(), 2);
+                    let all = s.value().encode_utf16().count();
+                    s.replace_text_in_range(Some(0..all), "short\nline", window, cx);
                     assert_eq!(s.value(), "short\nline");
+                    assert!(!s.input_was_truncated());
+                })
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn ime_partial_commit_preserves_clusters_ranges_and_original_undo(cx: &mut TestAppContext) {
+        crate::annotation::text::with_test_font(|| {
+            for cluster in ["界", "e\u{301}", "👩‍💻", "🇨🇦"] {
+                let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(120., 64.8, 24., cx));
+                let candidate = cluster.repeat(80);
+                cx.update(|window, cx| {
+                    input.update(cx, |s, cx| {
+                        s.focus(window, cx);
+                        s.replace_text_in_range(None, "A", window, cx);
+                        s.replace_and_mark_text_in_range(
+                            None,
+                            &"pinyin".repeat(80),
+                            None,
+                            window,
+                            cx,
+                        );
+                        assert_eq!(s.marked_text_range(window, cx), Some(1..481));
+                        s.replace_text_in_range(None, &candidate, window, cx);
+                        let value = s.value();
+                        let accepted = &value[1..];
+                        assert!(!accepted.is_empty());
+                        assert!(accepted.len() < candidate.len());
+                        assert_eq!(accepted.len() % cluster.len(), 0, "{cluster:?}");
+                        assert!(candidate.starts_with(accepted));
+                        assert!(s.marked.is_none());
+                        assert!(s.composition_start.is_none());
+                        assert!(s.input_was_truncated());
+                        let end = value.encode_utf16().count();
+                        assert_eq!(
+                            s.selected_text_range(false, window, cx).unwrap().range,
+                            end..end
+                        );
+                        assert!(s.layout_height() <= s.limit + 0.01);
+                        assert_eq!(s.undo.len(), 2);
+                    })
+                });
+                cx.simulate_keystrokes("ctrl-z");
+                cx.update(|_, cx| assert_eq!(input.read(cx).value(), "A"));
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn partial_replacement_preserves_suffix_and_unmark_fits_preedit(cx: &mut TestAppContext) {
+        crate::annotation::text::with_test_font(|| {
+            let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(120., 64.8, 24., cx));
+            cx.update(|window, cx| {
+                input.update(cx, |s, cx| {
+                    s.replace_text_in_range(None, "A🙂Z", window, cx);
+                    s.replace_text_in_range(Some(1..3), &"界".repeat(100), window, cx);
+                    assert!(s.value().starts_with("A界"));
+                    assert!(s.value().ends_with('Z'));
+                    assert!(!s.value().contains('🙂'));
+                    assert!(s.input_was_truncated());
+                    let all = s.value().encode_utf16().count();
+                    s.replace_and_mark_text_in_range(
+                        Some(0..all),
+                        &"W".repeat(100),
+                        None,
+                        window,
+                        cx,
+                    );
+                    s.unmark_text(window, cx);
+                    assert!(s.marked.is_none());
+                    assert!(s.composition_start.is_none());
+                    assert!(!s.value().is_empty() && s.value().len() < 100);
+                    assert!(s.layout_fits());
+                    assert!(s.input_was_truncated());
+                })
+            });
+            let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(12., 64.8, 24., cx));
+            cx.update(|window, cx| {
+                input.update(cx, |s, cx| {
+                    s.replace_text_in_range(None, "i", window, cx);
+                    s.replace_text_in_range(Some(0..1), "W", window, cx);
+                    assert_eq!(
+                        s.value(),
+                        "i",
+                        "a too-wide cluster cannot replace existing text"
+                    );
+                    assert!(s.input_was_truncated());
+                    assert_eq!(s.undo.len(), 1);
                 })
             });
         });

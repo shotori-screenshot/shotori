@@ -38,6 +38,7 @@ gpui-tray = { version = "0.1.4", default-features = false, features = [
 # crate's Frames; must match gpui-pre's version, currently 0.25.10)
 image = "0.25"
 smallvec = "1"
+unicode-segmentation = "1"
 
 # Embed assets/icons at build time (the self-maintained toolbar SVGs —
 # same 8.x line gpui-kit-assets already compiles, zero extra cost)

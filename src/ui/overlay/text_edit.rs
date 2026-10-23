@@ -224,6 +224,9 @@ impl Overlay {
             return;
         };
         self.text_subscription.take();
+        editor
+            .input()
+            .update(cx, |input, cx| input.discard_preedit(cx));
         if let Some((ix, before)) = self.number_edit.take() {
             // commit only a full integer; anything else (Esc, empty,
             // trailing junk) restores the pre-edit value

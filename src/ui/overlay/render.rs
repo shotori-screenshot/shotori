@@ -5,8 +5,8 @@
 
 use super::Overlay;
 use crate::actions::{
-    CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline,
-    Nudge, OcrSelection, OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection,
+    ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline, Nudge,
+    OcrSelection, OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection,
     ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
     ToggleLine, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
     ToggleSelect, ToggleText, UndoAnnotation,
@@ -190,7 +190,6 @@ impl Render for Overlay {
                 this.toggle_tool(crate::annotation::ShapeKind::Text, window, cx);
             }))
             .on_action(cx.listener(|this, _: &EscapeOverlay, window, cx| this.escape(window, cx)))
-            .on_action(cx.listener(|this, _: &CancelText, window, cx| this.escape(window, cx)))
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Enter, _, cx| {
                     if this.text_editing.is_some() {
@@ -652,6 +651,33 @@ impl Render for Overlay {
             // gestures anyway, so ⑥ stays above it). Renders only on
             // the output that owns the focus point.
             .children(loupe.map(|l| magnifier_loupe(self.frozen.clone(), l, ws).into_any_element()))
+            .children(
+                self.text_editing
+                    .as_ref()
+                    .filter(|editor| editor.input().read(cx).input_was_truncated())
+                    .map(|_| {
+                        div()
+                            .absolute()
+                            .top_4()
+                            .left_4()
+                            .right_4()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .id("text-overflow-notice")
+                                    .debug_selector(|| "text-overflow-notice".to_owned())
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgba(crate::ui::theme::c().chip_bg))
+                                    .text_color(rgba(crate::ui::theme::c().hint_text))
+                                    .text_sm()
+                                    .child(crate::i18n::t!("text_input.truncated").to_string()),
+                            )
+                    }),
+            )
+            // First-run OCR setup remains above editing feedback.
             .children(setup_el)
     }
 }

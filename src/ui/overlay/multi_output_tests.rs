@@ -1377,6 +1377,79 @@ fn text_input_workflow(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn text_overflow_notice_and_escape_keep_the_visible_prefix(cx: &mut TestAppContext) {
+    use gpui_kit::EntityInputHandler;
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        gpui_kit::component::init(cx);
+        crate::actions::init_annotation_keybindings(cx);
+        crate::actions::bind_keys(cx, &crate::actions::default_keys());
+    });
+    let mut capture = Capture::for_test((0, 0), 1.);
+    capture.output_name = "screen".into();
+    capture.width = 600;
+    capture.height = 400;
+    capture.rgba = vec![255; 600 * 400 * 4];
+    let capture = Arc::new(capture);
+    let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+    cx.simulate_resize(size(px(600.), px(400.)));
+    cx.update(|window, cx| {
+        session.update(cx, |s, cx| {
+            s.begin("screen", point(px(50.), px(80.)));
+            s.end("screen", point(px(300.), px(230.)));
+            s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Text));
+            cx.notify();
+        });
+        view.update(cx, |view, cx| {
+            view.start_text(point(px(80.), px(100.)), window, cx)
+        });
+    });
+    cx.run_until_parked();
+    let input = cx.update(|_, cx| view.read(cx).text_editing.as_ref().unwrap().input().clone());
+    cx.update(|window, cx| {
+        input.update(cx, |s, cx| {
+            s.replace_and_mark_text_in_range(None, &"pinyin".repeat(100), None, window, cx);
+            s.replace_text_in_range(None, &"测试文字".repeat(100), window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let accepted = cx.update(|_, cx| input.read(cx).value());
+    assert!(!accepted.is_empty());
+    assert!(accepted.chars().count() < 400);
+    for scale in [1., 1.25, 2.] {
+        cx.simulate_scale_factor_change(scale);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let notice = cx.debug_bounds("text-overflow-notice").unwrap();
+        assert!(notice.size.width > px(100.) && notice.size.height > px(10.));
+        assert!(notice.left() >= px(0.) && notice.right() <= px(600.));
+    }
+    // Leaving the editor preserves committed text, not unfinished phonetics.
+    cx.update(|window, cx| {
+        input.update(cx, |s, cx| {
+            s.replace_and_mark_text_in_range(None, "weishuruwancheng", None, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        let s = session.read(cx);
+        assert!(!s.blocked());
+        assert_eq!(s.annotations().tool(), None);
+        assert_eq!(s.annotations().selected_index(), None);
+        assert_eq!(
+            s.annotations().committed()[0].text.as_deref(),
+            Some(accepted.as_str())
+        );
+        assert!(view.read(cx).text_editing.is_none());
+    });
+    assert!(cx.debug_bounds("text-overflow-notice").is_none());
+}
+
+#[gpui_kit::test]
 fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     use crate::annotation::ShapeKind;
     cx.update(|cx| {

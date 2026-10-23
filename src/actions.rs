@@ -71,8 +71,7 @@ gpui_kit::actions!([
     UndoAnnotation,
     RedoAnnotation,
     DeleteAnnotation,
-    ClearAnnotations,
-    CancelText
+    ClearAnnotations
 ]);
 
 /// Keyboard translation in desktop logical pixels.

@@ -1,5 +1,5 @@
 //! Inline editor placement; text layout and input live in TextInput.
-use crate::ui::{text_input::TextInput, theme};
+use crate::ui::text_input::TextInput;
 use gpui_kit::*;
 
 pub(crate) struct TextEditor {
@@ -103,8 +103,7 @@ impl TextEditor {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
     pub(crate) fn render(&self) -> impl IntoElement {
-        // Less than one character width when empty: a compact box (~8px)
-        // just wide enough to cleanly hold the caret without gluing to the border.
+        // Keep the empty editor clickable without moving its text origin.
         let min_w = (self.font_size * 0.35).round().clamp(6., 9.);
         let display_w = self.visible_width.max(min_w);
         let display_h = self.height.max(self.font_size * 1.35);
@@ -112,69 +111,26 @@ impl TextEditor {
             px(display_w).min(self.bounds.size.width),
             px(display_h).min(self.bounds.size.height),
         );
-        let outline_bounds = Bounds::new(self.local, visible);
         div()
+            .id("text-editor")
+            .debug_selector(|| "text-editor".to_owned())
             .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .child(editor_outline(outline_bounds))
-            .child(
-                div()
-                    .id("text-editor")
-                    .debug_selector(|| "text-editor".to_owned())
-                    .absolute()
-                    .left(self.local.x)
-                    .top(self.local.y)
-                    .w(visible.width)
-                    .h(visible.height)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.input.clone()),
-            )
+            .left(self.local.x)
+            .top(self.local.y)
+            .w(visible.width)
+            .h(visible.height)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(self.input.clone())
     }
-}
-
-/// Paint from the overlay's origin, just like selection_backdrop. Outsetting
-/// the border or independently rounding a positioned child's origin and size
-/// can push its right edge beyond the selection at fractional DPI.
-fn editor_outline(bounds: Bounds<Pixels>) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |viewport, (), window, _| {
-            let mut bounds = bounds;
-            bounds.origin += viewport.origin;
-            window.paint_quad(outline(
-                bounds,
-                rgba(theme::c().accent),
-                BorderStyle::default(),
-            ));
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
 }
 
 #[cfg(test)]
 mod tests {
     use gpui_kit::{
         Bounds, Context, IntoElement, ParentElement, Pixels, Render, Styled, TestAppContext,
-        Window, div, point, px, size,
+        Window, div, point, px,
     };
 
-    struct OutlineHarness {
-        selection: Bounds<Pixels>,
-        editor: Bounds<Pixels>,
-    }
-    impl Render for OutlineHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(crate::ui::hud::selection_backdrop(Some(self.selection)))
-                .child(super::editor_outline(self.editor))
-        }
-    }
     struct EditorHarness {
         selection: Bounds<Pixels>,
         editor: super::TextEditor,
@@ -213,64 +169,17 @@ mod tests {
                 .iter()
                 .filter(|q| q.border_widths.top.0 > 0.)
                 .collect::<Vec<_>>();
-            assert!(borders.len() >= 2);
-            for border in &borders[1..] {
-                assert!(border.bounds.right() <= borders[0].bounds.right());
-                assert!(border.bounds.bottom() <= borders[0].bounds.bottom());
-            }
+            let mut outlines = borders.iter().map(|q| q.bounds).collect::<Vec<_>>();
+            outlines.dedup();
+            assert_eq!(
+                outlines.len(),
+                1,
+                "only the screenshot selection has a border"
+            );
             view.update(cx, |s, _| {
                 assert!(s.editor.actual_bounds().right() <= selection.right());
                 assert!(s.editor.actual_bounds().bottom() <= selection.bottom());
             });
-        }
-    }
-    #[gpui_kit::test]
-    fn editor_border_never_outsets_the_selection_at_fractional_dpi(cx: &mut TestAppContext) {
-        let initial = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(400.)));
-        let (view, cx) = cx.add_window_view(|_, _| OutlineHarness {
-            selection: initial,
-            editor: initial,
-        });
-        for scale in [1., 1.25, 1.5, 1.73, 2.] {
-            cx.simulate_scale_factor_change(scale);
-            for right in [350., 350.2, 350.5, 350.8] {
-                for left in [70., 70.2, 70.5, 70.8] {
-                    view.update(cx, |s, cx| {
-                        s.selection = Bounds::from_corners(
-                            point(px(20.), px(20.)),
-                            point(px(right), px(360.3)),
-                        );
-                        s.editor = Bounds::from_corners(
-                            point(px(left), px(80.6)),
-                            s.selection.bottom_right(),
-                        );
-                        cx.notify();
-                    });
-                    let quads = cx.update(|window, cx| {
-                        window.draw(cx).clear(cx);
-                        window.painted_quads()
-                    });
-                    let mut borders = quads
-                        .iter()
-                        .filter(|q| q.border_widths.top.0 > 0.)
-                        .map(|q| q.bounds)
-                        .collect::<Vec<_>>();
-                    // GPUI splits each outline into four masked strips with
-                    // identical outer bounds. Compare the two actual outlines.
-                    borders.dedup();
-                    assert_eq!(borders.len(), 2);
-                    assert_eq!(
-                        borders[0].right(),
-                        borders[1].right(),
-                        "right edge at scale {scale}"
-                    );
-                    assert_eq!(
-                        borders[0].bottom(),
-                        borders[1].bottom(),
-                        "bottom edge at scale {scale}"
-                    );
-                }
-            }
         }
     }
 }
