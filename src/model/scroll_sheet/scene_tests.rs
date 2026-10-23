@@ -1930,3 +1930,156 @@ fn independent_column_exclusion_preserves_body_and_later_section_controls() {
         }
     }
 }
+
+#[test]
+fn lateral_layout_shifts_preserve_the_complete_document() {
+    let page = document();
+    for (direction, amount) in [(-1, 1), (1, 1), (-1, 2), (1, 2), (-1, 8), (1, 8)] {
+        let mut sheet =
+            ScrollSheet::new(WIDTH, HEIGHT, &viewport(&page, 0), SheetLimits::default()).unwrap();
+        for top in (24..=360).step_by(24) {
+            let offset = match top {
+                0..=48 => 0,
+                49..=144 => amount * direction,
+                145..=240 => -(amount - 1).max(1) * direction,
+                _ => 0,
+            };
+            let original = viewport(&page, top);
+            let frame = shifted_scene(&original, offset);
+            let outcome = sheet.push(&frame);
+            assert!(
+                matches!(outcome, Fold::GrewBottom { growth: 24, .. }),
+                "top={top} offset={offset}: {outcome:?}"
+            );
+            assert_eq!(sheet.height(), top + HEIGHT);
+            assert_eq!(
+                sheet.canvas(),
+                &page[..((top + HEIGHT) * WIDTH * 4) as usize],
+                "top={top} offset={offset}"
+            );
+        }
+    }
+}
+
+#[test]
+fn lateral_correction_preserves_prepend_and_stationary_alignment() {
+    let page = document();
+    let mut sheet =
+        ScrollSheet::new(WIDTH, HEIGHT, &viewport(&page, 240), SheetLimits::default()).unwrap();
+    let shifted = shifted_scene(&viewport(&page, 240), 8);
+    assert!(matches!(
+        sheet.push(&shifted),
+        Fold::Still | Fold::Unchanged
+    ));
+    for top in (0..240).step_by(24).rev() {
+        let outcome = sheet.push(&shifted_scene(&viewport(&page, top), 8));
+        assert!(
+            matches!(outcome, Fold::GrewTop { growth: 24, .. }),
+            "top={top}: {outcome:?}"
+        );
+    }
+    assert_eq!(sheet.height(), 240 + HEIGHT);
+    assert_eq!(
+        sheet.canvas(),
+        &page[..((240 + HEIGHT) * WIDTH * 4) as usize]
+    );
+}
+
+#[test]
+fn clipped_lateral_layout_retains_the_verified_canvas() {
+    let mut page = document();
+    // Content reaches the left capture edge; no unseen background may replace it.
+    for y in 0..PAGE_HEIGHT {
+        let at = (y * WIDTH * 4) as usize;
+        page[at..at + 12].fill((y % 173) as u8);
+    }
+    let seed = viewport(&page, 0);
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &seed, SheetLimits::default()).unwrap();
+    for top in [24, 48] {
+        let outcome = sheet.push(&shifted_scene(&viewport(&page, top), 8));
+        assert_eq!(outcome, Fold::Refused(super::Refusal::LayoutShift));
+        assert_eq!(sheet.canvas(), seed);
+        assert_eq!(sheet.height(), HEIGHT);
+    }
+    assert!(matches!(
+        sheet.push(&viewport(&page, 72)),
+        Fold::GrewBottom { growth: 72, .. }
+    ));
+    assert_eq!(
+        sheet.canvas(),
+        &page[..((72 + HEIGHT) * WIDTH * 4) as usize]
+    );
+}
+
+fn shifted_scene(frame: &[u8], offset: i32) -> Vec<u8> {
+    let mut shifted = vec![255; frame.len()];
+    for y in 0..HEIGHT as usize {
+        for x in 0..WIDTH as usize {
+            let source_x = x as i32 - offset;
+            if (0..WIDTH as i32).contains(&source_x) {
+                let source = (y * WIDTH as usize + source_x as usize) * 4;
+                let destination = (y * WIDTH as usize + x) * 4;
+                shifted[destination..destination + 4].copy_from_slice(&frame[source..source + 4]);
+            }
+        }
+    }
+    shifted
+}
+
+#[test]
+fn lateral_correction_keeps_dark_background_and_refuses_fixed_regions() {
+    let mut page = document();
+    for pixel in page.as_chunks_mut::<4>().0 {
+        for channel in &mut pixel[..3] {
+            *channel = 255 - *channel;
+        }
+    }
+    let frame = |top, dx| {
+        let mut frame = shifted_scene(&viewport(&page, top), dx);
+        // The synthetic viewport exposes the same dark background at its edge.
+        for row in frame.as_chunks_mut::<{ WIDTH as usize * 4 }>().0 {
+            if dx > 0 {
+                for pixel in row[..dx as usize * 4].as_chunks_mut::<4>().0 {
+                    pixel[..3].fill(0);
+                }
+            }
+        }
+        frame
+    };
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &frame(0, 0), SheetLimits::default()).unwrap();
+    for top in [24, 48, 72] {
+        assert!(matches!(
+            sheet.push(&frame(top, 8)),
+            Fold::GrewBottom { growth: 24, .. }
+        ));
+    }
+    assert_eq!(
+        sheet.canvas(),
+        &page[..((72 + HEIGHT) * WIDTH * 4) as usize]
+    );
+
+    let page = document();
+    let stationary = |top, dx| {
+        let mut frame = shifted_scene(&viewport(&page, top), dx);
+        // A fixed text strip does not share the translated document's coordinates.
+        let prefix = (WIDTH * 120 * 4) as usize;
+        frame[..prefix].copy_from_slice(&page[..prefix]);
+        frame
+    };
+    let seed = stationary(0, 0);
+    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &seed, SheetLimits::default()).unwrap();
+    let result = sheet.push(&stationary(24, 8));
+    assert_eq!(result, Fold::Refused(super::Refusal::LayoutShift));
+    assert_eq!(sheet.canvas(), seed);
+}
+
+#[test]
+fn lateral_layout_warning_does_not_turn_into_scroll_speed_advice() {
+    use super::{Phase, Refusal, phase_of};
+    assert_eq!(phase_of(1, Refusal::LayoutShift), Phase::Following);
+    for count in [2, 40, 100] {
+        assert_eq!(phase_of(count, Refusal::LayoutShift), Phase::LayoutShift);
+    }
+    assert_eq!(phase_of(2, Refusal::NoOverlap), Phase::NoOverlap);
+    assert_eq!(phase_of(2, Refusal::Mismatch), Phase::Unstable);
+}

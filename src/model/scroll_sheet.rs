@@ -107,6 +107,11 @@
 //!   Without this the sparse-content fixture accepted `dy = -474` for a
 //!   272-row scroll and rewrote the sheet in the wrong place.
 //!
+//! Small lateral layout shifts are corrected against the accepted document
+//! coordinates only when distributed detail agrees and both side margins are
+//! observed empty. Mixed motion, independent columns and clipped edges retain
+//! the confirmed canvas and report a layout shift instead of guessing padding.
+//!
 //! Fixed bottom chrome (a site footer/status bar) follows the same
 //! evidence as the top band, but with a simpler sheet rule: once
 //! committed it leaves the content write entirely and is painted ONLY
@@ -124,7 +129,8 @@
 //! multi-hundred-MB captures).
 
 //! The impl is split by concern: [`profile`] (frame profiles and the band
-//! mask), [`matcher`] (offset search and refusal taxonomy), [`sticky`] (edge
+//! mask), [`matcher`] (offset search and refusal taxonomy), [`alignment`]
+//! (bounded lateral correction), [`sticky`] (edge
 //! chrome), [`floating`] (local overlays and overlap composition), its
 //! `frame_edge` submodule (captured window decorations), [`sidebar`]
 //! (independent column composition), and [`preview`] (live panel geometry and
@@ -242,6 +248,8 @@ pub(crate) enum Refusal {
     /// [`Refusal::NoOverlap`] this says the AREA is unstable; scrolling
     /// slower will not help.
     Mismatch,
+    /// Verified lateral motion cannot be composed as a single safe translation.
+    LayoutShift,
     /// Accepting the offset would grow the canvas past
     /// [`SheetLimits::max_height`].
     TooTall,
@@ -265,9 +273,8 @@ pub(crate) enum Fold {
     /// Pixels changed but nothing moved reliably (caret blink, hover
     /// effects). The frame becomes the new anchor; state is untouched.
     Still,
-    /// Frame could not be placed — see [`Refusal`]. The frame still
-    /// becomes the new anchor so the next comparison rides through the
-    /// change instead of differencing against a stale frame.
+    /// Frame could not be placed — see [`Refusal`]. The accepted position
+    /// anchor stays unchanged; only compatible observation references refresh.
     Refused(Refusal),
 }
 
@@ -388,8 +395,8 @@ pub(crate) struct ScrollSheet {
     /// The sheet so far: RGBA, `height()` rows of `width` px.
     canvas: Vec<u8>,
     state: ViewportState,
-    /// The PREVIOUS frame seen (raw bytes — the exact duplicate test
-    /// memcmp's it). Purely a "what did the screen just look like"
+    /// The previous frame in confirmed document columns (RGBA bytes).
+    /// Purely a "what did the screen just look like"
     /// reference: the duplicate shortcut and the fixed-column mask. It
     /// is NOT a position base — see [`ScrollSheet::stable_profile`].
     prev_raw: Vec<u8>,
@@ -411,6 +418,8 @@ pub(crate) struct ScrollSheet {
     /// search order; it never gates correctness (the coarse sweep still
     /// covers the full range when the user reverses).
     last_dy: i32,
+    /// Confirmed lateral displacement relative to the seed document.
+    horizontal_offset: i32,
     /// Diagnostics for the scroll loop's logs / progress UI.
     frames_pushed: usize,
     frames_accepted: usize,
@@ -495,6 +504,7 @@ impl ScrollSheet {
             stable_profile: profile,
             motion: MotionMask::default(),
             last_dy: 0,
+            horizontal_offset: 0,
             frames_pushed: 1,
             frames_accepted: 1,
             top_shifts: 0,
@@ -545,6 +555,7 @@ impl ScrollSheet {
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
+        self.horizontal_offset = 0;
         self.state = ViewportState::default();
         self.axis = axis;
         self.top_shifts = self.top_shifts.saturating_add(1);
@@ -649,16 +660,55 @@ impl ScrollSheet {
                 transposed.as_slice()
             }
         };
-        if frame == self.prev_raw.as_slice() {
+        let raw_frame = frame;
+        let normalized = (self.horizontal_offset != 0)
+            .then(|| alignment::normalize(frame, self.width as usize, self.horizontal_offset))
+            .flatten();
+        let frame = normalized.as_deref().unwrap_or(frame);
+        if (self.horizontal_offset == 0 || normalized.is_some())
+            && frame == self.prev_raw.as_slice()
+        {
             // Poll outran the repaint: not even a Still — the anchor
             // must stay so the next real frame diffs against fresh bytes.
             return Fold::Unchanged;
         }
 
-        let profile = RowProfile::from_rgba(frame, self.width, self.viewport_height);
-        let outcome = self.place(frame, &profile, document_motion);
-        // Every non-duplicate frame becomes the previous-frame reference,
-        // refused ones included: the fixed-column mask needs two ADJACENT
+        let mut profile = RowProfile::from_rgba(frame, self.width, self.viewport_height);
+        let previous_motion = self.motion.clone();
+        self.motion.observe(&self.prev_profile, &profile);
+        let mut placement = if self.horizontal_offset != 0 && normalized.is_none() {
+            Placement::Reject(Refusal::LayoutShift)
+        } else {
+            self.classify(&self.stable_profile, &profile, document_motion)
+        };
+        let recovered;
+        let mut offset = self.horizontal_offset;
+        let frame = if matches!(placement, Placement::Reject(_)) {
+            match self.recover_horizontal(raw_frame, document_motion) {
+                Ok(Some(aligned)) => {
+                    offset = aligned.offset;
+                    profile = aligned.profile;
+                    self.motion = previous_motion;
+                    self.motion.observe(&self.prev_profile, &profile);
+                    placement = self.classify(&self.stable_profile, &profile, document_motion);
+                    recovered = aligned.pixels;
+                    recovered.as_slice()
+                }
+                Ok(None) => frame,
+                Err(reason) => {
+                    self.motion = previous_motion;
+                    return Fold::Refused(reason);
+                }
+            }
+        } else {
+            frame
+        };
+        let outcome = self.place(frame, &profile, placement);
+        if !matches!(outcome, Fold::Refused(_)) {
+            self.horizontal_offset = offset;
+        }
+        // Frames in confirmed columns become the previous-frame reference,
+        // vertical refusals included: the fixed-column mask needs two ADJACENT
         // frames to tell "this band never moves" from "this band moved a
         // lot", and a duplicate must never become that reference. The
         // POSITION base (`stable_profile`) is not touched here — only
@@ -764,7 +814,7 @@ impl ScrollSheet {
         Placement::Match(estimate)
     }
 
-    fn place(&mut self, frame: &[u8], profile: &RowProfile, document_motion: Option<i32>) -> Fold {
+    fn place(&mut self, frame: &[u8], profile: &RowProfile, placement: Placement) -> Fold {
         // Low-information guard: a near-uniform anchor cannot be aligned
         // by any translation — the
         // conservative answer is Still; a later textured frame brings
@@ -772,9 +822,6 @@ impl ScrollSheet {
         if self.stable_profile.spread <= 1 {
             return Fold::Still;
         }
-        // Sidebar evidence: compare this frame against the previous one
-        // at the same position and down-weight bands that did not move.
-        self.motion.observe(&self.prev_profile, profile);
         // Position comes from ONE base: the last frame actually folded
         // into the sheet. There used to be a second, "riding" anchor
         // (every seen frame) that took over when the step outgrew the
@@ -788,7 +835,7 @@ impl ScrollSheet {
         // nothing is written, the canvas stays exactly as it was, and
         // the next frame that overlaps the (unchanged) base links up
         // again with its full displacement.
-        let estimate = match self.classify(&self.stable_profile, profile, document_motion) {
+        let estimate = match placement {
             Placement::Match(e) => e,
             Placement::Still => {
                 // A late column repaint can recover while the body is idle.
@@ -1013,6 +1060,7 @@ impl ScrollSheet {
     }
 }
 
+mod alignment;
 mod floating;
 mod matcher;
 mod preview;

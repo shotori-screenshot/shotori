@@ -437,6 +437,9 @@ scroll:
     waiting:
       en: Waiting for scroll
       zh-CN: 等待滚动
+    layout_shift:
+      en: "Layout moved sideways · capture retained"
+      zh-CN: "页面横向变化 · 已保留截图"
     no_overlap:
       en: No overlap
       zh-CN: 无重叠

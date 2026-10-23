@@ -142,6 +142,8 @@ pub enum Phase {
     /// does not help; this is the honest reading of a region whose
     /// content changes on its own.
     Unstable,
+    /// Lateral layout changes cannot be safely combined with the document.
+    LayoutShift,
     /// No overlap for long enough that the region cannot advance on its
     /// own (fixed chrome taller than the matcher's trim, a video pane, a
     /// region that does not scroll). Still not fatal: the user can keep
@@ -169,7 +171,9 @@ pub(super) const STALLED_FRAMES: u32 = 40;
 /// every refusal as "no overlap" was the old bug — a region with a
 /// blinking video ad told the user to scroll slower forever.
 pub(crate) fn phase_of(refusals: u32, reason: Refusal) -> Phase {
-    if refusals >= STALLED_FRAMES {
+    if refusals >= NO_OVERLAP_FRAMES && reason == Refusal::LayoutShift {
+        Phase::LayoutShift
+    } else if refusals >= STALLED_FRAMES {
         Phase::Stalled
     } else if refusals >= NO_OVERLAP_FRAMES {
         match reason {

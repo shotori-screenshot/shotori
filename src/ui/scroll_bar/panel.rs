@@ -233,6 +233,9 @@ impl PreviewPanel {
                 Phase::NoOverlap => Some(crate::i18n::t!("scroll.status.no_overlap").to_string()),
                 Phase::Unstable => Some(crate::i18n::t!("scroll.status.unstable").to_string()),
                 Phase::Stalled => Some(crate::i18n::t!("scroll.status.stalled").to_string()),
+                Phase::LayoutShift => {
+                    Some(crate::i18n::t!("scroll.status.layout_shift").to_string())
+                }
                 Phase::Following => None,
             },
         }
