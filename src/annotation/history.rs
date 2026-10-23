@@ -1,18 +1,25 @@
-//! The undo/redo ledger. One reversible step per entry; edits record
-//! both directions, removals keep their indices stable because the
-//! stack unwinds in reverse. The `Add`/`Edit`/`Remove*` variants are
-//! constructed across the annotation module (every gesture commits),
-//! so the enum is `pub(super)`.
+//! A shared undo/redo ledger for crop geometry and annotations.
+//! Each completed gesture records one reversible entry. Removal indices
+//! remain valid because entries are unwound in reverse order.
 
 use super::{Annotations, Shape};
+use gpui_kit::{Bounds, Pixels};
 
-/// One reversible step. Placement history was a plain shape stack, but
-/// in-place edits need both directions recorded: `before` to undo,
-/// `after` to redo. Shape indices are stable because committed shapes
-/// only ever leave from the tail via undo.
+/// Session geometry restored by a history step.
+pub(crate) enum HistoryEffect {
+    None,
+    Selection(Bounds<Pixels>),
+}
+
+/// Both directions of a completed edit. Indices match the shape list at
+/// the moment of recording and are restored by reverse-order undo.
 #[derive(Clone)]
 pub(super) enum HistoryEntry {
     Add(Shape),
+    Selection {
+        before: Bounds<Pixels>,
+        after: Bounds<Pixels>,
+    },
     Edit {
         ix: usize,
         before: Shape,
@@ -47,12 +54,7 @@ pub(super) enum HistoryEntry {
 }
 
 impl Annotations {
-    /// Record a committed shape: the Add entry enables undo, and any
-    /// diverging action invalidates the redo stack. Also drops the
-    /// selection — indices above the tail may have shifted, and since
-    /// the 2026-10-06 select-tool flip a placed mark no longer selects
-    /// itself: selecting is the select tool's job, never a side effect
-    /// of drawing.
+    /// Append a placed mark, invalidate redo and leave it unselected.
     pub(super) fn record_add(&mut self, shape: Shape) {
         self.shapes.push(shape.clone());
         self.history.push(HistoryEntry::Add(shape));
@@ -81,14 +83,26 @@ impl Annotations {
         true
     }
 
-    pub(crate) fn undo(&mut self) {
+    /// Record a finalized crop change in the same ledger as annotation edits.
+    pub(crate) fn record_selection(&mut self, before: Bounds<Pixels>, after: Bounds<Pixels>) {
+        if before != after {
+            self.history.push(HistoryEntry::Selection { before, after });
+            self.redo.clear();
+        }
+    }
+
+    pub(crate) fn undo(&mut self) -> HistoryEffect {
+        let mut effect = HistoryEffect::None;
         self.pressed = false;
         self.selected = None;
         if self.draft.take().is_some() {
-            return;
+            return effect;
         }
         if let Some(entry) = self.history.pop() {
             match &entry {
+                HistoryEntry::Selection { before, .. } => {
+                    effect = HistoryEffect::Selection(*before);
+                }
                 HistoryEntry::Add(_) => {
                     self.shapes.pop();
                 }
@@ -113,12 +127,18 @@ impl Annotations {
             }
             self.redo.push(entry);
         }
+        effect
     }
-    pub(crate) fn redo(&mut self) {
+
+    pub(crate) fn redo(&mut self) -> HistoryEffect {
+        let mut effect = HistoryEffect::None;
         if self.draft.is_none()
             && let Some(entry) = self.redo.pop()
         {
             match &entry {
+                HistoryEntry::Selection { after, .. } => {
+                    effect = HistoryEffect::Selection(*after);
+                }
                 HistoryEntry::Add(shape) => {
                     self.shapes.push(shape.clone());
                 }
@@ -144,5 +164,6 @@ impl Annotations {
             }
             self.history.push(entry);
         }
+        effect
     }
 }

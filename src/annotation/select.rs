@@ -1,7 +1,7 @@
 //! Selecting placed shapes: hit-testing and the selection state.
 //!
-//! The hit region of every kind is its visible stroke or region —
-//! "what you see is what you can click" (issue #5). This module owns
+//! Picks prefer visible ink and allow a small margin around thin strokes.
+//! Hollow interiors stay transparent to selection. This module owns
 //! the geometry probes and the `selected` slot on [`Annotations`];
 //! the pointer-level state machine (click vs. draw-through) lives in
 //! the session, which drives these APIs.
@@ -12,6 +12,7 @@ use gpui_kit::{Bounds, Pixels, Point, point, px, size};
 /// visible stroke itself; this only covers the antialiased fringe so
 /// an edge-pointing click still lands.
 const HIT_TOLERANCE: f32 = 0.5;
+const PICK_TOLERANCE: f32 = 4.;
 
 /// What a press at the hovered spot would do to a shape — the input
 /// to the cursor affordance. A hand cursor implies "I'm holding
@@ -27,10 +28,26 @@ pub(crate) enum ShapeHover {
 }
 
 impl Annotations {
-    /// Hit probe without side effects: the topmost shape index under
-    /// the point, if any.
+    /// Prefer visible ink, then allow a small pointing margin around it.
+    /// Both passes preserve topmost priority without filling hollow shapes.
     pub(crate) fn hit_test(&self, p: Point<Pixels>) -> Option<usize> {
-        self.shapes.iter().rposition(|s| shape_hit(s, p))
+        self.shapes
+            .iter()
+            .rposition(|s| shape_hit(s, p))
+            .or_else(|| {
+                self.shapes.iter().rposition(|s| {
+                    matches!(
+                        s.kind,
+                        ShapeKind::Rectangle
+                            | ShapeKind::Ellipse
+                            | ShapeKind::Line
+                            | ShapeKind::Arrow
+                            | ShapeKind::Polyline
+                            | ShapeKind::Pencil
+                            | ShapeKind::Highlighter
+                    ) && shape_erased(s, p, PICK_TOLERANCE)
+                })
+            })
     }
 
     /// Classify the hover at `p` for the cursor affordance. The
@@ -140,16 +157,7 @@ impl Annotations {
         self.set_size_of(kind, v); // remember for the next stroke
         let write = |shapes: &mut Vec<Shape>| {
             if let Some(shape) = shapes.get_mut(ix) {
-                if kind == ShapeKind::Number {
-                    let b = shape.bounds;
-                    let c = point(b.left() + b.size.width / 2., b.top() + b.size.height / 2.);
-                    shape.bounds = Bounds::new(
-                        point(c.x - px(v / 2.), c.y - px(v / 2.)),
-                        size(px(v), px(v)),
-                    );
-                } else {
-                    shape.width = v;
-                }
+                resize_shape(shape, v);
             }
         };
         // merge into the previous entry while the same drag continues
@@ -272,8 +280,8 @@ impl Annotations {
 
     /// Step the selected shape's size through its OWN preset ladder —
     /// the same rungs the toolbar exposes per tool. Number badges grow
-    /// their diameter (bounds re-centered); every other kind steps its
-    /// width field. One reversible Edit entry per notch.
+    /// their diameter around its center; text scales its bounds from the origin.
+    /// Other kinds change stroke width. One reversible Edit entry per notch.
     pub(crate) fn step_selected_size(&mut self, ix: usize, up: bool) -> bool {
         let kind = self.shapes[ix].kind;
         let spec = super::size_spec(kind);
@@ -288,21 +296,36 @@ impl Annotations {
         }
         self.set_size_of(kind, next); // remember for the next stroke
         let before = self.shapes[ix].clone();
-        if kind == ShapeKind::Number {
-            // grow the badge around its center
-            let b = self.shapes[ix].bounds;
-            let c = point(b.left() + b.size.width / 2., b.top() + b.size.height / 2.);
-            self.shapes[ix].bounds = Bounds::new(
-                point(c.x - px(next / 2.), c.y - px(next / 2.)),
-                size(px(next), px(next)),
-            );
-        } else {
-            self.shapes[ix].width = next;
-        }
+        resize_shape(&mut self.shapes[ix], next);
         let after = self.shapes[ix].clone();
         self.history.push(HistoryEntry::Edit { ix, before, after });
         self.redo.clear();
         true
+    }
+}
+
+/// Keep size-dependent geometry in the same history snapshot as its style.
+fn resize_shape(shape: &mut Shape, value: f32) {
+    match shape.kind {
+        ShapeKind::Number => {
+            let b = shape.bounds;
+            let center = point(b.left() + b.size.width / 2., b.top() + b.size.height / 2.);
+            shape.bounds = Bounds::new(
+                point(center.x - px(value / 2.), center.y - px(value / 2.)),
+                size(px(value), px(value)),
+            );
+        }
+        ShapeKind::Text => {
+            // Scale the wrapping width and height with the glyphs, preserving
+            // the text origin and line layout instead of clipping to the old box.
+            let ratio = value / shape.width;
+            shape.bounds.size = size(
+                shape.bounds.size.width * ratio,
+                shape.bounds.size.height * ratio,
+            );
+            shape.width = value;
+        }
+        _ => shape.width = value,
     }
 }
 
@@ -530,6 +553,104 @@ pub(crate) fn inflate(b: &Bounds<Pixels>, by: Pixels) -> Bounds<Pixels> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn resizing_placed_text_updates_bounds_and_history() {
+        for wheel in [false, true] {
+            let mut a = Annotations::default();
+            a.add_text(
+                Bounds::new(point(px(40.), px(50.)), size(px(220.), px(64.8))),
+                "Canvas note\nSecond row".into(),
+            );
+            a.select_index(0);
+            let original = a.selected().unwrap().clone();
+            if wheel {
+                assert!(a.step_selected_size(0, true));
+            } else {
+                a.apply_size(36.);
+                a.apply_size(48.);
+                a.end_size_drag();
+            }
+            let enlarged = a.selected().unwrap().clone();
+            let ratio = enlarged.width / original.width;
+            assert_eq!(enlarged.bounds.origin, original.bounds.origin);
+            assert_eq!(
+                enlarged.bounds.size,
+                size(
+                    original.bounds.size.width * ratio,
+                    original.bounds.size.height * ratio
+                )
+            );
+            assert_eq!(enlarged.text, original.text);
+            a.undo();
+            assert_eq!(a.shapes[0], original);
+            a.redo();
+            assert_eq!(a.shapes[0], enlarged);
+            a.select_index(0);
+            if wheel {
+                assert!(a.step_selected_size(0, false));
+            } else {
+                a.apply_size(24.);
+                a.end_size_drag();
+            }
+            let restored = &a.shapes[0];
+            assert_eq!(restored.width, original.width);
+            assert!(
+                (f32::from(restored.bounds.size.width - original.bounds.size.width)).abs() < 0.001
+            );
+            assert!(
+                (f32::from(restored.bounds.size.height - original.bounds.size.height)).abs()
+                    < 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn resized_text_raster_keeps_every_line_at_fractional_scales() {
+        super::super::text::with_test_font(|| {
+            let mut a = Annotations::default();
+            a.add_text(
+                Bounds::new(point(px(20.2), px(30.3)), size(px(220.), px(64.8))),
+                "Canvas note\nSecond row".into(),
+            );
+            a.select_index(0);
+            for font_size in [72., 12., 36., 24.] {
+                a.apply_size(font_size);
+                let shape = a.selected().unwrap();
+                for scale in [1_f32, 1.25, 1.5, 1.75, 2.] {
+                    let w = (800. * scale).ceil() as u32;
+                    let h = (400. * scale).ceil() as u32;
+                    let mut actual = vec![255; (w * h * 4) as usize];
+                    super::super::text::rasterize(
+                        shape,
+                        &mut actual,
+                        w,
+                        h,
+                        point(px(0.), px(0.)),
+                        scale,
+                    );
+                    // A taller reference uses identical wrapping and glyphs but
+                    // cannot hide a clipped last line behind the shape's mask.
+                    let mut reference_shape = shape.clone();
+                    reference_shape.bounds.size.height = px(350.);
+                    let mut expected = vec![255; actual.len()];
+                    super::super::text::rasterize(
+                        &reference_shape,
+                        &mut expected,
+                        w,
+                        h,
+                        point(px(0.), px(0.)),
+                        scale,
+                    );
+                    assert!(actual.iter().any(|channel| *channel != 255));
+                    assert!(
+                        actual == expected,
+                        "size {font_size}, scale {scale}: clipped text"
+                    );
+                }
+            }
+        });
+    }
+
     fn polyline(points: &[(f32, f32)], width: f32) -> Shape {
         Shape {
             kind: ShapeKind::Polyline,
@@ -544,6 +665,45 @@ mod tests {
 
     fn hits(shape: &Shape, x: f32, y: f32) -> bool {
         shape_hit(shape, point(px(x), px(y)))
+    }
+
+    #[test]
+    fn thin_stroke_picking_has_margin_without_widening_the_eraser() {
+        for kind in [
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+            ShapeKind::Polyline,
+            ShapeKind::Pencil,
+        ] {
+            let mut shape = polyline(&[(20., 30.), (100., 30.)], 1.);
+            shape.kind = kind;
+            let mut a = Annotations::default();
+            a.record_add(shape.clone());
+            let near = point(px(60.), px(34.));
+            assert_eq!(a.hit_test(near), Some(0), "{kind:?}");
+            assert!(!shape_erased(&shape, near, 0.5), "{kind:?}");
+            assert_eq!(a.hit_test(point(px(60.), px(50.))), None);
+        }
+        for kind in [ShapeKind::Rectangle, ShapeKind::Ellipse] {
+            let shape = Shape {
+                kind,
+                bounds: Bounds::new(point(px(20.), px(20.)), size(px(100.), px(80.))),
+                ..polyline(&[], 1.)
+            };
+            let mut a = Annotations::default();
+            a.record_add(shape);
+            assert_eq!(a.hit_test(point(px(70.), px(16.))), Some(0), "{kind:?}");
+            assert_eq!(a.hit_test(point(px(70.), px(60.))), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn exact_ink_wins_over_a_newer_shapes_pointing_margin() {
+        let mut a = Annotations::default();
+        a.record_add(polyline(&[(20., 30.), (100., 30.)], 1.));
+        a.record_add(polyline(&[(20., 34.), (100., 34.)], 1.));
+        assert_eq!(a.hit_test(point(px(60.), px(30.))), Some(0));
+        assert_eq!(a.hit_test(point(px(60.), px(32.))), Some(1));
     }
 
     /// An L whose ring returns to its start. The notch around (60,60)

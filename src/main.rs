@@ -167,7 +167,7 @@ fn main() {
                 eprintln!("[shotori] settings: {warning}");
             }
             shotori::actions::bind_keys(cx, settings.keys());
-            // Backstop: Esc still exits if the overlay somehow loses focus.
+            // Backstop for explicit close when the overlay has no focused view.
             // Note: dispatch_action inside a window does NOT bubble up here
             // (actions stop at the focus path — measured); the overlay's own
             // QuitOverlay handler is the real exit implementation; this line

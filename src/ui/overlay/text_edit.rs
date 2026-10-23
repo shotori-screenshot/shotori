@@ -6,6 +6,28 @@ use super::Overlay;
 use gpui_kit::*;
 
 impl Overlay {
+    /// Escape finishes active editing, or exits when the canvas is idle.
+    pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ocr_setup.is_some() {
+            self.ocr_setup_cancel(window, cx);
+        } else {
+            let editing_text = self.text_editing.is_some();
+            if editing_text {
+                self.finish_text(true, window, cx);
+            }
+            let interrupted = self.session.update(cx, |s, cx| {
+                let interrupted = s.escape_interaction();
+                cx.notify();
+                interrupted
+            });
+            if !editing_text && !interrupted {
+                cx.quit();
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn subscribe_text(
         &mut self,
         input: &Entity<crate::ui::text_input::TextInput>,

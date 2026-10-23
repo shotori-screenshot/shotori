@@ -211,20 +211,9 @@ pub(crate) fn selection_label(
         .into_any_element()
 }
 
-/// The annotation selection chrome: a 1 px dashed accent frame around
-/// the selected shape's ink bounding box ([`Shape::selection_box`]),
-/// plus the handle dots ([`paint_shape_handle_dot`] — white-cored, the
-/// ink-readable sibling of the region's solid dots) at its anchor
-/// points (endpoints for lines, vertices for polylines, corners for
-/// rects/ellipses). The dashed frame replaced a 1 px accent stroke
-/// that traced the shape's own outline — that stroke sat ON the ink,
-/// in a hue the annotation palette all but swallowed, so a selected
-/// shape read as unselected. Dashes also separate the frame from the
-/// selection region's SOLID accent border (object vs region), while
-/// the shared dash rhythm keeps the area eraser's white rect (a
-/// gesture in flight) its sibling: hue separates their meanings.
-/// Pure rendering of [`crate::annotation::Shape`] geometry, and the
-/// same visual language as [`selection_handles`].
+/// A dashed frame around the selected mark's visible ink, with contrasting
+/// backing and white-cored handles at its editable anchors. Geometry comes
+/// from the mark and is shared with hover feedback and hit testing.
 pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
@@ -234,19 +223,7 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
             };
             let mut b = shape.selection_box();
             b.origin += viewport.origin;
-            let mut builder = PathBuilder::stroke(px(1.)).dash_array(&[px(4.), px(3.)]);
-            builder.add_polygon(
-                &[
-                    point(b.left(), b.top()),
-                    point(b.right(), b.top()),
-                    point(b.right(), b.bottom()),
-                    point(b.left(), b.bottom()),
-                ],
-                true,
-            );
-            if let Ok(path) = builder.build() {
-                window.paint_path(path, rgba(theme::c().accent));
-            }
+            paint_annotation_frame(window, b);
             // One size, two fills: a shape's resize affordance wears
             // the same diameter the selection border does, but the
             // two-tone fill — see [`paint_shape_handle_dot`].
@@ -259,6 +236,37 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
     .top_0()
     .left_0()
     .size_full()
+}
+
+/// A hover target has a dashed outline without selection handles.
+pub(crate) fn annotation_hover_chrome(bounds: Bounds<Pixels>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |viewport, (), window, _| {
+            let b = Bounds::new(bounds.origin + viewport.origin, bounds.size);
+            paint_annotation_frame(window, b);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+fn paint_annotation_frame(window: &mut Window, b: Bounds<Pixels>) {
+    let points = [
+        b.origin,
+        point(b.right(), b.top()),
+        b.bottom_right(),
+        point(b.left(), b.bottom()),
+    ];
+    for (width, color) in [(3., 0x00000080), (1., theme::c().accent)] {
+        let mut path = PathBuilder::stroke(px(width)).dash_array(&[px(4.), px(3.)]);
+        path.add_polygon(&points, true);
+        if let Ok(path) = path.build() {
+            window.paint_path(path, rgba(color));
+        }
+    }
 }
 
 /// The eraser's pointer chrome (issue #14): a double-stroke ring

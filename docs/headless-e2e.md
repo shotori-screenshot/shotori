@@ -54,6 +54,16 @@ reports the toplevel at `y=28`), and every capture shows a phantom title strip
 above the app's real one. Constrain `resolution` to the window's own size
 (1120x780) when reviewing layout at its default size.
 
+### Reviewing crop editing
+
+With `SHOTORI_DEBUG_TARGET=HEADLESS-1` and
+`SHOTORI_DEBUG_SELECTION=150,110,700,430`, set
+`SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel` to inspect the
+annotation hover outline, selection handles, crop reselection and cancellation.
+The scenes create synthetic marks inside the injected selection. `selected`
+includes a keyboard-sized translation; `cancel` restores the crop after a
+reselection drag. Use an isolated compositor and configuration directory.
+
 ### Reviewing the settings window
 
 Settings write through immediately. Use a dedicated `HOME`, config, cache and

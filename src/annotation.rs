@@ -838,6 +838,7 @@ mod history;
 
 use eraser::EraserGesture;
 use gesture::distance;
+pub(crate) use history::HistoryEffect;
 use history::HistoryEntry;
 #[cfg(test)]
 mod tests {

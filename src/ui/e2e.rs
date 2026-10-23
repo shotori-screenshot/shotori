@@ -14,6 +14,8 @@
 //!   (opens the dialog since models are missing), then
 //!   OcrSetupConfirm at 6s (starts the download); "clear" fires the
 //!   clear-all annotations action (issue #15)
+//! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel` —
+//!   seed annotation and crop interaction states on the target output
 //! - `SHOTORI_DEBUG_SETTINGS_PAGE=general|toolbar|keys|ocr|appearance|about`
 //!   — open the settings window on that page. A headless seat has no
 //!   pointer AND no keyboard (docs/headless-e2e.md), so without this
@@ -49,6 +51,53 @@ pub(crate) fn debug_selection(targeted: bool) -> Selection {
             })
         })
         .unwrap_or(Selection::Idle)
+}
+
+/// Seed crop editing and hover states on a private headless display.
+pub(crate) fn debug_editing_scene(
+    targeted: bool,
+    session: &mut crate::model::session::ScreenshotSession,
+    output: &str,
+) {
+    if !targeted {
+        return;
+    }
+    let Ok(scene) = std::env::var("SHOTORI_DEBUG_EDITING_SCENE") else {
+        return;
+    };
+    if !matches!(scene.as_str(), "hover" | "selected" | "reselect" | "cancel") {
+        return;
+    }
+    let Some(bounds) = session.selection().bounds() else {
+        return;
+    };
+    let p = |x, y| bounds.origin + point(px(x), px(y));
+    session.edit_annotations(|a| {
+        a.toggle(crate::annotation::ShapeKind::Rectangle);
+        a.begin(p(80., 70.), bounds, false);
+        a.drag_to(p(290., 220.), bounds, false);
+        a.end();
+        a.toggle(crate::annotation::ShapeKind::Arrow);
+        a.begin(p(350., 150.), bounds, false);
+        a.drag_to(p(530., 150.), bounds, false);
+        a.end();
+        a.toggle(crate::annotation::ShapeKind::Select);
+    });
+    let origin = session.to_global(output, point(px(0.), px(0.)));
+    let local = |x, y| p(x, y) - origin;
+    session.pointer_move(output, local(180., 66.), false);
+    if scene == "selected" {
+        session.pointer_down(output, local(180., 66.), false);
+        session.pointer_up(output, local(180., 66.), false);
+        session.nudge(point(px(10.), px(10.)));
+        session.finish_nudge();
+    } else if scene == "reselect" || scene == "cancel" {
+        session.pointer_down(output, local(-60., -60.), false);
+        session.pointer_move(output, local(100., 100.), false);
+        if scene == "cancel" {
+            session.cancel_annotation();
+        }
+    }
 }
 
 /// Which settings page to open on. `None` (unset or unknown name) keeps

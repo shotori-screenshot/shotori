@@ -569,8 +569,8 @@ toolbar:
     en: Settings
     zh-CN: 设置
   cancel:
-    en: Cancel
-    zh-CN: 取消
+    en: Close screenshot
+    zh-CN: 关闭截图
 ocr:
   model:
     ppocrv6-tiny:

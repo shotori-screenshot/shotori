@@ -15,38 +15,21 @@ use super::{Shape, ShapeKind};
 const FRAME_PAD: f32 = 3.;
 
 impl Shape {
-    /// Selection frame: the axis-aligned bounding box of the shape's
-    /// VISIBLE ink, inflated by [`FRAME_PAD`] — the universal
-    /// "this object is selected" affordance (Figma/PowerPoint
-    /// language), replacing the 1 px accent stroke that traced the
-    /// shape's own outline. That stroke sat ON the ink, in a hue the
-    /// annotation palette all but swallowed, so a selected shape read
-    /// as unselected (user report, 2026-10-06). Callers paint this as
-    /// a dashed accent rectangle (`ui::hud::annotation_chrome`).
+    /// Visible ink bounds, including stroke caps and arrowhead wings.
+    pub(crate) fn ink_bounds(&self) -> Bounds<Pixels> {
+        match self.kind {
+            ShapeKind::Pencil
+            | ShapeKind::Highlighter
+            | ShapeKind::Polyline
+            | ShapeKind::Line
+            | ShapeKind::Arrow => ink_aabb(self),
+            _ => self.bounds,
+        }
+    }
+
+    /// The selection frame encloses visible ink with space for a dashed outline.
     pub(crate) fn selection_box(&self) -> Bounds<Pixels> {
-        super::select::inflate(
-            &match self.kind {
-                // Point-carried shapes: the ink is the union of capsules
-                // and arrowheads from the shared geometry source ("what
-                // you see is what you box"). Neither `points` alone nor
-                // `bounds` will do: a capsule's radius is half the
-                // stroke width, an arrowhead's wings reach ~1.8× the
-                // stroke width past the segment, and freehand drags grow
-                // `points` while never touching `bounds` — which stays
-                // the 0×0 box the gesture started from.
-                ShapeKind::Pencil
-                | ShapeKind::Highlighter
-                | ShapeKind::Polyline
-                | ShapeKind::Line
-                | ShapeKind::Arrow => ink_aabb(self),
-                // Bounds-carried shapes: `bounds` already encloses the
-                // ink — rect strokes and the ellipse ring are drawn
-                // inward from it, the badge circle inscribes it, and
-                // text/mosaic/blur fill exactly it.
-                _ => self.bounds,
-            },
-            px(FRAME_PAD),
-        )
+        super::select::inflate(&self.ink_bounds(), px(FRAME_PAD))
     }
 
     /// Handle anchors for the selection chrome — the points where a

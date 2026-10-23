@@ -5,16 +5,16 @@
 
 use super::Overlay;
 use crate::actions::{
-    CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, FinishPolyline, OcrSelection,
-    OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection, ScrollSelection,
-    SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
-    ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect,
-    ToggleText, UndoAnnotation,
+    CancelText, ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline,
+    Nudge, OcrSelection, OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection,
+    ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
+    ToggleLine, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
+    ToggleSelect, ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
-    annotation_chrome, eraser_chrome, hover_outline, magnifier_loupe, selection_backdrop,
-    selection_handles, selection_label,
+    annotation_chrome, annotation_hover_chrome, eraser_chrome, hover_outline, magnifier_loupe,
+    selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::toolbar::selection_toolbar;
 use gpui_kit::*;
@@ -118,7 +118,13 @@ impl Render for Overlay {
             .backdrop_bounds(&self.capture.output_name)
             .map(round_px);
         let hover = shared.hover_bounds(&self.capture.output_name).map(round_px);
-        let selected_shape = shared.selected_shape_local(&self.capture.output_name);
+        let selected_shape =
+            if self.text_editing.is_none() && shared.annotations().editing_text().is_none() {
+                shared.selected_shape_local(&self.capture.output_name)
+            } else {
+                None
+            };
+        let annotation_hover = shared.annotation_hover_bounds(&self.capture.output_name);
         let raster_preview = shared.uses_raster_preview();
         let shapes = if raster_preview {
             Vec::new()
@@ -183,9 +189,8 @@ impl Render for Overlay {
             .on_action(cx.listener(|this, _: &ToggleText, window, cx| {
                 this.toggle_tool(crate::annotation::ShapeKind::Text, window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &CancelText, window, cx| this.finish_text(false, window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &EscapeOverlay, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &CancelText, window, cx| this.escape(window, cx)))
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Enter, _, cx| {
                     if this.text_editing.is_some() {
@@ -198,7 +203,7 @@ impl Render for Overlay {
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
                     if this.text_editing.is_some() {
-                        this.finish_text(false, window, cx);
+                        this.escape(window, cx);
                     } else {
                         cx.propagate();
                     }
@@ -250,10 +255,25 @@ impl Render for Overlay {
                     cx.notify();
                 });
             }))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+                if matches!(
+                    event.keystroke.key.as_str(),
+                    "left" | "right" | "up" | "down"
+                ) {
+                    this.session.update(cx, |s, _| s.finish_nudge());
+                }
+            }))
+            .on_action(cx.listener(|this, action: &Nudge, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    if s.nudge(point(px(action.dx as f32), px(action.dy as f32))) {
+                        cx.notify();
+                    }
+                });
+            }))
             .on_action(cx.listener(|this, _: &UndoAnnotation, window, cx| {
                 window.focus(&this.focus_handle, cx);
                 this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| a.undo());
+                    s.undo();
                     cx.notify();
                 });
             }))
@@ -283,7 +303,7 @@ impl Render for Overlay {
             .on_action(cx.listener(|this, _: &RedoAnnotation, window, cx| {
                 window.focus(&this.focus_handle, cx);
                 this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| a.redo());
+                    s.redo();
                     cx.notify();
                 });
             }))
@@ -349,40 +369,10 @@ impl Render for Overlay {
             .map(|s| crate::ui::ocr_setup::setup_card(s, &self.setup_focus).into_any_element());
 
         base
-            // Two-stage Esc (handled in place, no reliance on bubbling):
-            // measured: dispatch_action inside a gpui window stops at the
-            // focus path and never reaches App::on_action — exiting must
-            // happen here. With the setup dialog open, Esc cancels the
-            // dialog instead (aborting any download).
-            .on_action(cx.listener(|this, _: &QuitOverlay, window, cx| {
-                if this.ocr_setup.is_some() {
-                    this.ocr_setup_cancel(window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.session.update(cx, |s, cx| {
-                    let cancelled = s.cancel_annotation();
-                    if cancelled {
-                        cx.notify();
-                    }
-                    cancelled
-                }) {
-                    cx.stop_propagation();
-                    return;
-                }
-                if this.session.read(cx).selection().is_dragging()
-                    || this.session.read(cx).selection().is_editing()
-                    || this.session.read(cx).toolbar_drag_active()
-                {
-                    this.session.update(cx, |s, cx| {
-                        s.cancel_drag(); // stage one: abandon this drag / revert the edit / put the toolbar back
-                        cx.notify();
-                    });
-                } else {
-                    cx.quit(); // stage two: exit
-                }
+            // Close always exits; Escape owns interaction cancellation.
+            .on_action(cx.listener(|_, _: &QuitOverlay, _, cx| {
+                cx.quit();
                 cx.stop_propagation();
-                cx.notify();
             }))
             // The gear / Ctrl+, — the one "exit" that leads somewhere:
             // a regular toplevel cannot coexist with exclusive-keyboard
@@ -400,14 +390,19 @@ impl Render for Overlay {
             // a stale pointer focus after a cross-screen release delivers
             // it with out-of-bounds local coordinates, which element
             // hit-testing would drop)
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, window, cx| {
-                if this.session.read(cx).blocked() { return; }
-                window.focus(&this.focus_handle, cx);
-                this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| a.finish_polyline());
-                    cx.notify();
-                });
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    if this.session.read(cx).blocked() {
+                        return;
+                    }
+                    window.focus(&this.focus_handle, cx);
+                    this.session.update(cx, |s, cx| {
+                        s.edit_annotations(|a| a.finish_polyline());
+                        cx.notify();
+                    });
+                }),
+            )
             // Wheel has two phases. (1) Pre-selection with no annotation
             // tool lit: step the smart-region hierarchy under the
             // pointer (child ↔ parent ↔ whole window/screen). (2) With
@@ -483,9 +478,16 @@ impl Render for Overlay {
             .child(
                 canvas(
                     move |bounds, window, _| {
-                        let highlights = highlighter_cache.borrow_mut().prepare(&shapes, window.scale_factor(), Bounds::new(point(px(0.), px(0.)), bounds.size));
-                        let images = number_cache.borrow_mut().prepare(&shapes, window.scale_factor());
-                        let next = filtered_image.into_iter()
+                        let highlights = highlighter_cache.borrow_mut().prepare(
+                            &shapes,
+                            window.scale_factor(),
+                            Bounds::new(point(px(0.), px(0.)), bounds.size),
+                        );
+                        let images = number_cache
+                            .borrow_mut()
+                            .prepare(&shapes, window.scale_factor());
+                        let next = filtered_image
+                            .into_iter()
                             .chain(images.iter().flatten().map(|image| image.image.clone()))
                             .chain(highlights.iter().flatten().map(|image| image.image.clone()))
                             .collect();
@@ -496,62 +498,91 @@ impl Render for Overlay {
                                 eprintln!("[shotori] preview cleanup failed: {error}");
                             }
                         }
-                        shapes.into_iter().zip(images).zip(highlights).collect::<Vec<_>>()
+                        shapes
+                            .into_iter()
+                            .zip(images)
+                            .zip(highlights)
+                            .collect::<Vec<_>>()
                     },
                     move |viewport, shapes, window, _| {
                         if let Some(mut clip) = sel {
                             clip.origin += viewport.origin;
-                            window.with_content_mask(
-                                Some(ContentMask { bounds: clip }),
-                                |window| {
-                                    if let Some((mut bounds, image)) = filtered {
-                                        bounds.origin += viewport.origin;
-                                        if let Err(error) = window.paint_image(bounds, bounds, Corners::default(), image, 0, false) {
-                                            eprintln!("[shotori] filter preview failed: {error}");
+                            window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            if let Some((mut bounds, image)) = filtered {
+                                bounds.origin += viewport.origin;
+                                if let Err(error) = window.paint_image(
+                                    bounds,
+                                    bounds,
+                                    Corners::default(),
+                                    image,
+                                    0,
+                                    false,
+                                ) {
+                                    eprintln!("[shotori] filter preview failed: {error}");
+                                }
+                            }
+                            for ((shape, number_image), highlight) in shapes {
+                                if shape.kind == crate::annotation::ShapeKind::Highlighter {
+                                    if let Some(mut highlight) = highlight {
+                                        highlight.bounds.origin += viewport.origin;
+                                        if let Err(error) = window.paint_image(
+                                            highlight.bounds,
+                                            highlight.bounds,
+                                            Corners::default(),
+                                            highlight.image,
+                                            0,
+                                            false,
+                                        ) {
+                                            eprintln!(
+                                                "[shotori] highlighter preview failed: {error}"
+                                            );
                                         }
                                     }
-                                    for ((shape, number_image), highlight) in shapes {
-                                        if shape.kind == crate::annotation::ShapeKind::Highlighter {
-                                            if let Some(mut highlight) = highlight {
-                                                highlight.bounds.origin += viewport.origin;
-                                                if let Err(error) = window.paint_image(highlight.bounds, highlight.bounds, Corners::default(), highlight.image, 0, false) {
-                                                    eprintln!("[shotori] highlighter preview failed: {error}");
-                                                }
-                                            }
-                                            continue;
-                                        }
-                                        if let Some(mut number_image) = number_image {
-                                            number_image.bounds.origin += viewport.origin;
-                                            if let Err(error) = window.paint_image(number_image.bounds, number_image.bounds, Corners::default(), number_image.image, 0, false) {
-                                                eprintln!("[shotori] number preview failed: {error}");
-                                            }
-                                            continue;
-                                        }
-                                        if matches!(shape.kind, crate::annotation::ShapeKind::Line | crate::annotation::ShapeKind::Arrow | crate::annotation::ShapeKind::Polyline | crate::annotation::ShapeKind::Pencil) {
-                                            for path in shape.line_paths(viewport.origin) {
-                                                window.paint_path(path, rgba(shape.color));
-                                            }
-                                            continue;
-                                        }
-                                        if shape.kind == crate::annotation::ShapeKind::Ellipse {
-                                            if let Some(path) = shape.ellipse_path(viewport.origin)
-                                            {
-                                                window.paint_path(path, rgba(shape.color));
-                                            }
-                                            continue;
-                                        }
-                                        for mut stroke in shape.strokes() {
-                                            stroke.origin += viewport.origin;
-                                            window.paint_quad(fill(stroke, rgba(shape.color)));
-                                        }
+                                    continue;
+                                }
+                                if let Some(mut number_image) = number_image {
+                                    number_image.bounds.origin += viewport.origin;
+                                    if let Err(error) = window.paint_image(
+                                        number_image.bounds,
+                                        number_image.bounds,
+                                        Corners::default(),
+                                        number_image.image,
+                                        0,
+                                        false,
+                                    ) {
+                                        eprintln!("[shotori] number preview failed: {error}");
                                     }
-                                    if let Some(mark) = &draft_mark {
-                                        for path in mark.draft_paths(viewport.origin) {
-                                            window.paint_path(path, rgba(mark.color));
-                                        }
+                                    continue;
+                                }
+                                if matches!(
+                                    shape.kind,
+                                    crate::annotation::ShapeKind::Line
+                                        | crate::annotation::ShapeKind::Arrow
+                                        | crate::annotation::ShapeKind::Polyline
+                                        | crate::annotation::ShapeKind::Pencil
+                                ) {
+                                    for path in shape.line_paths(viewport.origin) {
+                                        window.paint_path(path, rgba(shape.color));
                                     }
-                                },
-                            );
+                                    continue;
+                                }
+                                if shape.kind == crate::annotation::ShapeKind::Ellipse {
+                                    if let Some(path) = shape.ellipse_path(viewport.origin) {
+                                        window.paint_path(path, rgba(shape.color));
+                                    }
+                                    continue;
+                                }
+                                for mut stroke in shape.strokes() {
+                                    stroke.origin += viewport.origin;
+                                    window.paint_quad(fill(stroke, rgba(shape.color)));
+                                }
+                            }
+                            if let Some(mark) = &draft_mark {
+                                for path in mark.draft_paths(viewport.origin) {
+                                    window.paint_path(path, rgba(mark.color));
+                                }
+                            }
+                        });
                         }
                     },
                 )
@@ -562,6 +593,7 @@ impl Render for Overlay {
             )
             // ①½ Annotation selection chrome (stroke + handles),
             // above the marks, below the selection border.
+            .children(annotation_hover.map(annotation_hover_chrome))
             .child(annotation_chrome(selected_shape))
             // ①¾ Eraser chrome (issue #14): the brush ring / the area
             // rect — pointer affordances, above the marks they erase.
@@ -604,7 +636,10 @@ impl Render for Overlay {
                         self.capture.output_name.clone().into(),
                         self.session.read(cx).annotations(),
                         self.session.clone(),
-                        self.text_editing.as_ref().map(|e|e.focus_handle(cx)).unwrap_or_else(||self.focus_handle.clone()),
+                        self.text_editing
+                            .as_ref()
+                            .map(|e| e.focus_handle(cx))
+                            .unwrap_or_else(|| self.focus_handle.clone()),
                         size_slider,
                         swatch_picker,
                     ))
@@ -616,11 +651,7 @@ impl Render for Overlay {
             // chrome, topmost below the setup dialog (which blocks
             // gestures anyway, so ⑥ stays above it). Renders only on
             // the output that owns the focus point.
-            .children(
-                loupe.map(|l| magnifier_loupe(self.frozen.clone(), l, ws).into_any_element()),
-            )
-            // ⑥ First-run OCR setup dialog (confirm / progress), topmost
-
+            .children(loupe.map(|l| magnifier_loupe(self.frozen.clone(), l, ws).into_any_element()))
             .children(setup_el)
     }
 }
@@ -751,6 +782,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             }
                             return;
                         }
+                        let previous_annotation = s.hovered_annotation();
                         let changed = s.pointer_move(
                             &this.capture.output_name,
                             event.position,
@@ -759,7 +791,11 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                         let hovered = s.hover_at(&this.capture.output_name, event.position);
                         // the eraser ring follows the pointer: moves
                         // repaint even when no state changed
-                        if changed || hovered || s.eraser_ring_follows_pointer() {
+                        if changed
+                            || hovered
+                            || previous_annotation != s.hovered_annotation()
+                            || s.eraser_ring_follows_pointer()
+                        {
                             cx.notify();
                         }
                     });

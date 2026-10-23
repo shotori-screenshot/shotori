@@ -325,13 +325,13 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Cancel,
         debug_id: "tb-cancel",
         label_key: "toolbar.cancel",
-        shortcut: "Esc",
+        shortcut: "",
         icon: ButtonIcon::Kit(IconName::X),
     },
 ];
 
-/// The action each button dispatches — the exact same actions the
-/// keybindings dispatch (one action, two triggers, one pipeline).
+/// Shared commands for toolbar buttons. Explicit close is unconditional;
+/// Escape has a separate action for finishing the current interaction.
 fn action_for(button: crate::model::settings::ToolbarButton) -> Box<dyn gpui_kit::Action> {
     use crate::model::settings::ToolbarButton as B;
     match button {

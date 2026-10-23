@@ -102,6 +102,7 @@ impl Overlay {
                 session.begin(&capture.output_name, bounds.origin);
                 session.end(&capture.output_name, bounds.bottom_right());
             }
+            crate::ui::e2e::debug_editing_scene(debug_targeted, session, &capture.output_name);
             cx.notify();
         });
         let mut overlay = Self {

@@ -144,6 +144,8 @@ pub struct ScreenshotSession {
     screens: Vec<Screen>,
     selection: Selection,
     active_output: Option<String>,
+    selection_gesture: Option<editing::SelectionGesture>,
+    nudge: Option<editing::NudgeGesture>,
     /// The pointer's last known position in GLOBAL desktop coordinates,
     /// reported by whichever window actually receives its events. Under
     /// Wayland's implicit grab a gesture's events all go to the PRESS
@@ -227,6 +229,8 @@ impl ScreenshotSession {
                 .collect(),
             selection: Selection::Idle,
             active_output: None,
+            selection_gesture: None,
+            nudge: None,
             pointer_global: None,
             pending_click: None,
             moving: None,
@@ -299,6 +303,8 @@ impl ScreenshotSession {
         else {
             return false;
         };
+        self.finish_nudge();
+        self.cancel_selection_gesture();
         let current = self.selection.bounds();
         let next = if current == Some(union) {
             screen_bounds // all → this screen (wrap)
@@ -310,7 +316,10 @@ impl ScreenshotSession {
         self.toolbar_pos = None; // the selection was replaced: re-anchor
         self.set_active_output(name);
         self.selection = Selection::Selected { bounds: next };
-        true
+        if let Some(before) = current {
+            self.annotations.record_selection(before, next);
+        }
+        current != Some(next)
     }
 
     pub(crate) fn set_size(&mut self, name: &str, logical_size: Size<Pixels>) -> bool {
@@ -419,7 +428,12 @@ impl ScreenshotSession {
         let global = local + self.screen(name).bounds().origin;
         self.press = Some(global);
         self.hovered = None; // the outline steps aside for the real interaction
-        self.annotations.reset();
+        self.finish_nudge();
+        if let Some(before) = self.selection_snapshot() {
+            self.selection_gesture = Some(editing::SelectionGesture::Reselect(before));
+        } else {
+            self.annotations.reset();
+        }
         self.toolbar_pos = None; // a NEW selection re-anchors the toolbar
         self.set_active_output(name);
         self.selection.begin(global);
@@ -586,6 +600,7 @@ impl ScreenshotSession {
     /// the host window's local coordinates. Returns false when there is
     /// no draggable toolbar here (or a modal owns the session).
     pub(crate) fn toolbar_drag_begin(&mut self, name: &str, press: Point<Pixels>) -> bool {
+        self.finish_nudge();
         if self.blocked {
             return false;
         }
@@ -643,16 +658,41 @@ impl ScreenshotSession {
         if self.blocked {
             return false;
         }
-        self.selection
-            .drag_to(local + self.screen(name).bounds().origin)
+        let global = self.to_global(name, local);
+        if let Some(editing::SelectionGesture::Pending { press, .. }) = &self.selection_gesture {
+            let delta = global - *press;
+            if f32::from(delta.x).hypot(f32::from(delta.y)) <= CLICK_SLOP {
+                return false;
+            }
+            self.selection.begin(*press);
+            self.toolbar_pos = None;
+            self.set_active_output(name);
+            if let Some(editing::SelectionGesture::Pending { before, .. }) =
+                self.selection_gesture.take()
+            {
+                self.selection_gesture = Some(editing::SelectionGesture::Reselect(before));
+            }
+        }
+        self.selection.drag_to(global)
     }
 
     pub(crate) fn end(&mut self, name: &str, local: Point<Pixels>) {
         if self.blocked {
             return;
         }
-        self.selection
-            .end(local + self.screen(name).bounds().origin);
+        self.drag_to(name, local);
+        if matches!(
+            self.selection_gesture,
+            Some(editing::SelectionGesture::Pending { .. })
+        ) {
+            self.cancel_selection_gesture();
+            return;
+        }
+        self.selection.end(self.to_global(name, local));
+        if self.selection_gesture.is_some() && !self.selection.is_selected() {
+            self.cancel_selection_gesture();
+            return;
+        }
         // An in-place click (< selection::MIN_SIZE) leaves Idle — if a
         // smart region or a compositor window sits under the PRESS
         // point, select its rect instead (smart selection / window
@@ -675,6 +715,7 @@ impl ScreenshotSession {
         // chrome host must follow the selection there, exactly like an
         // edit-release does (see `follow_selection_host`).
         self.follow_selection_host();
+        self.commit_selection_gesture();
     }
 
     /// Track the region under the cursor for the hover outline. Returns
@@ -732,6 +773,9 @@ impl ScreenshotSession {
             self.toolbar_pos = drag.restore;
             return;
         }
+        if self.cancel_selection_gesture() {
+            return;
+        }
         self.press = None;
         self.hovered = None;
         self.smart_cursor.reset();
@@ -744,6 +788,7 @@ impl ScreenshotSession {
 }
 
 mod annotations;
+mod editing;
 mod export;
 mod smart;
 #[cfg(test)]
@@ -874,7 +919,7 @@ mod tests {
             s.request_filtered_preview("left", cx);
             assert!(s.preview_busy);
             s.cancel_annotation();
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert!(s.request_filtered_preview("left", cx).is_none());
         });
         cx.run_until_parked();
@@ -1523,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn press_outside_selection_still_restarts_and_clears_annotations() {
+    fn outside_press_waits_for_a_reselection_drag_and_keeps_annotations() {
         let mut s = session();
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.)));
@@ -1531,14 +1576,14 @@ mod tests {
         s.pointer_down("left", point(px(15.), px(15.)), false);
         s.pointer_up("left", point(px(25.), px(25.)), false);
         assert_eq!(s.annotations().visible().count(), 1);
-        // untoggle the tool, then press well outside the box: fresh
-        // selection, annotations wiped
+        // Outside presses preserve the crop until an intentional drag.
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
         s.pointer_down("left", point(px(60.), px(60.)), false);
-        assert!(s.selection().is_dragging());
+        assert!(s.selection().is_selected());
         s.pointer_move("left", point(px(80.), px(80.)), false);
+        assert!(s.selection().is_dragging());
         s.pointer_up("left", point(px(80.), px(80.)), false);
-        assert_eq!(s.annotations().visible().count(), 0);
+        assert_eq!(s.annotations().visible().count(), 1);
         let b = s.selection().bounds().unwrap();
         assert_eq!(b.origin, point(px(-40.), px(80.)));
     }
@@ -1840,9 +1885,9 @@ mod tests {
         let (_, left) = s.filtered_preview("left").unwrap();
         let (_, right) = s.filtered_preview("right").unwrap();
         assert!(Arc::ptr_eq(&left, &right));
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.crop("left").unwrap().2, original);
-        s.edit_annotations(|a| a.redo());
+        s.redo();
         assert_eq!(s.crop("right").unwrap().2, pixels);
     }
 
@@ -1913,7 +1958,7 @@ mod tests {
         assert!(s.filter_preview.borrow().is_none());
 
         // one undo restores every mark, still without touching the region
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.crop("left").unwrap().2, marked);
         assert_eq!(s.selection.bounds(), Some(sel));
     }
@@ -1955,7 +2000,7 @@ mod tests {
         assert!(s.annotations().selected().is_some());
         assert_eq!(s.annotations().committed().len(), 1);
         assert_ne!(s.annotations().committed()[0].bounds, before.bounds);
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.annotations().committed()[0], before);
 
         // a press that only wiggles within the slop still click-selects
@@ -2044,9 +2089,9 @@ mod tests {
         assert_eq!(now.size, rect.size);
 
         // one Edit entry: undo restores the pre-move position
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.annotations().committed()[0].bounds.origin, rect.origin);
-        s.edit_annotations(|a| a.redo());
+        s.redo();
         assert_eq!(s.annotations().committed()[0].bounds.origin, moved_origin);
 
         // Escape mid-move restores the press-time snapshot. Undo/redo
@@ -2100,7 +2145,7 @@ mod tests {
         let edited = s.annotations().committed()[0].clone();
         assert_eq!(edited.points[1], target);
         assert_eq!(edited.points[0], line.points[0]); // anchor moved only
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.annotations().committed()[0].points, line.points);
 
         // rectangle: grab the BR handle and drag THROUGH the fixed TL
@@ -2169,11 +2214,11 @@ mod tests {
                     assert_preview_matches_export(&s);
                 }
             }
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert_preview_matches_export(&s);
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert!(s.filtered_preview("left").is_none());
-            s.edit_annotations(|a| a.redo());
+            s.redo();
             assert_preview_matches_export(&s);
         }
     }
@@ -2215,11 +2260,11 @@ mod tests {
         assert_preview_matches_export(&s);
         assert_eq!(s.crop("left").unwrap().2, completed);
         for _ in 0..6 {
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert_preview_matches_export(&s);
         }
         for _ in 0..6 {
-            s.edit_annotations(|a| a.redo());
+            s.redo();
             assert_preview_matches_export(&s);
         }
         assert_eq!(s.crop("left").unwrap().2, completed);
@@ -2405,9 +2450,9 @@ mod tests {
             assert_eq!(s.crop("right").unwrap().2, pristine_right);
             // nothing raster remains — no preview cache at all
             assert!(s.filtered_preview("left").is_none());
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert_eq!(s.crop("left").unwrap().2, marked);
-            s.edit_annotations(|a| a.redo());
+            s.redo();
             assert_eq!(s.crop("right").unwrap().2, pristine_right);
         }
     }
@@ -2450,10 +2495,10 @@ mod tests {
                 pixels
             );
             assert_eq!(s.crop_original("right").unwrap().2, original);
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert!(s.filtered_preview("left").is_none());
             assert_eq!(s.crop("left").unwrap().2, original);
-            s.edit_annotations(|a| a.redo());
+            s.redo();
             assert_eq!(s.crop("left").unwrap().2, pixels);
             s.pointer_down("left", point(px(82.), px(22.)), false);
             s.pointer_move("right", point(px(5.), px(55.)), false);
@@ -2491,9 +2536,9 @@ mod tests {
             }
             assert_ne!(&marked[at..at + 3], &original[at..at + 3]);
         }
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.crop("left").unwrap().2, original);
-        s.edit_annotations(|a| a.redo());
+        s.redo();
         assert_eq!(s.crop("left").unwrap().2, marked);
     }
 
@@ -2532,7 +2577,7 @@ mod tests {
         assert_eq!(decoded.get_pixel(10, 40).0, color);
         assert_eq!(decoded.get_pixel(56, 40).0, color);
         assert_ne!(s.crop_original("left").unwrap().2, pixels);
-        s.edit_annotations(|a| a.undo());
+        s.undo();
         assert_eq!(s.annotations().next_number(), 2);
     }
 
@@ -2610,7 +2655,7 @@ mod tests {
                     selection.bottom_right() - point(px(2.), px(2.))
                 );
             }
-            s.edit_annotations(|a| a.undo());
+            s.undo();
             assert_eq!(s.annotations().committed()[0].bounds, before);
         }
     }

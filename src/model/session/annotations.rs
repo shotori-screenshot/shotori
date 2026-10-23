@@ -12,7 +12,7 @@ use gpui_kit::*;
 // One inset for placement, editing and movement; the outline is painted inside
 // the text bounds, so no separate border outset may consume this breathing room.
 const TEXT_INSET: f32 = 2.;
-fn text_area(selection: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+pub(super) fn text_area(selection: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     let inset = point(px(TEXT_INSET), px(TEXT_INSET));
     (selection.size.width > px(TEXT_INSET * 2.) && selection.size.height > px(TEXT_INSET * 2.))
         .then(|| Bounds::from_corners(selection.origin + inset, selection.bottom_right() - inset))
@@ -24,6 +24,7 @@ impl ScreenshotSession {
         edit: impl FnOnce(&mut crate::annotation::Annotations),
     ) {
         if !self.blocked && self.selection.is_selected() {
+            self.finish_nudge();
             edit(&mut self.annotations);
         }
     }
@@ -43,6 +44,7 @@ impl ScreenshotSession {
         self.annotations.preview_text(bounds, value);
     }
     pub(crate) fn begin_text_edit(&mut self, ix: usize) -> bool {
+        self.finish_nudge();
         if self.blocked || !self.selection.is_selected() || !self.annotations.begin_text_edit(ix) {
             return false;
         }
@@ -107,6 +109,7 @@ impl ScreenshotSession {
         if self.blocked {
             return;
         }
+        self.finish_nudge();
         self.pointer_global = Some(self.to_global(name, local));
         if let Some(selection) = self.selection.bounds() {
             let p = local + self.screen(name).bounds().origin;
@@ -136,19 +139,29 @@ impl ScreenshotSession {
             }
         }
         self.annotations.deselect();
+        let before = self.selection_snapshot();
         // A finalized selection is editable in place: an edge/corner
-        // band grabs a resize handle, the interior starts a move. Only
-        // a press OUTSIDE starts a fresh selection (which also clears
-        // the annotations — an edit must not).
+        // band grabs a resize handle, the interior starts a move. A
+        // press outside waits for a deliberate drag before reselecting.
         if self
             .selection
             .begin_edit(local + self.screen(name).bounds().origin)
         {
+            if let Some(before) = before {
+                self.selection_gesture = Some(super::editing::SelectionGesture::Edit(before));
+            }
             self.hovered = None;
             self.set_active_output(name);
             return;
         }
-        self.begin(name, local);
+        if let Some(before) = before {
+            self.selection_gesture = Some(super::editing::SelectionGesture::Pending {
+                press: self.to_global(name, local),
+                before,
+            });
+        } else {
+            self.begin(name, local);
+        }
     }
 
     pub(crate) fn pointer_move(&mut self, name: &str, local: Point<Pixels>, square: bool) -> bool {
@@ -156,6 +169,15 @@ impl ScreenshotSession {
             return false;
         }
         self.pointer_global = Some(self.to_global(name, local));
+        if matches!(
+            self.selection_gesture,
+            Some(
+                super::editing::SelectionGesture::Pending { .. }
+                    | super::editing::SelectionGesture::Reselect(_)
+            )
+        ) {
+            return self.drag_to(name, local);
+        }
         if self.annotations.enabled()
             || self.moving.is_some()
             || self.handle_drag.is_some()
@@ -194,29 +216,11 @@ impl ScreenshotSession {
                     } else {
                         selection
                     };
-                    let b = drag.before.bounds;
-                    let requested_delta = p - drag.press;
-                    let (min_dx, max_dx) = if b.size.width <= selection.size.width {
-                        (
-                            f32::from(selection.left() - b.left()),
-                            f32::from(selection.right() - b.right()),
-                        )
-                    } else {
-                        let d = f32::from(selection.left() - b.left());
-                        (d, d)
-                    };
-                    let (min_dy, max_dy) = if b.size.height <= selection.size.height {
-                        (
-                            f32::from(selection.top() - b.top()),
-                            f32::from(selection.bottom() - b.bottom()),
-                        )
-                    } else {
-                        let d = f32::from(selection.top() - b.top());
-                        (d, d)
-                    };
-                    let dx = f32::from(requested_delta.x).clamp(min_dx, max_dx);
-                    let dy = f32::from(requested_delta.y).clamp(min_dy, max_dy);
-                    let clamped_delta = point(px(dx), px(dy));
+                    let clamped_delta = super::editing::movement_delta(
+                        drag.before.ink_bounds(),
+                        selection,
+                        p - drag.press,
+                    );
                     self.annotations
                         .place_shape(drag.ix, &drag.before, clamped_delta);
                     return true;
@@ -242,6 +246,9 @@ impl ScreenshotSession {
             return;
         }
         self.pointer_global = Some(self.to_global(name, local));
+        if self.moving.is_some() || self.handle_drag.is_some() || self.pending_click.is_some() {
+            self.pointer_move(name, local, square);
+        }
         if self.annotations.enabled()
             || self.moving.is_some()
             || self.handle_drag.is_some()
@@ -269,15 +276,42 @@ impl ScreenshotSession {
             }
         }
         if self.selection.is_editing() {
+            self.pointer_move(name, local, square);
             self.selection.end_edit();
             self.follow_selection_host();
             self.press = None;
+            self.commit_selection_gesture();
         } else {
             self.end(name, local);
         }
     }
 
+    /// Cancel active manipulation and clear passive tool/shape selection together.
+    /// False means no operation was active, so Escape may close the screenshot.
+    pub(crate) fn escape_interaction(&mut self) -> bool {
+        if self.blocked {
+            return true;
+        }
+        self.finish_nudge();
+        let drawing = self.annotations.finish_interaction();
+        let geometry = self.cancel_annotation();
+        let dragging = self.selection.is_dragging()
+            || self.selection.is_editing()
+            || self.toolbar_drag_active();
+        if dragging {
+            self.cancel_drag();
+        }
+        drawing || geometry || dragging
+    }
+
     pub(crate) fn cancel_annotation(&mut self) -> bool {
+        if self.blocked {
+            return false;
+        }
+        self.finish_nudge();
+        if self.cancel_selection_gesture() || self.pending_click.take().is_some() {
+            return true;
+        }
         // Escape interrupts an in-flight edit drag (move or handle):
         // restore the snapshot
         if let Some(drag) = self.moving.take() {
@@ -363,6 +397,33 @@ impl ScreenshotSession {
         })
     }
 
+    /// The unselected mark a press would pick at the shared pointer.
+    pub(crate) fn hovered_annotation(&self) -> Option<usize> {
+        if self.blocked
+            || !self.selection.is_selected()
+            || self.selection_gesture.is_some()
+            || self.moving.is_some()
+            || self.handle_drag.is_some()
+            || self.toolbar_drag.is_some()
+            || !self.annotations.parks_click_select()
+        {
+            return None;
+        }
+        let p = self.pointer_global?;
+        if !self.selection.bounds()?.contains(&p) {
+            return None;
+        }
+        let ix = self.annotations.hit_test(p)?;
+        (self.annotations.selected_index() != Some(ix)).then_some(ix)
+    }
+
+    pub(crate) fn annotation_hover_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
+        let ix = self.hovered_annotation()?;
+        let mut bounds = self.annotations.shape(ix)?.selection_box();
+        bounds.origin -= self.screen(name).bounds().origin;
+        Some(bounds)
+    }
+
     /// The live loupe target, window-local for `name`'s output. None
     /// when no precision drag is live, or when the focus sits on
     /// another output — each overlay magnifies only the pixels it
@@ -427,8 +488,15 @@ impl ScreenshotSession {
     /// probe the cursor maps onto pointing hand / open hand (issue
     /// #17).
     pub(crate) fn annotation_hover(&self) -> Option<crate::annotation::ShapeHover> {
-        self.pointer_global
-            .and_then(|p| self.annotations.shape_hover(p))
+        if self.blocked || !self.selection.is_selected() || self.selection_gesture.is_some() {
+            return None;
+        }
+        let p = self.pointer_global?;
+        self.selection
+            .bounds()?
+            .contains(&p)
+            .then(|| self.annotations.shape_hover(p))
+            .flatten()
     }
 
     /// Whether pointer moves must repaint for the eraser's ring

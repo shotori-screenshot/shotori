@@ -15,6 +15,7 @@ use gpui_kit::*;
 
 gpui_kit::actions!([
     QuitOverlay,
+    EscapeOverlay,
     CopySelection,
     SaveSelection,
     PinSelection,
@@ -61,7 +62,6 @@ gpui_kit::actions!([
     ToggleArrow,
     ToggleNumber,
     ToggleText,
-    CancelText,
     TogglePencil,
     ToggleHighlighter,
     ToggleMosaic,
@@ -71,8 +71,17 @@ gpui_kit::actions!([
     UndoAnnotation,
     RedoAnnotation,
     DeleteAnnotation,
-    ClearAnnotations
+    ClearAnnotations,
+    CancelText
 ]);
+
+/// Keyboard translation in desktop logical pixels.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(no_json)]
+pub(crate) struct Nudge {
+    pub(crate) dx: i32,
+    pub(crate) dy: i32,
+}
 
 /// Keybindings, scoped to the `ShotoriOverlay` key context. Bound once
 /// during startup in `main`. `keys` carries the configurable commands
@@ -83,7 +92,7 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) {
     // Fixed conventions, scroll panel and pins — nothing here is
     // user-visible configuration
     cx.bind_keys([
-        KeyBinding::new("escape", QuitOverlay, Some("ShotoriOverlay")),
+        KeyBinding::new("escape", EscapeOverlay, Some("ShotoriOverlay")),
         KeyBinding::new("enter", CopySelection, Some("ShotoriOverlay")),
         // the scroll preview panel is its own context (the overlays are
         // gone while it lives); shortcuts mirror the selection flow
@@ -267,6 +276,26 @@ fn known_key_ids() -> String {
 /// scoped to `ShotoriOverlay`, plus the PolylineDrawing sub-context.
 pub fn init_annotation_keybindings(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("left", Nudge { dx: -1, dy: 0 }, Some("ShotoriOverlay")),
+        KeyBinding::new("right", Nudge { dx: 1, dy: 0 }, Some("ShotoriOverlay")),
+        KeyBinding::new("up", Nudge { dx: 0, dy: -1 }, Some("ShotoriOverlay")),
+        KeyBinding::new("down", Nudge { dx: 0, dy: 1 }, Some("ShotoriOverlay")),
+        KeyBinding::new(
+            "shift-left",
+            Nudge { dx: -10, dy: 0 },
+            Some("ShotoriOverlay"),
+        ),
+        KeyBinding::new(
+            "shift-right",
+            Nudge { dx: 10, dy: 0 },
+            Some("ShotoriOverlay"),
+        ),
+        KeyBinding::new("shift-up", Nudge { dx: 0, dy: -10 }, Some("ShotoriOverlay")),
+        KeyBinding::new(
+            "shift-down",
+            Nudge { dx: 0, dy: 10 },
+            Some("ShotoriOverlay"),
+        ),
         KeyBinding::new("v", ToggleSelect, Some("ShotoriOverlay")),
         KeyBinding::new("r", ToggleRectangle, Some("ShotoriOverlay")),
         KeyBinding::new("e", ToggleEllipse, Some("ShotoriOverlay")),
@@ -277,7 +306,7 @@ pub fn init_annotation_keybindings(cx: &mut App) {
         KeyBinding::new("h", ToggleHighlighter, Some("ShotoriOverlay")),
         KeyBinding::new("b", TogglePencil, Some("ShotoriOverlay")),
         KeyBinding::new("t", ToggleText, Some("ShotoriOverlay")),
-        KeyBinding::new("escape", CancelText, Some("ShotoriTextEditing")),
+        KeyBinding::new("escape", EscapeOverlay, Some("ShotoriTextEditing")),
         KeyBinding::new("n", ToggleNumber, Some("ShotoriOverlay")),
         KeyBinding::new("p", TogglePolyline, Some("ShotoriOverlay")),
         KeyBinding::new("enter", FinishPolyline, Some("PolylineDrawing")),

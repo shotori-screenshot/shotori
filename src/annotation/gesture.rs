@@ -260,10 +260,23 @@ impl Annotations {
         }
     }
 
-    /// Escape cancels a stroke first, then drops the selection, then
-    /// leaves the tool while keeping marks. An interrupted eraser
-    /// gesture merely stops — its deletions were live and history-
-    /// recorded as they happened; one Ctrl+Z reverts the whole sweep.
+    /// Return to the crop with no active tool, preserving completed marks.
+    /// Returns whether an unfinished drawing gesture was interrupted.
+    pub(crate) fn finish_interaction(&mut self) -> bool {
+        let active = self.pressed || self.draft.is_some() || self.eraser.is_some();
+        self.pressed = false;
+        self.draft = None;
+        self.eraser = None;
+        self.eraser_entry_open = false;
+        self.selected = None;
+        self.tool = None;
+        self.size_drag_active = false;
+        active
+    }
+
+    /// Cancel one annotation state for internal editing commands.
+    /// Completed eraser deletions remain in history for Undo.
+    /// User-facing Escape clears all interaction state via `finish_interaction`.
     pub(crate) fn cancel(&mut self) -> bool {
         self.pressed = false;
         self.eraser = None;

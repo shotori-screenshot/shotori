@@ -624,8 +624,11 @@ fn annotation_hover_cursor_picks_then_grabs(cx: &mut TestAppContext) {
         assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand);
     });
 
-    // Escape drops the selection (the mode stays active): pick again
+    // Escape clears passive state; re-enter Select to inspect picking again.
     vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    vcx.update(|_, cx| assert_eq!(session.read(cx).annotations().tool(), None));
+    vcx.simulate_keystrokes("v");
     vcx.run_until_parked();
     vcx.update(|_, cx| {
         assert!(session.read(cx).annotations().selected().is_none());
@@ -1081,7 +1084,7 @@ fn mosaic_and_blur_toolbar_share_focus_history(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn text_input_commit_cancel_and_history(cx: &mut TestAppContext) {
+fn text_input_commit_escape_and_history(cx: &mut TestAppContext) {
     // Host font fallback changes wrapping and can turn a valid resize
     // into a correctly rejected overflow on CI.
     crate::annotation::text::with_test_font(|| text_input_workflow(cx));
@@ -1247,7 +1250,19 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     });
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).annotations().committed()[0]
+                .text
+                .as_deref(),
+            Some("replacement text")
+        );
+        assert_eq!(session.read(cx).annotations().tool(), None);
+        assert!(!session.read(cx).blocked());
+    });
+    cx.simulate_keystrokes("ctrl-z");
     cx.update(|_, cx| assert_eq!(&session.read(cx).annotations().committed()[0], &original));
+    cx.simulate_keystrokes("v");
 
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.simulate_click(point(px(65.), px(65.)), Default::default());
@@ -1327,16 +1342,19 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     cx.update(|_, cx| assert!(session.read(cx).annotations().visible().next().is_none()));
     cx.simulate_keystrokes("ctrl-y");
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 1));
+    cx.simulate_keystrokes("t");
     cx.simulate_click(point(px(60.), px(230.)), Default::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.simulate_input("discard");
+    cx.simulate_input("keep on escape");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     cx.update(|_, cx| {
         assert!(view.read(cx).text_editing.is_none());
         assert!(!session.read(cx).blocked());
-        assert_eq!(session.read(cx).annotations().visible().count(), 1);
+        assert_eq!(session.read(cx).annotations().visible().count(), 2);
     });
+    cx.simulate_keystrokes("ctrl-z");
+    cx.simulate_keystrokes("t");
     // Empty confirmation must not add an invisible history entry.
     cx.simulate_click(point(px(60.), px(230.)), Default::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1367,7 +1385,7 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
         crate::actions::init_annotation_keybindings(cx);
         cx.bind_keys([gpui_kit::KeyBinding::new(
             "escape",
-            crate::actions::QuitOverlay,
+            crate::actions::EscapeOverlay,
             Some("ShotoriOverlay"),
         )]);
     });
@@ -1518,7 +1536,7 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
         crate::actions::init_annotation_keybindings(cx);
         cx.bind_keys([gpui_kit::KeyBinding::new(
             "escape",
-            crate::actions::QuitOverlay,
+            crate::actions::EscapeOverlay,
             Some("ShotoriOverlay"),
         )]);
     });
@@ -1767,7 +1785,7 @@ fn geometry_toolbar_keyboard_and_export(
         crate::actions::init_annotation_keybindings(cx);
         cx.bind_keys([gpui_kit::KeyBinding::new(
             "escape",
-            crate::actions::QuitOverlay,
+            crate::actions::EscapeOverlay,
             Some("ShotoriOverlay"),
         )]);
     });
@@ -1891,4 +1909,137 @@ fn geometry_toolbar_keyboard_and_export(
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 0));
     cx.simulate_keystrokes("ctrl-shift-z");
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 1));
+}
+
+#[gpui_kit::test]
+fn keyboard_movement_and_reselection_cancel_use_the_overlay_event_pipeline(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::{KeyDownEvent, KeyUpEvent, Keystroke};
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        gpui_kit::component::init(cx);
+        crate::actions::init_annotation_keybindings(cx);
+        crate::actions::bind_keys(cx, &crate::actions::default_keys());
+    });
+    let mut capture = Capture::for_test((0, 0), 1.);
+    capture.output_name = "screen".into();
+    capture.width = 640;
+    capture.height = 480;
+    capture.rgba = vec![255; 640 * 480 * 4];
+    let capture = Arc::new(capture);
+    let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+    let (_, cx) =
+        cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+    cx.simulate_resize(size(px(640.), px(480.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|_, cx| {
+        session.update(cx, |s, cx| {
+            s.begin("screen", point(px(40.), px(40.)));
+            s.end("screen", point(px(440.), px(300.)));
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let key = Keystroke::parse("right").unwrap();
+    for held in [false, true, true] {
+        cx.simulate_event(KeyDownEvent {
+            keystroke: key.clone(),
+            is_held: held,
+            prefer_character_input: false,
+        });
+    }
+    cx.simulate_event(KeyUpEvent { keystroke: key });
+    cx.simulate_keystrokes("shift-down");
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse("shift-down").unwrap(),
+    });
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).selection().bounds().unwrap().origin,
+            point(px(43.), px(50.))
+        )
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).selection().bounds().unwrap().origin,
+            point(px(43.), px(40.))
+        )
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).selection().bounds().unwrap().origin,
+            point(px(40.), px(40.))
+        )
+    });
+    cx.simulate_keystrokes("ctrl-y");
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).selection().bounds().unwrap().origin,
+            point(px(43.), px(40.))
+        )
+    });
+
+    cx.simulate_keystrokes("r");
+    cx.simulate_mouse_down(
+        point(px(90.), px(90.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.simulate_mouse_up(
+        point(px(180.), px(150.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.simulate_keystrokes("v");
+    cx.simulate_click(point(px(120.), px(86.)), Default::default());
+    cx.simulate_keystrokes("shift-right");
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse("shift-right").unwrap(),
+    });
+    cx.update(|_, cx| {
+        let s = session.read(cx);
+        assert_eq!(
+            s.annotations().selected().unwrap().bounds.origin,
+            point(px(100.), px(90.))
+        );
+        assert_eq!(
+            s.selection().bounds().unwrap().origin,
+            point(px(43.), px(40.))
+        );
+    });
+    cx.simulate_keystrokes("ctrl-z");
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).annotations().committed()[0].bounds.origin,
+            point(px(90.), px(90.))
+        )
+    });
+    cx.simulate_mouse_down(
+        point(px(520.), px(100.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.simulate_mouse_move(
+        point(px(600.), px(200.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.simulate_keystrokes("escape");
+    cx.simulate_mouse_up(
+        point(px(600.), px(200.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.update(|_, cx| {
+        let s = session.read(cx);
+        assert_eq!(
+            s.selection().bounds().unwrap().origin,
+            point(px(43.), px(40.))
+        );
+        assert_eq!(s.annotations().committed().len(), 1);
+        assert_eq!(s.annotations().tool(), None);
+    });
 }
