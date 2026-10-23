@@ -2,9 +2,8 @@
 //! what this is, where it lives, who helped.
 
 use gpui_kit::base::Button;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
-
-use crate::ui::theme;
 
 use super::{SettingsWindow, open_external, page_body, png_render_image};
 
@@ -20,7 +19,6 @@ impl SettingsWindow {
     /// this is, where it lives, who helped. One calm centered column;
     /// everything a support conversation needs.
     pub(super) fn page_about(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = theme::c();
         let entity = cx.entity();
         // ghost link button — same vocabulary as the config-file
         // buttons, each handing a URL to the session
@@ -28,15 +26,15 @@ impl SettingsWindow {
             let entity = entity.clone();
             Button::new(SharedString::from(url.clone()))
                 .accessibility_label(label.clone())
-                .px(px(10.))
-                .py(px(3.))
-                .rounded(px(6.))
-                .text_size(px(12.))
-                .text_color(rgba(t.btn_text))
+                .px_3()
+                .h_8()
+                .rounded(cx.theme().radius)
+                .text_sm()
+                .text_color(cx.theme().foreground)
                 .border_1()
-                .border_color(rgba(t.toolbar_border))
-                .hover(|s| s.bg(rgba(t.toolbar_hover)))
-                .focus_visible(|s| s.border_color(rgba(t.accent)))
+                .border_color(cx.theme().border)
+                .hover(|s| s.bg(cx.theme().secondary_hover))
+                .focus_visible(|s| s.border_color(cx.theme().ring))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |_, _| {
                         open_external(url.clone());
@@ -50,29 +48,32 @@ impl SettingsWindow {
         // the shared scrolling body with one centered column capped at a
         // comfortable measure.
         let body = div()
+            .p_6()
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(8.))
-            .max_w(px(440.))
-            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size(px(96.)))
+            .gap_2()
+            .w_full()
+            .max_w(rems(28.))
+            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size_24())
             .child(
                 div()
-                    .text_size(px(22.))
-                    .text_color(rgba(t.btn_text))
+                    .text_2xl()
+                    .text_color(cx.theme().foreground)
                     .child("Shotori"),
             )
             .child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
                     .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
             .child(
                 div()
-                    .text_size(px(13.))
-                    .text_color(rgba(t.btn_text))
-                    .max_w(px(440.))
+                    .text_sm()
+                    .text_color(cx.theme().foreground)
+                    .w_full()
+                    .max_w(rems(28.))
                     .text_center()
                     .line_height(relative(1.5))
                     .child(crate::i18n::t!("settings.about.tagline").to_string()),
@@ -97,30 +98,26 @@ impl SettingsWindow {
             )
             .child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(rgba(t.hint_text))
-                    .pt(px(4.))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .pt_1()
                     .child(crate::i18n::t!("settings.about.license").to_string()),
             )
             .child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(rgba(t.hint_text))
-                    .max_w(px(440.))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .w_full()
+                    .max_w(rems(28.))
                     .text_center()
                     .line_height(relative(1.5))
                     .pt(px(6.))
                     .child(crate::i18n::t!("settings.about.credits").to_string()),
             );
-        // Centered in the pane, both axes: this is an identity card, not
-        // a form. Left-aligned under the pages' gutter it looked like it
-        // had failed to fill the space; top-aligned it crowded the
-        // header in a tall window. `justify_center` on the scroll body
-        // keeps it in the optical middle and still scrolls when the
-        // window is shorter than the card.
+        // Auto margins consume spare height but never become negative, so
+        // short windows keep the top of the identity block reachable by scroll.
         page_body("page-about")
             .items_center()
-            .justify_center()
-            .child(body)
+            .child(body.my_auto().flex_shrink_0())
     }
 }

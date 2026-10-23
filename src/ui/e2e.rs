@@ -59,6 +59,54 @@ pub(crate) fn debug_settings_page() -> Option<String> {
         .filter(|page| !page.is_empty())
 }
 
+/// Open a settings color editor for headless inspection (`accent` or
+/// `accent:hsla`). Kept here with the rest of the runtime test backdoors.
+pub(crate) fn debug_settings_color() -> Option<(String, bool)> {
+    let value = std::env::var("SHOTORI_DEBUG_SETTINGS_COLOR")
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let (key, tab) = value.split_once(':').unwrap_or((&value, "palette"));
+    Some((key.to_owned(), tab == "hsla"))
+}
+
+/// Inspect expanded colors and the shortcut recorder without a headless input seat.
+pub(crate) fn debug_settings_custom_colors() -> bool {
+    std::env::var("SHOTORI_DEBUG_SETTINGS_CUSTOM_COLORS").as_deref() == Ok("1")
+}
+
+pub(crate) fn debug_settings_recording() -> Option<String> {
+    std::env::var("SHOTORI_DEBUG_SETTINGS_RECORDING")
+        .ok()
+        .filter(|id| {
+            crate::actions::CONFIGURABLE_KEYS
+                .iter()
+                .any(|(key, _)| key == id)
+        })
+}
+
+/// Seed search and scale in an isolated settings review session.
+pub(crate) fn debug_settings_query() -> String {
+    std::env::var("SHOTORI_DEBUG_SETTINGS_QUERY").unwrap_or_default()
+}
+
+pub(crate) fn debug_settings_font() -> Option<f32> {
+    std::env::var("SHOTORI_DEBUG_SETTINGS_FONT")
+        .ok()?
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite() && (12.0..=24.0).contains(value))
+}
+
+/// Inspect the lower part of a settings page on a seat without input.
+pub(crate) fn debug_settings_scroll(scroll: &ScrollHandle) {
+    if let Ok(value) = std::env::var("SHOTORI_DEBUG_SETTINGS_SCROLL")
+        && let Ok(offset) = value.parse::<f32>()
+        && offset.is_finite()
+    {
+        scroll.set_offset(point(px(0.), px(-offset.max(0.))));
+    }
+}
+
 /// Fire the configured action(s) after 1.5s.
 pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>) {
     let Some(action) = std::env::var("SHOTORI_DEBUG_ACTION").ok().filter(|a| {

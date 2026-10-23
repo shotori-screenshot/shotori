@@ -411,23 +411,25 @@ impl ColorKey {
         Self::SwatchBorder,
     ];
 
-    /// Human label (settings copy lives with the registry it names).
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::DimColor => "Dim",
-            Self::Accent => "Accent",
-            Self::PinBorder => "Pin border",
-            Self::ChipBg => "Chip background",
-            Self::HintText => "Hint text",
-            Self::BtnText => "Button text",
-            Self::BtnHoverBg => "Button hover",
-            Self::ToolbarBg => "Toolbar background",
-            Self::ToolbarText => "Toolbar text",
-            Self::ToolbarBorder => "Toolbar border",
-            Self::ToolbarHover => "Toolbar hover",
-            Self::ToolbarSelected => "Toolbar selected",
-            Self::SwatchBorder => "Swatch border",
-        }
+    /// Resolve at render time so changing the UI language also updates
+    /// the color editor; serialized theme keys remain language-independent.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        let key = match self {
+            Self::DimColor => "settings.appearance.colors.dim_color",
+            Self::Accent => "settings.appearance.colors.accent",
+            Self::PinBorder => "settings.appearance.colors.pin_border",
+            Self::ChipBg => "settings.appearance.colors.chip_bg",
+            Self::HintText => "settings.appearance.colors.hint_text",
+            Self::BtnText => "settings.appearance.colors.btn_text",
+            Self::BtnHoverBg => "settings.appearance.colors.btn_hover_bg",
+            Self::ToolbarBg => "settings.appearance.colors.toolbar_bg",
+            Self::ToolbarText => "settings.appearance.colors.toolbar_text",
+            Self::ToolbarBorder => "settings.appearance.colors.toolbar_border",
+            Self::ToolbarHover => "settings.appearance.colors.toolbar_hover",
+            Self::ToolbarSelected => "settings.appearance.colors.toolbar_selected",
+            Self::SwatchBorder => "settings.appearance.colors.swatch_border",
+        };
+        crate::i18n::t!(key)
     }
 
     /// The `theme.toml` key (stable — files outlive binaries).

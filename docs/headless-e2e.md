@@ -52,25 +52,40 @@ SHOTORI_DEBUG_SELECTION=200,150,700,500 "$APP"    # the selection overlay
 sway draws its **own 28px title bar** into the window rect (the wayland tree
 reports the toplevel at `y=28`), and every capture shows a phantom title strip
 above the app's real one. Constrain `resolution` to the window's own size
-(1024x640) when reviewing layout at its design size.
+(1120x780) when reviewing layout at its default size.
 
 ### Reviewing the settings window
 
-Every change in that window write-throughs to `~/.config/shotori/`, so a
-review run must not use the real directory — copy the config first:
+Settings write through immediately. Use a dedicated `HOME`, config, cache and
+data directory with synthetic configuration for each review; never copy the
+maintainer's settings or capture their active session.
 
 ```sh
-cp -r ~/.config/shotori /abs/path/target/headless/cfg/shotori
+export HOME=/abs/path/target/headless/home
 export XDG_CONFIG_HOME=/abs/path/target/headless/cfg
+export XDG_CACHE_HOME=/abs/path/target/headless/cache
+export XDG_DATA_HOME=/abs/path/target/headless/data
+mkdir -p "$HOME" "$XDG_CONFIG_HOME/shotori"
 SHOTORI_DEBUG_SETTINGS_PAGE=appearance "$APP" settings
 ```
 
-`SHOTORI_DEBUG_SETTINGS_PAGE` takes `general|toolbar|keys|ocr|appearance|about`
-and is the only way to reach a page headlessly — a headless seat has no
-pointer, so the sidebar cannot be clicked.
+`SHOTORI_DEBUG_SETTINGS_PAGE` takes `appearance|capture|keys|ocr|advanced|about`.
+`toolbar` and `general` are aliases for `capture` and `advanced`. A headless seat
+has no pointer, so this selects the initial page without clicking the sidebar.
+
+`SHOTORI_DEBUG_SETTINGS_SCROLL=<logical pixels>` sets the page's vertical offset.
+`SHOTORI_DEBUG_SETTINGS_QUERY` seeds the navigation search. A 12–24 px base font
+can be selected with `SHOTORI_DEBUG_SETTINGS_FONT` to review text scaling. These
+inputs apply only to the review process and do not change saved preferences.
+`SHOTORI_DEBUG_SETTINGS_CUSTOM_COLORS=1` expands custom colors without opening a
+picker; `SHOTORI_DEBUG_SETTINGS_RECORDING=copy` displays that command's recorder.
+
+`SHOTORI_DEBUG_SETTINGS_COLOR=accent` opens that color editor on Appearance;
+use `accent:hsla` to inspect its component sliders. The key is a stable
+`ColorKey::key()` name, and the run must still use an isolated config directory.
 
 The `printf` line is load-bearing twice: `resolution` makes the virtual screen
-big enough for the 1024×640 settings window, and `bg #ff00ff` makes a frozen
+big enough for the 1120×780 settings window, and `bg #ff00ff` makes a frozen
 frame unmistakable — anything the app fails to paint shows as loud pink instead
 of silent black. Write it with double quotes; the whole block sits inside single
 quotes.

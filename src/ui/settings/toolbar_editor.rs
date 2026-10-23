@@ -6,14 +6,16 @@
 //! model (`Settings::apply_drop`); everything here is presentation
 //! and gesture plumbing around it.
 
+use gpui_kit::base::Switch;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::model::settings::{Settings, ToolbarButton, ToolbarCluster, ToolbarItem};
+use crate::model::settings::{Settings, ToolbarCluster, ToolbarItem};
 use crate::ui::theme;
 use crate::ui::toolbar;
 
-use super::{SettingsWindow, card_group, page_body, page_header};
+use super::{Button, SettingsWindow, card_group, page_body, page_header};
 
 /// The drag-and-drop payload: what is being carried and where it came
 /// from (`None` = palette: a fresh insert; `Some(i)` = the preview
@@ -80,7 +82,7 @@ impl Render for DragGhost {
             .border_1()
             .border_color(rgba(t.accent))
             .shadow_md()
-            .text_size(px(12.))
+            .text_sm()
             .text_color(rgba(t.toolbar_text))
             .child(icon_visual(self.item))
             .child(item_name(self.item))
@@ -88,7 +90,33 @@ impl Render for DragGhost {
 }
 
 impl SettingsWindow {
-    /// Restore the factory row (the shell footer's "reset this page").
+    /// The smart-region switch. Same write-through contract as the OCR
+    /// upright toggle: the flip saves the file and the next capture reads
+    /// it — a live overlay is not rewired mid-session (its detectors, if
+    /// any, simply stay unused: the session queries the setting on every
+    /// hover/press/wheel).
+    pub(super) fn smart_region_switch(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Switch {
+        let entity = cx.entity();
+        super::layout::settings_switch(
+            "smart-region",
+            self.settings.smart_region(),
+            crate::i18n::t!("settings.general.smart_region.title").to_string(),
+            window,
+            cx,
+        )
+        .on_change(move |checked, _, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.settings.set_smart_region(checked);
+                this.persist(cx);
+            });
+        })
+    }
+
+    /// Restore the factory toolbar layout without changing capture preferences.
     pub(super) fn reset_toolbar(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
     }
@@ -325,31 +353,22 @@ impl SettingsWindow {
 
     /// The palette: every control not currently on the bar, plus the
     /// two layout items (any number of those may live on the bar).
-    /// Chips drag onto the bar, click appends. The palette area is
+    /// Chips drag onto the bar or append on click. The palette area is
     /// also the remove target: dropping a bar item here takes it off.
     fn palette(&self, cx: &Context<Self>) -> Stateful<Div> {
-        let placed: std::collections::BTreeSet<ToolbarButton> = self
-            .settings
-            .row()
-            .iter()
-            .filter_map(|item| match item {
-                ToolbarItem::Button(button) => Some(*button),
-                _ => None,
-            })
-            .collect();
-        let mut chips = div().flex().flex_wrap().gap(px(6.));
+        let mut chips = div().flex().flex_wrap().gap_2();
         for cluster in [
             ToolbarCluster::Tools,
             ToolbarCluster::Actions,
             ToolbarCluster::Confirm,
         ] {
-            for meta in toolbar::BUTTONS
-                .iter()
-                .filter(|meta| meta.button.cluster() == cluster)
-            {
-                if placed.contains(&meta.button) {
-                    continue;
-                }
+            for meta in toolbar::BUTTONS.iter().filter(|meta| {
+                meta.button.cluster() == cluster
+                    && !self
+                        .settings
+                        .row()
+                        .contains(&ToolbarItem::Button(meta.button))
+            }) {
                 chips = chips.child(self.palette_chip(ToolbarItem::Button(meta.button), cx));
             }
         }
@@ -361,7 +380,6 @@ impl SettingsWindow {
             .id("pv-palette")
             .flex()
             .flex_col()
-            .gap(px(6.))
             // dropping a bar item back here removes it; palette-origin
             // drops just return home (no-op)
             .on_drop(move |dragged: &DraggedItem, _, cx| {
@@ -375,44 +393,43 @@ impl SettingsWindow {
             .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgba(theme::c().accent)))
             .rounded(px(6.))
             .border_1()
-            .border_color(rgba(theme::c().toolbar_border))
-            .p(px(10.))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgba(theme::c().hint_text))
-                    .child(crate::i18n::t!("settings.toolbar_page.palette_hint").to_string()),
-            )
+            .border_color(cx.theme().transparent)
             .child(chips)
     }
 
-    fn palette_chip(&self, item: ToolbarItem, cx: &Context<Self>) -> Stateful<Div> {
+    fn palette_chip(&self, item: ToolbarItem, cx: &Context<Self>) -> Button {
         let entity = cx.entity();
         let payload = DraggedItem { item, from: None };
-        let click_entity = entity.clone();
-        div()
-            .id(SharedString::from(format!("pv-chip-{}", item.id())))
+        Button::new(SharedString::from(format!("pv-chip-{}", item.id())))
+            .accessibility_label(item_name(item))
             .flex()
             .items_center()
-            .gap(px(6.))
-            .h(px(30.))
-            .px(px(8.))
-            .rounded(px(6.))
-            .border_1()
-            .border_color(rgba(theme::c().toolbar_border))
-            .text_size(px(12.))
-            .text_color(rgba(theme::c().toolbar_text))
-            .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
+            .gap_2()
+            .h_9()
+            .px_3()
+            .w(rems(10.5))
+            .max_w_full()
+            .rounded(cx.theme().radius)
+            .text_sm()
+            .bg(cx.theme().secondary)
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().secondary_hover))
+            .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
             .on_drag(payload, ghost_constructor)
             .on_click(move |_, _, cx| {
-                click_entity.update(cx, |this, cx| this.append(item, cx));
+                entity.update(cx, |this, cx| {
+                    this.append(item, cx);
+                });
             })
             .child(icon_visual(item))
             .child(item_name(item))
     }
 
-    pub(super) fn page_toolbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = theme::c();
+    pub(super) fn page_capture(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         // Releasing anywhere on the page confirms the PREVIEWED slot:
         // the gap highlight is a promise, not a hint. Drop targets
         // that physically sit under the pointer win by bubbling
@@ -429,38 +446,124 @@ impl SettingsWindow {
                 }
             },
         );
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            // A canvas page legitimately runs wider than the reading
-            // measure: the factory row is ~703px and gets its own
-            // horizontal pan inside the card.
-            .max_w(px(780.))
+        let smart_region = self.smart_region_switch(window, cx);
+        let body = super::layout::content_column()
             .child(page_header(
-                crate::i18n::t!("settings.toolbar_page.title").as_ref(),
-                crate::i18n::t!("settings.toolbar_page.blurb").as_ref(),
+                cx,
+                crate::i18n::t!("settings.preferences.capture").as_ref(),
+                crate::i18n::t!("settings.preferences.capture_hint").as_ref(),
             ))
             .child(card_group(
-                Some(crate::i18n::t!("settings.toolbar_page.group.current").as_ref()),
+                cx,
+                Some(crate::i18n::t!("settings.general.group.selection").as_ref()),
+                vec![
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.general.smart_region.title").to_string(),
+                        Some(crate::i18n::t!("settings.general.smart_region.body").to_string()),
+                        smart_region,
+                    ),
+                    super::card_row(
+                        cx,
+                        crate::i18n::t!("settings.appearance.dim_opacity").to_string(),
+                        Some(crate::i18n::t!("settings.appearance.dim_hint").to_string()),
+                        self.opacity_control(cx),
+                    ),
+                ],
+            ))
+            .child(card_group(
+                cx,
+                None,
                 vec![
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(8.))
-                        .p(px(12.))
-                        .child(self.preview_strip(cx))
+                        .gap_4()
+                        .p_3()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().group_box)
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(rgba(t.hint_text))
-                                .child(crate::i18n::t!("settings.toolbar_page.hint").to_string()),
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_start()
+                                        .justify_between()
+                                        .gap_4()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(crate::i18n::t!(
+                                                            "settings.toolbar_page.group.current"
+                                                        ).to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .line_height(relative(1.5))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(crate::i18n::t!(
+                                                            "settings.toolbar_page.hint"
+                                                        ).to_string()),
+                                                ),
+                                        )
+                                        .child(super::shell::reset_button(
+                                            "settings.toolbar_page.reset",
+                                            cx,
+                                            {
+                                                let entity = cx.entity();
+                                                move |_, _, cx| {
+                                                    entity.update(cx, |this, cx| {
+                                                        this.reset_toolbar(cx)
+                                                    });
+                                                }
+                                            },
+                                        )),
+                                )
+                                .child(self.preview_strip(cx)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(crate::i18n::t!(
+                                                    "settings.toolbar_page.group.palette"
+                                                ).to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .line_height(relative(1.5))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(crate::i18n::t!(
+                                                    "settings.toolbar_page.palette_hint"
+                                                ).to_string()),
+                                        ),
+                                )
+                                .child(self.palette(cx)),
                         ),
                 ],
-            ))
-            .child(card_group(
-                Some(crate::i18n::t!("settings.toolbar_page.group.palette").as_ref()),
-                vec![div().p(px(12.)).child(self.palette(cx))],
             ));
         let rail_scrub = cx.listener(Self::on_rail_scrub);
         page_body("page-toolbar")

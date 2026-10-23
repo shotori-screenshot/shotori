@@ -3,11 +3,12 @@
 //! (or is refused inline). The chord canonicalization and display
 //! helpers live with the page that uses them.
 
+use gpui_kit::base::Button;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use crate::ui::theme;
-
-use super::{CONTENT_MAX, SettingsWindow, alpha, card_group, card_row, page_body, page_header};
+use super::{SettingsWindow, card_group, card_row, page_body, page_header};
 
 /// The localized display name of a configurable shortcut id. The ids
 /// live in `actions::CONFIGURABLE_KEYS`; the test below pins that
@@ -110,19 +111,33 @@ impl SettingsWindow {
         for (id, factory) in crate::actions::CONFIGURABLE_KEYS {
             rows.push(self.key_row(id, factory, cx));
         }
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            .max_w(px(CONTENT_MAX))
-            .child(page_header(
-                crate::i18n::t!("settings.keys_page.title").as_ref(),
-                crate::i18n::t!("settings.keys_page.blurb").as_ref(),
-            ))
-            .child(card_group(
-                Some(crate::i18n::t!("settings.keys_page.group").as_ref()),
-                rows,
-            ));
+        let body = super::layout::content_column()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_4()
+                    .child(page_header(
+                        cx,
+                        crate::i18n::t!("settings.keys_page.title").as_ref(),
+                        crate::i18n::t!("settings.keys_page.blurb").as_ref(),
+                    ))
+                    .child(super::shell::reset_button(
+                        "settings.keys_page.reset",
+                        cx,
+                        {
+                            let entity = cx.entity();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.settings.reset_keys();
+                                    this.persist(cx);
+                                });
+                            }
+                        },
+                    )),
+            )
+            .child(card_group(cx, None, rows));
         page_body("page-keys").child(body)
     }
 
@@ -132,7 +147,6 @@ impl SettingsWindow {
     /// attached to whichever row is listening; without focus the
     /// keydown listener is dead weight on the others.
     fn key_row(&self, id: &str, factory: &str, cx: &mut Context<Self>) -> Div {
-        let t = theme::c();
         let entity = cx.entity();
         let recording = self.recording.as_deref() == Some(id);
         let keystroke = self
@@ -162,39 +176,42 @@ impl SettingsWindow {
                 .to_string(),
             )
         };
-        let mut cap = div()
+        let cap_id = SharedString::from(format!("key-cap-{id}"));
+        let mut cap = Button::new(cap_id)
+            .accessibility_label(key_label(id))
             .flex()
             .items_center()
             .justify_center()
-            .w(px(110.))
-            .h(px(28.))
-            .px(px(10.))
-            .rounded(px(6.))
-            .text_size(px(12.))
-            .cursor_pointer()
+            .min_w(rems(7.))
+            .max_w_full()
+            .min_h_8()
+            .h_auto()
+            .py_1()
+            .when(recording, |cap| cap.min_w(rems(11.)))
+            .px_3()
+            .rounded(cx.theme().radius)
+            .text_sm()
             .border_1()
-            .border_color(rgba(if recording {
-                t.accent
+            .border_color(if recording {
+                cx.theme().ring
             } else {
-                t.toolbar_border
-            }))
-            .bg(rgba(if recording {
-                alpha(t.toolbar_hover, 0x88)
+                cx.theme().border
+            })
+            .bg(if recording {
+                cx.theme().accent
             } else {
-                0x00000000
-            }))
-            .text_color(rgba(if recording { t.accent } else { t.btn_text }))
-            .hover(|s| s.border_color(rgba(t.accent)));
+                cx.theme().background
+            })
+            .text_color(cx.theme().foreground)
+            .focus_visible(|s| s.border_color(cx.theme().ring))
+            .hover(|s| s.bg(cx.theme().secondary_hover));
         if recording {
             // Only the RECORDING cap listens: one shared focus handle,
             // attached to whichever row is armed — without focus the
             // keydown listener is dead weight on the others.
-            cap = cap
-                .track_focus(&self.record_focus)
-                .on_key_down(cx.listener(Self::capture_key));
+            cap = cap.track_focus(&self.record_focus);
         }
         let cap = cap
-            .id(SharedString::from(format!("key-cap-{id}")))
             .on_click({
                 let id = id.to_owned();
                 move |_, window, cx| {
@@ -202,7 +219,10 @@ impl SettingsWindow {
                 }
             })
             .child(cap_label);
-        card_row(key_label(id), description, cap)
+        let cap = div()
+            .capture_key_down(cx.listener(Self::capture_key))
+            .child(cap);
+        card_row(cx, key_label(id), description, cap)
     }
 
     /// Key-cap click: start recording (focusing the cap so the chord
@@ -238,6 +258,9 @@ impl SettingsWindow {
         let Some(id) = self.recording.clone() else {
             return;
         };
+        // Capture before Button handles Enter/Space as activation, otherwise
+        // binding one of those keys would merely toggle the recorder off.
+        cx.stop_propagation();
         let keystroke = &event.keystroke;
         let bare = keystroke.modifiers == gpui_kit::Modifiers::default();
         if keystroke.key == "escape" && bare {
@@ -280,5 +303,61 @@ impl SettingsWindow {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsWindow;
+    use crate::model::settings::Settings;
+    use crate::ui::settings::Section;
+    use gpui_kit::TestAppContext;
+
+    #[gpui_kit::test]
+    fn recorder_refuses_enter_and_records_space_without_button_activation(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let config = tempfile::tempdir().expect("test config directory");
+        let path = config.path().join("settings.toml");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = SettingsWindow::new(window, cx);
+            view.section = Section::Keys;
+            view.settings = Settings::default();
+            view.path = Some(path.clone());
+            view.error = None;
+            view
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| view.toggle_recording("copy", window, cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| {
+                assert_eq!(view.recording.as_deref(), Some("copy"));
+                assert!(view.record_error.is_some());
+                assert_eq!(
+                    view.settings.keys().get("copy").map(String::as_str),
+                    Some("ctrl-c")
+                );
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("space");
+        cx.update(|_, cx| {
+            view.update(cx, |view, _| {
+                assert!(view.recording.is_none());
+                assert_eq!(
+                    view.settings.keys().get("copy").map(String::as_str),
+                    Some("space")
+                );
+                assert!(view.error.is_none());
+            })
+        });
+        let (saved, warnings) = Settings::load(Some(&path));
+        assert!(warnings.is_empty());
+        assert_eq!(saved.keys().get("copy").map(String::as_str), Some("space"));
     }
 }

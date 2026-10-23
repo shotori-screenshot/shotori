@@ -65,7 +65,14 @@ gpui_kit::assets::icon_assets!(
         WindowMinimize,
         WindowMaximize,
         WindowRestore,
-        WindowClose
+        WindowClose,
+        // Settings window resize affordance.
+        MoveDiagonal2,
+        Check,
+        Search,
+        Scan,
+        ChevronDown,
+        ChevronRight
     ]
 );
 

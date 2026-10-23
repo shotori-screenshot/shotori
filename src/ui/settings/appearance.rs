@@ -1,82 +1,145 @@
-//! The Appearance page: the theme.toml editor. Base palette selector,
-//! one color picker per [`ColorKey`], the dim-opacity slider — all
-//! live-applied to this window's own chrome so the edits preview the
-//! next capture's palette, and written through to theme.toml on every
-//! change (the write-through contract of [`super::SettingsWindow`],
-//! pointed at a different file).
+//! Screenshot palette previews and advanced appearance controls. Changes are
+//! applied to captures and written through immediately to theme.toml.
 
-use gpui_kit::base::IndexPath;
-use gpui_kit::base::slider::{
-    Slider, SliderEvent, SliderIndicator, SliderState, SliderThumb, SliderTrack, SliderValue,
-};
-use gpui_kit::component::Sizable;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_kit::component::searchable_list::SearchableVec;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use super::color_picker::SettingsColorPicker;
+use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::slider::Slider as ThemedSlider;
 use gpui_kit::*;
 
 use crate::ui::theme::load::{self, ThemeFile};
 use crate::ui::theme::{self, ColorKey};
 
 use super::{
-    AppearanceState, BaseItem, CONTENT_MAX, ROW_MIN_H, SettingsWindow, card_group, card_row,
-    page_body, page_header, sync_shell_palette,
+    AppearanceState, SettingsWindow, card_group, card_row, page_body, page_header,
+    sync_shell_palette,
 };
 
 impl SettingsWindow {
-    /// Appearance: theme base + per-field colors, live-applied to this
-    /// window's own chrome.
-    pub(super) fn page_appearance(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(18.))
-            .max_w(px(CONTENT_MAX))
+    pub(super) fn page_appearance(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        use gpui_kit::component::select::Select;
+
+        let mut body = super::layout::content_column()
             .child(page_header(
-                crate::i18n::t!("settings.appearance.title").as_ref(),
-                crate::i18n::t!("settings.appearance.blurb").as_ref(),
+                cx,
+                crate::i18n::t!("settings.preferences.appearance").as_ref(),
+                crate::i18n::t!("settings.preferences.appearance_hint").as_ref(),
             ))
             .child(card_group(
-                Some(crate::i18n::t!("settings.appearance.group.base").as_ref()),
+                cx,
+                None,
                 vec![card_row(
-                    crate::i18n::t!("settings.appearance.base_palette").to_string(),
-                    None::<String>,
-                    div().w_full().child(
-                        Select::new(&self.appearance.base_select)
-                            .accessibility_label(
-                                crate::i18n::t!("settings.appearance.base_palette").to_string(),
-                            )
-                            .menu_width(px(280.)),
-                    ),
+                    cx,
+                    crate::i18n::t!("settings.general.language.label").to_string(),
+                    Some(crate::i18n::t!("settings.general.language.blurb").to_string()),
+                    Select::new(&self.language_select).w_full(),
                 )],
             ))
             .child(card_group(
-                Some(crate::i18n::t!("settings.appearance.group.dim").as_ref()),
-                vec![
-                    div()
+                cx,
+                Some(crate::i18n::t!("settings.appearance.base_palette").as_ref()),
+                vec![self.theme_choices(window, cx)],
+            ));
+        let mut custom = div().flex().flex_col().gap_2().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    gpui_kit::base::Button::new("custom-colors")
+                        .flex_1()
                         .flex()
                         .items_center()
-                        .min_h(px(ROW_MIN_H))
-                        .px(px(14.))
-                        .py(px(10.))
-                        .child(self.opacity_row(cx)),
-                ],
-            ))
-            // The colour grid is the long block, so it is the part that
-            // scrolls off the bottom — a clipped slider read as broken.
-            .child(card_group(
-                Some(crate::i18n::t!("settings.appearance.group.colors").as_ref()),
-                vec![div().p(px(12.)).child(self.color_grid(cx))],
-            ));
+                        .justify_start()
+                        .gap_2()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+                        .child(
+                            gpui_kit::component::Icon::new(if self.custom_colors {
+                                gpui_kit::assets::IconName::ChevronDown
+                            } else {
+                                gpui_kit::assets::IconName::ChevronRight
+                            })
+                            .size_4(),
+                        )
+                        .child(crate::i18n::t!("settings.preferences.custom_colors").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.custom_colors = !this.custom_colors;
+                            cx.notify();
+                        })),
+                )
+                .children(self.custom_colors.then(|| {
+                    super::shell::reset_button("settings.appearance.reset_colors", cx, {
+                        let entity = cx.entity();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.appearance_reset(window, cx));
+                        }
+                    })
+                })),
+        );
+        if self.custom_colors {
+            let mut colors = div().flex().flex_col().gap_3();
+            for (title, keys) in [
+                (
+                    "settings.appearance.custom.selection",
+                    &[
+                        ColorKey::DimColor,
+                        ColorKey::Accent,
+                        ColorKey::PinBorder,
+                        ColorKey::SwatchBorder,
+                    ][..],
+                ),
+                (
+                    "settings.appearance.custom.toolbar",
+                    &[
+                        ColorKey::ToolbarBg,
+                        ColorKey::ToolbarText,
+                        ColorKey::ToolbarBorder,
+                        ColorKey::ToolbarHover,
+                        ColorKey::ToolbarSelected,
+                    ][..],
+                ),
+                (
+                    "settings.appearance.custom.feedback",
+                    &[
+                        ColorKey::ChipBg,
+                        ColorKey::HintText,
+                        ColorKey::BtnText,
+                        ColorKey::BtnHoverBg,
+                    ][..],
+                ),
+            ] {
+                colors = colors.child(card_group(
+                    cx,
+                    Some(crate::i18n::t!(title).as_ref()),
+                    vec![self.color_grid(keys, cx)],
+                ));
+            }
+            custom = custom.child(colors);
+        }
+        body = body.child(custom);
         page_body("page-appearance").child(body)
     }
 
     /// One row per [`ColorKey`]: label + picker showing the resolved
     /// color. Wraps two per line at the default width.
-    fn color_grid(&self, _: &Context<Self>) -> Div {
-        let t = theme::c();
-        let mut grid = div().flex().flex_wrap().gap(px(4.));
-        for (key, state) in &self.appearance.pickers {
+    fn color_grid(&self, keys: &[ColorKey], cx: &Context<Self>) -> Div {
+        let mut grid = div()
+            .grid()
+            .grid_cols(2)
+            .gap_x_4()
+            .gap_y_1()
+            .w_full()
+            .min_w_0();
+        for (key, state) in self
+            .appearance
+            .pickers
+            .iter()
+            .filter(|(key, _)| keys.contains(key))
+        {
             // Swatch first, label next, both left-aligned: the picker
             // used to sit 280px away from the name it belongs to, which
             // read as two unrelated columns.
@@ -84,93 +147,47 @@ impl SettingsWindow {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .w(px(300.))
-                    .py(px(5.))
-                    .child(ColorPicker::new(state).small())
+                    .gap_2()
+                    .min_w_0()
+                    .py_1()
+                    .child(SettingsColorPicker::new(state, key.label().into_owned()))
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(rgba(t.btn_text))
-                            .child(key.label()),
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(key.label().into_owned()),
                     ),
             );
         }
         grid
     }
 
-    /// Dim opacity: 0–1 slider, the value readout as a percentage.
-    fn opacity_row(&self, cx: &Context<Self>) -> Div {
-        let t = theme::c();
-        const TRACK_W: f32 = 180.;
-        const THUMB: f32 = 12.;
-        let state = &self.appearance.opacity;
-        let value = match state.read(cx).value() {
-            SliderValue::Single(v) => v,
-            SliderValue::Range(s, _) => s,
-        };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(
-                div()
-                    .w(px(110.))
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
-                    .child(crate::i18n::t!("settings.appearance.dim_opacity").to_string()),
-            )
-            .child(
-                div().relative().w(px(TRACK_W)).h(px(18.)).child(
-                    Slider::new(state)
-                        .horizontal()
-                        .absolute()
-                        .size_full()
-                        .child(
-                            SliderTrack::new(state)
-                                .absolute()
-                                .left(px(THUMB / 2.))
-                                .top(px(7.))
-                                .w(px(TRACK_W - THUMB))
-                                .h(px(4.))
-                                .rounded_full()
-                                .bg(rgba(t.toolbar_border))
-                                // The indicator is the only thing that
-                                // records `SliderState::bounds` (see
-                                // `SliderIndicator::render`'s on_prepaint).
-                                // Without it the state kept a 0x0 rect, so
-                                // pointer -> value divided by zero and the
-                                // thumb never moved: the slider was dead on
-                                // this page while the overlay's copy (which
-                                // has this line) worked. It doubles as the
-                                // filled portion up to the value.
-                                .child(
-                                    SliderIndicator::new(state)
-                                        .size_full()
-                                        .rounded_full()
-                                        .bg(rgba(t.accent)),
-                                ),
-                        )
-                        .child(
-                            SliderThumb::new(state)
-                                .absolute()
-                                .top(px(2.))
-                                .left(px(value * (TRACK_W - THUMB)))
-                                .size(px(THUMB))
-                                .rounded_full()
-                                .bg(rgba(t.btn_text))
-                                .border_1()
-                                .border_color(rgba(t.toolbar_bg)),
-                        ),
-                ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.hint_text))
-                    .child(format!("{:.0}%", theme::c().dim_opacity * 100.)),
-            )
+    /// Dim opacity: the same slider used by the layout/interaction harness.
+    pub(super) fn opacity_control(&self, cx: &Context<Self>) -> Div {
+        opacity_slider(&self.appearance.opacity, cx)
     }
+}
+
+/// The kit owns track/thumb geometry, hit-testing and drag feedback.
+fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
+    let value = state.read(cx).value().start();
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .child(
+            div()
+                .w(rems(9.))
+                .flex_shrink_0()
+                .child(ThemedSlider::new(state).horizontal().bg(cx.theme().primary)),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{:.0}%", value * 100.)),
+        )
 }
 
 // ── Appearance: state plumbing ─────────────────────────────────────────────
@@ -187,33 +204,7 @@ impl AppearanceState {
         let (file, errors) = load::load_editable(path.as_deref());
         let current = current_palette(&file);
 
-        // Base palette selector: seeded from the file (None = shotori);
-        // a Confirm swaps the base, re-seeds the pickers below and
-        // writes through (see `appearance_set_base`). The legacy
-        // "auto" spelling seeds as "shotori" — the same pair, and
-        // "shotori" is what the editor writes back.
-        let current_base = match file.base.as_deref() {
-            None | Some("shotori") | Some("auto") => "shotori".to_string(),
-            Some(base) => base.to_string(),
-        };
-        let items = BaseItem::all();
-        let selected = items
-            .iter()
-            .position(|item| item.name == current_base)
-            .map(IndexPath::new);
-        let base_select =
-            cx.new(|cx| SelectState::new(SearchableVec::new(items), selected, window, cx));
         let mut subs = Vec::new();
-        // subscribe_in (not subscribe): the base swap must re-seed the
-        // pickers, and `set_value` needs the window.
-        subs.push(
-            cx.subscribe_in(&base_select, window, |this, _, event, window, cx| {
-                if let SelectEvent::Confirm(Some(base)) = event {
-                    this.appearance_set_base(base, window, cx);
-                }
-            }),
-        );
-
         let mut pickers = Vec::new();
         for key in ColorKey::ALL {
             let value = u32_to_hsla(key.get(&current));
@@ -254,7 +245,6 @@ impl AppearanceState {
             file,
             path,
             error: errors.first().cloned(),
-            base_select,
             pickers,
             opacity,
             _subscriptions: subs,
@@ -266,7 +256,7 @@ impl SettingsWindow {
     /// Apply the working theme live — the settings window's own chrome
     /// re-skins, previewing the next capture's palette — and write
     /// theme.toml through.
-    fn appearance_apply(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn appearance_apply(&mut self, cx: &mut Context<Self>) {
         let (dark, light, palette_errors) = self.appearance.file.palettes();
         theme::set(dark, light);
         // appearance edits re-skin the whole shell, not just accent
@@ -284,7 +274,7 @@ impl SettingsWindow {
     /// Re-seed every picker and the slider from the resolved palette —
     /// after a base switch or a reset the swatches must show what a
     /// capture would show. `set_value` emits nothing, so no loop.
-    fn appearance_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn appearance_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = current_palette(&self.appearance.file);
         for (key, state) in &self.appearance.pickers {
             state.update(cx, |state, cx| {
@@ -296,7 +286,12 @@ impl SettingsWindow {
         });
     }
 
-    fn appearance_set_base(&mut self, base: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn appearance_set_base(
+        &mut self,
+        base: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.appearance.file.base.as_deref().unwrap_or("shotori") == base {
             return;
         }
@@ -305,13 +300,11 @@ impl SettingsWindow {
         self.appearance_apply(cx);
     }
 
-    /// Drop every override, keep the chosen base.
+    /// Clear custom colors while preserving the base and capture opacity.
     pub(super) fn appearance_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let base = self.appearance.file.base.clone();
-        self.appearance.file = ThemeFile {
-            base,
-            ..Default::default()
-        };
+        for key in ColorKey::ALL {
+            self.appearance.file.set_color(key, None);
+        }
         self.appearance_resync(window, cx);
         self.appearance_apply(cx);
     }
@@ -330,3 +323,59 @@ fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
 }
 
 use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};
+
+#[cfg(test)]
+mod tests {
+    use super::opacity_slider;
+    use gpui_kit::base::slider::{SliderState, SliderValue};
+    use gpui_kit::component::Theme;
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, Modifiers, Render, TestAppContext, Window, point,
+        px,
+    };
+
+    struct SliderFixture(Entity<SliderState>);
+
+    impl Render for SliderFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            opacity_slider(&self.0, cx)
+        }
+    }
+
+    #[gpui_kit::test]
+    fn standard_opacity_slider_maps_pointer_positions_across_text_sizes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let state = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(1.)
+                .step(0.05)
+                .default_value(0.55)
+        });
+        let (_, cx) = cx.add_window_view(|_, _| SliderFixture(state.clone()));
+        for rem in [16., 20., 24.] {
+            for value in [0., 0.55, 1.] {
+                cx.update(|window, cx| {
+                    Theme::global_mut(cx).font_size = px(rem);
+                    Theme::sync_base(cx);
+                    window.set_rem_size(px(rem));
+                    state.update(cx, |state, cx| state.set_value(value, window, cx));
+                    window.draw(cx).clear(cx);
+                });
+                let rail = cx.update(|_, cx| state.read(cx).bounds());
+                assert!(rail.size.width > px(0.));
+                cx.simulate_click(
+                    point(rail.left() + rail.size.width * 0.25, rail.center().y),
+                    Modifiers::default(),
+                );
+                cx.update(|_, cx| {
+                    assert!(matches!(state.read(cx).value(), SliderValue::Single(v)
+                        if (v - 0.25).abs() < 0.001));
+                });
+            }
+        }
+    }
+}
