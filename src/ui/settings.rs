@@ -166,7 +166,7 @@ pub fn run() {
             // this toplevel; the first event-loop pass is still the
             // safe place to create it.
             cx.spawn(async move |cx| {
-                cx.update(|cx| {
+                let opened = cx.update(|cx| {
                     cx.open_window(window_options(), |window, cx| {
                         let view = cx.new(|cx| SettingsWindow::new(window, cx));
                         // Root hosts the WindowState plugin — without it
@@ -175,8 +175,19 @@ pub fn run() {
                         // must stay bare; a regular toplevel wants this.
                         cx.new(|cx| Root::new(view, window, cx))
                     })
-                    .expect("failed to open the settings window");
                 });
+                if let Err(err) = opened {
+                    // App already shutting down before the task ran, or the
+                    // compositor going away / window limit reached: report
+                    // and let the loop end naturally instead of panicking
+                    // from a detached task — the process has nothing left
+                    // to show.
+                    eprintln!("shotori settings: failed to open the settings window: {err}");
+                    crate::notify::send(
+                        "Shotori",
+                        crate::i18n::t!("settings.open_failed").as_ref(),
+                    );
+                }
             })
             .detach();
         });

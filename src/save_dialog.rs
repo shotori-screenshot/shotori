@@ -39,11 +39,16 @@ static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<PendingSave>>> =
 /// Stash a cropped selection; the caller then quits the overlay.
 pub fn stash(w: u32, h: u32, rgba: Vec<u8>) {
     let slot = PENDING.get_or_init(|| std::sync::Mutex::new(None));
-    *slot.lock().unwrap() = Some(PendingSave { w, h, rgba });
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(PendingSave { w, h, rgba });
 }
 
 fn take_pending() -> Option<PendingSave> {
-    PENDING.get()?.lock().unwrap().take()
+    PENDING
+        .get()?
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }
 
 // ── Overlay teardown ─────────────────────────────────────────────────
@@ -67,7 +72,7 @@ pub fn register_overlay(handle: AnyWindowHandle) {
     OVERLAYS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(handle);
 }
 
@@ -78,7 +83,7 @@ pub fn close_overlays(window: &mut Window, cx: &mut App) {
     window.remove_window();
     let handles = OVERLAYS
         .get()
-        .map(|h| std::mem::take(&mut *h.lock().unwrap()))
+        .map(|h| std::mem::take(&mut *h.lock().unwrap_or_else(|poisoned| poisoned.into_inner())))
         .unwrap_or_default();
     for handle in handles {
         if handle == current {

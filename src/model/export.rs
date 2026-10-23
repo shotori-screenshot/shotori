@@ -19,6 +19,13 @@ pub fn crop(
     bounds: Bounds<Pixels>,
     scale: f32,
 ) -> Option<(u32, u32, Vec<u8>)> {
+    // The row loop indexes rgba as cap_w×cap_h; a short buffer would
+    // panic mid-copy — assert the contract where it's cheap.
+    debug_assert_eq!(
+        rgba.len(),
+        cap_w as usize * cap_h as usize * 4,
+        "crop buffer is not a tightly packed rgba8 capture"
+    );
     let clamp = |v: f32, max: u32| v.round().clamp(0., max as f32) as u32;
     let x0 = clamp(f32::from(bounds.left()) * scale, cap_w);
     let y0 = clamp(f32::from(bounds.top()) * scale, cap_h);

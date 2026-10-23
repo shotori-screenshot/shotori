@@ -54,6 +54,11 @@ pub fn preview_window(
     viewport_h: u32,
     window_rows: u32,
 ) -> (u32, u32) {
+    // Degenerate empty sheet: rows = ...max(1) below would exceed
+    // sheet_h and `sheet_h - rows` would underflow — bail first.
+    if sheet_h == 0 {
+        return (0, 1);
+    }
     // The window may never be shorter than the viewport: the highlight
     // must fit inside the strip, or the "what you are looking at" band
     // would be clipped by a panel-height accident.

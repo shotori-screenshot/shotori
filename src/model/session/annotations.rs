@@ -117,8 +117,17 @@ impl ScreenshotSession {
             // the handles sit on the shape's body, so this must run
             // before the shape hit-test parks a click
             if let Some(anchor) = self.annotations.selected().and_then(|s| s.handle_at(p)) {
-                let ix = self.annotations.selected_index().expect("selected");
-                let before = self.annotations.selected().expect("selected").clone();
+                // handle_at only reports handles of the selected shape —
+                // the same lookup this branch condition just proved — so
+                // zip the index and the copy instead of unwrapping twice.
+                let Some((ix, before)) = self
+                    .annotations
+                    .selected_index()
+                    .zip(self.annotations.selected())
+                else {
+                    return;
+                };
+                let before = before.clone();
                 self.handle_drag = Some(HandleDrag { ix, anchor, before });
                 return;
             }

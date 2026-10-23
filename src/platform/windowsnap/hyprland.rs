@@ -14,7 +14,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use gpui_kit::{Bounds, point, px, size};
 use serde_json::Value;
 
 use super::SnapRect;
@@ -150,19 +149,18 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
             if w <= 0. || h <= 0. {
                 return None;
             }
-            Some(SnapRect {
-                bounds: Bounds {
-                    origin: point(px(x as f32), px(y as f32)),
-                    size: size(px(w as f32), px(h as f32)),
-                },
-                app_id: c
-                    .get("class")
+            Some(SnapRect::from_xywh(
+                x as f32,
+                y as f32,
+                w as f32,
+                h as f32,
+                c.get("class")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                focused: false, // clients JSON carries no focus flag
-                recency: 0,
-            })
+                false, // clients JSON carries no focus flag
+                0,
+            ))
         })
         .collect()
 }

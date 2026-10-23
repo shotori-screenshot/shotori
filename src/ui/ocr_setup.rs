@@ -133,11 +133,18 @@ pub(crate) fn setup_card(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoEleme
         .items_center()
         .justify_center()
         .bg(rgba(theme::c().dim()))
-        // clicks on the backdrop must not start a new selection underneath
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
+        // Any button on the backdrop (or on the card) must not reach the
+        // overlay underneath: middle-click/right-click would start a new
+        // selection through the modal.
+        .on_mouse_down(MouseButton::Left, swallow)
+        .on_mouse_down(MouseButton::Middle, swallow)
+        .on_mouse_down(MouseButton::Right, swallow)
         .child(card_body(setup, focus))
+}
+
+/// Shared stop_propagation handler for the modal's button swallowing.
+fn swallow(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
 }
 
 fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
@@ -230,9 +237,9 @@ fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
         .flex()
         .flex_col()
         .gap_2()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
+        .on_mouse_down(MouseButton::Left, swallow)
+        .on_mouse_down(MouseButton::Middle, swallow)
+        .on_mouse_down(MouseButton::Right, swallow)
         .child(
             div()
                 .text_size(px(15.))

@@ -57,6 +57,10 @@ pub const DEFAULT_ANNOTATION_COLORS: [u32; PALETTE] = [
     0xFF4545FF, 0xFF8A32FF, 0xFFD43BFF, 0x40C878FF, 0x409CFFFF, 0x222222FF, 0xFFFFFFFF,
 ];
 
+/// The UI language (settings.toml top-level `language` key). `Auto`
+/// follows the system locale; the rest name a `locales/ui.yml` column.
+/// Unknown values degrade to Auto with a load warning (same contract
+/// as every other key).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     Auto,
@@ -543,7 +547,8 @@ impl Settings {
     }
 }
 
-/// All valid ids, comma-joined for error messages.
+/// The user's config dir (`$XDG_CONFIG_HOME/shotori`, else
+/// `~/.config/shotori`). Shared by the tray/settings writers
 /// and settings loaders so the two files can never disagree about
 /// where the config dir is.
 pub fn config_dir() -> Option<PathBuf> {

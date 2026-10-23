@@ -12,6 +12,7 @@ use crate::model::scroll_sheet::{Axis, Phase};
 use crate::platform::scroll_capture::{ScrollControls, ScrollEvent};
 use crate::ui::image_util;
 use crate::ui::theme;
+use crate::ui::theme::alpha;
 
 pub(crate) struct PreviewPanel {
     focus: FocusHandle,
@@ -850,9 +851,4 @@ impl DeckIcon {
 enum DeckTone {
     Neutral,
     Primary,
-}
-
-/// `0xRRGGBBAA` with a replacement alpha — theme colors are opaque.
-pub(super) fn alpha(color: u32, alpha: u8) -> u32 {
-    (color & 0xFFFFFF00) | u32::from(alpha)
 }

@@ -86,6 +86,7 @@ pub mod clipboard;
 pub mod i18n;
 pub mod notify;
 pub mod ocr;
+pub mod render_image;
 pub mod save_dialog;
 pub mod tray;
 
@@ -123,8 +124,19 @@ pub fn launch_detached(subcommand: &str) {
         }
     };
     match Command::new(exe).arg(subcommand).spawn() {
-        Ok(child) => {
-            drop(child);
+        Ok(mut child) => {
+            // Reap in a detached thread: the tray is a resident process,
+            // so every launched session would otherwise pile up as a
+            // zombie when it exits. If this process dies first, the
+            // child is reparented to init, which reaps it — the thread
+            // dying with the process is harmless here (unlike the
+            // notify/clipboard children, whose WORK must outlive the
+            // parent; a reaper thread has nothing to outlive).
+            std::thread::spawn(move || {
+                if let Err(e) = child.wait() {
+                    eprintln!("[shotori] reaping detached child failed: {e}");
+                }
+            });
             println!("[shotori] launched `{subcommand}`");
         }
         Err(e) => eprintln!("[shotori] failed to launch `{subcommand}`: {e}"),

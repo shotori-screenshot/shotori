@@ -7,28 +7,53 @@
 //! same IPC) completes the chain into the session's coordinate space.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
-use gpui_kit::{Bounds, point, px, size};
-use niri_ipc::socket::Socket;
 use niri_ipc::{Output, Reply, Request, Response, Window, Workspace};
 
 use super::SnapRect;
 
 pub fn query() -> Option<Vec<SnapRect>> {
-    let mut socket = Socket::connect().ok()?;
-    let windows = match socket.send(Request::Windows).ok()? {
+    let path = std::env::var_os(niri_ipc::socket::SOCKET_PATH_ENV)?;
+    let stream = UnixStream::connect(path).ok()?;
+    // The query wrapper budgets 1 s on the main thread, but a wedged
+    // compositor socket would leak this helper thread forever inside
+    // read_line — cap the I/O so the thread can always exit (sway.rs /
+    // hyprland.rs do the same). niri-ipc's Socket keeps its stream
+    // private with no timeout hook, so the one-JSON-line-each-way
+    // protocol is spoken directly here.
+    stream
+        .set_read_timeout(Some(Duration::from_millis(800)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(800)))
+        .ok()?;
+    let mut socket = BufReader::new(stream);
+    let windows = match send(&mut socket, Request::Windows)? {
         Reply::Ok(Response::Windows(v)) => v,
         _ => return None,
     };
-    let workspaces = match socket.send(Request::Workspaces).ok()? {
+    let workspaces = match send(&mut socket, Request::Workspaces)? {
         Reply::Ok(Response::Workspaces(v)) => v,
         _ => return None,
     };
-    let outputs = match socket.send(Request::Outputs).ok()? {
+    let outputs = match send(&mut socket, Request::Outputs)? {
         Reply::Ok(Response::Outputs(v)) => v,
         _ => return None,
     };
     Some(assemble(&windows, &workspaces, &outputs))
+}
+
+/// One niri-IPC round trip: JSON request line → JSON reply line.
+fn send(socket: &mut BufReader<UnixStream>, request: Request) -> Option<Reply> {
+    let mut buf = serde_json::to_string(&request).ok()?;
+    buf.push('\n');
+    socket.get_mut().write_all(buf.as_bytes()).ok()?;
+    buf.clear();
+    socket.read_line(&mut buf).ok()?;
+    serde_json::from_str(&buf).ok()
 }
 
 /// window list → global logical rects. Pure, unit-tested with JSON
@@ -54,21 +79,19 @@ fn assemble(
             if ww <= 0 || wh <= 0 {
                 return None; // mid-animation or closing
             }
-            Some(SnapRect {
-                bounds: Bounds {
-                    origin: point(
-                        px(logical.x as f32 + vx as f32 + layout.window_offset_in_tile.0 as f32),
-                        px(logical.y as f32 + vy as f32 + layout.window_offset_in_tile.1 as f32),
-                    ),
-                    size: size(px(ww as f32), px(wh as f32)),
-                },
-                app_id: w.app_id.clone().unwrap_or_default(),
-                focused: w.is_focused,
-                recency: w
-                    .focus_timestamp
+            let x = logical.x as f32 + vx as f32 + layout.window_offset_in_tile.0 as f32;
+            let y = logical.y as f32 + vy as f32 + layout.window_offset_in_tile.1 as f32;
+            Some(SnapRect::from_xywh(
+                x,
+                y,
+                ww as f32,
+                wh as f32,
+                w.app_id.clone().unwrap_or_default(),
+                w.is_focused,
+                w.focus_timestamp
                     .map(|t| t.secs * 1_000 + u64::from(t.nanos) / 1_000_000)
                     .unwrap_or(0),
-            })
+            ))
         })
         .collect()
 }

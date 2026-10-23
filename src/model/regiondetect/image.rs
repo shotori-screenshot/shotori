@@ -133,9 +133,16 @@ pub(super) fn downscale(source: &RgbaView<'_>, target_w: i32, target_h: i32) -> 
             let x1 = (tx + 1) as f64 * sx;
             let (mut acc, mut weight) = ([0f64; 4], 0f64);
             let ys = y0.floor() as i32;
-            let ye = y1.ceil() as i32;
             let xs = x0.floor() as i32;
-            let xe = x1.ceil() as i32;
+            // f64 rounding can push the final tile's edge a ULP past the
+            // source size (e.g. y1 = 644.000…2 → ceil = 645 for a 644-row
+            // source), and overlap() still returns a tiny positive weight for
+            // that phantom row — without the clamp the loop reads one row
+            // out of bounds and panics the background analysis thread (~5%
+            // of capture sizes hit this). Floors stay ≥ 0 for non-negative
+            // inputs, so only the upper bound needs the clamp.
+            let ye = (y1.ceil() as i32).min(source.height);
+            let xe = (x1.ceil() as i32).min(source.width);
             for y in ys..ye.max(ys) {
                 let wy = overlap(y as f64, y0, y1);
                 for x in xs..xe.max(xs) {
@@ -371,4 +378,25 @@ pub(super) fn canny(image: &GrayImage, low_threshold: f32, high_threshold: f32) 
         }
     }
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: f64 tile math overshooting the source bounds must not
+    /// read out of bounds. 1281×644 → 1280×643 is the smallest pair where
+    /// the last tile's `y1` lands a ULP above the source height
+    /// (`ceil` → 645), which panicked the analysis thread before the
+    /// `ye`/`xe` clamp.
+    #[test]
+    fn downscale_clamps_float_overshoot_to_source_bounds() {
+        let data = vec![128u8; 1281 * 644 * 4];
+        let view = RgbaView::new(&data, 1281, 644).expect("len matches dims");
+        let out = downscale(&view, 1280, 643);
+        assert_eq!((out.width, out.height), (1280, 643));
+        // Every output pixel stays fully accumulated (no phantom-row NaNs
+        // or zero-fill): uniform source → uniform output, all 4 channels.
+        assert_eq!(out.data[0..4], [128, 128, 128, 128]);
+    }
 }

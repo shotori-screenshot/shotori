@@ -45,6 +45,10 @@ impl From<wl_output::Transform> for Transform {
 pub(super) struct App {
     pub shm: Option<wl_shm::WlShm>,
     pub manager: Option<ZwlrScreencopyManagerV1>,
+    /// Negotiated zwlr_screencopy_manager_v1 version: v3+ completes its
+    /// announcement batch with a buffer_done event, and copying earlier
+    /// races the batch (same handling as scroll_capture.rs).
+    pub screencopy_version: u32,
     /// xdg-output manager: the authoritative source for an output's
     /// LOGICAL geometry (true fractional scale + transform applied —
     /// wl_output only reports the integer-rounded scale)
@@ -73,6 +77,10 @@ pub(super) struct FrameState {
     pub failed: bool,
     ready: bool,
     pub mmap: Option<memmap2::MmapMut>,
+    /// Set once the copy request went out: v3 compositors may send
+    /// buffer events twice (shm + dmabuf batches); copy_prepared must
+    /// not copy twice.
+    copied: bool,
     #[allow(dead_code)]
     buffer: Option<wl_buffer::WlBuffer>,
     #[allow(dead_code)]
@@ -88,6 +96,7 @@ impl FrameState {
             failed: false,
             ready: false,
             mmap: None,
+            copied: false,
             buffer: None,
             file: None,
         }
@@ -112,14 +121,16 @@ impl App {
         self.outputs.get_mut(idx)?.frame.as_mut()
     }
 
-    /// Full Buffer-event handling: record metadata → create shm pool/buffer →
-    /// request copy → attach resources back.
+    /// Full Buffer-event handling: record metadata → create shm
+    /// pool/buffer → attach resources back. The copy itself moved to
+    /// copy_prepared — v3 compositors finish announcing with buffer_done,
+    /// so the dispatcher decides when the copy is legal.
     /// (Split into its own method for borrow splitting: creating the pool
     /// needs a shared borrow of self.shm while attaching needs a mutable one)
     #[allow(clippy::too_many_arguments)] // wayland event fields are just this many
     fn handle_buffer(
         &mut self,
-        frame: &ZwlrScreencopyFrameV1,
+        _frame: &ZwlrScreencopyFrameV1,
         idx: usize,
         qh: &QueueHandle<Self>,
         fmt: wl_shm::Format,
@@ -185,12 +196,25 @@ impl App {
         };
         let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
         let buffer = pool.create_buffer(0, w, h, stride, fmt, qh, ());
-        frame.copy(&buffer);
 
         if let Some(f) = self.frame_mut(idx) {
             f.file = Some(file);
             f.mmap = Some(mmap);
             f.buffer = Some(buffer);
+        }
+    }
+
+    /// Issue the copy once the buffer is prepared — but only once per
+    /// frame, and only after the compositor finished announcing (v3).
+    fn copy_prepared(&mut self, frame: &ZwlrScreencopyFrameV1, idx: usize) {
+        let Some(f) = self.frame_mut(idx) else {
+            return;
+        };
+        if !f.copied
+            && let Some(buffer) = f.buffer.as_ref()
+        {
+            f.copied = true;
+            frame.copy(buffer);
         }
     }
 }
@@ -213,6 +237,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
             match interface.as_str() {
                 "wl_shm" => state.shm = Some(registry.bind(name, version, qh, ())),
                 "zwlr_screencopy_manager_v1" => {
+                    state.screencopy_version = version.min(3);
                     state.manager = Some(registry.bind(name, version.min(3), qh, ()))
                 }
                 "zxdg_output_manager_v1" => {
@@ -377,6 +402,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
                     height as i32,
                     stride as i32,
                 );
+                if state.screencopy_version < 3 {
+                    // v1/v2 managers never send buffer_done — the copy
+                    // is legal the moment a buffer was prepared.
+                    state.copy_prepared(frame, *idx);
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                // v3: the announcement batch is complete; copy may go.
+                state.copy_prepared(frame, *idx);
             }
             zwlr_screencopy_frame_v1::Event::Flags { flags } => {
                 if let Some(f) = state.frame_mut(*idx) {

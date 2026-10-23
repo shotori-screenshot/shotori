@@ -98,8 +98,10 @@ libwayland-dev` (see CI).
 ### Rendering & pixels
 
 - **`RenderImage` wants BGRA** (Vulkan backend); in-memory RGBA must
-  swap bytes 0↔2. The PNG/annotation path is RGBA. `ui/image_util.rs`
-  owns this contract — don't hand-build image buffers elsewhere.
+  swap bytes 0↔2. The PNG/annotation path is RGBA. `src/render_image.rs`
+  owns this contract (a leaf so model/ and annotation/ can call it;
+  `ui/image_util.rs` re-exports for ui call sites) — don't hand-build
+  image buffers elsewhere.
 - **Never compute a hit-test rect from layout side effects.** The
   element and its hit-test rect must derive from the same constants
   (the grip/cursor alignment trap). One geometry source per

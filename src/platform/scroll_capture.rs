@@ -476,14 +476,21 @@ impl Preview {
                 crate::model::scroll_sheet::PREVIEW_SAMPLE_W,
             );
             let (v_top, v_h) = self.mapping(sheet, top, rows, k);
-            let _ = events.try_send(ScrollEvent::Preview {
-                width: pw,
-                height: ph,
-                rgba: Arc::new(rgba),
-                viewport_top: v_top,
-                viewport_height: v_h,
-            });
-            self.shown = Some(identity);
+            // Mark shown only when the event actually entered the
+            // channel: a full channel drops the send, and recording it
+            // as shown would suppress the resend that should follow.
+            if events
+                .try_send(ScrollEvent::Preview {
+                    width: pw,
+                    height: ph,
+                    rgba: Arc::new(rgba),
+                    viewport_top: v_top,
+                    viewport_height: v_h,
+                })
+                .is_ok()
+            {
+                self.shown = Some(identity);
+            }
         } else {
             // Pixels are already right (the sheet only rewrote rows in
             // place); the highlight may still have moved.
@@ -582,10 +589,13 @@ fn run_manual(
     loop {
         let tick = Instant::now();
         if !paused && Instant::now() > deadline {
+            // MANUAL_DEADLINE is the whole-session budget, not an
+            // inactivity timeout — say so, or the user (and logs) read a
+            // stall diagnosis into a normal long session.
             return fail_with_partial(
                 events,
                 sheet,
-                "Nothing new was captured for ten minutes — the session timed out.",
+                "The capture session hit its ten-minute limit.",
             );
         }
         match cmds.try_recv() {
@@ -621,7 +631,14 @@ fn run_manual(
                 preview.peek(delta, sheet, events);
                 continue;
             }
-            Err(_) => {}
+            Err(async_channel::TryRecvError::Empty) => {}
+            Err(async_channel::TryRecvError::Closed) => {
+                // The UI dropped its command channel: nobody can send
+                // Finish or Cancel any more, so running to the deadline
+                // would only burn the budget and leak a zombie capture.
+                // Deliver what we have — the same path as Finish.
+                return deliver(events, sheet);
+            }
         }
         if paused {
             std::thread::sleep(MANUAL_POLL);
