@@ -52,16 +52,25 @@
 //!   since the static edge trim only survives small bands, each accepted
 //!   moving frame also votes per sampled row ("still at the same viewport
 //!   row while the page moved"), and a persistent structured prefix
-//!   commits as a band: masked out of matching, and written ONCE at the
-//!   sheet top — pinned chrome must not repeat down the long image. See
+//!   extends the match exclusion. Late overlays never insert canvas rows;
+//!   only an existing seed header reserves space at the sheet top. See
 //!   [`StickyBands`].
 //! - **Visible-content composition** — accepted frames refresh the viewport,
 //!   except for localized stationary overlays detected from edges that stay
 //!   fixed while the surrounding page moves. These regions retain previously
 //!   captured pixels; later unobstructed observations repair seed occlusions.
+//!   Bidirectional overlap evidence covers controls clipped by capture edges.
 //!   A bounded halo includes the button face, antialiasing and nearby shadow.
+//!   Each retained span remembers its viewport row and whether it needs repair.
+//!   Edge quarters prefer more interior observations, including before a new
+//!   sticky bar is detected. Near floating controls this extends to the edgeward
+//!   half to avoid repeated fades and backdrop blur. Interior samples refresh
+//!   normally; prepends preserve provenance.
 //!   Regions never observed unobstructed retain their captured pixels; the
 //!   compositor does not invent missing text or paint a guessed background.
+//!   Stationary decorations connected to a confirmed bottom frame use a pixel
+//!   mask instead of a control's rectangular halo. The frame is kept once at
+//!   the output perimeter, outside the document plane.
 //! - **One position base, and refusals write nothing** — a frame is only
 //!   ever placed against the last frame the sheet actually advanced to
 //!   (`stable_profile`). Measuring the step against *any* nearer frame
@@ -107,10 +116,9 @@
 //! The impl is split by concern: [`profile`] (frame profiles + the
 //! band mask), [`sticky`] (edge chrome), [`floating`] (local overlays and
 //! overlap composition), [`matcher`] (the offset search and its refusal
-//! taxonomy) and [`preview`] (the live
-//! panel's geometry and the HUD phase ladder). The tests stay in this
-//! file: one fixture set drives the whole pipeline through
-//! [`ScrollSheet::push`].
+//! taxonomy) and [`preview`] (the live panel's geometry and the HUD phase
+//! ladder). In-file fixtures and font-rasterized `scene_tests` exercise the
+//! complete pipeline through [`ScrollSheet::push`].
 
 use floating::FloatingOverlays;
 use matcher::{Placement, estimate_offset};
@@ -315,9 +323,9 @@ impl ViewportState {
 
 /// Decision-log sink for a live capture,
 /// `SHOTORI_DEBUG_SHEET_LOG=<path>`: one line per pushed frame and one
-/// per band splice. When a stitched output looks wrong, this is the
+/// per accepted placement. When a stitched output looks wrong, this is the
 /// recording of every judgment the sheet made — measured step, costs,
-/// refusals, splices — which is the only way to debug a session after
+/// refusals and edge bands — which helps debug a session after
 /// the fact (the frames themselves are gone). Best-effort by design:
 /// an unwritable path must never touch the capture. Release builds
 /// with the variable unset do not read it.
@@ -393,8 +401,8 @@ pub(crate) struct ScrollSheet {
     /// Diagnostics for the scroll loop's logs / progress UI.
     frames_pushed: usize,
     frames_accepted: usize,
-    /// Preview invalidation revision for prepends, band splices, axis
-    /// switches and floating-overlay repair within an existing viewport.
+    /// Preview invalidation revision for prepends, axis switches and
+    /// floating-overlay repair within an existing viewport.
     top_shifts: u32,
 }
 
@@ -451,7 +459,7 @@ impl ScrollSheet {
                 position: 0,
                 max_position: 0,
             },
-            floating: FloatingOverlays::new(&seed),
+            floating: FloatingOverlays::new(&seed, sheet_w),
             prev_raw: seed,
             prev_profile: profile.clone(),
             sticky: StickyBands::new(),
@@ -481,11 +489,7 @@ impl ScrollSheet {
         if self.axis == axis {
             return true;
         }
-        if self.axis_locked
-            || self.frames_accepted > 1
-            || self.sticky.inserted > 0
-            || self.state.position != 0
-        {
+        if self.axis_locked || self.frames_accepted > 1 || self.state.position != 0 {
             self.axis_locked = true;
             return false;
         }
@@ -503,7 +507,7 @@ impl ScrollSheet {
         self.prev_raw = seed.clone();
         self.prev_profile = RowProfile::from_rgba(&seed, self.width, self.viewport_height);
         self.stable_profile = self.prev_profile.clone();
-        self.floating = FloatingOverlays::new(&seed);
+        self.floating = FloatingOverlays::new(&seed, self.width);
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
@@ -514,11 +518,7 @@ impl ScrollSheet {
     }
 
     fn height(&self) -> u32 {
-        // Physical canvas rows: the seed frame's viewport rows, every
-        // spliced band row, and the grown content below.
-        (i64::from(self.viewport_height)
-            + i64::from(self.sticky.inserted)
-            + self.state.max_position) as u32
+        (i64::from(self.viewport_height) + self.state.max_position) as u32
     }
 
     /// The sheet so far (RGBA, `width` × `height()`).
@@ -571,7 +571,7 @@ impl ScrollSheet {
         )
     }
 
-    /// Content revision for splices and occlusion repair. The live preview
+    /// Content revision for prepends and occlusion repair. The live preview
     /// compares it to decide whether its cached window still matches.
     pub(crate) fn top_revision(&self) -> u32 {
         self.top_shifts
@@ -708,17 +708,20 @@ impl ScrollSheet {
         };
 
         let (next, branch, growth) = self.state.transition(estimate.dy);
-        if u64::from(self.viewport_height)
-            + u64::from(self.sticky.inserted)
-            + next.max_position as u64
+        if u64::from(self.viewport_height) + next.max_position as u64
             > self.options.max_height as u64
         {
             return Fold::Refused(Refusal::TooTall);
         }
 
         let had_floating = !self.floating.is_empty();
+        self.floating.observe_frame_edge(frame, estimate.dy);
+        self.sticky.seed_top = self
+            .sticky
+            .seed_top
+            .min(self.floating.frame_edge.seed_prefix_rows() as u32);
         self.floating
-            .observe(frame, (self.width, self.viewport_height), estimate.dy);
+            .observe(frame, (self.width, self.viewport_height));
         if had_floating || !self.floating.is_empty() {
             // Occlusion repair changes pixels even inside a stationary preview.
             self.top_shifts = self.top_shifts.saturating_add(1);
@@ -731,7 +734,7 @@ impl ScrollSheet {
             let evidence =
                 stillness_grid(&self.stable_profile, profile, &self.options, estimate.dy);
             if !evidence.still.is_empty() {
-                self.sticky.update(&evidence, next.position);
+                self.sticky.update(&evidence);
                 if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
                     self.commit_top_band(t, frame);
                 }
@@ -742,7 +745,7 @@ impl ScrollSheet {
         }
 
         let row = self.width as usize * 4;
-        let top = self.sticky.top as usize;
+        let top = self.sticky.seed_top as usize;
         let prepend = if branch == Branch::Above {
             growth as usize
         } else {
@@ -755,34 +758,27 @@ impl ScrollSheet {
             // overlap), leaving zeroed rows above for the viewport
             // write. The band area at the physical top stays put.
             let shift = growth as usize * row;
+            self.floating.insert_rows(top, growth as usize);
             self.canvas.resize(self.canvas.len() + shift, 0);
             let len = self.canvas.len();
             self.canvas
                 .copy_within(top * row..len - shift, top * row + shift);
+            // A tentative still prefix may contain ordinary page rules. Newly
+            // exposed rows have no earlier observation to retain, so seed them
+            // from the capture instead of leaving transparent holes. Their
+            // provenance stays repairable until a clear observation replaces it.
+            let exposed_end = (top + growth as usize).min(self.viewport_height as usize);
+            self.canvas[top * row..exposed_end * row]
+                .copy_from_slice(&frame[top * row..exposed_end * row]);
             self.top_shifts = self.top_shifts.saturating_add(1);
         } else if branch == Branch::Below && growth > 0 {
             self.canvas
                 .resize(self.canvas.len() + growth as usize * row, 0);
         }
-        // Refresh visible content across the viewport, preserving clean overlap
-        // under floating overlays. With a committed top band the
-        // frame splits: rows [0, prefix) bottom-align into the band area
-        // (rewritten every frame — a collapsing toolbar shrinks the live
-        // prefix while the band keeps its tallest extent), rows from
-        // `start = max(top, prefix)` land in the content area at
-        // `position + start`. During the detection delay (prefix still
-        // tentative, top not yet committed) the still prefix rows are
-        // SKIPPED: writing them would stamp chrome pixels into the
-        // content plane (placeholder-type sticky would happen to match;
-        // browser-chrome type would corrupt whatever the earlier frames
-        // recorded there). Skipping shifts nothing — the remaining rows
-        // keep the `position + row` mapping either way.
-        // Grid j attests rows [j·step, (j+1)·step); the prefix height is
-        // the last attested row + 1 (one grid coarser than the truth,
-        // never writing a row only its grid's FIRST row vouches for).
-        // Zero prefix must stay zero — a phantom one-row skip would
-        // punch a hole in every ordinary scroll (newly prepended rows
-        // have no earlier frame to backfill them).
+        // The live still prefix protects earlier content from a fixed bar.
+        // Only seed chrome owns a reserved header; a late bar does not shift
+        // the document or get copied above it. A zero prefix must remain zero,
+        // and sampling may only exclude rows covered by the observed grid.
         let live_prefix = if self.sticky.prefix == 0 {
             0
         } else {
@@ -791,12 +787,10 @@ impl ScrollSheet {
         let prefix_rows = live_prefix.min(top);
         if prefix_rows > 0 {
             let band_bytes = prefix_rows * row;
-            let band_dst = (top - prefix_rows) * row;
-            self.canvas[band_dst..band_dst + band_bytes].copy_from_slice(&frame[..band_bytes]);
+            self.canvas[..band_bytes].copy_from_slice(&frame[..band_bytes]);
         }
-        // Collapsing toolbars (live prefix below the committed height)
-        // write from the committed height: the exposed rows are lost
-        // rather than misplaced (the documented v1 simplification).
+        // Keep any reserved seed header separate from the document plane.
+        // Late overlays may disappear and expose their entire former area.
         let start = top.max(live_prefix);
         // A committed BOTTOM band is chrome, not content. Excluding it
         // from the normal viewport write is what keeps a fixed footer
@@ -810,16 +804,11 @@ impl ScrollSheet {
         let bot = self.sticky.bot as usize;
         let content_end = self.viewport_height as usize - bot;
         let start = start.min(content_end);
-        // `inserted` is the physical shift the commit surgeries imposed
-        // on the content stream (mid-scroll pins splice the band in and
-        // everything below moves down by `top`; a band pinned from the
-        // first frame reuses the seed rows and shifts nothing). The
-        // write destination must follow whichever happened.
         self.floating.composite(
             &mut self.canvas,
             frame,
             self.width as usize,
-            next.position as usize + self.sticky.inserted as usize,
+            next.position as usize,
             start..content_end,
             retained,
         );
@@ -829,12 +818,14 @@ impl ScrollSheet {
             // only place the footer's pixels are genuine content for
             // the final image; Shifted/Prepend leave the old footer
             // at the canvas bottom untouched.
-            let footer_dst =
-                (next.position as usize + content_end + self.sticky.inserted as usize) * row;
+            let footer_dst = (next.position as usize + content_end) * row;
             let footer_src = content_end * row;
             self.canvas[footer_dst..footer_dst + bot * row]
                 .copy_from_slice(&frame[footer_src..self.viewport_height as usize * row]);
         }
+        self.floating
+            .frame_edge
+            .composite(&mut self.canvas, frame, next.position as usize);
         self.state = next;
         self.frames_accepted += 1;
         // A non-seed frame has entered the canvas; the axis can no
@@ -844,14 +835,14 @@ impl ScrollSheet {
         // The accepted frame is the new stable base (see `place`).
         self.stable_profile = profile.clone();
         sheet_log(&format!(
-            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} ins={} prefix={}",
+            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} seed_top={} prefix={}",
             self.frames_pushed,
             estimate.dy,
             estimate.cost,
             estimate.runner_up - estimate.cost,
             self.state.position,
             self.sticky.top,
-            self.sticky.inserted,
+            self.sticky.seed_top,
             self.sticky.prefix,
         ));
         match branch {
@@ -867,53 +858,16 @@ impl ScrollSheet {
         }
     }
 
-    /// Commit surgery for a newly detected top band of `t` rows (see
-    /// [`StickyBands`]). The insight that keeps this cheap: the "band
-    /// copies" the detection delay wrote at each viewport top are NOT
-    /// wrong — a sticky element's placeholder in the content plane
-    /// renders the element itself, so those pixels are the correct
-    /// content for exactly where they landed (newest-wins keeps the
-    /// last copy, and later frames wash the placeholder once the
-    /// element scrolls out of its container). The surgery therefore
-    /// only has to make room: splice `t − top` fresh rows in at the
-    /// band line, seed them from this frame's band rows, and leave
-    /// `state` untouched — the content mapping (`canvas row =
-    /// top + position + (row − top)`) is unchanged for rows below the
-    /// band, so position/max_position stay valid as-is. The one
-    /// exception is a band that was pinned from the very FIRST frame:
-    /// the seed frame already wrote it at the canvas top, so the
-    /// splice would duplicate it — detected by the canvas top already
-    /// matching the frame's band rows (memcmp; also covers band
-    /// growth when the old band rows at [0, top) still match).
+    /// Exclude a verified top overlay without changing document coordinates.
+    /// Only chrome already present in the seed owns a reserved canvas header.
     fn commit_top_band(&mut self, t: u32, frame: &[u8]) {
-        let m0 = self.sticky.top;
-        let g = t - m0; // band growth in rows
-        let row = self.width as usize * 4;
-        let t_bytes = t as usize * row;
-
-        let already_pinned =
-            self.canvas.len() >= t_bytes && self.canvas[..t_bytes] == frame[..t_bytes];
-        if !already_pinned {
-            // Splice g fresh rows in at the band line (below any
-            // previously committed band), shifting the content down.
-            let at = m0 as usize * row;
-            let add = g as usize * row;
-            let len = self.canvas.len();
-            self.canvas.resize(len + add, 0);
-            self.canvas.copy_within(at..len, at + add);
-            // Seed the new band rows so the pin line (band bottom meets
-            // content top) is continuous even before the write path
-            // refreshes it.
-            self.canvas[at..t_bytes].copy_from_slice(&frame[at..t_bytes]);
-            self.sticky.inserted += g;
-            self.top_shifts = self.top_shifts.saturating_add(1);
-            sheet_log(&format!(
-                "SPLICE band rows {m0}→{t} (+{g}, inserted={}, pos={})",
-                self.sticky.inserted, self.state.position
-            ));
-        }
+        // Prepends may already have moved copies of unconfirmed chrome into
+        // the canvas. Only the prefix unchanged since the seed owns a header;
+        // a once-blank document margin must stay eligible for content writes.
+        self.sticky.seed_top = t.min(self.floating.frame_edge.seed_prefix_rows() as u32);
+        let bytes = self.sticky.seed_top as usize * self.width as usize * 4;
+        self.canvas[..bytes].copy_from_slice(&frame[..bytes]);
         self.sticky.top = t;
-        self.sticky.pending.clear();
     }
 }
 
@@ -921,6 +875,8 @@ mod floating;
 mod matcher;
 mod preview;
 mod profile;
+#[cfg(test)]
+mod scene_tests;
 mod sticky;
 #[cfg(test)]
 mod tests {
@@ -1578,13 +1534,8 @@ mod tests {
         assert_eq!(s.viewport_span(), (HDR + 180, H2 - HDR));
     }
 
-    /// Flat page background directly beneath the chrome must never join
-    /// the band: a featureless strip matches the base at EVERY offset,
-    /// so offset-0 stillness alone extended the run into it, and every
-    /// band-growth commit spliced that moment's slice into the canvas
-    /// top — torn copies of chrome and content piling up at the image
-    /// start (the dark-theme GitHub capture). The displaced comparison
-    /// is what rejects it: background matches translated too.
+    /// Flat page margins match both stationary and translated coordinates;
+    /// they must not enlarge the fixed-header exclusion.
     #[test]
     fn flat_background_below_the_chrome_never_pins() {
         const H2: u32 = 800;
@@ -1613,16 +1564,8 @@ mod tests {
         assert_eq!(s.sticky.top, HDR);
     }
 
-    /// A compositor repaint stall under committed chrome: damage blocks
-    /// repaint late, so a band of rows hugging the pinned header can
-    /// show the PREVIOUS position for a few accepted frames. Those rows
-    /// are offset-0 still AND misfit the translation — displacement-
-    /// verified, exactly like chrome — and with a two-frame commit bar
-    /// they grew the band over themselves and were spliced into the
-    /// canvas: sheared, duplicated content right below the header (the
-    /// second GitHub capture). Chrome persists for as long as it is
-    /// pinned; a repaint stall does not — so committing demands a
-    /// verified run longer than any plausible stall.
+    /// Short repaint stalls can look stationary beneath a fixed header.
+    /// The persistence requirement prevents them from enlarging its exclusion.
     #[test]
     fn stalled_damage_blocks_under_the_chrome_never_grow_the_band() {
         const H2: u32 = 800;
@@ -1732,14 +1675,10 @@ mod tests {
         }
     }
 
-    /// The mid-scroll pin: the navbar travels WITH the content until it
-    /// reaches the viewport top (its placeholder stays in the content
-    /// plane — rendered once there), then freezes. Detection commits a
-    /// few frames later; the surgery splices the band in and the
-    /// content stream stays exact, navbar appearing once in the band
-    /// and once at its pre-pin content position.
+    /// A mid-scroll overlay leaves its original document occurrence intact
+    /// and never inserts another copy above the captured content.
     #[test]
-    fn mid_scroll_pin_splices_the_band_and_keeps_the_content_exact() {
+    fn mid_scroll_pin_keeps_document_coordinates_and_a_single_original_heading() {
         const H2: u32 = 800;
         const NAV: u32 = 12;
         const NAV_AT: u32 = 40; // the navbar's content-plane rows
@@ -1778,13 +1717,7 @@ mod tests {
             }
             v
         };
-        let expected = |last: u32| -> Vec<u8> {
-            let mut v = band.clone();
-            for row in 0..last + H2 {
-                v.extend_from_slice(&row_of(row));
-            }
-            v
-        };
+        let expected = |last: u32| -> Vec<u8> { (0..last + H2).flat_map(row_of).collect() };
 
         // c = 40 is the first pinned frame; the still run reaches 2 two
         // frames later, so the commit happens while scrolling through
@@ -1794,11 +1727,7 @@ mod tests {
             let out = s.push(&frame(c));
             assert!(matches!(out, Fold::GrewBottom { .. }), "frame {c}: {out:?}");
         }
-        // Band spliced once at the top (+NAV rows). The content plane
-        // ends at last + H (pinned frames contribute H − NAV viewport
-        // rows, but the first frame's full H rows seed the plane): the
-        // navbar's own placeholder rows [40, 52) appear exactly once.
-        assert_eq!(s.dimensions(), (W, NAV + 210 + H2));
+        assert_eq!(s.dimensions(), (W, 210 + H2));
         assert_eq!(s.canvas(), expected(210).as_slice());
     }
 

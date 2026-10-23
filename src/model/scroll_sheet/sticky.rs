@@ -1,72 +1,22 @@
-//! Sticky-band detection: fixed chrome inside the selection (site
-//! navbars that pin on scroll, floating toolbars) violates the
-//! row-translation assumption the matcher stands on. This module owns
-//! the evidence (per-row stillness runs on accepted moving frames),
-//! the commit surgery (pin the band once at the canvas top) and the
-//! band-level flat-content guard.
+//! Detection of fixed edge bars from accepted scrolling frames. A row must
+//! remain still while failing the document translation before it can establish
+//! a band. Flat margins and short repaint stalls cannot establish one.
+//!
+//! Confirmed bands extend the matcher's exclusion area. Their live prefix is
+//! excluded from overlap writes without inserting or shifting document rows.
+//! Only a header already present at the original canvas top reserves a header
+//! area during prepends. A late sticky title retains its original occurrence
+//! in the document, with no additional copy at the image top.
+//!
+//! Bottom bands are excluded from content writes and painted at the growing
+//! canvas bottom. Previously exposed content survives return passes.
 
 use super::SheetLimits;
 use super::profile::RowProfile;
-/// Sticky-band detection: fixed chrome inside the selection (site
-/// navbars that pin on scroll, floating toolbars) violates the
-/// row-translation assumption the matcher stands on. The static edge
-/// trim (~6 %) only survives small bands and only for MATCHING — the
-/// band pixels still land in the canvas at every viewport position
-/// ("a fixed navbar is duplicated along the seam"). This adds the
-/// visual detection layer:
-///
-/// - **Evidence** — on every accepted frame with dy ≠ 0 (a MOVING page
-///   is what makes "still at the same viewport row" mean "fixed
-///   chrome" instead of "nothing scrolled"), each sampled row is
-///   probed against the comparison base twice: at offset 0 and at the
-///   accepted translation dy. The offset-0 mask keeps the run (and the
-///   live prefix) contiguous — band padding and self-similar chrome
-///   interiors are still. The TRANSLATION probe separates what the
-///   offset-0 mask cannot: page content matches TRANSLATED (it IS the
-///   translation, mad ≈ 0), featureless background matches BOTH, and
-///   only pinned chrome matches offset 0 but misfits dy. Commit height
-///   stops at the last translation-verified grid: trusting offset 0
-///   alone once pinned dark-theme background strips and slow-scroll
-///   content slices under the real chrome, and every band-growth
-///   commit then spliced that moment's slice into the canvas top —
-///   torn copies of chrome and content piled up at the image start
-///   (the GitHub capture report).
-/// - **Commit** — a still run over a top-anchored prefix of rows whose
-///   tail has stayed displacement-verified for [`COMMIT_FRAMES`] frames
-///   (persistence is what separates chrome from stale damage blocks,
-///   which verify exactly like chrome until they repaint), backed by at
-///   least one structured row (a band that is uniformly flat is
-///   indistinguishable from flat CONTENT — pure-white margins must not
-///   get pinned), commits the band.
-/// - **Canvas semantics** — a committed top band is written ONCE, from
-///   the committing frame, and pinned at the canvas top: the band covers
-///   only the content that does NOT track with scrolling, so a second
-///   copy down the image could only be a duplicate of chrome. During the
-///   detection delay the band rows were still being written as content at each
-///   viewport position; committing surgically removes those duplicate
-///   segments (tracked in `pending`) so the content stream stays exact.
-/// - **Bottom band** — same evidence, a simpler canvas rule: once
-///   committed the trailing rows leave BOTH the match scan and the
-///   normal content write. The footer is painted only on appends, at
-///   the growing bottom; an up-scroll writes content over the old
-///   bottom copy and never stamps the footer mid-image. No splice is
-///   needed because the newest-wins write already cleans the previous
-///   bottom copy on the way down.
-///
-/// Collapsing toolbars (the band SHRINKS after pinning) are handled by
-/// never shrinking the committed height: the band area keeps its
-/// tallest extent and each frame's live prefix is bottom-aligned into
-/// it, so the pin line — the only row where band meets content — stays
-/// pixel-continuous.
+
+/// Consecutive stationary observations needed for a candidate prefix.
 const STILL_FRAMES: u16 = 2;
-/// Displacement-verified persistence a commit demands. Stale compositor
-/// damage blocks misfit dy exactly like chrome for a frame or two (the
-/// rows simply have not repainted), and a two-frame bar then spliced
-/// the stale block into the canvas as band growth — sheared, duplicated
-/// content below the pinned header (the second GitHub capture). Real
-/// chrome keeps verifying for as long as it stays pinned; a block that
-/// stays unmoved through this many accepted frames is chrome by
-/// definition.
+/// Persistence separates fixed bars from short-lived stale repaint regions.
 const COMMIT_FRAMES: u16 = 6;
 /// A committed band must end in a cluster of at least this many
 /// displacement-verified grids — noise (a caret row, a one-row border)
@@ -88,19 +38,14 @@ const STRUCTURED_SPREAD: u8 = 4;
 /// Sticky-band state, in viewport (frame) coordinates.
 #[derive(Debug, Clone)]
 pub(super) struct StickyBands {
-    /// Committed top band height in canvas rows. Monotone; 0 until a
-    /// band is committed.
+    /// Confirmed top exclusion height in viewport rows. Monotone; zero
+    /// until a structured band has enough persistent motion evidence.
     pub(super) top: u32,
-    /// Rows the commit surgeries spliced into the canvas — the part of
-    /// the physical height that is band, not content (a band pinned
-    /// from the first frame reuses the seed frame's rows and never
-    /// counts here). `height() = viewport_height + inserted +
-    /// max_position`.
-    pub(super) inserted: u32,
-    /// Committed bottom band height in rows. Unlike the top band this
-    /// needs no spliced rows: it is excluded from content writes and
-    /// painted at the growing bottom on appends only (see the module
-    /// notes).
+    /// Header rows already present at the original canvas top. Late overlays
+    /// never reserve additional canvas rows or move the content coordinate system.
+    pub(super) seed_top: u32,
+    /// Confirmed bottom exclusion height. Painted only at the growing bottom
+    /// so return passes cannot stamp a footer into previously exposed content.
     pub(super) bot: u32,
     /// Consecutive still frames per sampled row (top tracking), one
     /// entry per `step`-spaced row of the viewport.
@@ -115,16 +60,9 @@ pub(super) struct StickyBands {
     pub(super) verified: Vec<u16>,
     /// Bottom-anchored mirror of `verified`.
     pub(super) bot_verified: Vec<u16>,
-    /// Content positions of the frames processed since the top prefix
-    /// went still — the raw material for the commit surgery's duplicate
-    /// segments. Reset whenever the prefix breaks (a row moved again)
-    /// or the walk stops being monotonically downward (a Shifted or
-    /// Prepend frame interleaves duplicated content in ways the segment
-    /// math does not model; detection simply restarts).
-    pub(super) pending: Vec<i64>,
     /// The current still top prefix, in sampled rows (`run ≥ 1`).
-    /// Bottom-aligned into the band area on every write — the collapsing
-    /// toolbar handling above.
+    /// Seed chrome stays anchored to the canvas top; late overlays only
+    /// exclude overlap writes.
     pub(super) prefix: usize,
 }
 
@@ -132,23 +70,21 @@ impl StickyBands {
     pub(super) fn new() -> Self {
         Self {
             top: 0,
-            inserted: 0,
+            seed_top: 0,
             bot: 0,
             run: Vec::new(),
             bot_run: Vec::new(),
             verified: Vec::new(),
             bot_verified: Vec::new(),
-            pending: Vec::new(),
             prefix: 0,
         }
     }
 
     /// Fold one frame's stillness evidence in. `evidence` is per-sampled-row
-    /// stillness against the comparison base (offset 0 and translated);
-    /// `position` is the frame's content position (post-transition).
+    /// stillness against the comparison base (offset 0 and translated).
     /// Sized on first use — the sheet is constructed before any evidence
     /// exists.
-    pub(super) fn update(&mut self, evidence: &RowStillness, position: i64) {
+    pub(super) fn update(&mut self, evidence: &RowStillness) {
         let still = &evidence.still;
         if self.run.len() != still.len() {
             self.run = vec![0; still.len()];
@@ -156,7 +92,6 @@ impl StickyBands {
             self.verified = vec![0; still.len()];
             self.bot_verified = vec![0; still.len()];
         }
-        let monotone = self.pending.last().is_none_or(|&p| position > p);
         for (j, &s) in still.iter().enumerate() {
             self.run[j] = if s { self.run[j].saturating_add(1) } else { 0 };
             self.verified[j] = if s && evidence.verified[j] {
@@ -182,14 +117,6 @@ impl StickyBands {
         }
         // The top prefix: rows [0, prefix) all still THIS frame.
         self.prefix = still.iter().take_while(|&s| *s).count();
-        if self.prefix >= MIN_BAND_GRIDS && monotone {
-            self.pending.push(position);
-        } else {
-            // Prefix broke or the walk reversed — everything recorded
-            // since the band went still is no longer trustworthy as
-            // duplicate-segment geometry.
-            self.pending.clear();
-        }
     }
 
     /// Whether the top band should commit now, and at what height (in
@@ -239,8 +166,8 @@ impl StickyBands {
     /// contiguous cluster of displacement-verified grids. The offset-0
     /// run may run far past it (flat background strips are still too —
     /// that is exactly what the translation probe is for); rows past
-    /// the cluster stay content, so no band-growth commit can splice
-    /// them into the canvas top. Three shapes matter:
+    /// the cluster stay content rather than expanding the exclusion into
+    /// ordinary page margins. Three shapes matter:
     ///
     /// - A self-similar band interior collides with its own rows dy
     ///   away (chrome row vs chrome row) and never verifies — grids
