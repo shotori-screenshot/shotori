@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use rapidocr_core::config::PipelineConfig;
@@ -84,7 +84,11 @@ fn init_engine() -> anyhow::Result<Mutex<rapidocr_core::RapidOcr>> {
         "OCR models are missing; reopen OCR setup to download them"
     );
     let progress = DownloadProgress::default();
-    let _lock = cache_lock(&dir, &progress)?;
+    // Bounded wait: this progress has no cancel flag (no UI owns it), so an
+    // unbounded poll would hang the OCR action forever if another process's
+    // downloader is wedged. 30 s covers a finishing download; a retry after
+    // the clear error is cheap.
+    let _lock = cache_lock(&dir, &progress, Some(Duration::from_secs(30)))?;
     anyhow::ensure!(
         assets_missing(&dir) == 0,
         "OCR models are missing; reopen OCR setup to download them"
@@ -261,7 +265,16 @@ fn check_cancelled(progress: &DownloadProgress) -> anyhow::Result<()> {
 
 /// Keep the lock file in place: unlinking it would let another process lock a
 /// different inode. Dropping the handle releases the OS lock, including on exit.
-fn cache_lock(dir: &Path, progress: &DownloadProgress) -> anyhow::Result<std::fs::File> {
+/// `wait` bounds how long to poll before giving up — `None` waits until the
+/// holder finishes or `progress.cancel` fires (the download UI path, whose
+/// progress is real); a bounded wait is mandatory for callers whose progress
+/// is a throwaway (`init_engine`), or a wedged downloader in another process
+/// would hang the OCR action forever with no error surfaced.
+fn cache_lock(
+    dir: &Path,
+    progress: &DownloadProgress,
+    wait: Option<Duration>,
+) -> anyhow::Result<std::fs::File> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -269,11 +282,17 @@ fn cache_lock(dir: &Path, progress: &DownloadProgress) -> anyhow::Result<std::fs
         .read(true)
         .write(true)
         .open(dir.join(".download.lock"))?;
+    let deadline = wait.map(|w| Instant::now() + w);
     loop {
         check_cancelled(progress)?;
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
             Err(std::fs::TryLockError::WouldBlock) => {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    anyhow::bail!(
+                        "another shotori process holds the OCR model lock; try again when it finishes"
+                    );
+                }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
@@ -287,7 +306,12 @@ fn download_models(progress: &DownloadProgress) -> anyhow::Result<()> {
         .connect_timeout(Duration::from_secs(10))
         // Bound blocking network operations so a cancelled worker also exits
         // when a server stops sending data. The UI dismisses immediately.
-        .timeout(Duration::from_secs(10))
+        // reqwest 0.12's blocking builder has no read_timeout, so the bound
+        // is a generous total (≥ 50 KB/s sustained for the ~31 MB set) — a
+        // tighter cap killed slow-but-alive downloads mid-transfer; a wedged
+        // server still cannot hang the worker past the cap, and the user can
+        // always cancel from the dialog.
+        .timeout(Duration::from_secs(600))
         .build()
         .context("building HTTP client")?;
     download_models_in(&model_dir()?, &selected_assets(), progress, &client)
@@ -299,7 +323,7 @@ fn download_models_in(
     progress: &DownloadProgress,
     client: &reqwest::blocking::Client,
 ) -> anyhow::Result<()> {
-    let _lock = cache_lock(dir, progress)?;
+    let _lock = cache_lock(dir, progress, None)?;
     for (i, asset) in assets.iter().enumerate() {
         check_cancelled(progress)?;
         let dest = dir.join(asset.filename);
@@ -700,7 +724,7 @@ mod tests {
     #[test]
     fn cache_lock_serializes_handles_and_wait_is_cancellable() {
         let dir = tempfile::tempdir().unwrap();
-        let first = cache_lock(dir.path(), &DownloadProgress::default()).unwrap();
+        let first = cache_lock(dir.path(), &DownloadProgress::default(), None).unwrap();
         let other = std::fs::File::options()
             .read(true)
             .write(true)
@@ -717,7 +741,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            tx.send(cache_lock(&path, &worker_progress).map(|_| ()))
+            tx.send(cache_lock(&path, &worker_progress, None).map(|_| ()))
                 .unwrap();
         });
         progress.cancel.store(true, Ordering::Relaxed);

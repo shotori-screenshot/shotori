@@ -539,6 +539,15 @@ pub fn set(theme: Theme, light: Option<Theme>) {
     };
 }
 
+/// Re-tint a palette token. Theme colours are `0xRRGGBBAA` (alpha in the
+/// LOW byte — see `--print-theme`), so the wash keeps the RGB and swaps
+/// the alpha byte: hairlines and card backgrounds are shades of the
+/// palette that already exists, not new palette entries. One copy here
+/// (it used to be duplicated in settings.rs and scroll_bar/panel.rs).
+pub(crate) fn alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0xffff_ff00) | u32::from(alpha)
+}
+
 /// Called by GPUI on initial window creation and appearance changes.
 pub fn follow_system(appearance: gpui_kit::WindowAppearance) {
     SYSTEM_DARK.store(

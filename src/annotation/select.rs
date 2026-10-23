@@ -87,18 +87,18 @@ impl Annotations {
     /// Remove the selected shape (the Delete/Backspace path). Records
     /// a Remove entry so undo re-inserts at the same index; drops the
     /// selection because indices shift after a mid-sequence removal.
+    /// Delegates to delete_shape so Remove-entry semantics live in one
+    /// place.
     pub(crate) fn delete_selected(&mut self) -> bool {
-        let Some(ix) = self.selected_index() else {
-            return false;
-        };
-        if ix >= self.shapes.len() {
-            return false;
+        // selected_index() is bounds-checked, so delete_shape's guard
+        // cannot fail here.
+        match self.selected_index() {
+            Some(ix) => {
+                self.delete_shape(ix);
+                true
+            }
+            None => false,
         }
-        let shape = self.shapes.remove(ix);
-        self.history.push(HistoryEntry::Remove { ix, shape });
-        self.redo.clear();
-        self.selected = None;
-        true
     }
 
     pub(crate) fn selected(&self) -> Option<&Shape> {
@@ -504,6 +504,13 @@ fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
 
 /// Even-odd ray casting: is the point inside the polygon?
 fn point_in_polygon(p: Point<Pixels>, poly: &[Point<Pixels>]) -> bool {
+    // Fewer than 3 vertices cannot enclose area, and `j = len - 1`
+    // below would wrap on an empty slice. Today's callers only feed
+    // real polygons; the guard keeps this generic utility safe for
+    // future ones.
+    if poly.len() < 3 {
+        return false;
+    }
     let (x, y) = (f32::from(p.x), f32::from(p.y));
     let mut inside = false;
     let mut j = poly.len() - 1;

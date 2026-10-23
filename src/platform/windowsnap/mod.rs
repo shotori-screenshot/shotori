@@ -60,6 +60,32 @@ pub struct SnapRect {
     pub(crate) recency: u64,
 }
 
+impl SnapRect {
+    /// Shared tail of every backend's assembly: wrap an output-global
+    /// logical rect plus metadata. Callers keep their own unit math
+    /// (sources differ: f64 JSON numbers, f32 IPC sums); this only
+    /// centralizes the field plumbing.
+    pub(crate) fn from_xywh(
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        app_id: String,
+        focused: bool,
+        recency: u64,
+    ) -> Self {
+        Self {
+            bounds: Bounds {
+                origin: point(px(x), px(y)),
+                size: size(px(w), px(h)),
+            },
+            app_id,
+            focused,
+            recency,
+        }
+    }
+}
+
 /// Query the running compositor once. None = no supported compositor.
 /// The whole IPC exchange runs on a helper thread with a hard 1s cap:
 /// a wedged socket must never freeze the overlay startup.

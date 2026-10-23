@@ -5,8 +5,9 @@
 //! captured content are NOT taken — manual scrolling keeps working
 //! under the frame.
 
-use super::panel::{PreviewPanel, alpha, scroll_copy_exit, scroll_save_exit};
+use super::panel::{PreviewPanel, scroll_copy_exit, scroll_save_exit};
 use super::*;
+use crate::ui::theme::alpha;
 
 use std::sync::Arc;
 

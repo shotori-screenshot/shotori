@@ -168,17 +168,25 @@ impl ScreenshotSession {
             });
             cx.spawn(async move |this, cx| {
                 let cache = task.await;
-                let _ = this.update(cx, |session, cx| {
-                    session.preview_busy = false;
-                    // Geometry changes cannot reuse the worker's frozen crop.
-                    if session.geometry_revision == geometry_revision
-                        && session.selection.bounds() == selection.bounds()
-                    {
-                        *session.filter_preview.get_mut() = cache;
-                    }
-                    session.request_filtered_preview(&output, cx);
-                    cx.notify();
-                });
+                // update() fails when the preview's window closed while the
+                // worker ran; the cache then has no consumer and dies with
+                // the task — nothing to notify, nothing to recover.
+                if this
+                    .update(cx, |session, cx| {
+                        session.preview_busy = false;
+                        // Geometry changes cannot reuse the worker's frozen crop.
+                        if session.geometry_revision == geometry_revision
+                            && session.selection.bounds() == selection.bounds()
+                        {
+                            *session.filter_preview.get_mut() = cache;
+                        }
+                        session.request_filtered_preview(&output, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    // window gone mid-preview
+                }
             })
             .detach();
         }
@@ -240,7 +248,7 @@ impl ScreenshotSession {
         if cache.as_ref().is_none_or(|c| c.selection != selection) {
             let original = self.crop_impl(output, false)?;
             let pixels = original.rgba.clone();
-            let image = crate::ui::image_util::rgba_to_render_image(
+            let image = crate::render_image::rgba_to_render_image(
                 pixels.clone(),
                 original.width,
                 original.height,
@@ -268,21 +276,25 @@ impl ScreenshotSession {
                 cached.stroke = None;
             }
             let history_changed = cached.committed != committed;
-            let appended_stroke = committed.len() == cached.committed.len() + 1
-                && committed.starts_with(&cached.committed)
-                && cached.stroke.is_some()
-                && committed.last().is_some_and(|shape| {
-                    matches!(shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter)
-                });
-            if appended_stroke {
+            let appended_one = committed.len() == cached.committed.len() + 1
+                && committed.starts_with(&cached.committed);
+            // Appending a finished pencil/highlighter stroke only replays the
+            // new suffix. Undo, replacement and edits rebuild from the
+            // immutable capture. The pair lookup degrades instead of
+            // unwrapping; any miss lands in the full rebuild below, which is
+            // always correct.
+            let suffix = if appended_one {
+                cached.stroke.as_mut().zip(committed.last())
+            } else {
+                None
+            }
+            .filter(|(_, shape)| matches!(shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter));
+            if let Some((stroke, last)) = suffix {
                 // Promote the final incremental draft, including a new release
                 // point, instead of rasterizing the entire long stroke again.
-                cached.pixels = cached
-                    .stroke
-                    .as_mut()
-                    .unwrap()
+                cached.pixels = stroke
                     .render(
-                        committed.last().unwrap(),
+                        last,
                         &cached.pixels,
                         (original.width, original.height),
                         original.bounds.origin,
@@ -335,7 +347,7 @@ impl ScreenshotSession {
                     original.bounds.origin,
                     original.scale,
                 );
-                cached.image = crate::ui::image_util::rgba_to_render_image(
+                cached.image = crate::render_image::rgba_to_render_image(
                     pixels,
                     original.width,
                     original.height,

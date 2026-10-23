@@ -203,7 +203,7 @@ impl NumberCache {
                                         px(badge.height as f32 / scale),
                                     ),
                                 ),
-                                image: crate::ui::image_util::rgba_to_render_image(
+                                image: crate::render_image::rgba_to_render_image(
                                     badge.rgba,
                                     badge.width,
                                     badge.height,

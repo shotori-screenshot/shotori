@@ -31,7 +31,18 @@ pub(crate) fn convert_to_rgba(
         return Vec::new();
     }
     let mut rgba = vec![0u8; (w * h * 4) as usize];
-    let is_xrgb = matches!(format, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888);
+    // Allow-list the four 8-bit formats the swizzles below actually
+    // implement. Anything else (the 10-bit/HDR family KWin announces for
+    // HDR shm copies, RGB565, …) would land in the byte-order branch and
+    // come out with scrambled channels — the worst failure mode for a
+    // screenshot tool — so fail soft instead: both callers (capture/mod.rs
+    // length check, scroll bail path) treat an empty buffer as a skipped
+    // frame.
+    let is_xrgb = match format {
+        wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => true,
+        wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => false,
+        _ => return Vec::new(),
+    };
 
     for y in 0..h as usize {
         let src_row = &bytes[y * stride as usize..][..(w * 4) as usize];
@@ -105,7 +116,12 @@ pub(super) fn rotated_size(w: u32, h: u32, t: Transform) -> (u32, u32) {
 /// offsets that are multiples of 4 qualify; fall back to byte swaps).
 fn reverse_row_pixels(row: &mut [u8]) {
     let n = row.len() / 4;
-    if n > 0 && row.as_ptr().addr().is_multiple_of(4) {
+    // n == 0 would underflow the index below (debug panic / release OOB);
+    // unreachable for real w*4 rows today, one guard from safe.
+    if n == 0 {
+        return;
+    }
+    if row.as_ptr().addr().is_multiple_of(4) {
         let words = unsafe { std::slice::from_raw_parts_mut(row.as_mut_ptr().cast::<u32>(), n) };
         words.reverse();
     } else {

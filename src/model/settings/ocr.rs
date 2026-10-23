@@ -73,9 +73,6 @@ impl OcrModel {
     }
 }
 
-/// The UI language (settings.toml top-level `language` key). `Auto`
-/// follows the system locale; the rest name a `locales/ui.yml` column.
-/// Unknown values degrade to Auto with a load warning (same contract
 /// The factory OCR configuration — deliberately the historical default,
 /// so existing installs see no behavior change until they opt in.
 pub const DEFAULT_OCR_MODEL: OcrModel = OcrModel::Ppocrv6Small;

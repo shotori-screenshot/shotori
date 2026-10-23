@@ -50,7 +50,22 @@ impl Render for Overlay {
                 )
             });
             edit.map(|(kind, spec, current)| {
-                let state = if self.slider.as_ref().is_none_or(|(k, _)| *k != kind) {
+                // Clone the reusable state out first: the create branch
+                // needs cx.new/cx.subscribe (mutable), so the lookup
+                // must release its borrow before branching.
+                let reusable = match self.slider.as_ref() {
+                    Some((k, state)) if *k == kind => Some(state.clone()),
+                    _ => None,
+                };
+                let state = if let Some(state) = reusable {
+                    // sync external changes (wheel) into the thumb;
+                    // skip when equal or every frame would re-notify
+                    // itself into a loop
+                    if (state.read(cx).value().start() - current).abs() > f32::EPSILON {
+                        state.update(cx, |s, cx| s.set_value(current, window, cx));
+                    }
+                    state
+                } else {
                     // a new tool family means a new range — the state is
                     // baked at build time, so rebuild the entity
                     let state = cx.new(|_| {
@@ -86,15 +101,6 @@ impl Render for Overlay {
                     self.slider_sub = Some(sub);
                     self.slider = Some((kind, state.clone()));
                     state
-                } else {
-                    let (_, state) = self.slider.as_ref().expect("checked above");
-                    // sync external changes (wheel) into the thumb;
-                    // skip when equal or every frame would re-notify
-                    // itself into a loop
-                    if (state.read(cx).value().start() - current).abs() > f32::EPSILON {
-                        state.update(cx, |s, cx| s.set_value(current, window, cx));
-                    }
-                    state.clone()
                 };
                 // single-value sliders carry the thumb position in
                 // percentage().END (start stays 0)
@@ -614,9 +620,13 @@ impl Render for Overlay {
             // ②¾ Window-level pointer listeners (see `pointer_event_sink`)
             .child(pointer_event_sink(input_view))
             // ③ Size label stays independent so narrow selections cannot wrap it.
+            // Size comes from the same rounded local bounds the border
+            // paints (label and border cannot disagree); the old raw
+            // `selection.bounds().unwrap()` here was a same-snapshot
+            // unwrap with a second geometry source.
             .children(
                 sel.filter(|_| active)
-                    .map(|b| selection_label(b, ws, round_px(selection.bounds().unwrap()).size)),
+                    .map(|b| selection_label(b, ws, b.size)),
             )
             .children(self.text_editing.as_ref().map(|editor| editor.render()))
             // ④ Toolbar: appears only after release (no flicker while dragging).

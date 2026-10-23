@@ -81,7 +81,7 @@ fn render(shape: &Shape, scale: f32, viewport: Bounds<Pixels>) -> Option<StrokeI
     });
     Some(StrokeImage {
         bounds: Bounds::new(origin, size(px(w as f32 / scale), px(h as f32 / scale))),
-        image: crate::ui::image_util::rgba_to_render_image(pixels, w, h),
+        image: crate::render_image::rgba_to_render_image(pixels, w, h),
     })
 }
 

@@ -176,11 +176,18 @@ fn byte_len(w: u32, h: u32) -> anyhow::Result<usize> {
     let len = (w as usize)
         .checked_mul(h as usize)
         .and_then(|len| len.checked_mul(4));
-    anyhow::ensure!(
-        w > 0 && h > 0 && len.is_some_and(|len| len <= MAX_BYTES),
-        "invalid pin dimensions"
-    );
-    Ok(len.unwrap())
+    anyhow::ensure!(w > 0 && h > 0, "invalid pin dimensions");
+    // The checked_mul chain is the length authority: None here means an
+    // overflow the ensure! above must have caught — surface it as an
+    // error instead of unwrapping.
+    len.ok_or_else(|| anyhow::anyhow!("pin dimensions overflow"))
+        .and_then(|len| {
+            if len <= MAX_BYTES {
+                Ok(len)
+            } else {
+                Err(anyhow::anyhow!("invalid pin dimensions"))
+            }
+        })
 }
 fn validate(spec: &PinSpec) -> anyhow::Result<()> {
     anyhow::ensure!(

@@ -81,6 +81,9 @@ settings:
   title:
     en: Shotori Settings
     zh-CN: Shotori 设置
+  open_failed:
+    en: Couldn’t open the settings window
+    zh-CN: 无法打开设置窗口
   no_config_dir:
     en: "no config directory (is HOME set?)"
     zh-CN: "找不到配置目录（HOME 未设置？）"
@@ -545,9 +548,27 @@ toolbar:
   mosaic:
     en: Mosaic / Blur
     zh-CN: 马赛克 / 模糊
+  filter_mosaic:
+    en: Mosaic
+    zh-CN: 马赛克
+  filter_blur:
+    en: Blur
+    zh-CN: 模糊
   eraser:
     en: Eraser
     zh-CN: 橡皮擦
+  eraser_brush:
+    en: Brush eraser
+    zh-CN: 笔刷橡皮擦
+  eraser_rect:
+    en: Rectangle eraser
+    zh-CN: 矩形橡皮擦
+  color_label:
+    en: "Color: %{name}"
+    zh-CN: "颜色：%{name}"
+  color_edit_aria:
+    en: "Edit color: %{name}"
+    zh-CN: "编辑颜色：%{name}"
   text:
     en: Text
     zh-CN: 文字

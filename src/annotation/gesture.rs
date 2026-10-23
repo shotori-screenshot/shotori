@@ -39,31 +39,36 @@ impl Annotations {
             return;
         }
         self.draft_generation += 1;
+        // The overlay only dispatches presses with a drawing tool active
+        // (Select/None park earlier), so this lookup holds by contract —
+        // but the draw path must not panic, so degrade to a no-op.
+        let Some(tool) = self.tool else {
+            return;
+        };
         self.draft = Some(Draft {
             start: p,
             ink: p,
             shape: Shape {
-                kind: self.tool.expect("active annotation tool"),
+                kind: tool,
                 text: None,
-                number: (self.tool == Some(ShapeKind::Number))
-                    .then(|| self.placement_number(same_number)),
-                bounds: if self.tool == Some(ShapeKind::Number) {
+                number: (tool == ShapeKind::Number).then(|| self.placement_number(same_number)),
+                bounds: if tool == ShapeKind::Number {
                     number_bounds(p, selection, self.number_size())
                 } else {
                     Bounds::new(p, size(px(0.), px(0.)))
                 },
-                color: if self.tool == Some(ShapeKind::Highlighter) {
+                color: if tool == ShapeKind::Highlighter {
                     (self.color().0 & 0xffffff00) | 96
                 } else {
                     self.color().0
                 },
                 width: self.width(),
                 points: if matches!(
-                    self.tool,
-                    Some(ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Polyline)
+                    tool,
+                    ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Polyline
                 ) {
                     vec![p, p]
-                } else if matches!(self.tool, Some(ShapeKind::Pencil | ShapeKind::Highlighter)) {
+                } else if matches!(tool, ShapeKind::Pencil | ShapeKind::Highlighter) {
                     vec![p]
                 } else {
                     Vec::new()
@@ -253,7 +258,13 @@ impl Annotations {
             return;
         }
         self.pressed = false;
-        let mut shape = self.draft.take().unwrap().shape;
+        // is_drawing_polyline() above proved a draft exists; take()
+        // degrades instead of unwrapping to keep the pointer path
+        // panic-free by construction.
+        let Some(draft) = self.draft.take() else {
+            return;
+        };
+        let mut shape = draft.shape;
         shape.points.pop();
         if shape.points.len() >= 2 {
             self.record_add(shape);

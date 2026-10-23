@@ -11,7 +11,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-use gpui_kit::{Bounds, point, px, size};
 use serde_json::Value;
 
 use super::SnapRect;
@@ -52,6 +51,17 @@ fn ipc_call(stream: &mut UnixStream, msg_type: u32) -> std::io::Result<Vec<u8>> 
         ));
     }
     let len = u32::from_ne_bytes(header[6..10].try_into().unwrap()) as usize;
+    // The length arrives over the socket, so treat it as unbounded until
+    // checked: a wedged or broken compositor must not make us allocate
+    // up to 4 GiB before the first payload byte. Real GET_TREE replies
+    // are kilobytes; 256 MiB is a floor nobody hits.
+    const MAX_PAYLOAD: usize = 256 << 20;
+    if len > MAX_PAYLOAD {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "i3-ipc payload exceeds sanity cap",
+        ));
+    }
     let mut payload = vec![0u8; len];
     stream.read_exact(&mut payload)?;
     Ok(payload)
@@ -91,18 +101,17 @@ fn walk(node: &Value, out: &mut Vec<SnapRect>) {
                 })
                 .unwrap_or_default()
                 .to_owned();
-            out.push(SnapRect {
-                bounds: Bounds {
-                    origin: point(px(x as f32), px(y as f32)),
-                    size: size(px(w as f32), px(h as f32)),
-                },
+            out.push(SnapRect::from_xywh(
+                x as f32,
+                y as f32,
+                w as f32,
+                h as f32,
                 app_id,
-                focused: node
-                    .get("focused")
+                node.get("focused")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                recency: 0, // the tree carries no timestamps
-            });
+                0, // the tree carries no timestamps
+            ));
         }
     }
     for key in ["nodes", "floating_nodes"] {

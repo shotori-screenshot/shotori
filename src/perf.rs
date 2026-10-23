@@ -58,7 +58,10 @@ fn stats(mut v: Vec<f64>) -> (f64, f64, f64, f64) {
     if v.is_empty() {
         return (0., 0., 0., 0.);
     }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // total_cmp: perf samples come from Instant differences and can
+    // contain NaN on clock weirdness — partial_cmp().unwrap() would
+    // panic the perf harness exactly when it should report bad data.
+    v.sort_by(f64::total_cmp);
     let n = v.len();
     (
         v[0],

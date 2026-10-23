@@ -149,8 +149,14 @@ mod imp {
     /// Read stdin fully → connect to compositor, offer the data → serve paste
     /// requests until overridden
     pub fn daemon_main() -> anyhow::Result<()> {
-        let mime = std::env::args()
+        // args_os + lossy: the MIME comes from whatever the clipboard
+        // offered (usually RFC-2045 ASCII, but a hostile target name
+        // must not panic the daemon). MIME matching in the compositor
+        // is byte-based, so lossy conversion only affects garbage names
+        // that would never match anyway.
+        let mime = std::env::args_os()
             .nth(2)
+            .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_else(|| IMAGE_MIME.to_string());
 
         let mut payload = Vec::new();

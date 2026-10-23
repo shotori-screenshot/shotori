@@ -25,21 +25,29 @@ fn main() {
     let boot = std::time::Instant::now();
     shotori::boot_mark("main entry");
 
+    // args_os, not args: the launcher must dispatch even when some
+    // unrelated argument is non-UTF8 (std::env::args panics on those).
+    // Dispatching child entry points (notify/bench/perf/clipboard)
+    // compares against ASCII constants, so OsStr equality is enough.
+    fn first_arg() -> Option<std::ffi::OsString> {
+        std::env::args_os().nth(1)
+    }
+
     // Notification child: `shotori --notify <summary> <body>` (see notify.rs)
-    if std::env::args().nth(1).as_deref() == Some(shotori::notify::NOTIFY_ARG) {
+    if first_arg().as_deref() == Some(std::ffi::OsStr::new(shotori::notify::NOTIFY_ARG)) {
         std::process::exit(shotori::notify::notify_main());
     }
 
     // Microbenchmarks: `shotori --bench [name]` (see bench.rs) — must run
     // before clap (free-form argument) and before any GUI/theme init
-    if std::env::args().nth(1).as_deref() == Some(shotori::bench::BENCH_ARG) {
+    if first_arg().as_deref() == Some(std::ffi::OsStr::new(shotori::bench::BENCH_ARG)) {
         std::process::exit(shotori::bench::bench_main());
     }
 
     // E2E perf suites: `shotori --perf [suite...]` (see perf.rs) —
     // developer-only, compiled behind the `perf` cargo feature
     #[cfg(feature = "perf")]
-    if std::env::args().nth(1).as_deref() == Some(shotori::perf::PERF_ARG) {
+    if first_arg().as_deref() == Some(std::ffi::OsStr::new(shotori::perf::PERF_ARG)) {
         std::process::exit(shotori::perf::perf_main());
     }
 
@@ -47,7 +55,7 @@ fn main() {
     // behind the copy action (see the resident-offer model in
     // clipboard.rs).
     #[cfg(target_os = "linux")]
-    if std::env::args().nth(1).as_deref() == Some(clipboard::DAEMON_ARG) {
+    if first_arg().as_deref() == Some(std::ffi::OsStr::new(clipboard::DAEMON_ARG)) {
         if let Err(e) = clipboard::daemon_main() {
             eprintln!("[shotori] clipboard daemon exiting: {e:#}");
             std::process::exit(1);
@@ -271,16 +279,27 @@ fn main() {
                         if perf_warm && warm_reopen.is_none() {
                             warm_reopen = Some((cap.clone(), did, session.clone(), logical));
                         }
-                        let handle = cx
-                            .open_window(
-                                Overlay::window_options(did, logical),
-                                |window, cx| {
-                                    cx.new(|cx| {
-                                        Overlay::new(cap, session.clone(), window, cx)
-                                    })
-                                },
-                            )
-                            .expect("failed to open layer-shell window");
+                        let opened = cx.open_window(
+                            Overlay::window_options(did, logical),
+                            |window, cx| {
+                                cx.new(|cx| {
+                                    Overlay::new(cap, session.clone(), window, cx)
+                                })
+                            },
+                        );
+                        // One output's surface failing (compositor
+                        // without layer-shell, geometry race) must not
+                        // kill the whole screenshot: skip it and let
+                        // the remaining overlays come up.
+                        let handle = match opened {
+                            Ok(handle) => handle,
+                            Err(error) => {
+                                eprintln!(
+                                    "[shotori] overlay window failed to open: {error:?}"
+                                );
+                                continue;
+                            }
+                        };
                         // Needed by the save flow to unmap every overlay
                         // before the file dialog takes over the screen
                         shotori::save_dialog::register_overlay(handle.into());
@@ -298,15 +317,21 @@ fn main() {
                         .await;
                     cx.update(|cx| {
                         shotori::boot_mark("warm reopen requested");
-                        let handle = cx
-                            .open_window(
-                                Overlay::window_options(did, logical),
-                                |window, cx| {
-                                    cx.new(|cx| Overlay::new(cap, session, window, cx))
-                                },
-                            )
-                            .expect("failed to open warm layer-shell window");
-                        shotori::save_dialog::register_overlay(handle.into());
+                        match cx.open_window(
+                            Overlay::window_options(did, logical),
+                            |window, cx| {
+                                cx.new(|cx| Overlay::new(cap, session, window, cx))
+                            },
+                        ) {
+                            Ok(handle) => {
+                                shotori::save_dialog::register_overlay(handle.into());
+                            }
+                            Err(error) => {
+                                // perf-only path: a failed warm window is
+                                // a lost data point, not a failure.
+                                eprintln!("[shotori] warm reopen failed: {error:?}");
+                            }
+                        }
                     });
                 }
             })
@@ -333,8 +358,11 @@ fn main() {
 fn full_capture(clipboard: bool, path: Option<std::path::PathBuf>, delay: f32) -> ! {
     use shotori::model::session::ScreenshotSession;
 
-    if delay > 0. {
-        std::thread::sleep(std::time::Duration::from_secs_f32(delay));
+    if delay > 0. && delay.is_finite() {
+        // from_secs_f32 panics on non-finite/negative — clap accepts both
+        // (f32 has no range validation), so gate here. Cap at an hour:
+        // --delay is for settling compositors, not a timer feature.
+        std::thread::sleep(std::time::Duration::from_secs_f32(delay.min(3600.)));
     }
     let caps = match capture::capture_all_outputs() {
         Ok(c) => c,

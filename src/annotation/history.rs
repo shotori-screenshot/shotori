@@ -62,8 +62,9 @@ impl Annotations {
         self.selected = None;
     }
 
-    /// The stroke eraser's brush radius — half the eraser tool's
-    /// entry (or open one). One undo then restores the whole sweep.
+    /// The stroke eraser records its whole sweep as one entry:
+    /// commit_removals extends the open entry (or opens one). One undo
+    /// then restores the entire sweep.
     pub(super) fn commit_removals(&mut self, removed: Vec<(usize, Shape)>) -> bool {
         if removed.is_empty() {
             return false;
@@ -93,6 +94,13 @@ impl Annotations {
 
     pub(crate) fn undo(&mut self) -> HistoryEffect {
         let mut effect = HistoryEffect::None;
+        // A text edit parks the original shape in text_original and
+        // undoes would shift indices under it, making finish_text_edit
+        // overwrite the wrong shape. The key context normally prevents
+        // this dispatch; make the immunity structural.
+        if self.text_original.is_some() {
+            return effect;
+        }
         self.pressed = false;
         self.selected = None;
         if self.draft.take().is_some() {
@@ -129,9 +137,22 @@ impl Annotations {
         }
         effect
     }
-
     pub(crate) fn redo(&mut self) -> HistoryEffect {
         let mut effect = HistoryEffect::None;
+        // Same index-shift hazard as undo(): see the text_original gate
+        // there.
+        if self.text_original.is_some() {
+            return effect;
+        }
+        // Mirror undo(): any shape mutation invalidates the selected
+        // index. Remove/RemoveAll shift or clear the list, and a stale
+        // Some(ix) here is a user-reachable OOB (delete → undo →
+        // re-select → redo → wheel over canvas).
+        self.selected = None;
+        // Unlike undo(), a live draft blocks redo entirely: there is
+        // nothing meaningful to redo mid-stroke, and cancelling the
+        // user's in-flight gesture as a side effect of Ctrl+Y would be
+        // surprising.
         if self.draft.is_none()
             && let Some(entry) = self.redo.pop()
         {
@@ -156,7 +177,6 @@ impl Annotations {
                     for (ix, _) in removals {
                         self.shapes.remove(*ix);
                     }
-                    self.selected = None;
                 }
                 HistoryEntry::RemoveAll { .. } => {
                     self.shapes.clear();
