@@ -16,8 +16,8 @@
 //!   sideways jump desyncs the stitch (the folded columns stop
 //!   matching), and free frame movement shipped broken long screenshots.
 //! - the **capture HUD** — a floating action bar in the selection
-//!   toolbar's own vocabulary (grip-free, 30 px icon tiles, accent
-//!   primary) above a strip of the growing long image. Status and live
+//!   toolbar's own vocabulary (grip-free, neutral 30 px icon tiles)
+//!   above a strip of the growing long image. Status and live
 //!   size ride as small chips ON the strip, the same language as the
 //!   selection's size label. No panel header, no footer, no slab: with
 //!   the HUD up, the frame is just the selection outline plus a move

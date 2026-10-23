@@ -400,7 +400,6 @@ impl FrameView {
                         } else {
                             IconName::Pause
                         },
-                        false,
                         pause,
                     ))
                     .child(frame_button(
@@ -408,7 +407,6 @@ impl FrameView {
                         copy_label.clone(),
                         format!("{copy_label} · Enter"),
                         IconName::Copy,
-                        true,
                         copy,
                     ))
                     .child(frame_button(
@@ -416,7 +414,6 @@ impl FrameView {
                         save_label.clone(),
                         format!("{save_label} · Ctrl+S"),
                         IconName::Save,
-                        false,
                         save,
                     ))
                     .child(frame_button(
@@ -424,7 +421,6 @@ impl FrameView {
                         cancel_label.clone(),
                         format!("{cancel_label} · Esc"),
                         IconName::X,
-                        false,
                         cancel,
                     ))
             }))
@@ -467,18 +463,8 @@ fn frame_button(
     label: String,
     tooltip: String,
     icon: IconName,
-    primary: bool,
     on_press: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (bg, hover, ink) = if primary {
-        (
-            alpha(theme::c().accent, 0x2E),
-            alpha(theme::c().accent, 0x4A),
-            theme::c().accent,
-        )
-    } else {
-        (0, theme::c().toolbar_hover, theme::c().toolbar_text)
-    };
     div()
         .id(id)
         .flex()
@@ -486,8 +472,7 @@ fn frame_button(
         .justify_center()
         .size(px(30.))
         .rounded(px(6.))
-        .bg(rgba(bg))
-        .hover(move |style| style.bg(rgba(hover)))
+        .hover(|style| style.bg(rgba(theme::c().toolbar_hover)))
         .cursor(CursorStyle::PointingHand)
         .aria_label(label)
         .tooltip(move |_, cx| {
@@ -495,7 +480,12 @@ fn frame_button(
                 .into()
         })
         .on_mouse_down(MouseButton::Left, on_press)
-        .child(svg().path(icon.path()).size(px(16.)).text_color(rgba(ink)))
+        .child(
+            svg()
+                .path(icon.path())
+                .size(px(16.))
+                .text_color(rgba(theme::c().toolbar_text)),
+        )
 }
 
 /// The invisible canvas that owns the frame window's pointer listeners.

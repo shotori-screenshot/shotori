@@ -559,7 +559,6 @@ impl Render for PreviewPanel {
                 pause_label.clone(),
                 format!("{pause_label} · Space"),
                 DeckIcon::Kit(pause_icon),
-                DeckTone::Neutral,
                 true,
                 cx.listener(|this, _, _, cx| this.toggle_pause(cx)),
             ))
@@ -568,7 +567,6 @@ impl Render for PreviewPanel {
                 axis_label.clone(),
                 axis_tip,
                 DeckIcon::Own("icons/axis.svg"),
-                DeckTone::Neutral,
                 !self.axis_locked,
                 cx.listener(|this, _, _, cx| this.toggle_axis(cx)),
             ))
@@ -583,7 +581,6 @@ impl Render for PreviewPanel {
                 copy_label.clone(),
                 format!("{copy_label} · Enter"),
                 DeckIcon::Kit(IconName::Copy),
-                DeckTone::Primary,
                 true,
                 cx.listener(|this, _, _, cx| this.request_finish(cx)),
             ))
@@ -592,7 +589,6 @@ impl Render for PreviewPanel {
                 save_label.clone(),
                 format!("{save_label} · Ctrl+S"),
                 DeckIcon::Kit(IconName::Save),
-                DeckTone::Neutral,
                 true,
                 cx.listener(|this, _, _, cx| this.request_save(cx)),
             ))
@@ -601,7 +597,6 @@ impl Render for PreviewPanel {
                 cancel_label.clone(),
                 format!("{cancel_label} · Esc"),
                 DeckIcon::Kit(IconName::X),
-                DeckTone::Neutral,
                 true,
                 cx.listener(|this, _, _, cx| this.request_cancel(cx)),
             ));
@@ -783,26 +778,16 @@ fn preview_chip(text: String) -> Div {
         .child(text)
 }
 
-/// The floating bar's icon look: the selection toolbar's 30px tile,
-/// with one accent tile for the primary exit. Disabled tiles fade but
-/// keep their tooltip (the axis explains why it locked).
+/// Neutral icon tiles for the floating toolbar. Disabled tiles fade
+/// but keep their tooltip explaining why the action is unavailable.
 fn deck_button(
     id: &'static str,
     label: String,
     tooltip: String,
     icon: DeckIcon,
-    tone: DeckTone,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let (bg, hover, ink) = match tone {
-        DeckTone::Neutral => (0, theme::c().toolbar_hover, theme::c().toolbar_text),
-        DeckTone::Primary => (
-            alpha(theme::c().accent, 0x2E),
-            alpha(theme::c().accent, 0x4A),
-            theme::c().accent,
-        ),
-    };
     let button = div()
         .id(id)
         .flex()
@@ -810,7 +795,6 @@ fn deck_button(
         .justify_center()
         .size(px(30.))
         .rounded(px(7.))
-        .bg(rgba(bg))
         .aria_label(label)
         .tooltip(move |_, cx| {
             cx.new(|_| crate::ui::toolbar::ToolbarTooltip(tooltip.clone().into()))
@@ -818,14 +802,18 @@ fn deck_button(
         });
     let button = if enabled {
         button
-            .hover(move |style| style.bg(rgba(hover)))
+            .hover(|style| style.bg(rgba(theme::c().toolbar_hover)))
             .cursor(CursorStyle::PointingHand)
             .on_click(on_click)
     } else {
         button.opacity(0.45)
     };
     button
-        .child(icon.svg().size(px(16.)).text_color(rgba(ink)))
+        .child(
+            icon.svg()
+                .size(px(16.))
+                .text_color(rgba(theme::c().toolbar_text)),
+        )
         .into_any_element()
 }
 
@@ -844,12 +832,6 @@ impl DeckIcon {
             Self::Own(path) => svg().path(path),
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum DeckTone {
-    Neutral,
-    Primary,
 }
 
 /// `0xRRGGBBAA` with a replacement alpha — theme colors are opaque.
