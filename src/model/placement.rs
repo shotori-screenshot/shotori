@@ -197,10 +197,19 @@ pub(crate) fn round_px(b: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
-/// The four visual strokes as output-local rects.
+/// Output-local frame strokes separated from the capture's sampling boundary.
 pub(crate) fn frame_strokes(rect: ScrollRect) -> [Bounds<Pixels>; 4] {
-    let (x, y) = (rect.x as f32, rect.y as f32);
-    let (w, h) = (rect.width as f32, rect.height as f32);
+    // Independent edge rounding and compositor filtering can sample beyond
+    // the logical crop. Move only the chrome; keep every selected content row.
+    const CAPTURE_GAP_PIXELS: f32 = 2.;
+    let (x, y) = (
+        rect.x as f32 - CAPTURE_GAP_PIXELS,
+        rect.y as f32 - CAPTURE_GAP_PIXELS,
+    );
+    let (w, h) = (
+        rect.width as f32 + 2. * CAPTURE_GAP_PIXELS,
+        rect.height as f32 + 2. * CAPTURE_GAP_PIXELS,
+    );
     [
         Bounds {
             origin: point(px(x - FRAME_STROKE), px(y - FRAME_STROKE)),
@@ -474,7 +483,7 @@ mod tests {
     use super::{
         FRAME_CHIP_GAP, FRAME_CHIP_H, FRAME_CHIP_W, FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H,
         SCROLL_PANEL_GAP, SCROLL_PANEL_MARGIN, SCROLL_PANEL_W, ScrollPanelDock, TB_H, TB_W,
-        TB_W_ROW1, clamp_moved_rect, frame_grab_chip, frame_toolbar, label_anchor,
+        TB_W_ROW1, clamp_moved_rect, frame_grab_chip, frame_strokes, frame_toolbar, label_anchor,
         plan_scroll_panel, scroll_panel_margins, toolbar_anchor, toolbar_size,
     };
     use crate::model::session::ScrollRect;
@@ -723,6 +732,38 @@ mod tests {
                     // and stays fully on the output
                     assert!(left >= 0. && left + SCROLL_PANEL_W <= 1920.);
                     assert!(top >= SCROLL_PANEL_MARGIN && top + panel_h <= 1080.);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_frame_clears_capture_rounding_and_filter_footprint() {
+        // Screencopy and the UI round independently. Reserve an outward
+        // pixel for compositor filtering around the captured rectangle.
+        for scale in [1.0f32, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            for origin in [0, 1, 17, 100, 101] {
+                for (width, height) in [(16, 17), (399, 301), (800, 600)] {
+                    let rect = ScrollRect {
+                        x: origin,
+                        y: origin + 1,
+                        width,
+                        height,
+                    };
+                    let left = (rect.x as f32 * scale).floor() - 1.;
+                    let top = (rect.y as f32 * scale).floor() - 1.;
+                    let right = ((rect.x + width) as f32 * scale).ceil() + 1.;
+                    let bottom = ((rect.y + height) as f32 * scale).ceil() + 1.;
+                    for stroke in frame_strokes(rect) {
+                        let sl = (f32::from(stroke.left()) * scale).floor();
+                        let st = (f32::from(stroke.top()) * scale).floor();
+                        let sr = (f32::from(stroke.right()) * scale).ceil();
+                        let sb = (f32::from(stroke.bottom()) * scale).ceil();
+                        assert!(
+                            sr <= left || sl >= right || sb <= top || st >= bottom,
+                            "frame {stroke:?} reaches capture footprint at {scale}x: {rect:?}"
+                        );
+                    }
                 }
             }
         }
