@@ -52,11 +52,7 @@ impl SettingsWindow {
     /// Open the settings and theme files through the system editor.
     pub(super) fn page_advanced(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let body = super::layout::content_column()
-            .child(page_header(
-                cx,
-                crate::i18n::t!("settings.preferences.advanced").as_ref(),
-                crate::i18n::t!("settings.preferences.advanced_hint").as_ref(),
-            ))
+            .child(page_header(cx, "settings.preferences.advanced", None))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.general.group.files").as_ref()),
@@ -74,6 +70,7 @@ impl SettingsWindow {
         super::layout::compact_row(
             cx,
             name,
+            None,
             Some(
                 match file {
                     ConfigFile::Settings => self.path.as_ref(),

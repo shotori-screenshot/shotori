@@ -21,18 +21,18 @@ impl SettingsWindow {
         use gpui_kit::component::select::Select;
 
         let mut body = super::layout::content_column()
-            .child(page_header(
-                cx,
-                crate::i18n::t!("settings.preferences.appearance").as_ref(),
-                crate::i18n::t!("settings.preferences.appearance_hint").as_ref(),
-            ))
+            .child(page_header(cx, "settings.preferences.appearance", None))
             .child(card_group(
                 cx,
                 None,
                 vec![card_row(
                     cx,
                     crate::i18n::t!("settings.general.language.label").to_string(),
-                    Some(crate::i18n::t!("settings.general.language.blurb").to_string()),
+                    // No hint: picking a language re-renders every
+                    // string on the spot, so "applies immediately"
+                    // tells the user what the click already proved.
+                    None,
+                    None,
                     Select::new(&self.language_select).w_full(),
                 )],
             ))

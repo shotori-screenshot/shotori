@@ -75,7 +75,9 @@ gpui_kit::assets::icon_assets!(
         Search,
         Scan,
         ChevronDown,
-        ChevronRight
+        ChevronRight,
+        // The settings pages' inline help mark (hover tooltip hint).
+        CircleQuestionMark
     ]
 );
 

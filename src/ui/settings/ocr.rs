@@ -42,12 +42,12 @@ impl SettingsWindow {
         };
         let summary = format!("{} · {} · {}", model.languages(), model.tier(), status);
         let upright = self.upright_switch(window, cx);
+        // The custom row's live detail: path · ready, or the first
+        // problem; None while off — the off how-to lives in the row's
+        // help mark instead.
+        let custom_detail = custom_summary(&custom);
         let body = super::layout::content_column()
-            .child(page_header(
-                cx,
-                crate::i18n::t!("settings.ocr_page.title").as_ref(),
-                crate::i18n::t!("settings.ocr_page.blurb").as_ref(),
-            ))
+            .child(page_header(cx, "settings.ocr_page.title", None))
             .child(card_group(
                 cx,
                 None,
@@ -55,6 +55,7 @@ impl SettingsWindow {
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.ocr_page.model").to_string(),
+                        None,
                         Some(summary),
                         div().w(rems(20.)).max_w_full().child(
                             Select::new(&self.ocr_select)
@@ -69,38 +70,35 @@ impl SettingsWindow {
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.ocr_page.upright.title").to_string(),
-                        Some(crate::i18n::t!("settings.ocr_page.upright.body").to_string()),
+                        Some("settings.ocr_page.upright.body"),
+                        None,
                         upright,
                     ),
                 ],
             ))
+            // The custom config and the model directory share one card:
+            // a "Cache" caption over a single "Model cache" row only
+            // repeated the row's own label.
             .child(card_group(
                 cx,
                 None,
-                vec![super::layout::compact_row(
-                    cx,
-                    crate::i18n::t!("settings.ocr_page.custom.title").to_string(),
-                    Some(custom_summary(&custom)),
-                    custom_open_button(&custom, cx),
-                )],
-            ))
-            .child(card_group(
-                cx,
-                Some(crate::i18n::t!("settings.ocr_page.group.cache").as_ref()),
-                vec![super::layout::compact_row(
-                    cx,
-                    crate::i18n::t!("settings.ocr_page.cache_row").to_string(),
-                    Some(crate::ocr::model_dir_display()),
-                    open_dir_button(cx),
-                )],
-            ))
-            .child(
-                div()
-                    .text_sm()
-                    .line_height(relative(1.5))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::i18n::t!("settings.ocr_page.cache_hint").to_string()),
-            );
+                vec![
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.ocr_page.custom.title").to_string(),
+                        Some("settings.ocr_page.custom.off"),
+                        custom_detail,
+                        custom_open_button(&custom, cx),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.ocr_page.cache_row").to_string(),
+                        Some("settings.ocr_page.cache_hint"),
+                        Some(crate::ocr::model_dir_display()),
+                        open_dir_button(cx),
+                    ),
+                ],
+            ));
         page_body("page-ocr").child(body)
     }
 
@@ -124,21 +122,22 @@ impl SettingsWindow {
     }
 }
 
-/// The custom row's detail line: off-hint, path · ready, or the first
-/// problem (parse errors and missing files, one line — the raw anyhow
-/// chain is multi-line and would wreck the row).
-fn custom_summary(custom: &Option<Result<std::path::PathBuf, String>>) -> String {
+/// The custom row's live detail line, when a config is set: path ·
+/// ready, or the first problem (parse errors and missing files, one
+/// line — the raw anyhow chain is multi-line and would wreck the
+/// row). Off renders no detail: the off how-to is the row's help mark.
+fn custom_summary(custom: &Option<Result<std::path::PathBuf, String>>) -> Option<String> {
     match custom {
-        None => crate::i18n::t!("settings.ocr_page.custom.off").to_string(),
-        Some(Ok(path)) => format!(
+        None => None,
+        Some(Ok(path)) => Some(format!(
             "{} · {}",
             path.display(),
             crate::i18n::t!("settings.ocr_page.ready")
-        ),
-        Some(Err(reason)) => {
+        )),
+        Some(Err(reason)) => Some(
             crate::i18n::t!("settings.ocr_page.custom.broken", reason = one_line(reason))
-                .to_string()
-        }
+                .to_string(),
+        ),
     }
 }
 

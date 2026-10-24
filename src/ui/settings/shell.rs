@@ -151,7 +151,15 @@ impl SettingsWindow {
                     .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
                     .tooltip(move |_, cx| cx.new(|_| Tooltip::new(toggle_label.clone())).into())
-                    .child(img(ImageSource::Render(SIDEBAR_LOGO.clone())).size_5()),
+                    // Same optical nudge as `help_tooltip`: the CJK
+                    // title text beside it rides ~2px low in its line
+                    // box, box-centering reads visibly high.
+                    .child(
+                        img(ImageSource::Render(SIDEBAR_LOGO.clone()))
+                            .size_5()
+                            .relative()
+                            .top(px(2.)),
+                    ),
             );
         let leading = div()
             .flex()

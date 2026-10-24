@@ -448,11 +448,7 @@ impl SettingsWindow {
         );
         let smart_region = self.smart_region_switch(window, cx);
         let body = super::layout::content_column()
-            .child(page_header(
-                cx,
-                crate::i18n::t!("settings.preferences.capture").as_ref(),
-                crate::i18n::t!("settings.preferences.capture_hint").as_ref(),
-            ))
+            .child(page_header(cx, "settings.preferences.capture", None))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.general.group.selection").as_ref()),
@@ -460,13 +456,15 @@ impl SettingsWindow {
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.general.smart_region.title").to_string(),
-                        Some(crate::i18n::t!("settings.general.smart_region.body").to_string()),
+                        Some("settings.general.smart_region.body"),
+                        None,
                         smart_region,
                     ),
                     super::card_row(
                         cx,
                         crate::i18n::t!("settings.appearance.dim_opacity").to_string(),
-                        Some(crate::i18n::t!("settings.appearance.dim_hint").to_string()),
+                        Some("settings.appearance.dim_hint"),
+                        None,
                         self.opacity_control(cx),
                     ),
                 ],
@@ -495,29 +493,11 @@ impl SettingsWindow {
                                         .items_start()
                                         .justify_between()
                                         .gap_4()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(crate::i18n::t!(
-                                                            "settings.toolbar_page.group.current"
-                                                        ).to_string()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .line_height(relative(1.5))
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(crate::i18n::t!(
-                                                            "settings.toolbar_page.hint"
-                                                        ).to_string()),
-                                                ),
-                                        )
+                                        .child(group_heading(
+                                            cx,
+                                            "settings.toolbar_page.group.current",
+                                            "settings.toolbar_page.hint",
+                                        ))
                                         .child(super::shell::reset_button(
                                             "settings.toolbar_page.reset",
                                             cx,
@@ -538,29 +518,11 @@ impl SettingsWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(crate::i18n::t!(
-                                                    "settings.toolbar_page.group.palette"
-                                                ).to_string()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .line_height(relative(1.5))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(crate::i18n::t!(
-                                                    "settings.toolbar_page.palette_hint"
-                                                ).to_string()),
-                                        ),
-                                )
+                                .child(group_heading(
+                                    cx,
+                                    "settings.toolbar_page.group.palette",
+                                    "settings.toolbar_page.palette_hint",
+                                ))
                                 .child(self.palette(cx)),
                         ),
                 ],
@@ -1022,6 +984,21 @@ fn item_name(item: ToolbarItem) -> String {
         ToolbarItem::Separator => crate::i18n::t!("settings.toolbar_page.separator").to_string(),
     }
 }
+
+/// A group heading with an inline [`super::help_tooltip`] mark: the
+/// usage hint rides in a hover tooltip instead of a permanent caption
+/// line, so the page speaks with one voice per card.
+fn group_heading(cx: &App, label_key: &'static str, hint_key: &'static str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(crate::i18n::t!(label_key).to_string())
+        .child(super::help_tooltip(hint_key, cx))
+}
+
 /// Thumb display geometry for the rail: `(thumb_w, usable_track)`,
 /// derived from the handle — viewport/content ratio, clamped to a
 /// grabbable 24px minimum so a long row keeps a handle-sized thumb.

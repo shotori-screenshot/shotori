@@ -47,6 +47,7 @@ use gpui_kit::component::color_picker::ColorPickerState;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Root, TITLE_BAR_HEIGHT, TitleBar};
 use gpui_kit::*;
 
@@ -618,6 +619,36 @@ impl Render for SettingsWindow {
             .children(resize_handles(window))
     }
 }
+
+/// A help mark — the little circled "?" that parks a usage hint in a
+/// hover tooltip instead of a permanent caption line. Other design
+/// systems sell this combo as "HelpTooltip"; gpui-component ships
+/// the parts (a `Tooltip` view, an icon set) but not the combo, so it
+/// is composed once here for every page to reuse. The i18n key
+/// resolves both the tooltip text and the element id: call sites stay
+/// one-argument and ids stay stable across pages.
+///
+/// The mark sits next to CJK labels, whose ink rides ~2px below its
+/// line-box center while the icon is geometrically box-centered —
+/// box-centering alone reads visibly high ("the logo is not centered"
+/// report). The 2px top nudge is the optical fix, shared by every
+/// call site.
+pub(super) fn help_tooltip(key: &'static str, cx: &App) -> Stateful<Div> {
+    let hint = crate::i18n::t!(key).to_string();
+    let hover_fg = cx.theme().foreground;
+    div()
+        .id(key)
+        .flex()
+        .items_center()
+        .relative()
+        .top(px(2.))
+        .p(px(3.))
+        .text_color(cx.theme().muted_foreground)
+        .hover(move |s| s.text_color(hover_fg))
+        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(hint.clone())).into())
+        .child(Icon::new(IconName::CircleQuestionMark).size_3p5())
+}
+
 /// Hand a file path or URL to the session (xdg-open) — the config
 /// editor buttons and the About page's links share this. Reaped on a
 /// plain thread so the UI never blocks and no zombie lingers.

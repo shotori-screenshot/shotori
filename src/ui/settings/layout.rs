@@ -111,25 +111,28 @@ pub(super) fn content_column() -> Div {
         .gap_4()
 }
 
-pub(super) fn page_header(cx: &App, title: &str, blurb: &str) -> Div {
+/// Page title with an optional inline [`super::help_tooltip`] mark.
+/// Both arguments are i18n keys. Only pages whose blurb teaches
+/// something the page itself does not show (an interaction, a restart
+/// question) keep a mark: a subtitle that restates the title next to
+/// the rows that already say it is noise, not help.
+pub(super) fn page_header(
+    cx: &App,
+    title_key: &'static str,
+    hint_key: Option<&'static str>,
+) -> Div {
     div()
         .flex()
-        .flex_col()
-        .gap_1()
+        .items_center()
+        .gap_2()
         .child(
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().foreground)
-                .child(title.to_owned()),
+                .child(crate::i18n::t!(title_key).to_string()),
         )
-        .child(
-            div()
-                .text_sm()
-                .line_height(relative(1.5))
-                .text_color(cx.theme().muted_foreground)
-                .child(blurb.to_owned()),
-        )
+        .children(hint_key.map(|key| super::help_tooltip(key, cx)))
 }
 
 /// Section captions share a compact divider above their form rows.
@@ -161,13 +164,20 @@ pub(super) fn card_group(
 
 /// Wrapping is driven by available layout width, not a cached window size.
 /// At narrow widths the control drops below its label instead of squeezing it.
+///
+/// Rows carry two optional annotations with different jobs: `hint` is
+/// a static i18n key collapsed into the label's circled-? hover
+/// tooltip; `description` is live state (model readiness, the cache
+/// path, a factory keystroke) that must stay visible — hiding state
+/// behind a hover removes information the row exists to show.
 pub(super) fn card_row(
     cx: &App,
     label: impl Into<SharedString>,
-    description: Option<impl Into<SharedString>>,
+    hint: Option<&'static str>,
+    description: Option<String>,
     control: impl IntoElement,
 ) -> Div {
-    form_row(cx, label, description, control, true)
+    form_row(cx, label, hint, description, control, true)
 }
 
 /// Switches and icon actions reserve only their actual width; fields use a
@@ -175,19 +185,31 @@ pub(super) fn card_row(
 pub(super) fn compact_row(
     cx: &App,
     label: impl Into<SharedString>,
-    description: Option<impl Into<SharedString>>,
+    hint: Option<&'static str>,
+    description: Option<String>,
     control: impl IntoElement,
 ) -> Div {
-    form_row(cx, label, description, control, false)
+    form_row(cx, label, hint, description, control, false)
 }
 
 fn form_row(
     cx: &App,
     label: impl Into<SharedString>,
-    description: Option<impl Into<SharedString>>,
+    hint: Option<&'static str>,
+    description: Option<String>,
     control: impl IntoElement,
     field: bool,
 ) -> Div {
+    let mut heading = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_sm()
+        .text_color(cx.theme().foreground)
+        .child(label.into());
+    if let Some(key) = hint {
+        heading = heading.child(super::help_tooltip(key, cx));
+    }
     let mut label = div()
         .flex()
         .flex_col()
@@ -195,19 +217,14 @@ fn form_row(
         .flex_1()
         .flex_basis(rems(18.))
         .min_w(rems(10.))
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().foreground)
-                .child(label.into()),
-        );
+        .child(heading);
     if let Some(description) = description {
         label = label.child(
             div()
                 .text_sm()
                 .line_height(relative(1.5))
                 .text_color(cx.theme().muted_foreground)
-                .child(description.into()),
+                .child(description),
         );
     }
     div()
@@ -348,7 +365,8 @@ mod tests {
                 card_row(
                     cx,
                     "Language",
-                    Some("Choose the interface language"),
+                    None,
+                    Some("Choose the interface language".to_string()),
                     div().debug_selector(|| "control".into()).w_full().h_8(),
                 )
                 .debug_selector(|| "row".into()),

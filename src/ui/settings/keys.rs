@@ -120,8 +120,8 @@ impl SettingsWindow {
                     .gap_4()
                     .child(page_header(
                         cx,
-                        crate::i18n::t!("settings.keys_page.title").as_ref(),
-                        crate::i18n::t!("settings.keys_page.blurb").as_ref(),
+                        "settings.keys_page.title",
+                        Some("settings.keys_page.blurb"),
                     ))
                     .child(super::shell::reset_button(
                         "settings.keys_page.reset",
@@ -222,7 +222,7 @@ impl SettingsWindow {
         let cap = div()
             .capture_key_down(cx.listener(Self::capture_key))
             .child(cap);
-        card_row(cx, key_label(id), description, cap)
+        card_row(cx, key_label(id), None, description, cap)
     }
 
     /// Key-cap click: start recording (focusing the cap so the chord
