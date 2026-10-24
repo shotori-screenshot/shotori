@@ -40,9 +40,10 @@ assume_upright = false
 
 # Advanced: point this at your own rapidocr config TOML to run your
 # own ONNX models — it overrides `model` entirely (the settings
-# window's dropdown disables while it is active). Relative model
-# paths inside the TOML resolve against the TOML's own directory; a
-# leading ~ expands to your home directory. See docs/ocr-custom-model.md
-# for a worked example. Delete the key (or leave it empty) to go back
-# to the bundled models.
+# window's dropdown disables while it is active). The OCR page can
+# also pick or create this file for you (Choose file… / New from
+# template…). Relative model paths inside the TOML resolve against
+# the TOML's own directory; a leading ~ expands to your home
+# directory. See docs/ocr-custom-model.md for a worked example.
+# Delete the key (or leave it empty) to go back to the bundled models.
 # custom_config = "~/models/my-ocr.toml"

@@ -88,14 +88,23 @@ pub fn open_model_dir() -> anyhow::Result<PathBuf> {
 /// The user's custom rapidocr config (`[ocr] custom_config`), with
 /// `~/` expanded against `$HOME` — hand-edited settings naturally
 /// write `~`, but no library involved expands it.
-/// The configured custom-config path, normalized: `~`/`~/…` expand
-/// against `$HOME`, and a bare relative value resolves against `$HOME`
-/// too — a desktop-launched app's CWD is arbitrary (see the rebase
-/// comment below), so a CWD-relative reading would point nowhere.
 pub fn custom_config() -> Option<PathBuf> {
-    let path = expand_tilde(settings::current().ocr_custom_config()?)?;
+    custom_config_from(settings::current().ocr_custom_config())
+}
+
+/// [`custom_config`]'s normalization applied to a caller-supplied raw
+/// value: `~`/`~/…` expand against `$HOME`, and a bare relative value
+/// resolves against `$HOME` too — a desktop-launched app's CWD is
+/// arbitrary (see the rebase comment in `load_custom_config`), so a
+/// CWD-relative reading would point nowhere. Takes the raw setting
+/// instead of reading the global because the settings window must
+/// validate ITS live snapshot (what the next save will write), not
+/// the startup one — a path picked in that window would otherwise
+/// stay invisible until the next launch.
+pub fn custom_config_from(raw: Option<&str>) -> Option<PathBuf> {
+    let path = expand_tilde(raw?)?;
     // A bare relative value resolves against $HOME (a desktop-launched
-    // app's CWD is arbitrary, see the rebase comment below) — but a
+    // app's CWD is arbitrary, see the rebase comment above) — but a
     // `~name` value is another user's home: leave it unjoined so the
     // engine's error names the mistake, matching the rebase rule.
     let tildeish = path.to_str().is_some_and(|s| s.starts_with('~'));
@@ -106,6 +115,26 @@ pub fn custom_config() -> Option<PathBuf> {
         });
     }
     Some(path)
+}
+
+/// A ready-to-edit custom config for `model` as TOML text, rooted at
+/// the model cache directory: the registry entry's full parameter set
+/// (the part nobody can safely guess) with absolute model paths, so
+/// the file survives being saved anywhere. If that set is already
+/// downloaded the template runs as-is; otherwise the settings chip
+/// names the first missing file. The settings page's "new from
+/// template" writes this to the user-chosen path.
+pub fn template_config_toml(model: OcrModel) -> anyhow::Result<String> {
+    template_config_for(model, &model_dir()?)
+}
+
+/// [`template_config_toml`]'s pure core (testable without `$HOME`).
+fn template_config_for(model: OcrModel, dir: &Path) -> anyhow::Result<String> {
+    let set = model::model_set_by_name(model.id())
+        .with_context(|| format!("model set {} is not in rapidocr's registry", model.id()))?;
+    set.config(dir)
+        .to_toml_string()
+        .context("serializing the OCR config template")
 }
 
 /// `~` and `~/…` resolve against `$HOME`; `Some` carries the expanded
@@ -189,15 +218,21 @@ fn load_custom_config(
 
 /// Validate the custom config the way the settings page's readiness
 /// chip shows it: file parses, every enabled stage's model files
-/// exist. `upright` comes from the caller (the page passes its live
-/// toggle, not the startup global — `persist()` never reinstalls the
-/// global, so a mid-session toggle would otherwise leave the chip
-/// stale). `None` = no custom config set; `Some(Err)` carries the
-/// first problem found (parse errors beat file checks — an
-/// unparseable config's paths are not trustworthy).
-pub fn custom_config_status(assume_upright: bool) -> Option<Result<PathBuf, String>> {
-    let path = custom_config()?;
-    cached_custom_status(path, assume_upright)
+/// exist. `raw` is the un-normalized `[ocr] custom_config` value from
+/// the CALLER's settings — the settings window validates its live
+/// snapshot (a path just picked in the UI must light the chip up
+/// without a restart), while the engine reads the startup global
+/// through [`custom_config`]. `None` = no custom config set;
+/// `Some(Err)` carries the first problem found (parse errors beat
+/// file checks — an unparseable config's paths are not trustworthy).
+/// `upright` is the live toggle: it can only turn the classifier off,
+/// never on. The mtime cache below keys on (path, mtime, upright), so
+/// callers with different settings values never collide.
+pub fn custom_config_status(
+    raw: Option<&str>,
+    assume_upright: bool,
+) -> Option<Result<PathBuf, String>> {
+    cached_custom_status(custom_config_from(raw)?, assume_upright)
 }
 
 /// Last (path, mtime, upright) verdict of [`custom_config_status_for`].
@@ -1160,6 +1195,63 @@ mod tests {
         assert!(
             err.contains("broken.toml"),
             "carries the config path: {err}"
+        );
+    }
+
+    #[test]
+    fn custom_config_status_reads_a_caller_supplied_raw_value() {
+        // The settings window passes its live snapshot's raw value, not
+        // the startup global — the whole point of the raw parameter.
+        // The raw value also gets the same normalization the global
+        // path had: an absolute path passes through, a bare relative
+        // value anchors to $HOME.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rec_only_config(dir.path(), "");
+        assert!(
+            super::custom_config_status(Some(path.display().to_string()).as_deref(), false)
+                .unwrap()
+                .is_ok()
+        );
+        // None stays None (no custom config configured)
+        assert!(super::custom_config_status(None, false).is_none());
+
+        // relative raw anchors to $HOME — here the anchored file does
+        // not exist, so the status must be a missing-file error naming
+        // the ANCHORED path, proving the rebase happened
+        let home = std::env::var_os("HOME").expect("tests run with HOME set");
+        let anchored = PathBuf::from(&home).join("shotori-test-does-not-exist.toml");
+        let err = super::custom_config_status(Some("shotori-test-does-not-exist.toml"), false)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            err.contains(anchored.to_str().unwrap()),
+            "relative raw resolves against $HOME: {err}"
+        );
+    }
+
+    #[test]
+    fn template_config_parses_and_names_the_set_files() {
+        // The settings page's "new from template" writes exactly this
+        // text; it must parse AND validate, and its model paths must
+        // be absolute joins onto the given directory with the
+        // registry's filenames — the file has to survive being saved
+        // anywhere and still find the cache.
+        let dir = tempfile::tempdir().unwrap();
+        let text =
+            super::template_config_for(crate::model::settings::DEFAULT_OCR_MODEL, dir.path())
+                .unwrap();
+        let cfg = rapidocr_core::config::RapidOcrConfig::from_toml_str(&text)
+            .expect("template must be a valid rapidocr config");
+        let set =
+            rapidocr_core::model::model_set_by_name(crate::model::settings::DEFAULT_OCR_MODEL.id())
+                .unwrap();
+        assert_eq!(
+            cfg.det.unwrap().model_path,
+            dir.path().join(set.det.asset.filename)
+        );
+        assert_eq!(
+            cfg.rec.unwrap().model_path,
+            dir.path().join(set.rec.asset.filename)
         );
     }
 

@@ -8,7 +8,22 @@ TOML and it will run exactly that pipeline instead.
 
 ## Enabling
 
-In `~/.config/shotori/settings.toml`:
+Settings → OCR → Custom model:
+
+- **Choose file…** — pick an existing rapidocr config TOML; it is
+  written to `[ocr] custom_config` and takes effect immediately.
+- **New from template…** — pick a save location and shotori writes a
+  ready-to-edit config there: the currently selected model's full
+  parameter set (thresholds, mean/std, image shapes — the part nobody
+  can safely guess), with model paths pointing at the bundled cache.
+  Edit the paths to your own ONNX files (and the dictionary) and the
+  status line re-validates on the next settings save.
+- **Open config** (shown while a config is active) — opens the file
+  in your system editor.
+- **Replace… / Clear** — point at a different file, or go back to the
+  bundled models.
+
+You can also edit `~/.config/shotori/settings.toml` by hand:
 
 ```toml
 [ocr]
@@ -22,10 +37,12 @@ custom_config = "~/models/my-ocr.toml"
   and the OCR page shows the config's path and status (ready, or the
   first problem found).
 - No download ever happens in this mode — the files are yours.
-- Delete the key (or leave it empty) to go back to the bundled models.
+- Delete the key (or leave it empty) to go back to the bundled models
+  (or press **Clear** in the settings window).
 - Reopen the settings window after editing `settings.toml` by hand:
   the window reads the file once at open and writes its snapshot back
-  on every toggle, so a stale window would erase your edit.
+  on every toggle, so a stale window would erase your edit. Changes
+  made through the window's own buttons are always picked up live.
 
 ## The config format
 

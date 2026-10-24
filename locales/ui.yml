@@ -238,11 +238,11 @@ settings:
         en: Custom model
         zh-CN: 自定义模型
       off:
-        # the "reopen" clause matters: the window persists its open-time
-        # snapshot on every toggle, which would erase a hand edit made
-        # while it sits open
-        en: "Off — set [ocr] custom_config in settings.toml\nto a rapidocr config TOML, then reopen this window"
-        zh-CN: "关闭——在 settings.toml 中把 [ocr] custom_config\n指向 rapidocr 配置文件，然后重新打开本设置窗口"
+        # hand edits to settings.toml still work, but a window left open
+        # persists its open-time snapshot on every toggle, which would
+        # erase such an edit — the reopen clause stays
+        en: "Off — pick a rapidocr config TOML below, or create one from\nthe current model as a starting point. Hand edits to\nsettings.toml need this window reopened to be picked up"
+        zh-CN: "关闭——在下方选择 rapidocr 配置文件，或从当前模型生成\n模板起步。手改 settings.toml 后需重开本窗口才能生效"
       overridden:
         en: Superseded by the custom config below
         zh-CN: 已被下方自定义配置接管
@@ -252,6 +252,33 @@ settings:
       open:
         en: Open config
         zh-CN: 打开配置
+      browse:
+        en: Choose file…
+        zh-CN: 选择文件…
+      pick_title:
+        en: Choose a rapidocr config
+        zh-CN: 选择 rapidocr 配置文件
+      new:
+        en: New from template…
+        zh-CN: 从模板新建…
+      new_title:
+        en: Save custom model config
+        zh-CN: 保存自定义模型配置
+      replace:
+        en: Replace…
+        zh-CN: 替换…
+      clear:
+        en: Clear
+        zh-CN: 清除
+      toml_filter:
+        en: TOML config
+        zh-CN: TOML 配置
+      template_failed_title:
+        en: Template not written
+        zh-CN: 模板未写入
+      template_failed_body:
+        en: "Could not write the config template: %{error}"
+        zh-CN: "无法写入配置模板：%{error}"
     upright:
       title:
         en: "Skip orientation detection"
