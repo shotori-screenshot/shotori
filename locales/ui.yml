@@ -111,6 +111,13 @@ settings:
       body:
         en: Highlight detected regions on hover and select them with a click
         zh-CN: 悬停高亮区域，点击选中
+    annotation_auto_select:
+      title:
+        en: Auto-select after drawing
+        zh-CN: 绘制后自动选中
+      body:
+        en: A placed mark selects itself, ready to move, resize or wheel-tune
+        zh-CN: 标注画完自动选中，可直接拖动、缩放或滚轮微调
     group:
       files:
         en: Config files
@@ -118,6 +125,9 @@ settings:
       selection:
         en: Selection
         zh-CN: 选区
+      annotation:
+        en: Annotation
+        zh-CN: 标注
     file:
       open:
         en: Open

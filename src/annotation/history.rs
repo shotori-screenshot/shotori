@@ -54,12 +54,15 @@ pub(super) enum HistoryEntry {
 }
 
 impl Annotations {
-    /// Append a placed mark, invalidate redo and leave it unselected.
+    /// Append a placed mark, invalidate redo, and leave it unselected
+    /// — unless the auto-select switch is on, in which case the fresh
+    /// mark parks its own selection for immediate wheel/drag tuning
+    /// (the pre-flip behavior, now opt-in via `from_settings`).
     pub(super) fn record_add(&mut self, shape: Shape) {
         self.shapes.push(shape.clone());
         self.history.push(HistoryEntry::Add(shape));
         self.redo.clear();
-        self.selected = None;
+        self.selected = self.auto_select.then(|| self.shapes.len() - 1);
     }
 
     /// The stroke eraser records its whole sweep as one entry:

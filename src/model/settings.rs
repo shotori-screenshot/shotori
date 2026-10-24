@@ -122,6 +122,11 @@ pub struct Settings {
     /// layer and stays available either way (the detector's quality
     /// itself is issue #27's topic).
     smart_region: bool,
+    /// A freshly placed annotation selects itself on release, so the
+    /// wheel and a drag tune it without a second click. Off by
+    /// default: since the 2026-10-06 select-tool flip selection is an
+    /// explicit mode, and this switch only opts back in.
+    annotation_auto_select: bool,
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
@@ -141,6 +146,7 @@ impl Default for Settings {
             language: Language::Auto,
             sidebar_collapsed: false,
             smart_region: true,
+            annotation_auto_select: false,
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
             keys: crate::actions::default_keys(),
         }
@@ -166,6 +172,9 @@ struct File {
     /// preference files written before the key existed keep the
     /// shipped behavior).
     smart_region: Option<bool>,
+    /// Auto-select an annotation on placement (`annotation_auto_select`,
+    /// absent = off — the shipped select-tool behavior).
+    annotation_auto_select: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -289,6 +298,16 @@ impl Settings {
 
     pub fn set_smart_region(&mut self, enabled: bool) {
         self.smart_region = enabled;
+    }
+
+    /// Whether a placed annotation selects itself (default off —
+    /// selection belongs to the select tool).
+    pub fn annotation_auto_select(&self) -> bool {
+        self.annotation_auto_select
+    }
+
+    pub fn set_annotation_auto_select(&mut self, enabled: bool) {
+        self.annotation_auto_select = enabled;
     }
 
     /// The resolved shortcut keystrokes (id → keystroke, defaults
@@ -484,6 +503,7 @@ impl Settings {
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 smart_region: file.smart_region.unwrap_or(true),
+                annotation_auto_select: file.annotation_auto_select.unwrap_or(false),
                 annotation_colors,
                 keys,
             },
@@ -541,6 +561,10 @@ impl Settings {
             toml::Value::from(self.sidebar_collapsed),
         );
         table.insert("smart_region".into(), toml::Value::from(self.smart_region));
+        table.insert(
+            "annotation_auto_select".into(),
+            toml::Value::from(self.annotation_auto_select),
+        );
         let ocr = table
             .entry("ocr")
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -965,6 +989,24 @@ mod tests {
         assert!(Settings::default().smart_region());
         let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
         assert!(fresh.smart_region());
+    }
+
+    #[test]
+    fn annotation_auto_select_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let mut s = Settings::default();
+        assert!(!s.annotation_auto_select());
+        s.set_annotation_auto_select(true);
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty());
+        assert!(back.annotation_auto_select());
+        // The factory default is off (the shipped select-tool
+        // behavior), and an absent key (a preference file written
+        // before the key existed) loads as off too.
+        let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
+        assert!(!fresh.annotation_auto_select());
     }
 
     #[test]

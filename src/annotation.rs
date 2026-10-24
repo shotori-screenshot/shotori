@@ -38,10 +38,11 @@ pub(crate) enum ShapeKind {
     Arrow,
     Polyline,
     /// The select tool — a MODE, never a shape record (the erasers'
-    /// pattern: tool-only variants of this enum). Selection is its
-    /// exclusive job: draw tools never park a click-select or
-    /// auto-select on place (2026-10-06 flip), so a selected shape
-    /// implies this tool is active.
+    /// pattern: tool-only variants of this enum). Selection is
+    /// normally its exclusive job: draw tools never park a
+    /// click-select, and auto-select on place only happens with the
+    /// opt-in `auto_select` switch (2026-10-06 flip), so a selected
+    /// shape implies this tool is active or that switch is on.
     Select,
 }
 
@@ -272,6 +273,10 @@ pub(crate) struct Annotations {
     /// Index into `shapes` of the currently selected annotation, if any.
     /// Editing actions (wheel size stepping, later drags) target it.
     selected: Option<usize>,
+    /// Whether a placed mark selects itself on release (the settings
+    /// switch; default off — the 2026-10-06 flip made selection the
+    /// select tool's exclusive job, and this flag only opts back in).
+    auto_select: bool,
     text_original: Option<(usize, Shape)>,
     /// A slider size-drag is in flight: consecutive `apply_size` calls
     /// merge into one history entry (see `apply_size`).
@@ -308,6 +313,7 @@ impl Default for Annotations {
             eraser: None,
             eraser_entry_open: false,
             selected: None,
+            auto_select: false,
             text_original: None,
             size_drag_active: false,
         }
@@ -502,6 +508,19 @@ impl Annotations {
     pub(crate) fn tool(&self) -> Option<ShapeKind> {
         self.tool
     }
+
+    /// Production constructor: placement preferences come from the
+    /// persisted settings, read once per capture (the overlay session
+    /// is rebuilt for every screenshot; there is no live reload).
+    /// Tests build `default()` instead — factory behavior, no global
+    /// state, no cross-test races.
+    pub(crate) fn from_settings() -> Self {
+        Self {
+            auto_select: crate::model::settings::current().annotation_auto_select(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn toggle(&mut self, kind: ShapeKind) {
         self.draft = None;
         self.pressed = false;
@@ -1012,6 +1031,35 @@ mod tests {
             a.shape_hover(point(px(30.), px(10.))),
             Some(ShapeHover::Pick)
         );
+    }
+
+    #[test]
+    fn auto_select_option_selects_the_fresh_mark() {
+        // Factory default stays unselected — the select-tool flip is
+        // the shipped behavior (also asserted in
+        // hover_splits_pick_from_move_by_selection).
+        let mut a = Annotations::default();
+        a.toggle(ShapeKind::Rectangle);
+        rectangle(&mut a);
+        assert_eq!(a.selected_index(), None);
+
+        // The switch opts the pre-flip behavior back in: the placed
+        // mark parks its own selection, ready for wheel/drag tuning.
+        let mut a = Annotations {
+            auto_select: true,
+            ..Annotations::default()
+        };
+        a.toggle(ShapeKind::Rectangle);
+        rectangle(&mut a);
+        assert_eq!(a.selected().map(|s| s.kind), Some(ShapeKind::Rectangle));
+
+        // The next stroke takes the selection with it (begin drops it)
+        // and hands it back on release.
+        a.begin(point(px(50.), px(50.)), selection(), false);
+        assert_eq!(a.selected_index(), None);
+        a.drag_to(point(px(70.), px(70.)), selection(), false);
+        a.end();
+        assert_eq!(a.selected_index(), Some(1));
     }
 
     #[test]

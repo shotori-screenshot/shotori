@@ -116,6 +116,31 @@ impl SettingsWindow {
         })
     }
 
+    /// The auto-select-on-placement switch. Same write-through contract
+    /// as the smart-region switch: the flip saves the file and the next
+    /// capture reads it — a live overlay keeps its behavior until it is
+    /// rebuilt (the Annotations flag is read once per session).
+    pub(super) fn annotation_auto_select_switch(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Switch {
+        let entity = cx.entity();
+        super::layout::settings_switch(
+            "annotation-auto-select",
+            self.settings.annotation_auto_select(),
+            crate::i18n::t!("settings.general.annotation_auto_select.title").to_string(),
+            window,
+            cx,
+        )
+        .on_change(move |checked, _, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.settings.set_annotation_auto_select(checked);
+                this.persist(cx);
+            });
+        })
+    }
+
     /// Restore the factory toolbar layout without changing capture preferences.
     pub(super) fn reset_toolbar(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
@@ -469,6 +494,21 @@ impl SettingsWindow {
                     ),
                 ],
             ))
+            .child({
+                let auto_select = self.annotation_auto_select_switch(window, cx);
+                card_group(
+                    cx,
+                    Some(crate::i18n::t!("settings.general.group.annotation").as_ref()),
+                    vec![super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.general.annotation_auto_select.title")
+                            .to_string(),
+                        Some("settings.general.annotation_auto_select.body"),
+                        None,
+                        auto_select,
+                    )],
+                )
+            })
             .child(card_group(
                 cx,
                 None,

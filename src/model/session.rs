@@ -234,7 +234,11 @@ impl ScreenshotSession {
             smart_cursor: Default::default(),
             cursor_screen: None,
             press: None,
-            annotations: Default::default(),
+            // Placement behavior (auto-select on draw) comes from the
+            // persisted settings, read once per capture — the overlay
+            // session is rebuilt for every screenshot, there is no
+            // live reload.
+            annotations: crate::annotation::Annotations::from_settings(),
             filter_preview: Default::default(),
             preview_busy: false,
             preview_display: None,
