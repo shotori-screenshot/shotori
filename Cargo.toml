@@ -18,6 +18,15 @@ repository = "https://github.com/mengh04/shotori"
 keywords = ["screenshot", "wayland", "gpui", "screencopy", "clipboard"]
 categories = ["graphics", "multimedia::images", "command-line-utilities"]
 
+# The scroll_sheet pixel-regression fixtures are per-pixel f32 math over
+# hundreds of 480×640 frames; at the default unoptimized test profile they
+# alone took ~7 minutes per suite run (427 s for the worst single test).
+# opt-level 3 for tests only — `cargo build` keeps its fast dev profile —
+# cuts the full suite to ~17 s (individual tests 23–48× faster) while the
+# inherited overflow-checks/debug-assertions stay on.
+[profile.test]
+opt-level = 3
+
 [dependencies]
 # default-features off: the default pulls the component library, whose
 # Root/WindowState is poison for layer-shell overlays (AGENTS.md "the
