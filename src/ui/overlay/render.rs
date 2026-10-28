@@ -408,12 +408,15 @@ impl Render for Overlay {
                     });
                 }),
             )
-            // Wheel has two phases. (1) Pre-selection with no annotation
+            // Wheel has three phases. (0) A FINALIZED selection with no
+            // annotation edit target: zoom the crop in place, equal ratio
+            // about its centre — "my box came out a little small, don't
+            // make me redraw it". (1) Pre-selection with no annotation
             // tool lit: step the smart-region hierarchy under the
             // pointer (child ↔ parent ↔ whole window/screen). (2) With
-            // a tool lit: step its S/M/L size preset (issue #3). Only
-            // consumed in the phase that can use it; otherwise the
-            // event bubbles.
+            // a tool lit: step its S/M/L size preset (issue #3). Each
+            // phase only consumes the event when IT is the state's
+            // meaning; otherwise the event bubbles.
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 if this.text_editing.is_some() {
                     cx.propagate();
@@ -435,6 +438,34 @@ impl Render for Overlay {
                 // still accumulate to full steps below.
                 let lines = lines.clamp(-1., 1.);
                 this.size_scroll_acc += lines;
+                // Phase 0 — the crop owns the wheel once it exists.
+                // `edit_kind()` also covers a selected shape (the wheel
+                // then tunes THAT, phase 2's job), and a lit tool means
+                // the user is annotating, not reframing.
+                let zoomable = {
+                    let session = this.session.read(cx);
+                    session.annotations().edit_kind().is_none() && session.selection().is_selected()
+                };
+                if zoomable {
+                    let mut consumed = false;
+                    while this.size_scroll_acc >= 1.0 {
+                        this.session.update(cx, |s, _| s.zoom_selection(1));
+                        consumed = true;
+                        this.size_scroll_acc -= 1.0;
+                    }
+                    while this.size_scroll_acc <= -1.0 {
+                        this.session.update(cx, |s, _| s.zoom_selection(-1));
+                        consumed = true;
+                        this.size_scroll_acc += 1.0;
+                    }
+                    if consumed {
+                        // Even a notch that hit the zoom limit belongs to
+                        // the crop, not to whatever sits under the overlay.
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.session.read(cx).annotations().tool().is_none() {
                     // phase 1 — hierarchy stepping (drains whole units)
                     let mut consumed = false;

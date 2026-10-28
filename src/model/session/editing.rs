@@ -126,6 +126,35 @@ impl ScreenshotSession {
         true
     }
 
+    /// Wheel-zoom the finalized selection about its centre (see
+    /// [`Selection::zoom`]). Consecutive notches coalesce into ONE undo
+    /// entry through the nudge gesture — the same contract as arrow-key
+    /// nudging, and any other action (`finish_nudge`) closes the step.
+    /// Returns whether the box actually changed.
+    pub(crate) fn zoom_selection(&mut self, steps: i32) -> bool {
+        if self.blocked
+            || !self.selection.is_selected()
+            || self.selection_gesture.is_some()
+            || self.toolbar_drag.is_some()
+        {
+            return false;
+        }
+        let Some(desktop) = self.desktop_bounds() else {
+            return false;
+        };
+        let Some(before) = self.selection.bounds() else {
+            return false;
+        };
+        if !self.selection.zoom(steps, desktop) {
+            return false;
+        }
+        self.nudge.get_or_insert(NudgeGesture::Selection { before });
+        // A box that grew across the seam must carry its chrome with
+        // it, like every other geometry edit.
+        self.follow_selection_host();
+        true
+    }
+
     pub(crate) fn finish_nudge(&mut self) {
         match self.nudge.take() {
             Some(NudgeGesture::Shape { ix, before }) => self.annotations.commit_move(ix, before),
@@ -575,5 +604,53 @@ mod tests {
         s.edit_annotations(|a| a.toggle(ShapeKind::Pencil));
         s.pointer_move("screen", p(110., 76.), false);
         assert_eq!(s.hovered_annotation(), None);
+    }
+
+    // ── Wheel zoom (issue: reframe an existing crop) ─────────────
+
+    #[test]
+    fn wheel_zoom_reframes_the_crop_in_place_and_undoes_as_one_step() {
+        let mut s = session(); // 200×180 crop at (40,40) on a 400×300 screen
+        let original = s.selection.bounds().unwrap();
+        for _ in 0..3 {
+            assert!(s.zoom_selection(1));
+        }
+        s.finish_nudge(); // one gesture = one undo entry
+        let zoomed = s.selection.bounds().unwrap();
+        assert!(f32::from(zoomed.size.width) > f32::from(original.size.width));
+        // grew outward from the centre: it still contains the old box
+        assert!(zoomed.contains(&original.origin));
+        assert!(zoomed.contains(&original.bottom_right()));
+        s.undo();
+        assert_eq!(s.selection.bounds(), Some(original));
+        s.redo();
+        assert_eq!(s.selection.bounds(), Some(zoomed));
+        // …and shrinking coalesces the same way, in the other direction
+        for _ in 0..2 {
+            assert!(s.zoom_selection(-1));
+        }
+        s.finish_nudge();
+        let smaller = s.selection.bounds().unwrap();
+        assert!(f32::from(smaller.size.width) < f32::from(zoomed.size.width));
+        s.undo();
+        assert_eq!(s.selection.bounds(), Some(zoomed));
+    }
+
+    #[test]
+    fn wheel_zoom_never_leaves_the_desktop_nor_touches_other_states() {
+        let mut s = session();
+        assert!(!s.zoom_selection(0));
+        // a drag in flight owns the pointer gesture: the wheel is inert
+        s.pointer_down("screen", p(300., 250.), false);
+        s.pointer_move("screen", p(350., 280.), false);
+        assert!(!s.zoom_selection(1));
+        s.pointer_up("screen", p(350., 280.), false);
+        // grow until the limits: every result stays on the captured desktop
+        for _ in 0..64 {
+            s.zoom_selection(1);
+            let b = s.selection.bounds().unwrap();
+            assert!(b.left() >= px(0.) && b.top() >= px(0.), "{b:?}");
+            assert!(b.right() <= px(400.) && b.bottom() <= px(300.), "{b:?}");
+        }
     }
 }

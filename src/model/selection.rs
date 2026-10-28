@@ -39,6 +39,11 @@ pub(crate) const HANDLE_VIS: f32 = 7.0;
 /// into coupling unnoticed.
 const _: () = assert!(HANDLE_VIS < HANDLE_HIT);
 
+/// One wheel notch scales a finalized selection by this factor; its
+/// reciprocal shrinks it. ~7 notches double the box — fast enough to
+/// reframe in one gesture, fine enough not to overshoot.
+pub(crate) const ZOOM_STEP: f32 = 1.1;
+
 /// Which edge(s) a resize grab drags. The eight zones mirror the classic
 /// screenshot-tool handles (4 corners + 4 edge midpoints).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -135,6 +140,45 @@ fn axis_zone(v: f32, lo: f32, hi: f32) -> Option<bool> {
 /// guard — f32::clamp panics on inverted bounds.
 fn clamp_to(v: f32, lo: f32, hi: f32) -> f32 {
     if lo > hi { lo } else { v.clamp(lo, hi) }
+}
+
+/// The pure geometry behind [`Selection::zoom`]: scale about the
+/// centre, keeping the aspect ratio, clamped by the desktop and
+/// [`MIN_SIZE`] through the factor.
+fn zoom_bounds(b: Bounds<Pixels>, steps: i32, desktop: Bounds<Pixels>) -> Bounds<Pixels> {
+    let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+    if w <= 0. || h <= 0. {
+        return b;
+    }
+    let cx = (f32::from(b.left()) + f32::from(b.right())) * 0.5;
+    let cy = (f32::from(b.top()) + f32::from(b.bottom())) * 0.5;
+    let (dl, dr) = (f32::from(desktop.left()), f32::from(desktop.right()));
+    let (dt, db) = (f32::from(desktop.top()), f32::from(desktop.bottom()));
+    // Headroom expressed as a FACTOR: the centre is pinned, so each
+    // axis may at most double before its nearer desktop edge is hit.
+    let room = ((2. * (cx - dl).min(dr - cx)) / w).min((2. * (cy - dt).min(db - cy)) / h);
+    // Same for the floor: MIN_SIZE on the tighter axis governs.
+    let floor = (MIN_SIZE / w).max(MIN_SIZE / h);
+    let wanted = ZOOM_STEP.powi(steps);
+    let factor = if steps > 0 {
+        wanted.min(room).max(1.)
+    } else {
+        wanted.max(floor).min(1.)
+    };
+    if factor == 1. {
+        return b;
+    }
+    let (nw, nh) = (w * factor, h * factor);
+    // Float guard on top of `room`: a 0.1px drift at the desktop edge
+    // must not re-introduce the "selection leaks past the screen" bug.
+    // In-bounds inputs leave this a no-op (the centre is preserved).
+    Bounds {
+        origin: point(
+            px(clamp_to(cx - nw * 0.5, dl, dr - nw)),
+            px(clamp_to(cy - nh * 0.5, dt, db - nh)),
+        ),
+        size: size(px(nw), px(nh)),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -305,6 +349,36 @@ impl Selection {
             }
             _ => false,
         }
+    }
+
+    /// Wheel-zoom a finalized selection in place: `steps` notches at
+    /// [`ZOOM_STEP`], positive to grow, negative to shrink. Both axes
+    /// share one factor (equal ratio — the crop keeps its shape) and
+    /// the box's CENTRE is the anchor, so "I framed it a bit too
+    /// small" grows outward evenly instead of crawling away from the
+    /// cursor.
+    ///
+    /// The desktop and [`MIN_SIZE`] limits clamp the FACTOR, never the
+    /// individual edges: clamping edges would break the ratio and slide
+    /// the centre. A box already flush against the desktop simply stops
+    /// growing on the tighter axis (the other axis follows, since they
+    /// share the factor).
+    pub fn zoom(&mut self, steps: i32, desktop: Bounds<Pixels>) -> bool {
+        if steps == 0 {
+            return false;
+        }
+        // Only a FINALIZED box zooms: an in-flight drag/edit already
+        // owns the pointer gesture, and silently resizing under it would
+        // fight the user's own motion.
+        let Self::Selected { bounds: before } = *self else {
+            return false;
+        };
+        let after = zoom_bounds(before, steps, desktop);
+        if after == before {
+            return false;
+        }
+        *self = Self::Selected { bounds: after };
+        true
     }
 
     /// Release after a move/resize: the (already clamped) bounds become the
@@ -702,5 +776,80 @@ mod tests {
         let mut s = selected();
         assert!(!s.edit_to(pt(0., 0.), desk(0., 0., 500., 500.)));
         assert!(s.is_selected()); // untouched
+    }
+
+    // ── Wheel zoom ─────────────────────────────────────────────
+
+    fn centre(b: gpui_kit::Bounds<Pixels>) -> (f32, f32) {
+        (
+            (f32::from(b.left()) + f32::from(b.right())) * 0.5,
+            (f32::from(b.top()) + f32::from(b.bottom())) * 0.5,
+        )
+    }
+
+    #[test]
+    fn wheel_zoom_scales_both_axes_about_the_centre() {
+        let mut s = selected(); // 100×100 at (100,100), centre (150,150)
+        let before = s.bounds().unwrap();
+        assert!(s.zoom(1, desk(0., 0., 500., 500.)));
+        let b = s.bounds().unwrap();
+        let fx = f32::from(b.size.width) / f32::from(before.size.width);
+        let fy = f32::from(b.size.height) / f32::from(before.size.height);
+        assert!((fx - 1.1).abs() < 1e-4, "one notch = one ZOOM_STEP: {fx}");
+        assert!((fx - fy).abs() < 1e-4, "equal ratio: {fx} vs {fy}");
+        let (cx, cy) = centre(b);
+        assert!(
+            (cx - 150.).abs() < 1e-3 && (cy - 150.).abs() < 1e-3,
+            "{b:?}"
+        );
+        // the inverse notch restores the original box (factor 1.1 vs 1/1.1)
+        assert!(s.zoom(-1, desk(0., 0., 500., 500.)));
+        let b = s.bounds().unwrap();
+        assert!((f32::from(b.size.width) - 100.).abs() < 1e-3, "{b:?}");
+        assert!((f32::from(b.size.height) - 100.).abs() < 1e-3, "{b:?}");
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_the_ratio_and_caps_at_the_desktop() {
+        let mut s = Selection::Idle;
+        s.begin(pt(10., 10.));
+        s.end(pt(50., 30.)); // 40×20, centre (30,20) → 30px to the left edge
+        for _ in 0..40 {
+            s.zoom(1, desk(0., 0., 500., 500.));
+        }
+        let b = s.bounds().unwrap();
+        assert!((f32::from(b.size.width) / f32::from(b.size.height) - 2.).abs() < 1e-3);
+        assert!(f32::from(b.left()).abs() < 1e-3, "flush left: {b:?}");
+        assert!((f32::from(b.top())).abs() > 0., "the loose axis stops too");
+        let (cx, cy) = centre(b);
+        assert!((cx - 30.).abs() < 1e-3 && (cy - 20.).abs() < 1e-3, "{b:?}");
+        assert!(!s.zoom(1, desk(0., 0., 500., 500.)), "no growth left");
+    }
+
+    #[test]
+    fn wheel_zoom_out_floors_at_min_size() {
+        let mut s = selected();
+        for _ in 0..80 {
+            s.zoom(-1, desk(0., 0., 500., 500.));
+        }
+        let b = s.bounds().unwrap();
+        assert!((f32::from(b.size.width) - 2.).abs() < 1e-3, "{b:?}");
+        assert!((f32::from(b.size.height) - 2.).abs() < 1e-3, "{b:?}");
+        assert!(!s.zoom(-1, desk(0., 0., 500., 500.))); // further notches are no-ops
+        let (cx, cy) = centre(b);
+        assert!(
+            (cx - 150.).abs() < 1e-3 && (cy - 150.).abs() < 1e-3,
+            "{b:?}"
+        );
+    }
+
+    #[test]
+    fn wheel_zoom_only_touches_a_finalized_selection() {
+        let mut s = Selection::Idle;
+        assert!(!s.zoom(1, desk(0., 0., 500., 500.)));
+        s.begin(pt(10., 10.));
+        s.drag_to(pt(50., 50.));
+        assert!(!s.zoom(1, desk(0., 0., 500., 500.)), "mid-drag");
+        assert!(s.is_dragging());
     }
 }
