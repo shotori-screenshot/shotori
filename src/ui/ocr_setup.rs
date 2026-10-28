@@ -471,7 +471,7 @@ mod keyboard_tests {
         for key in keys.split_whitespace() {
             cx.simulate_keystrokes(key);
             cx.simulate_event(gpui_kit::KeyUpEvent {
-                keystroke: gpui_kit::Keystroke::parse(key).unwrap(),
+                keystroke: crate::actions::parse_keystroke(key).unwrap(),
             });
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);

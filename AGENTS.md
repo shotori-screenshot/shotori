@@ -123,6 +123,13 @@ libwayland-dev` (see CI).
 - **`#[cfg]` cannot hang in the middle of a method chain.** Absorb it
   with `.children(Option)` (Option is an IntoIterator) or precompute an
   `Option<AnyElement>`.
+- **Runtime keystrokes are not `&'static str`.** gpui-pre 0.3.10
+  narrowed `Keystroke::parse` and `KeyBinding::new` to literal-only and
+  dropped their OS argument, so a literal `secondary-` is now a hard
+  parse error. Runtime chords (settings.toml, the shortcut recorder, the
+  e2e injector) go through `actions::parse_keystroke` and
+  `KeyBinding::load`, which resolve `secondary-` from the host OS.
+  (`Box::leak`-ing a chord to satisfy the lifetime is the wrong fix.)
 - **Never panic through gpui's background executor.** Fallible lazy init
   (the OCR engine) returns `Result` and leaves the `OnceLock` unset so
   the next call retries; failures surface to the overlay instead of
@@ -171,7 +178,7 @@ libwayland-dev` (see CI).
   and tested there.
 - `#[gpui_kit::test]` was once unusable — its proc macro recursed
   infinitely inside `gpui_macros` and crashed rustc with SIGSEGV ("my
-  code segfaulted the compiler"). On the pinned gpui-kit 0.7 it works:
+  code segfaulted the compiler"). On the pinned gpui-kit 0.8 it works:
   ten in-tree uses drive real widgets headlessly (`src/ui/text_input.rs`,
   `src/ui/text_editor.rs`, `src/model/session.rs`). If a future bump
   makes rustc die while expanding it, that is the regression to report —

@@ -194,7 +194,15 @@ impl PreviewPanel {
     /// of the live edge. The panel never scrolls a bitmap — the strip is
     /// a viewfinder, so a step is a new slice from the engine and the
     /// "Back to live" chip restores following.
-    fn scroll_preview(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    // `gpui_kit::` spelled out: this module's own `ScrollEvent` (the
+    // capture engine's event enum, imported above) shadows the wheel
+    // event the element listener delivers.
+    fn scroll_preview(
+        &mut self,
+        event: &gpui_kit::ScrollEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let lines = match event.delta {
             ScrollDelta::Lines(lines) => lines.y,
             ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
@@ -615,7 +623,7 @@ impl Render for PreviewPanel {
             .bg(rgba(theme::c().toolbar_hover))
             .border_1()
             .border_color(rgba(alpha(theme::c().toolbar_border, 0xD0)))
-            .on_scroll_wheel(cx.listener(Self::scroll_preview));
+            .on_scroll(cx.listener(Self::scroll_preview));
 
         if let Some(image) = self.image.clone() {
             let rows = self.preview_rows.max(1) as f32;

@@ -414,7 +414,7 @@ impl Render for Overlay {
             // a tool lit: step its S/M/L size preset (issue #3). Only
             // consumed in the phase that can use it; otherwise the
             // event bubbles.
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                 if this.text_editing.is_some() {
                     cx.propagate();
                     return;

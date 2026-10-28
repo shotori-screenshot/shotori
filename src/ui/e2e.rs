@@ -25,7 +25,9 @@
 
 use gpui_kit::*;
 
-use crate::actions::{ClearAnnotations, CopySelection, OcrSelection, QuitOverlay, SaveSelection};
+use crate::actions::{
+    ClearAnnotations, CopySelection, OcrSelection, QuitOverlay, SaveSelection, parse_keystroke,
+};
 use crate::model::selection::Selection;
 use crate::ui::overlay::Overlay;
 
@@ -229,28 +231,29 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
                 return;
             }
             if let Err(error) = win.update(cx, |_, window, cx| {
-                for character in "canvas note".chars() {
-                    let key = if character == ' ' {
-                        "space".into()
-                    } else {
-                        character.to_string()
-                    };
-                    match Keystroke::parse(&key) {
+                // Every chord sent here is runtime text (characters, or
+                // key names picked at runtime), so all of them go through
+                // the same parser and the same failure report.
+                fn send(chord: &str, window: &mut Window, cx: &mut App) {
+                    match parse_keystroke(chord) {
                         Ok(key) => {
                             window.dispatch_keystroke(key, cx);
                         }
                         Err(error) => eprintln!("[shotori] text review key failed: {error}"),
                     }
                 }
-                if action == "textedit" {
-                    if let Ok(key) = Keystroke::parse("enter") {
-                        window.dispatch_keystroke(key, cx);
+                for character in "canvas note".chars() {
+                    if character == ' ' {
+                        send("space", window, cx);
+                    } else {
+                        send(&character.to_string(), window, cx);
                     }
+                }
+                if action == "textedit" {
+                    send("enter", window, cx);
                 } else if action == "textmiddle" {
                     for key in ["home", "right", "right", "right", "right", "right", "right"] {
-                        if let Ok(key) = Keystroke::parse(key) {
-                            window.dispatch_keystroke(key, cx);
-                        }
+                        send(key, window, cx);
                     }
                 }
             }) {

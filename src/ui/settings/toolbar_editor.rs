@@ -668,7 +668,7 @@ impl SettingsWindow {
             // the right domain it also normalizes any overshoot the
             // native application leaves behind before paint's own
             // clamp-writeback lands on the next frame.
-            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
                 let handle = this.preview_scroll.clone();
                 let max = handle.max_offset().x;
                 if max > px(0.) {

@@ -150,23 +150,21 @@ impl Render for PinSurface {
                                 cx.stop_propagation();
                             }),
                         )
-                        .on_scroll_wheel(cx.listener(
-                            move |this, event: &ScrollWheelEvent, _, cx| {
-                                let lines = match event.delta {
-                                    ScrollDelta::Lines(lines) => lines.y,
-                                    ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
-                                };
-                                // zoom around the cursor, not the pin's
-                                // corner — the point under the pointer
-                                // stays under the pointer
-                                let cursor = event.position + output.origin;
-                                this.board.update(cx, |board, cx| {
-                                    board.zoom_at(id, lines, cursor);
-                                    cx.notify();
-                                });
-                                cx.stop_propagation();
-                            },
-                        ))
+                        .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                            let lines = match event.delta {
+                                ScrollDelta::Lines(lines) => lines.y,
+                                ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
+                            };
+                            // zoom around the cursor, not the pin's
+                            // corner — the point under the pointer
+                            // stays under the pointer
+                            let cursor = event.position + output.origin;
+                            this.board.update(cx, |board, cx| {
+                                board.zoom_at(id, lines, cursor);
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                        }))
                         .child(
                             // probe + pixel-alignment guard: this wrapper
                             // fills the border box's CONTENT area, which

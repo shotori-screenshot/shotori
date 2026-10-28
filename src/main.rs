@@ -174,7 +174,9 @@ fn main() {
             for warning in &warnings {
                 eprintln!("[shotori] settings: {warning}");
             }
-            shotori::actions::bind_keys(cx, settings.keys());
+            shotori::actions::bind_keys(cx, settings.keys())
+                .into_iter()
+                .for_each(|id| eprintln!("[shotori] keys: {id} could not be bound"));
             // Backstop for explicit close when the overlay has no focused view.
             // Note: dispatch_action inside a window does NOT bubble up here
             // (actions stop at the focus path — measured); the overlay's own

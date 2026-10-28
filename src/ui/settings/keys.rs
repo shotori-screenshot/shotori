@@ -57,7 +57,7 @@ fn canonical_chord(keystroke: &gpui_kit::Keystroke) -> String {
 /// Human-facing chord: `"ctrl-,"` → `"Ctrl+,"`, `"alt-escape"` →
 /// `"Alt+Esc"`. Parses first so the `-` key ("ctrl--") splits right.
 fn pretty_keystroke(keystroke: &str) -> String {
-    let Ok(parsed) = gpui_kit::Keystroke::parse(keystroke) else {
+    let Ok(parsed) = crate::actions::parse_keystroke(keystroke) else {
         return keystroke.to_owned();
     };
     let m = &parsed.modifiers;

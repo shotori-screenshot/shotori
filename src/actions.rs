@@ -87,7 +87,12 @@ pub(crate) struct Nudge {
 /// resolved from the user's settings (`[keys]` overrides applied —
 /// see [`resolve_keys`]); a missing id falls back to its factory
 /// keystroke, so tests (and a truncated map) still bind every command.
-pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) {
+///
+/// Returns the ids whose chord could not be registered (an override
+/// that fails gpui's parser, or a gpui context-syntax change) so
+/// `main` can warn: a dropped binding means a command with no key at
+/// all, which is exactly the failure that must not be silent.
+pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static str> {
     // Fixed conventions, scroll panel and pins — nothing here is
     // user-visible configuration
     cx.bind_keys([
@@ -139,27 +144,61 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) {
     // init_annotation_keybindings, and the keymap resolves
     // later-registered bindings first — a user override must be able
     // to shadow a plain-key annotation binding.
-    cx.bind_keys(CONFIGURABLE_KEYS.iter().filter_map(|(id, factory)| {
-        let keystroke = keys.get(*id).map(String::as_str).unwrap_or(factory);
-        overlay_binding(id, keystroke)
-    }));
+    //
+    // Resolved into a Vec first: `KeyBinding::load` takes `&App` while
+    // `cx.bind_keys` holds the mutable borrow for the duration of the
+    // call.
+    let mut unbound: Vec<&'static str> = Vec::new();
+    let configurable: Vec<KeyBinding> = CONFIGURABLE_KEYS
+        .iter()
+        .filter_map(|(id, factory)| {
+            let keystroke = keys.get(*id).map(String::as_str).unwrap_or(factory);
+            match overlay_binding(cx, id, keystroke) {
+                Some(binding) => Some(binding),
+                None => {
+                    unbound.push(*id);
+                    None
+                }
+            }
+        })
+        .collect();
+    cx.bind_keys(configurable);
+    unbound
 }
 
 /// The action behind a configurable id — the single place ids map to
 /// dispatch targets. `None` = the id is not in [`CONFIGURABLE_KEYS`]
-/// (registry drift is pinned by `tests::registry_sync`).
-fn overlay_binding(id: &str, keystroke: &str) -> Option<KeyBinding> {
-    let ctx = Some("ShotoriOverlay");
+/// (registry drift is pinned by `tests::registry_ids_have_bindings`).
+fn overlay_action(id: &str) -> Option<Box<dyn Action>> {
     Some(match id {
-        "copy" => KeyBinding::new(keystroke, CopySelection, ctx),
-        "save" => KeyBinding::new(keystroke, SaveSelection, ctx),
-        "pin" => KeyBinding::new(keystroke, PinSelection, ctx),
-        "ocr" => KeyBinding::new(keystroke, OcrSelection, ctx),
-        "scroll" => KeyBinding::new(keystroke, ScrollSelection, ctx),
-        "select_screen" => KeyBinding::new(keystroke, SelectScreen, ctx),
-        "settings" => KeyBinding::new(keystroke, OpenSettings, ctx),
+        "copy" => Box::new(CopySelection),
+        "save" => Box::new(SaveSelection),
+        "pin" => Box::new(PinSelection),
+        "ocr" => Box::new(OcrSelection),
+        "scroll" => Box::new(ScrollSelection),
+        "select_screen" => Box::new(SelectScreen),
+        "settings" => Box::new(OpenSettings),
         _ => return None,
     })
+}
+
+/// Binds one configurable id's chord. The chord is runtime text (a
+/// settings.toml override, the recorder, or the factory literal), and
+/// gpui-pre 0.3.10 narrowed `KeyBinding::new` to `&'static str` — its
+/// `Keystroke::parse` no longer takes an OS, so a literal `secondary-`
+/// is a hard error now. `KeyBinding::load` is the dynamic entry point:
+/// it resolves `secondary-` from the host OS.
+fn overlay_binding(cx: &App, id: &str, keystroke: &str) -> Option<KeyBinding> {
+    let action = overlay_action(id)?;
+    // The context is a compile-time literal, so a parse failure means
+    // gpui changed its context syntax — drop the binding instead of
+    // registering it context-free (`tests::overlay_context_parses`
+    // fails first, which is the signal to fix it).
+    let predicate = KeyBindingContextPredicate::parse("ShotoriOverlay").ok()?;
+    // Same reasoning one level down: `resolve_keys` already rejected
+    // unparseable chords, so an error here is unreachable for shipped
+    // settings — skip rather than panic on a hand-edited file.
+    KeyBinding::load(keystroke, action, Some(predicate.into()), false, None, cx).ok()
 }
 
 /// Factory defaults as the full id → keystroke map — what a fresh
@@ -171,6 +210,31 @@ pub fn default_keys() -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The host OS gpui's chord parser resolves `secondary-` against.
+/// `Keystroke::parse_internal` special-cases only `Mac` (every other OS
+/// maps `secondary-` to `ctrl-`), so this must agree with the host on
+/// that one arm. The bindings themselves resolve through
+/// `cx.platform_info().os` (`KeyBinding::load`); this mirror exists for
+/// the validation/display paths that have no `App` (`keystroke_valid`,
+/// the recorder's pretty-print, the e2e injector).
+fn host_os() -> OperatingSystem {
+    if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else {
+        OperatingSystem::Linux
+    }
+}
+
+/// Parses a chord that is not a compile-time literal (settings.toml,
+/// the recorder, the e2e key injector). gpui-pre 0.3.10 narrowed
+/// [`Keystroke::parse`] to `&'static str` — literals keep using it,
+/// everything runtime goes through `parse_with_os` with [`host_os`].
+pub fn parse_keystroke(source: &str) -> std::result::Result<Keystroke, InvalidKeystrokeError> {
+    Keystroke::parse_with_os(source, host_os())
+}
+
 /// Whether `keystroke` is a chord a keyboard can actually produce.
 /// [`Keystroke::parse`] alone is too permissive to gate on — it
 /// accepts any tail as the key name ("oops" parses), which would let a
@@ -179,7 +243,7 @@ pub fn default_keys() -> BTreeMap<String, String> {
 /// named keys. ([`Keystroke::parse`] stays the authority on the
 /// modifier syntax; the recorder never produces garbage chords.)
 pub fn keystroke_valid(keystroke: &str) -> bool {
-    let Ok(parsed) = Keystroke::parse(keystroke) else {
+    let Ok(parsed) = parse_keystroke(keystroke) else {
         return false;
     };
     let key = parsed.key.as_str();
@@ -336,20 +400,60 @@ mod tests {
     // test-support feature, and shadowing Rust's #[test] with it
     // recurses the compiler (see the AGENTS.md note).
     use super::{
-        CONFIGURABLE_KEYS, Path, RESERVED_KEYS, default_keys, keystroke_valid, overlay_binding,
-        resolve_keys,
+        CONFIGURABLE_KEYS, Path, RESERVED_KEYS, default_keys, keystroke_valid, overlay_action,
+        overlay_binding, resolve_keys,
     };
 
     #[test]
     fn registry_ids_have_bindings() {
-        // `overlay_binding`'s match and CONFIGURABLE_KEYS must cover the
+        // `overlay_action`'s match and CONFIGURABLE_KEYS must cover the
         // same ids — this pins the sync without a runtime panic path.
         for (id, _) in CONFIGURABLE_KEYS {
             assert!(
-                overlay_binding(id, "ctrl-f1").is_some(),
+                overlay_action(id).is_some(),
                 "configurable id {id:?} has no action binding"
             );
         }
+    }
+
+    #[test]
+    fn overlay_context_parses() {
+        // `overlay_binding` derives the binding's key context from this
+        // literal; a gpui syntax change would otherwise silently unbind
+        // every configurable command.
+        assert!(gpui_kit::KeyBindingContextPredicate::parse("ShotoriOverlay").is_ok());
+    }
+
+    /// The dynamic bind path (`KeyBinding::load`, not the literal
+    /// `KeyBinding::new`) must produce bindings the keymap indexes by
+    /// action — a silent drop would leave a command with no key at all,
+    /// and no other test would notice.
+    #[gpui_kit::test]
+    fn configurable_chords_bind_through_the_dynamic_path(cx: &mut gpui_kit::TestAppContext) {
+        let keys = default_keys();
+        cx.update(|cx| {
+            let bindings: Vec<_> = CONFIGURABLE_KEYS
+                .iter()
+                .filter_map(|(id, factory)| {
+                    let keystroke = keys.get(*id).map(String::as_str).unwrap_or(factory);
+                    overlay_binding(cx, id, keystroke)
+                })
+                .collect();
+            assert_eq!(
+                bindings.len(),
+                CONFIGURABLE_KEYS.len(),
+                "every configurable id must produce a binding"
+            );
+            let keymap = gpui_kit::Keymap::new(bindings);
+            for (id, chord) in CONFIGURABLE_KEYS {
+                let action = overlay_action(id).expect("action for a configurable id");
+                assert_eq!(
+                    keymap.bindings_for_action(action.as_ref()).count(),
+                    1,
+                    "{id}: {chord} did not reach its action"
+                );
+            }
+        });
     }
 
     #[test]
