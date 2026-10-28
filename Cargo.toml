@@ -123,3 +123,14 @@ gpui-kit = { version = "0.8", default-features = false, features = ["test-suppor
 # The pin (floating image) feature lives on the `pin` branch (it needs the
 # vendored set_layer_margin patch); once upstream merges it, the branch can
 # return to main without a [patch.crates-io] section
+
+# The symbol tables cost ~26 MiB of the 105 MiB binary and nothing ships
+# a debugger for it. `strip` runs once after linking (measured 0.1 s on
+# the 105 MiB file), so compile and link times are unchanged — unlike
+# `lto` / `codegen-units = 1`, which measured at +26% cold builds and
+# +50 s per incremental relink for a 5-9% size win.
+#
+# This does not reach `cargo install` users: Cargo ignores the package's
+# own profiles when installing (rust-lang/cargo#11599).
+[profile.release]
+strip = "symbols"
