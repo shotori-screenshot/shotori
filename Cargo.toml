@@ -130,7 +130,8 @@ gpui-kit = { version = "0.8", default-features = false, features = ["test-suppor
 # `lto` / `codegen-units = 1`, which measured at +26% cold builds and
 # +50 s per incremental relink for a 5-9% size win.
 #
-# This does not reach `cargo install` users: Cargo ignores the package's
-# own profiles when installing (rust-lang/cargo#11599).
+# This reaches `cargo install` too (verified on a fresh target dir: a
+# `cargo install --locked` lands a 79 MiB binary), so crates.io users get
+# the stripped binary without passing any flag.
 [profile.release]
 strip = "symbols"
