@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_skips_passive_tools_and_resets_active_gestures_once() {
+    fn escape_clears_passive_tools_then_resets_active_gestures_once() {
         for kind in [
             ShapeKind::Text,
             ShapeKind::Select,
@@ -298,13 +298,17 @@ mod tests {
                 a.toggle(kind);
                 a.select_index(0);
             });
+            // A lit tool / armed mark consumes the FIRST Escape: the
+            // overlay must not close out from under the annotation
+            // ("Esc in annotation mode quit the screenshot" bug).
             assert!(
-                !s.escape_interaction(),
-                "passive {kind:?} must not consume Escape"
+                s.escape_interaction(),
+                "passive {kind:?} must consume the first Escape"
             );
             assert_eq!(s.annotations.tool(), None);
             assert_eq!(s.annotations.selected_index(), None);
             assert_eq!(s.annotations.committed().len(), 1);
+            assert!(!s.escape_interaction(), "second Escape must exit: {kind:?}");
         }
         for kind in [
             ShapeKind::Rectangle,

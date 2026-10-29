@@ -302,6 +302,12 @@ impl ScreenshotSession {
             return true;
         }
         self.finish_nudge();
+        // A lit tool button or an armed mark is interaction state too,
+        // even though neither has a live gesture. It must count as
+        // consumed BEFORE `finish_interaction` wipes it, otherwise Esc
+        // in annotation mode darkened the toolbar and quit the whole
+        // screenshot in one keystroke ("Esc did not leave the tool").
+        let passive = self.annotations.tool().is_some() || self.annotations.selected().is_some();
         let drawing = self.annotations.finish_interaction();
         let geometry = self.cancel_annotation();
         let dragging = self.selection.is_dragging()
@@ -310,7 +316,7 @@ impl ScreenshotSession {
         if dragging {
             self.cancel_drag();
         }
-        drawing || geometry || dragging
+        drawing || geometry || dragging || passive
     }
 
     pub(crate) fn cancel_annotation(&mut self) -> bool {
