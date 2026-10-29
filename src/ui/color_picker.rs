@@ -1,4 +1,4 @@
-//! Settings-specific color presentation over the kit's existing picker state.
+//! Shared compact color picker for settings and annotation tools.
 //! The stock picker changes a swatch's actual color on hover (lighten/darken),
 //! which clips differently for pale and dark colors. A neutral outer ring
 //! keeps the sampled color honest and gives every tile the same feedback.
@@ -12,27 +12,30 @@ use gpui_kit::component::{ActiveTheme, Sizable};
 use gpui_kit::*;
 
 #[derive(IntoElement)]
-pub(super) struct SettingsColorPicker {
+pub(super) struct ColorPicker {
     state: Entity<ColorPickerState>,
     label: SharedString,
+    selected: bool,
 }
 
-impl SettingsColorPicker {
+impl ColorPicker {
     pub(super) fn new(state: &Entity<ColorPickerState>, label: String) -> Self {
         Self {
             state: state.clone(),
             label: label.into(),
+            selected: false,
         }
+    }
+
+    pub(super) fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
     }
 
     fn swatch(&self, id: impl Into<ElementId>, color: Hsla, cx: &App) -> ColorSwatch {
         let selected = self.state.read(cx).value() == Some(color);
         let state = self.state.clone();
-        let hover = if selected {
-            cx.theme().primary
-        } else {
-            cx.theme().foreground.opacity(0.7)
-        };
+        let hover = cx.theme().foreground;
         let ring = if selected {
             cx.theme().primary
         } else {
@@ -41,20 +44,13 @@ impl SettingsColorPicker {
         ColorSwatch::new(id, color)
             .selected(selected)
             .size_6()
-            .p(rems(0.125))
-            .rounded(cx.theme().radius)
+            .flex_shrink_0()
             .border_2()
             .border_color(ring)
             .hover(move |style| style.border_color(hover))
+            .active(|style| style.border_color(cx.theme().primary))
             .focus_visible(|style| style.border_color(cx.theme().ring))
-            .child(
-                div()
-                    .size_full()
-                    .rounded_sm()
-                    .bg(color)
-                    .border_1()
-                    .border_color(cx.theme().border),
-            )
+            .child(div().size_full().bg(color))
             .on_click(move |color, _, window, cx| {
                 state.update(cx, |state, cx| state.select_color(color, window, cx));
             })
@@ -62,8 +58,7 @@ impl SettingsColorPicker {
 
     fn palette(&self, cx: &App) -> Div {
         use gpui_kit::component::theme as colors;
-        // Keep the kit's existing palette and featured colors. Only the tile
-        // presentation changes; saved and selectable colors stay the same.
+        // Match the featured row to the eleven shade columns below it.
         let scales: [fn(usize) -> Hsla; 9] = [
             colors::stone,
             colors::red,
@@ -89,32 +84,31 @@ impl SettingsColorPicker {
             t.cyan,
             t.cyan_light,
             t.magenta,
-            t.magenta_light,
         ];
-        let favorites = div().flex().gap_0p5().children(
-            featured
-                .into_iter()
-                .enumerate()
-                .map(|(index, color)| self.swatch(("featured", index), color, cx)),
-        );
+        let favorites =
+            div()
+                .flex()
+                .children(featured.into_iter().enumerate().map(|(index, color)| {
+                    self.swatch(("featured", index), color, cx)
+                        .debug_selector(move || format!("featured-{index}"))
+                }));
         let mut panel = div()
             .flex()
             .flex_col()
-            .gap_1()
             .child(favorites)
-            .child(div().my_2().border_t_1().border_color(t.border));
+            .child(div().my_3().border_t_1().border_color(t.border));
         for (row, scale) in scales.into_iter().enumerate() {
-            let line = div()
-                .flex()
-                .gap_0p5()
-                .children(shades.into_iter().enumerate().map(|(column, shade)| {
-                    self.swatch(
-                        ("palette-cell", row * shades.len() + column),
-                        scale(shade),
-                        cx,
-                    )
-                    .debug_selector(move || format!("palette-{row}-{column}"))
-                }));
+            let line =
+                div()
+                    .flex()
+                    .children(shades.into_iter().enumerate().map(|(column, shade)| {
+                        self.swatch(
+                            ("palette-cell", row * shades.len() + column),
+                            scale(shade),
+                            cx,
+                        )
+                        .debug_selector(move || format!("palette-{row}-{column}"))
+                    }));
             panel = panel.child(line);
         }
         panel
@@ -225,11 +219,14 @@ impl SettingsColorPicker {
         let state = self.state.read(cx);
         let active_tab = state.active_tab();
         let hex = state.hex_input().clone();
+        let color = state.displayed_color().unwrap_or(cx.theme().background);
         let tabs = self.state.clone();
         div()
             .flex()
             .flex_col()
             .gap_3()
+            .w(rems(16.75))
+            .p_0p5()
             .child(
                 TabBar::new("picker-mode")
                     .segmented()
@@ -254,12 +251,24 @@ impl SettingsColorPicker {
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .pt_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .size_5()
+                            .flex_shrink_0()
+                            .rounded(cx.theme().radius)
+                            .bg(color)
+                            .border_1()
+                            .border_color(cx.theme().border),
+                    )
                     .child(Input::new(&hex).small()),
             )
     }
 }
 
-impl RenderOnce for SettingsColorPicker {
+impl RenderOnce for ColorPicker {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = self.state.read(cx);
         let open = state.is_open();
@@ -268,7 +277,7 @@ impl RenderOnce for SettingsColorPicker {
         let focused = focus.is_focused(window);
         let root_state = self.state.clone();
         let popup_state = self.state.clone();
-        let id: ElementId = ("settings-color", self.state.entity_id()).into();
+        let id: ElementId = ("color-picker", self.state.entity_id()).into();
         PickerRoot::new(id)
             .open(open)
             .track_focus(&focus)
@@ -279,32 +288,23 @@ impl RenderOnce for SettingsColorPicker {
             .child(
                 Popover::new("panel")
                     .open(open)
-                    .w(rems(22.))
                     .on_open_change(move |open: &bool, _, cx| {
                         popup_state.update(cx, |state, cx| state.set_open(*open, cx))
                     })
                     .trigger(
                         Button::new("swatch-trigger")
                             .focusable(false)
-                            .size_7()
-                            .p(rems(0.125))
-                            .rounded(cx.theme().radius)
-                            .border_2()
-                            .border_color(if open || focused {
+                            .size_6()
+                            .rounded_sm()
+                            .bg(color)
+                            .border_1()
+                            .border_color(if self.selected || open || focused {
                                 cx.theme().ring
                             } else {
                                 cx.theme().transparent
                             })
-                            .hover(|s| s.border_color(cx.theme().foreground.opacity(0.7)))
-                            .focus_visible(|s| s.border_color(cx.theme().ring))
-                            .child(
-                                div()
-                                    .size_full()
-                                    .rounded_sm()
-                                    .bg(color)
-                                    .border_1()
-                                    .border_color(cx.theme().border),
-                            ),
+                            .hover(|s| s.border_color(cx.theme().foreground))
+                            .focus_visible(|s| s.border_color(cx.theme().ring)),
                     )
                     .children(open.then(|| self.content(window, cx))),
             )
@@ -313,7 +313,7 @@ impl RenderOnce for SettingsColorPicker {
 
 #[cfg(test)]
 mod tests {
-    use super::SettingsColorPicker;
+    use super::ColorPicker;
     use gpui_kit::base::ColorPickerState;
     use gpui_kit::component::{Root, theme};
     use gpui_kit::{
@@ -328,27 +328,13 @@ mod tests {
 
     impl Render for PickerFixture {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let picker = SettingsColorPicker::new(&self.state, "Accent".into());
+            let picker = ColorPicker::new(&self.state, "Accent".into());
             if self.palette_only {
                 picker.palette(cx).into_any_element()
             } else {
                 picker.render(window, cx).into_any_element()
             }
         }
-    }
-
-    #[gpui_kit::test]
-    fn editor_surfaces_are_opaque_even_when_screenshot_chips_are_translucent(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(|cx| {
-            gpui_kit::base::init(cx);
-            gpui_kit::component::init(cx);
-            crate::ui::settings::sync_shell_palette(cx);
-            let theme = gpui_kit::component::Theme::global(cx);
-            assert_eq!(theme.background.a, 1.);
-            assert_eq!(theme.popover.a, 1.);
-        });
     }
 
     #[gpui_kit::test]
@@ -365,6 +351,25 @@ mod tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
+        for (featured_selector, shade_selectors) in [
+            ("featured-0", ["palette-0-0", "palette-4-0", "palette-8-0"]),
+            ("featured-5", ["palette-0-5", "palette-4-5", "palette-8-5"]),
+            (
+                "featured-10",
+                ["palette-0-10", "palette-4-10", "palette-8-10"],
+            ),
+        ] {
+            let featured = cx
+                .debug_bounds(featured_selector)
+                .expect("featured tile should render");
+            assert_eq!(featured.size.width, featured.size.height);
+            for selector in shade_selectors {
+                let shade = cx.debug_bounds(selector).expect("shade tile should render");
+                assert_eq!(shade.size, featured.size);
+                assert_eq!(shade.origin.x, featured.origin.x);
+            }
+        }
+        assert!(cx.debug_bounds("featured-11").is_none());
         let before = cx.update(|_, cx| view.read(cx).state.read(cx).value());
         for selector in ["palette-0-0", "palette-0-10", "palette-1-5"] {
             let bounds = cx

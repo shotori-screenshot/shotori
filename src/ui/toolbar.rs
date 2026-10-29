@@ -13,13 +13,12 @@ use gpui_kit::{
         Button,
         slider::{Slider, SliderIndicator, SliderState, SliderThumb, SliderTrack},
     },
-    component::Sizable,
-    component::color_picker::{ColorPicker, ColorPickerState},
+    component::color_picker::ColorPickerState,
     *,
 };
 
 use crate::model::session::ScreenshotSession;
-use crate::ui::theme;
+use crate::ui::{color_picker::ColorPicker, theme};
 
 use crate::actions::{
     ClearAnnotations, CopySelection, OcrSelection, PinSelection, QuitOverlay, SaveSelection,

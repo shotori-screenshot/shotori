@@ -697,7 +697,25 @@ use shell::resize_handles;
 mod about;
 mod advanced;
 mod appearance;
-mod color_picker;
 mod keys;
 mod ocr;
 mod toolbar_editor;
+
+#[cfg(test)]
+mod color_surface_tests {
+    use gpui_kit::TestAppContext;
+
+    #[gpui_kit::test]
+    fn editor_surfaces_are_opaque_even_when_screenshot_chips_are_translucent(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::ui::settings::sync_shell_palette(cx);
+            let theme = gpui_kit::component::Theme::global(cx);
+            assert_eq!(theme.background.a, 1.);
+            assert_eq!(theme.popover.a, 1.);
+        });
+    }
+}

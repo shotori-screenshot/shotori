@@ -1,7 +1,7 @@
 //! Screenshot palette previews and advanced appearance controls. Changes are
 //! applied to captures and written through immediately to theme.toml.
 
-use super::color_picker::SettingsColorPicker;
+use crate::ui::color_picker::ColorPicker;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
@@ -150,7 +150,7 @@ impl SettingsWindow {
                     .gap_2()
                     .min_w_0()
                     .py_1()
-                    .child(SettingsColorPicker::new(state, key.label().into_owned()))
+                    .child(ColorPicker::new(state, key.label().into_owned()))
                     .child(
                         div()
                             .text_sm()

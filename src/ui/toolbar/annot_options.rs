@@ -154,25 +154,13 @@ pub(super) fn annot_options(
             // `swatch_picker`). Non-selected swatches stay
             // plain one-click selectors, so "pick a color" and
             // "edit a color" never fight over the same click.
-            // The wrap carries the SELECTED affordance (accent
-            // ring + selected surface, same vocabulary as a
-            // lit control) — the picker's own trigger has no
-            // selected state, and without the ring the active
-            // cell reads as just another swatch
-            // (user-reported).
-            options =
-                options.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .rounded(px(5.))
-                        .border_1()
-                        .border_color(rgba(theme::c().accent))
-                        .bg(rgba(theme::c().toolbar_selected))
-                        .child(ColorPicker::new(picker).small().accessibility_label(
-                            crate::i18n::t!("toolbar.color_edit_aria", name = name),
-                        )),
-                );
+            options = options.child(
+                ColorPicker::new(
+                    picker,
+                    crate::i18n::t!("toolbar.color_edit_aria", name = name).to_string(),
+                )
+                .selected(true),
+            );
             continue;
         }
         let session = session.clone();

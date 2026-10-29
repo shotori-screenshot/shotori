@@ -22,6 +22,7 @@
 //! - [`theme`]: visual constants
 //! - [`image_util`]: RGBA → RenderImage (the BGRA contract)
 
+pub(crate) mod color_picker;
 pub mod e2e;
 pub mod hud;
 pub mod image_util;
