@@ -25,6 +25,13 @@ pub(super) enum HistoryEntry {
         before: Shape,
         after: Shape,
     },
+    /// One gesture that moved or restyled several shapes at once (a
+    /// multi-selection drag, a batch style edit): undo restores every
+    /// snapshot as ONE step, so the selection the user built does not
+    /// come back half-undone.
+    EditMany {
+        edits: Vec<ShapeEdit>,
+    },
     /// A mid-sequence removal (the Delete key): undo re-inserts at the
     /// same index. Indices in older entries stay valid because the
     /// stack unwinds in reverse order — each entry's index matches the
@@ -53,6 +60,9 @@ pub(super) enum HistoryEntry {
     },
 }
 
+/// One shape's pre/post snapshot inside a multi-shape edit.
+pub(super) type ShapeEdit = (usize, Shape, Shape);
+
 impl Annotations {
     /// Append a placed mark, invalidate redo, and leave it unselected
     /// — unless the auto-select switch is on, in which case the fresh
@@ -62,7 +72,11 @@ impl Annotations {
         self.shapes.push(shape.clone());
         self.history.push(HistoryEntry::Add(shape));
         self.redo.clear();
-        self.selected = self.auto_select.then(|| self.shapes.len() - 1);
+        self.selected = if self.auto_select {
+            vec![self.shapes.len() - 1]
+        } else {
+            Vec::new()
+        };
     }
 
     /// The stroke eraser records its whole sweep as one entry:
@@ -72,7 +86,7 @@ impl Annotations {
         if removed.is_empty() {
             return false;
         }
-        self.selected = None; // indices shift below
+        self.selected.clear(); // indices shift below
         match self.history.last_mut() {
             Some(HistoryEntry::RemoveMany { removals }) if self.eraser_entry_open => {
                 removals.extend(removed);
@@ -105,7 +119,7 @@ impl Annotations {
             return effect;
         }
         self.pressed = false;
-        self.selected = None;
+        self.selected.clear();
         if self.draft.take().is_some() {
             return effect;
         }
@@ -120,6 +134,13 @@ impl Annotations {
                 HistoryEntry::Edit { ix, before, .. } => {
                     if let Some(shape) = self.shapes.get_mut(*ix) {
                         *shape = before.clone();
+                    }
+                }
+                HistoryEntry::EditMany { edits } => {
+                    for (ix, before, _) in edits.iter() {
+                        if let Some(shape) = self.shapes.get_mut(*ix) {
+                            *shape = before.clone();
+                        }
                     }
                 }
                 HistoryEntry::Remove { ix, shape } => {
@@ -149,9 +170,9 @@ impl Annotations {
         }
         // Mirror undo(): any shape mutation invalidates the selected
         // index. Remove/RemoveAll shift or clear the list, and a stale
-        // Some(ix) here is a user-reachable OOB (delete → undo →
+        // index here is a user-reachable OOB (delete → undo →
         // re-select → redo → wheel over canvas).
-        self.selected = None;
+        self.selected.clear();
         // Unlike undo(), a live draft blocks redo entirely: there is
         // nothing meaningful to redo mid-stroke, and cancelling the
         // user's in-flight gesture as a side effect of Ctrl+Y would be
@@ -169,6 +190,13 @@ impl Annotations {
                 HistoryEntry::Edit { ix, after, .. } => {
                     if let Some(shape) = self.shapes.get_mut(*ix) {
                         *shape = after.clone();
+                    }
+                }
+                HistoryEntry::EditMany { edits } => {
+                    for (ix, _, after) in edits.iter() {
+                        if let Some(shape) = self.shapes.get_mut(*ix) {
+                            *shape = after.clone();
+                        }
                     }
                 }
                 HistoryEntry::Remove { ix, .. } => {

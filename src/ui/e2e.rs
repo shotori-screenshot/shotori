@@ -91,12 +91,12 @@ pub(crate) fn debug_editing_scene(
     let local = |x, y| p(x, y) - origin;
     session.pointer_move(output, local(180., 66.), false);
     if scene == "selected" {
-        session.pointer_down(output, local(180., 66.), false);
+        session.pointer_down(output, local(180., 66.), false, false);
         session.pointer_up(output, local(180., 66.), false);
         session.nudge(point(px(10.), px(10.)));
         session.finish_nudge();
     } else if scene == "reselect" || scene == "cancel" {
-        session.pointer_down(output, local(-60., -60.), false);
+        session.pointer_down(output, local(-60., -60.), false, false);
         session.pointer_move(output, local(100., 100.), false);
         if scene == "cancel" {
             session.cancel_annotation();

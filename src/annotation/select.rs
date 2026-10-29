@@ -5,6 +5,7 @@
 //! the geometry probes and the `selected` slot on [`Annotations`];
 //! the pointer-level state machine (click vs. draw-through) lives in
 //! the session, which drives these APIs.
+use super::history::ShapeEdit;
 use super::{Annotations, HistoryEntry, Shape, ShapeKind, line};
 use gpui_kit::{Bounds, Pixels, Point, point, px, size};
 
@@ -62,52 +63,148 @@ impl Annotations {
             return None;
         }
         let ix = self.hit_test(p)?;
-        Some(if self.selected_index() == Some(ix) {
+        Some(if self.is_selected(ix) {
             ShapeHover::Move
         } else {
             ShapeHover::Pick
         })
     }
 
-    /// Select a shape by index (the click-select path); no-op when the
-    /// index no longer exists.
+    /// Every shape whose selection frame intersects `rect` — the
+    /// marquee's batch pick, in list order (bottom to top), so the
+    /// last entry handed to [`select_indices`] is the topmost shape
+    /// and takes primary — the same priority a click has.
+    pub(crate) fn shapes_in(&self, rect: Bounds<Pixels>) -> Vec<usize> {
+        self.shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, shape)| {
+                let b = shape.selection_box();
+                b.origin.x < rect.right()
+                    && b.right() > rect.left()
+                    && b.origin.y < rect.bottom()
+                    && b.bottom() > rect.top()
+            })
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    /// Select a shape by index (the plain click-select path): replaces
+    /// the whole selection. No-op when the index no longer exists.
     pub(crate) fn select_index(&mut self, ix: usize) -> bool {
         if self.shapes.get(ix).is_some() {
-            self.selected = Some(ix);
+            self.selected.clear();
+            self.selected.push(ix);
             true
         } else {
             false
         }
     }
 
-    pub(crate) fn deselect(&mut self) {
-        self.selected = None;
+    /// Shift+click: add `ix` to the selection, or drop it when it is
+    /// already in (the conventional toggle). Dropping the primary
+    /// hands primary to whatever was selected before it, so a
+    /// multi-selection keeps a meaningful edit target.
+    pub(crate) fn toggle_index(&mut self, ix: usize) -> bool {
+        if self.shapes.get(ix).is_none() {
+            return false;
+        }
+        match self.selected.iter().position(|sel| *sel == ix) {
+            Some(pos) => {
+                self.selected.remove(pos);
+            }
+            None => self.selected.push(ix),
+        }
+        true
     }
 
-    /// Remove the selected shape (the Delete/Backspace path). Records
-    /// a Remove entry so undo re-inserts at the same index; drops the
-    /// selection because indices shift after a mid-sequence removal.
-    /// Delegates to delete_shape so Remove-entry semantics live in one
-    /// place.
-    pub(crate) fn delete_selected(&mut self) -> bool {
-        // selected_index() is bounds-checked, so delete_shape's guard
-        // cannot fail here.
-        match self.selected_index() {
-            Some(ix) => {
-                self.delete_shape(ix);
-                true
+    /// Replace the selection with `ixs` (the marquee path). Unknown
+    /// indices are dropped and duplicates collapse onto their first
+    /// occurrence; the LAST survivor becomes primary, so passing the
+    /// hit order through hands the primary to the topmost shape.
+    pub(crate) fn select_indices(&mut self, ixs: impl IntoIterator<Item = usize>) {
+        let mut kept: Vec<usize> = Vec::new();
+        for ix in ixs {
+            if self.shapes.get(ix).is_some() && !kept.contains(&ix) {
+                kept.push(ix);
             }
-            None => false,
         }
+        self.selected = kept;
+    }
+
+    pub(crate) fn deselect(&mut self) {
+        self.selected.clear();
+    }
+
+    /// Remove every selected shape (the Delete/Backspace path). One
+    /// history entry restores the whole batch — the deletion records
+    /// each shape's index at the moment it left, so undo re-inserts
+    /// them in reverse and redo re-takes them in order. The selection
+    /// drops because indices shift after mid-sequence removals.
+    pub(crate) fn delete_selected(&mut self) -> bool {
+        let mut ixs: Vec<usize> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|ix| self.shapes.get(*ix).is_some())
+            .collect();
+        if ixs.is_empty() {
+            return false;
+        }
+        ixs.sort_unstable();
+        ixs.dedup();
+        self.selected.clear();
+        self.text_original = None;
+        if ixs.len() == 1 {
+            self.delete_shape(ixs[0]);
+            return true;
+        }
+        let mut removals = Vec::with_capacity(ixs.len());
+        // highest index first: every earlier index stays valid while
+        // the batch unwinds, and `removals` is in gesture order
+        for ix in ixs.into_iter().rev() {
+            let shape = self.shapes.remove(ix);
+            removals.push((ix, shape));
+        }
+        self.history.push(HistoryEntry::RemoveMany { removals });
+        self.redo.clear();
+        true
     }
 
     pub(crate) fn selected(&self) -> Option<&Shape> {
-        self.selected.and_then(|ix| self.shapes.get(ix))
+        self.selected_index().and_then(|ix| self.shapes.get(ix))
     }
 
-    /// The selected shape's index (valid or None).
+    /// The primary selected shape's index (valid or None): the last
+    /// entry of the selection order — the shape the newest gesture
+    /// added, which owns the handles and the style editors.
     pub(crate) fn selected_index(&self) -> Option<usize> {
-        self.selected.filter(|ix| self.shapes.get(*ix).is_some())
+        self.selected
+            .last()
+            .copied()
+            .filter(|ix| self.shapes.get(*ix).is_some())
+    }
+
+    /// Every selected index, primary last.
+    pub(crate) fn selected_indices(&self) -> &[usize] {
+        &self.selected
+    }
+
+    /// The selected shapes in selection order (primary last), skipping
+    /// indices whose shape has gone away.
+    pub(crate) fn selected_shapes(&self) -> Vec<&Shape> {
+        self.selected
+            .iter()
+            .filter_map(|ix| self.shapes.get(*ix))
+            .collect()
+    }
+
+    pub(crate) fn is_selected(&self, ix: usize) -> bool {
+        self.selected.contains(&ix)
+    }
+
+    pub(crate) fn selected_count(&self) -> usize {
+        self.selected.len()
     }
 
     /// The size the wheel/slider edit right now: the selected shape's
@@ -199,6 +296,15 @@ impl Annotations {
         }
     }
 
+    /// The whole-selection variant of [`place_shape`]: every shape
+    /// follows the same delta, each re-derived from its own press
+    /// snapshot.
+    pub(crate) fn place_shapes(&mut self, before: &[(usize, Shape)], delta: Point<Pixels>) {
+        for (ix, shape) in before {
+            self.place_shape(*ix, shape, delta);
+        }
+    }
+
     /// Re-derive shape `ix` from the press snapshot with handle
     /// `anchor` placed at `p` — snapshot semantics like [`place_shape`].
     pub(crate) fn place_handle(
@@ -218,17 +324,30 @@ impl Annotations {
     /// (before → current) so undo restores the pre-drag state. No
     /// entry when nothing changed.
     pub(crate) fn commit_move(&mut self, ix: usize, before: Shape) {
-        let Some(after) = self.shapes.get(ix) else {
-            return;
-        };
-        if after != &before {
-            self.history.push(HistoryEntry::Edit {
-                ix,
-                before,
-                after: after.clone(),
-            });
-            self.redo.clear();
+        self.commit_moves(&[(ix, before)]);
+    }
+
+    /// Commit a whole selection's drag as ONE history step: a single
+    /// `Edit` when only one shape moved, `EditMany` otherwise.
+    pub(crate) fn commit_moves(&mut self, before: &[(usize, Shape)]) {
+        let mut edits: Vec<ShapeEdit> = Vec::new();
+        for (ix, before) in before {
+            let Some(after) = self.shapes.get(*ix) else {
+                continue;
+            };
+            if after != before {
+                edits.push((*ix, before.clone(), after.clone()));
+            }
         }
+        match edits.len() {
+            0 => return,
+            1 => {
+                let (ix, before, after) = edits.remove(0);
+                self.history.push(HistoryEntry::Edit { ix, before, after });
+            }
+            _ => self.history.push(HistoryEntry::EditMany { edits }),
+        }
+        self.redo.clear();
     }
 
     /// Step the selected badge's VALUE ±1 — the wheel over a selected

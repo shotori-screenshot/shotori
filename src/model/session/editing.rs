@@ -268,7 +268,7 @@ mod tests {
         session.begin("screen", p(40., 40.));
         session.end("screen", p(240., 220.));
         session.edit_annotations(|a| a.toggle(ShapeKind::Rectangle));
-        session.pointer_down("screen", p(80., 80.), false);
+        session.pointer_down("screen", p(80., 80.), false, false);
         session.pointer_up("screen", p(140., 130.), false);
         session.edit_annotations(|a| a.toggle(ShapeKind::Select));
         session
@@ -324,7 +324,7 @@ mod tests {
                 a.finish_interaction();
                 a.toggle(kind);
             });
-            s.pointer_down("screen", p(80., 100.), false);
+            s.pointer_down("screen", p(80., 100.), false, false);
             s.pointer_move("screen", p(110., 110.), false);
             assert!(s.escape_interaction(), "active {kind:?}");
             assert!(!s.escape_interaction(), "second Escape must exit: {kind:?}");
@@ -345,13 +345,13 @@ mod tests {
         s.toolbar_pos = Some(p(15., 250.));
         s.undo();
         assert!(s.annotations.committed().is_empty());
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         assert_eq!(s.selection.bounds(), Some(original));
         s.pointer_up("screen", p(302., 101.), false);
         assert_eq!(s.selection.bounds(), Some(original));
         s.redo();
         assert_eq!(s.annotations.committed(), marks);
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         s.pointer_move("screen", p(360., 160.), false);
         assert!(s.selection.is_dragging());
         assert_eq!(s.annotations.committed(), marks);
@@ -380,7 +380,7 @@ mod tests {
         });
         let original = s.selection.bounds().unwrap();
         s.toolbar_pos = Some(p(15., 250.));
-        s.pointer_down("second", p(30., 40.), false);
+        s.pointer_down("second", p(30., 40.), false, false);
         s.pointer_move("second", p(100., 140.), false);
         assert!(s.active_on("second"));
         assert!(s.cancel_annotation());
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(s.toolbar_pos, Some(p(15., 250.)));
         assert_eq!(s.selection.bounds(), Some(original));
         assert_eq!(s.annotations.committed().len(), 1);
-        s.pointer_down("second", p(30., 40.), false);
+        s.pointer_down("second", p(30., 40.), false, false);
         s.pointer_up("second", p(100., 140.), false);
         assert!(s.active_on("second"));
         s.undo();
@@ -401,7 +401,7 @@ mod tests {
         let mut s = session();
         let original = s.selection.bounds().unwrap();
         let marks = s.annotations.committed().to_vec();
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         s.pointer_up("screen", p(380., 180.), false);
         let reselected = s.selection.bounds().unwrap();
         assert_eq!(
@@ -410,7 +410,7 @@ mod tests {
         );
         assert_eq!(s.annotations.committed(), marks);
         s.edit_annotations(|a| a.toggle(ShapeKind::Number));
-        s.pointer_down("screen", p(340., 140.), false);
+        s.pointer_down("screen", p(340., 140.), false, false);
         s.pointer_up("screen", p(340., 140.), false);
         assert_eq!(s.annotations.committed().len(), 2);
         s.undo();
@@ -445,16 +445,19 @@ mod tests {
     #[test]
     fn moving_and_resizing_crop_keep_marks_and_record_one_step_per_drag() {
         let mut s = session();
+        // The select tool sweeps a marquee on blank canvas, so region
+        // editing needs it off — that is the "no tool" path.
+        s.edit_annotations(|a| a.toggle(ShapeKind::Select));
         let original = s.selection.bounds().unwrap();
         let marks = s.annotations.committed().to_vec();
-        s.pointer_down("screen", p(190., 180.), false);
+        s.pointer_down("screen", p(190., 180.), false, false);
         for x in [200., 210., 220.] {
             s.pointer_move("screen", p(x, 190.), false);
         }
         s.pointer_up("screen", p(230., 200.), false);
         let moved = s.selection.bounds().unwrap();
         assert_eq!(moved.origin, original.origin + p(40., 20.));
-        s.pointer_down("screen", moved.bottom_right(), false);
+        s.pointer_down("screen", moved.bottom_right(), false, false);
         s.pointer_up("screen", moved.bottom_right() + p(20., 30.), false);
         let resized = s.selection.bounds().unwrap();
         assert_eq!(resized.size, moved.size + size(px(20.), px(30.)));
@@ -475,8 +478,9 @@ mod tests {
     #[test]
     fn undo_cancels_active_crop_edit_before_touching_history() {
         let mut s = session();
+        s.edit_annotations(|a| a.toggle(ShapeKind::Select));
         let original = s.selection.bounds().unwrap();
-        s.pointer_down("screen", p(190., 180.), false);
+        s.pointer_down("screen", p(190., 180.), false, false);
         s.pointer_move("screen", p(210., 195.), false);
         s.undo();
         assert_eq!(s.selection.bounds(), Some(original));
@@ -530,7 +534,7 @@ mod tests {
     fn freehand_movement_clamps_the_whole_stroke_and_undo_restores_every_point() {
         let mut s = session();
         s.edit_annotations(|a| a.toggle(ShapeKind::Pencil));
-        s.pointer_down("screen", p(100., 160.), false);
+        s.pointer_down("screen", p(100., 160.), false, false);
         s.pointer_move("screen", p(150., 175.), false);
         s.pointer_up("screen", p(200., 190.), false);
         s.edit_annotations(|a| {
@@ -601,7 +605,7 @@ mod tests {
         s.pointer_move("screen", p(110., 76.), false);
         assert_eq!(s.hovered_annotation(), Some(0));
         assert!(s.annotation_hover_bounds("screen").is_some());
-        s.pointer_down("screen", p(110., 76.), false);
+        s.pointer_down("screen", p(110., 76.), false, false);
         s.pointer_up("screen", p(110., 76.), false);
         assert_eq!(s.annotations.selected_index(), Some(0));
         assert_eq!(s.hovered_annotation(), None);
@@ -645,7 +649,7 @@ mod tests {
         let mut s = session();
         assert!(!s.zoom_selection(0));
         // a drag in flight owns the pointer gesture: the wheel is inert
-        s.pointer_down("screen", p(300., 250.), false);
+        s.pointer_down("screen", p(300., 250.), false, false);
         s.pointer_move("screen", p(350., 280.), false);
         assert!(!s.zoom_selection(1));
         s.pointer_up("screen", p(350., 280.), false);

@@ -14,7 +14,7 @@ use crate::actions::{
 use crate::model::placement::round_px;
 use crate::ui::hud::{
     annotation_chrome, annotation_hover_chrome, eraser_chrome, hover_outline, magnifier_loupe,
-    selection_backdrop, selection_handles, selection_label,
+    marquee_chrome, selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::toolbar::selection_toolbar;
 use gpui_kit::*;
@@ -124,12 +124,13 @@ impl Render for Overlay {
             .backdrop_bounds(&self.capture.output_name)
             .map(round_px);
         let hover = shared.hover_bounds(&self.capture.output_name).map(round_px);
-        let selected_shape =
+        let selected_shapes =
             if self.text_editing.is_none() && shared.annotations().editing_text().is_none() {
-                shared.selected_shape_local(&self.capture.output_name)
+                shared.selected_shapes_local(&self.capture.output_name)
             } else {
-                None
+                Vec::new()
             };
+        let marquee = shared.marquee_bounds_local(&self.capture.output_name);
         let annotation_hover = shared.annotation_hover_bounds(&self.capture.output_name);
         let raster_preview = shared.uses_raster_preview();
         let shapes = if raster_preview {
@@ -630,7 +631,10 @@ impl Render for Overlay {
             // ①½ Annotation selection chrome (stroke + handles),
             // above the marks, below the selection border.
             .children(annotation_hover.map(annotation_hover_chrome))
-            .child(annotation_chrome(selected_shape))
+            .child(annotation_chrome(selected_shapes))
+            // ①⅝ Marquee in flight: the drag-selection rectangle, above
+            // the marks it sweeps and below the selection border.
+            .children(marquee.map(marquee_chrome))
             // ①¾ Eraser chrome (issue #14): the brush ring / the area
             // rect — pointer affordances, above the marks they erase.
             .children(eraser.map(eraser_chrome))
@@ -824,6 +828,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             &this.capture.output_name,
                             event.position,
                             event.modifiers.alt,
+                            event.modifiers.shift,
                         );
                         cx.notify(); // repaint re-derives the cursor in render
                     });

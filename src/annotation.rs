@@ -270,9 +270,12 @@ pub(crate) struct Annotations {
     /// gesture and extends with each removal; cleared when the
     /// gesture ends (see `commit_removals`).
     eraser_entry_open: bool,
-    /// Index into `shapes` of the currently selected annotation, if any.
-    /// Editing actions (wheel size stepping, later drags) target it.
-    selected: Option<usize>,
+    /// Indices into `shapes` of the selected annotations, in selection
+    /// order: the LAST one is primary — editing actions (text/number
+    /// editing, wheel size stepping, handle drags) target it, and only
+    /// it paints resize handles. A plain click leaves one entry here;
+    /// a marquee or a Shift+click builds a multi-selection.
+    selected: Vec<usize>,
     /// Whether a placed mark selects itself on release (the settings
     /// switch; default off — the 2026-10-06 flip made selection the
     /// select tool's exclusive job, and this flag only opts back in).
@@ -312,7 +315,7 @@ impl Default for Annotations {
             pressed: false,
             eraser: None,
             eraser_entry_open: false,
-            selected: None,
+            selected: Vec::new(),
             auto_select: false,
             text_original: None,
             size_drag_active: false,
@@ -524,7 +527,7 @@ impl Annotations {
     pub(crate) fn toggle(&mut self, kind: ShapeKind) {
         self.draft = None;
         self.pressed = false;
-        self.selected = None;
+        self.selected.clear();
         // a keyboard shortcut can switch tools mid-gesture; the sweep
         // must stop with it (a stale gesture would keep erasing under
         // the next tool's pointer moves)
@@ -587,11 +590,15 @@ impl Annotations {
     /// edit); otherwise it steps the active tool's size — the value the
     /// NEXT stroke will take. Continuous within the tool's [`SizeSpec`].
     pub(crate) fn step_size(&mut self, up: bool) -> bool {
-        // invariant: `selected` is a valid index or None — every path
+        // invariant: every index in `selected` is valid — every path
         // that mutates `shapes` (undo/redo/reset/record_add) or leaves
-        // edit mode (begin/toggle) clears it
-        debug_assert!(self.selected.is_none_or(|ix| self.shapes.get(ix).is_some()));
-        if let Some(ix) = self.selected {
+        // edit mode (begin/toggle) clears the list
+        debug_assert!(
+            self.selected
+                .iter()
+                .all(|ix| self.shapes.get(*ix).is_some())
+        );
+        if let Some(ix) = self.selected_index() {
             // The wheel over a selected NUMBER tunes its value (issue
             // #2's quick nudge — diameter stays with the slider);
             // every other kind steps its size as before.
@@ -627,7 +634,7 @@ impl Annotations {
         self.eraser = None;
         self.eraser_entry_open = false;
         self.tool = None;
-        self.selected = None;
+        self.selected.clear();
     }
 
     pub(crate) fn visible(&self) -> impl Iterator<Item = &Shape> + '_ {
@@ -647,7 +654,7 @@ impl Annotations {
         };
         self.text_original = Some((ix, shape.clone()));
         self.end_size_drag();
-        self.selected = Some(ix);
+        self.selected = vec![ix];
         true
     }
 
@@ -731,7 +738,7 @@ impl Annotations {
                 self.history.push(HistoryEntry::Edit { ix, before, after });
                 self.redo.clear();
             }
-            self.selected = Some(ix);
+            self.selected = vec![ix];
         }
     }
 
@@ -740,7 +747,7 @@ impl Annotations {
             let shape = self.shapes.remove(ix);
             self.history.push(HistoryEntry::Remove { ix, shape });
             self.redo.clear();
-            self.selected = None;
+            self.selected.clear();
         }
     }
 
@@ -758,7 +765,7 @@ impl Annotations {
         }
         self.draft = None;
         self.pressed = false;
-        self.selected = None;
+        self.selected.clear();
         self.text_original = None;
         self.size_drag_active = false;
         self.eraser = None;

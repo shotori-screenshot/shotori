@@ -305,6 +305,12 @@ impl Overlay {
                 {
                     return match crate::model::selection::press_target(bounds, global) {
                         PressTarget::Handle(h) => handle_cursor(h),
+                        // under the select tool the interior's press is
+                        // a marquee, not a region move — a grab hand
+                        // there promises a drag the app does not do
+                        PressTarget::Interior if session.annotations().parks_click_select() => {
+                            CursorStyle::Crosshair
+                        }
                         PressTarget::Interior => CursorStyle::OpenHand,
                         PressTarget::Outside => CursorStyle::Crosshair,
                     };
