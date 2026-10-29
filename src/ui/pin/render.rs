@@ -12,7 +12,14 @@ impl Render for PinSurface {
         // glow only while this surface holds keyboard focus (a focused pin
         // is the one Esc/keys address; an unfocused one is just desktop
         // furniture and must not glare).
+        //
+        // TWO gates, because a surface hosts EVERY pin on its output: the
+        // window-level `is_window_active` alone made one focused pin light
+        // up all the others sharing the surface. The per-pin gate is
+        // `selected_id` — the menu's pin, else the topmost one, i.e. the
+        // pin the keyboard and Esc actually address.
         let active = window.is_window_active();
+        let focused = board.read(cx).selected_id();
         let menu = board
             .read(cx)
             .menu
@@ -112,7 +119,7 @@ impl Render for PinSurface {
                         // shadows are painted before the element's own
                         // content mask (Style::paint), so the overflow_hidden
                         // above does not clip them.
-                        .shadow(if active {
+                        .shadow(if active && focused == Some(id) {
                             vec![
                                 BoxShadow::new(
                                     px(0.),
