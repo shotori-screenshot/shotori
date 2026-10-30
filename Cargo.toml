@@ -10,7 +10,7 @@ perf = []
 
 [package]
 name = "shotori"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 description = "Shotori — Wayland-native screenshot tool: select, annotate, pin, long-capture scrolling pages, with on-device OCR (gpui-kit UI)"
 license = "MIT"

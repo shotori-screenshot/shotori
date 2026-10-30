@@ -60,9 +60,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           ARTIFACTS=$(ls shotori-*.tar.gz)
-          gh release create "${GITHUB_REF_NAME}" $ARTIFACTS \
-            --title "shotori ${GITHUB_REF_NAME}" \
-            --generate-notes
+          NOTES="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES" ]; then
+            gh release create "${GITHUB_REF_NAME}" $ARTIFACTS \
+              --title "shotori ${GITHUB_REF_NAME}" --notes-file "$NOTES"
+          else
+            gh release create "${GITHUB_REF_NAME}" $ARTIFACTS \
+              --title "shotori ${GITHUB_REF_NAME}" --generate-notes
+          fi
 
   aur:
     # Bump the AUR package (pkgver + sha256) and push via the release key.
