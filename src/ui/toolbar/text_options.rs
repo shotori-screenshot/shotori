@@ -332,6 +332,7 @@ impl RenderOnce for TextOptions {
         let font = controls.font.clone();
         row = row.child(
             Select::new(&font)
+                .id("text-font")
                 .small()
                 .w_40()
                 .menu_width(rems(16.))

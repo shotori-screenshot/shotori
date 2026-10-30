@@ -1583,6 +1583,185 @@ fn text_overflow_notice_and_escape_keep_the_visible_prefix(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1200;
+        capture.height = 700;
+        capture.rgba = vec![255; 1200 * 700 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1200.), px(700.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_down(
+            point(px(20.), px(20.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(1150.), px(500.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let text = cx.debug_bounds("tb-text").unwrap();
+        cx.simulate_click(text.center(), Default::default());
+        cx.simulate_click(point(px(80.), px(80.)), Default::default());
+        cx.run_until_parked();
+        cx.simulate_input("Editable annotation");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(point(px(100.), px(90.)), Default::default());
+        cx.update(|_, cx| {
+            assert_eq!(session.read(cx).annotations().tool(), None);
+            assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+        });
+        let original = cx.update(|_, cx| session.read(cx).annotations().committed()[0].clone());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let font = cx.update(|window, _| {
+            gpui_kit::base::test_support::find(window, &[], &"text-font".into())
+                .expect("font selector is visible")
+                .bounds()
+        });
+        cx.simulate_click(font.center(), Default::default());
+        cx.update(|window, cx| {
+            assert!(gpui_kit::base::GlobalState::is_in_deferred_context(cx));
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(
+                gpui_kit::base::test_support::find(window, &[], &"text-font".into())
+                    .unwrap()
+                    .expanded(),
+                Some(false)
+            );
+            assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+            assert_eq!(session.read(cx).annotations().committed()[0], original);
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_click(font.center(), Default::default());
+        let family = crate::annotation::text::families()[0].clone();
+        cx.simulate_input(&family);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        let choice = cx.update(|window, cx| {
+            use gpui_kit::component::ActiveTheme;
+            window.draw(cx).clear(cx);
+            let color = *cx.theme().tokens.accent;
+            let choices = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| {
+                    let Some(mut fill) = quad.background.as_solid() else {
+                        return false;
+                    };
+                    fill.a = color.a;
+                    fill == color && quad.bounds.size.width.0 > 100.
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(choices.len(), 1, "one highlighted font result");
+            let center = choices[0].bounds.center();
+            point(px(center.x.0), px(center.y.0)) / window.scale_factor()
+        });
+        cx.simulate_event(gpui_kit::ScrollEvent {
+            position: choice,
+            delta: gpui_kit::ScrollDelta::Lines(point(0., -1.)),
+            ..Default::default()
+        });
+        cx.simulate_mouse_down(choice, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(choice, MouseButton::Right, Default::default());
+        cx.update(|_, cx| {
+            assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+            assert_eq!(session.read(cx).annotations().committed()[0], original);
+        });
+        cx.simulate_mouse_down(choice, MouseButton::Left, Default::default());
+        cx.update(|_, cx| {
+            assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+            assert!(view.read(cx).text_editing.is_none());
+        });
+        cx.simulate_mouse_up(choice, MouseButton::Left, Default::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.selected_index(), Some(0));
+            assert_eq!(
+                a.selected().unwrap().text_style.font.as_ref(),
+                Some(&family)
+            );
+            assert_eq!(a.committed().len(), 1);
+        });
+        cx.update(|window, cx| window.focus(&view.read(cx).focus_handle.clone(), cx));
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed()[0], original));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let position = point(px(100.), px(90.));
+        cx.simulate_event(gpui_kit::MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui_kit::MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        assert_inline_text_caret(&view, cx);
+        cx.simulate_click(font.center(), Default::default());
+        cx.simulate_input(&family);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let editor = view
+                .read(cx)
+                .text_editing
+                .as_ref()
+                .expect("font menu keeps editing");
+            assert_eq!(editor.style.font.as_ref(), Some(&family));
+            assert_eq!(editor.value(cx), "Editable annotation");
+            assert_eq!(
+                gpui_kit::base::test_support::find(window, &[], &"text-font".into())
+                    .unwrap()
+                    .expanded(),
+                Some(false)
+            );
+        });
+        cx.simulate_click(position, Default::default());
+        assert_inline_text_caret(&view, cx);
+        cx.simulate_input("!");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.committed().len(), 1);
+            assert!(a.committed()[0].text.as_ref().unwrap().contains('!'));
+            assert_eq!(a.committed()[0].text_style.font.as_ref(), Some(&family));
+        });
+    });
+}
+
+#[gpui_kit::test]
 fn text_style_controls_preserve_selection_validate_size_and_undo(cx: &mut TestAppContext) {
     crate::annotation::text::with_test_font(|| {
         cx.update(|cx| {

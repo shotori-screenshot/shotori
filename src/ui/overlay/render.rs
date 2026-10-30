@@ -17,6 +17,7 @@ use crate::ui::hud::{
     magnifier_loupe, marquee_chrome, selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::toolbar::selection_toolbar;
+use gpui_kit::base::GlobalState;
 use gpui_kit::*;
 
 impl Render for Overlay {
@@ -204,7 +205,7 @@ impl Render for Overlay {
             .on_action(cx.listener(|this, _: &EscapeOverlay, window, cx| this.escape(window, cx)))
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Enter, _, cx| {
-                    if this.text_editing.is_some() {
+                    if this.text_editing.is_some() && !GlobalState::is_in_deferred_context(cx) {
                         cx.stop_propagation();
                     } else {
                         cx.propagate();
@@ -213,6 +214,10 @@ impl Render for Overlay {
             )
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
+                    if GlobalState::is_in_deferred_context(cx) {
+                        cx.propagate();
+                        return;
+                    }
                     if let Some(editor) = &this.text_editing {
                         if editor.focus_handle(cx).is_focused(window) {
                             this.escape(window, cx);
@@ -415,7 +420,9 @@ impl Render for Overlay {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    if this.session.read(cx).blocked() && this.text_editing.is_none() {
+                    if GlobalState::is_in_deferred_context(cx)
+                        || (this.session.read(cx).blocked() && this.text_editing.is_none())
+                    {
                         return;
                     }
                     this.finish_text(true, window, cx);
@@ -437,7 +444,7 @@ impl Render for Overlay {
             // phase only consumes the event when IT is the state's
             // meaning; otherwise the event bubbles.
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
-                if this.text_editing.is_some() {
+                if GlobalState::is_in_deferred_context(cx) || this.text_editing.is_some() {
                     cx.propagate();
                     return;
                 }
@@ -775,14 +782,18 @@ impl Render for Overlay {
 /// level mouse handlers are not an alternative: under Wayland's
 /// implicit grab a drag's events keep arriving at the PRESS window
 /// even outside its bounds, and element hit-testing would drop exactly
-/// those events.
+/// those events. Deferred menus own pointer interaction while open: occlusion
+/// excludes elements underneath, but does not exclude these window listeners.
 fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, (), window, _| {
             let view = input_view.clone();
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || GlobalState::is_in_deferred_context(cx)
+                {
                     return;
                 }
                 let _ = view.update(cx, |this, cx| {
@@ -881,7 +892,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
             });
             let view = input_view.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble {
+                if phase != DispatchPhase::Bubble || GlobalState::is_in_deferred_context(cx) {
                     return;
                 }
                 let _ = view.update(cx, |this, cx| {
@@ -922,7 +933,10 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                 });
             });
             window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || GlobalState::is_in_deferred_context(cx)
+                {
                     return;
                 }
                 let _ = input_view.update(cx, |this, cx| {
