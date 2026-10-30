@@ -130,9 +130,9 @@ impl TextEditor {
         self.input.update(cx, |s, cx| s.focus(window, cx));
     }
     pub(crate) fn render(&self) -> impl IntoElement {
-        // Keep the empty editor clickable without moving its text origin.
+        // Keep the empty input clickable after subtracting decoration insets.
         let min_w = (self.font_size * 0.35).round().clamp(6., 9.);
-        let display_w = self.visible_width.max(min_w);
+        let display_w = self.visible_width.max(min_w + self.style.inset() * 2.);
         let display_h = self.height.max(self.font_size * 1.35);
         let visible = size(
             px(display_w).min(self.bounds.size.width),
@@ -147,11 +147,15 @@ impl TextEditor {
             .w(visible.width)
             .h(visible.height)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // TextInput has no intrinsic layout size: all four edges must
+            // constrain its parent so the caret and hitbox keep their extent.
             .child(
                 div()
                     .absolute()
                     .left(px(self.style.inset()))
                     .top(px(self.style.inset()))
+                    .right(px(self.style.inset()))
+                    .bottom(px(self.style.inset()))
                     .child(self.input.clone()),
             )
     }
@@ -176,6 +180,108 @@ mod tests {
                 .child(self.editor.render())
         }
     }
+    #[gpui_kit::test]
+    fn inline_editor_paints_caret_and_places_it_at_pointer(cx: &mut TestAppContext) {
+        crate::annotation::text::with_test_font(|| {
+            let selection =
+                Bounds::from_corners(point(px(20.), px(20.)), point(px(420.), px(300.)));
+            let (view, cx) = cx.add_window_view(|_, cx| EditorHarness {
+                selection,
+                editor: super::TextEditor::new(
+                    Bounds::from_corners(point(px(70.2), px(80.3)), selection.bottom_right()),
+                    point(px(70.2), px(80.3)),
+                    24.,
+                    0xe52a39ff,
+                    cx,
+                ),
+            });
+            for decorated in [false, true] {
+                for scale in [1., 1.25, 1.5, 1.75, 2.] {
+                    cx.simulate_scale_factor_change(scale);
+                    cx.update(|window, cx| {
+                        view.update(cx, |s, cx| {
+                            let style = crate::annotation::text::TextStyle {
+                                background: decorated.then_some(0x28394aff),
+                                outline: decorated.then_some(0xffffffff),
+                                ..Default::default()
+                            };
+                            s.editor.sync_style(24., 0xe52a39ff, &style, cx);
+                            s.editor
+                                .input()
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            s.editor.refresh(cx);
+                            s.editor.focus(window, cx);
+                            cx.notify();
+                        });
+                    });
+                    for value in ["", "Canvas note"] {
+                        cx.update(|_, cx| {
+                            view.update(cx, |s, cx| {
+                                s.editor
+                                    .input()
+                                    .update(cx, |input, cx| input.set_value(value, cx));
+                                s.editor.refresh(cx);
+                                cx.notify();
+                            });
+                        });
+                        let quads = cx.update(|window, cx| {
+                            window.draw(cx).clear(cx);
+                            window.painted_quads()
+                        });
+                        let color: gpui_kit::Background = gpui_kit::rgba(0xe52a39ff).into();
+                        let carets = quads
+                            .iter()
+                            .filter(|q| q.background == color)
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            carets.len(),
+                            1,
+                            "visible caret: decorated={decorated}, scale={scale}, text={value:?}"
+                        );
+                        assert_eq!(
+                            carets[0].bounds.intersect(&carets[0].content_mask.bounds),
+                            carets[0].bounds
+                        );
+                    }
+                    let at_start = cx.update(|_, cx| {
+                        let editor = &view.read(cx).editor;
+                        editor.local
+                            + point(
+                                px(editor.style.inset() + 1.),
+                                px(editor.style.inset() + 12.),
+                            )
+                    });
+                    cx.simulate_click(at_start, Default::default());
+                    cx.simulate_input("A");
+                    cx.update(|_, cx| assert_eq!(view.read(cx).editor.value(cx), "ACanvas note"));
+                    cx.simulate_mouse_down(
+                        at_start,
+                        gpui_kit::MouseButton::Left,
+                        Default::default(),
+                    );
+                    let drag_end = at_start + point(px(60.), px(0.));
+                    cx.simulate_mouse_move(
+                        drag_end,
+                        Some(gpui_kit::MouseButton::Left),
+                        Default::default(),
+                    );
+                    cx.simulate_mouse_up(drag_end, gpui_kit::MouseButton::Left, Default::default());
+                    let has_selection = cx.update(|window, cx| {
+                        window.draw(cx).clear(cx);
+                        let color: gpui_kit::Background = gpui_kit::rgba(0x4080ff44).into();
+                        window.painted_quads().iter().any(|quad| {
+                            quad.background == color && quad.bounds.size.width.0 > 20. * scale
+                        })
+                    });
+                    assert!(
+                        has_selection,
+                        "dragging selects text inside the input region"
+                    );
+                }
+            }
+        });
+    }
+
     #[gpui_kit::test]
     fn actual_text_editor_stays_inside_selection(cx: &mut TestAppContext) {
         let selection =

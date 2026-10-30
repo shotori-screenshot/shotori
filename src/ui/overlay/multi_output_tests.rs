@@ -1133,6 +1133,40 @@ fn text_input_commit_escape_and_history(cx: &mut TestAppContext) {
     crate::annotation::text::with_test_font(|| text_input_workflow(cx));
 }
 
+fn assert_inline_text_caret(
+    view: &gpui_kit::Entity<Overlay>,
+    cx: &mut gpui_kit::VisualTestContext,
+) {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        let editor = view.read(cx).text_editing.as_ref().unwrap();
+        assert!(
+            editor.focus_handle(cx).is_focused(window),
+            "inline editor owns focus"
+        );
+        let color: gpui_kit::Background = gpui_kit::rgba(editor.color).into();
+        let scale = window.scale_factor();
+        let carets = window
+            .painted_quads()
+            .into_iter()
+            .filter(|quad| {
+                quad.background == color
+                    && quad.bounds.size.width.0 == scale.round().max(1.)
+                    && quad.bounds.size.height.0 > scale
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            carets.len(),
+            1,
+            "the active editor paints one visible caret"
+        );
+        assert_eq!(
+            carets[0].bounds.intersect(&carets[0].content_mask.bounds),
+            carets[0].bounds
+        );
+    });
+}
+
 fn text_input_workflow(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::base::init(cx);
@@ -1169,6 +1203,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     cx.simulate_click(point(px(60.), px(60.)), Default::default());
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.run_until_parked();
+    assert_inline_text_caret(&view, cx);
     assert!(cx.debug_bounds("text-editor").unwrap().size.width <= px(9.));
     assert!(cx.debug_bounds("tb-text").is_some());
     // A narrow output must keep trailing text controls reachable without
@@ -1233,6 +1268,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(cx.debug_bounds("text-editor").unwrap().size.height > px(32. * 1.35 * 2.));
+    assert_inline_text_caret(&view, cx);
     let live_pixels = cx.update(|_, cx| session.read(cx).crop("screen").unwrap());
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -1290,6 +1326,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
         assert_eq!(editor.font_size, original.size());
         assert_eq!(editor.color, original.color);
     });
+    assert_inline_text_caret(&view, cx);
     cx.simulate_keystrokes("ctrl-a");
     cx.simulate_input("replacement text");
     cx.run_until_parked();
@@ -1341,6 +1378,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
         Default::default(),
     );
     cx.run_until_parked();
+    assert_inline_text_caret(&view, cx);
     cx.simulate_keystrokes("ctrl-a");
     cx.simulate_input("a long replacement which must grow beyond the old text width");
     cx.simulate_keystrokes("shift-enter");
@@ -1365,6 +1403,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     });
     // Separately prove that a resize which fits is applied, rather than
     // weakening the assertion to accept either font size.
+    assert_inline_text_caret(&view, cx);
     cx.simulate_keystrokes("ctrl-a");
     cx.simulate_input("replacement text\nanother line");
     cx.update(|_, cx| {
@@ -1378,6 +1417,7 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     let color = cx.debug_bounds("tb-color-2").unwrap();
     cx.simulate_click(color.center(), Default::default());
     cx.run_until_parked();
+    assert_inline_text_caret(&view, cx);
     let edited_pixels = cx.update(|_, cx| {
         let editor = view.read(cx).text_editing.as_ref().unwrap();
         assert_eq!(editor.font_size, 40.);
