@@ -261,6 +261,7 @@ struct PinSurface {
     focus_handle: FocusHandle,
     output: PinOutput,
     _subscription: Subscription,
+    _activation: Subscription,
 }
 
 impl PinSurface {
@@ -273,11 +274,17 @@ impl PinSurface {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let subscription = cx.observe(&board, |_, _, cx| cx.notify());
+        // Wayland reports focus loss as a keyboard `leave`, which lands here
+        // as an activation change. Repaint on it so the frame's halo follows
+        // the window's real focus (see the shadow comment in render.rs)
+        // instead of freezing in whatever state the first frame drew.
+        let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
         Self {
             board,
             focus_handle,
             output,
             _subscription: subscription,
+            _activation: activation,
         }
     }
 

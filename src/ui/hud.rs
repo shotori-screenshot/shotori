@@ -241,23 +241,52 @@ pub(crate) fn lens_draft_chrome(shape: crate::annotation::Shape) -> impl IntoEle
     .size_full()
 }
 
-/// A dashed frame around the selected mark's visible ink, with contrasting
-/// backing and white-cored handles at its editable anchors. Geometry comes
-/// from the mark and is shared with hover feedback and hit testing.
-pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> impl IntoElement {
+/// A dashed frame around every selected mark's visible ink, with contrasting
+/// backing. Only a SINGLE selection draws handle dots at its editable
+/// anchors: a multi-selection moves and deletes as a group, so per-member
+/// handles would edit one shape out of it. Geometry comes from the marks
+/// and is shared with hover feedback and hit testing.
+pub(crate) fn annotation_chrome(selected: Vec<crate::annotation::Shape>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |viewport, (), window, _| {
-            let Some(shape) = &selected else {
-                return;
-            };
-            paint_annotation_polygon(window, &shape.frame_corners().map(|p| p + viewport.origin));
-            // One size, two fills: a shape's resize affordance wears
-            // the same diameter the selection border does, but the
-            // two-tone fill — see [`paint_shape_handle_dot`].
-            for p in shape.handle_points() {
-                paint_shape_handle_dot(window, p + viewport.origin);
+            let single = selected.len() == 1;
+            for shape in &selected {
+                paint_annotation_polygon(
+                    window,
+                    &shape.frame_corners().map(|p| p + viewport.origin),
+                );
+                if !single {
+                    continue;
+                }
+                // One size, two fills: a shape's resize affordance wears
+                // the same diameter the selection border does, but the
+                // two-tone fill — see [`paint_shape_handle_dot`].
+                for p in shape.handle_points() {
+                    paint_shape_handle_dot(window, p + viewport.origin);
+                }
             }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// The drag-selection rectangle in flight: the same dashed frame the
+/// selection wears, plus a faint wash so the swept area reads over ink.
+pub(crate) fn marquee_chrome(bounds: Bounds<Pixels>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |viewport, (), window, _| {
+            let b = Bounds::new(bounds.origin + viewport.origin, bounds.size);
+            // faint wash so the swept area reads over dense ink; `rgba`
+            // takes 0xRRGGBBAA, so the accent keeps its hue and gets a
+            // low alpha directly instead of a color-space round trip
+            let wash = rgba((theme::c().accent & 0xffff_ff00) | 0x1e);
+            window.paint_quad(fill(b, wash));
+            paint_annotation_frame(window, b);
         },
     )
     .absolute()

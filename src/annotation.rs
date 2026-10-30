@@ -251,9 +251,9 @@ pub(crate) struct Annotations {
     pressed: bool,
     /// Pointer state accompanying the editable erase draft.
     eraser: Option<EraserGesture>,
-    /// Index into `shapes` of the currently selected annotation, if any.
-    /// Editing actions (wheel size stepping, later drags) target it.
-    selected: Option<usize>,
+    /// Selected indices in selection order; the last mark owns parameter edits.
+    /// Handles are available only for a single selection.
+    selected: Vec<usize>,
     /// Select newly placed marks for immediate editing when enabled in settings.
     auto_select: bool,
     text_original: Option<(usize, Shape)>,
@@ -311,7 +311,7 @@ impl Default for Annotations {
             draft_generation: 0,
             pressed: false,
             eraser: None,
-            selected: None,
+            selected: Vec::new(),
             auto_select: false,
             text_original: None,
             size_drag_active: false,
@@ -552,7 +552,7 @@ impl Annotations {
     pub(crate) fn toggle(&mut self, kind: ShapeKind) {
         self.draft = None;
         self.pressed = false;
-        self.selected = None;
+        self.selected.clear();
         // a keyboard shortcut can switch tools mid-gesture; the sweep
         // must stop with it (a stale gesture would keep erasing under
         // the next tool's pointer moves)
@@ -621,11 +621,15 @@ impl Annotations {
             self.end_size_drag();
             return true;
         }
-        // invariant: `selected` is a valid index or None — every path
+        // invariant: every index in `selected` is valid — every path
         // that mutates `shapes` (undo/redo/reset/record_add) or leaves
-        // edit mode (begin/toggle) clears it
-        debug_assert!(self.selected.is_none_or(|ix| self.shapes.get(ix).is_some()));
-        if let Some(ix) = self.selected {
+        // edit mode (begin/toggle) clears the list
+        debug_assert!(
+            self.selected
+                .iter()
+                .all(|ix| self.shapes.get(*ix).is_some())
+        );
+        if let Some(ix) = self.selected_index() {
             return self.step_selected_size(ix, up);
         }
         let Some(tool) = self.tool else {
@@ -651,7 +655,7 @@ impl Annotations {
         self.pressed = false;
         self.eraser = None;
         self.tool = None;
-        self.selected = None;
+        self.selected.clear();
     }
 
     pub(crate) fn visible(&self) -> impl Iterator<Item = &Shape> + '_ {
@@ -671,7 +675,7 @@ impl Annotations {
         };
         self.text_original = Some((ix, shape.clone()));
         self.end_size_drag();
-        self.selected = Some(ix);
+        self.selected = vec![ix];
         true
     }
 
@@ -745,7 +749,7 @@ impl Annotations {
         }
         self.draft = None;
         self.pressed = false;
-        self.selected = None;
+        self.selected.clear();
         self.text_original = None;
         self.size_drag_active = false;
         self.eraser = None;

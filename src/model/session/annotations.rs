@@ -12,6 +12,33 @@ use gpui_kit::*;
 // One inset for placement, editing and movement; the outline is painted inside
 // the text bounds, so no separate border outset may consume this breathing room.
 const TEXT_INSET: f32 = 2.;
+
+/// Axis-aligned rectangle spanned by two desktop-global points (the
+/// marquee's anchor and its live corner).
+fn global_rect(a: Point<Pixels>, b: Point<Pixels>) -> Bounds<Pixels> {
+    let (left, right) = if a.x < b.x { (a.x, b.x) } else { (b.x, a.x) };
+    let (top, bottom) = if a.y < b.y { (a.y, b.y) } else { (b.y, a.y) };
+    Bounds::from_corners(point(left, top), point(right, bottom))
+}
+
+/// Union of movement bounds, preserving each mark's frame and text inset.
+/// One clamped delta keeps the group's internal spacing unchanged.
+pub(super) fn group_movement_bounds(
+    before: &[(usize, crate::annotation::Shape)],
+) -> Option<Bounds<Pixels>> {
+    let mut bounds = before.iter().map(|(_, shape)| {
+        if shape.kind == crate::annotation::ShapeKind::Text {
+            let inset = point(px(TEXT_INSET), px(TEXT_INSET));
+            let ink = shape.ink_bounds();
+            Bounds::from_corners(ink.origin - inset, ink.bottom_right() + inset)
+        } else {
+            shape.selection_box()
+        }
+    });
+    let first = bounds.next()?;
+    Some(bounds.fold(first, |acc, b| acc.union(&b)))
+}
+
 pub(super) fn text_area(selection: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
     let inset = point(px(TEXT_INSET), px(TEXT_INSET));
     (selection.size.width > px(TEXT_INSET * 2.) && selection.size.height > px(TEXT_INSET * 2.))
@@ -111,7 +138,16 @@ impl ScreenshotSession {
             .then(|| (ix, shape.bounds.origin - origin))
     }
 
-    pub(crate) fn pointer_down(&mut self, name: &str, local: Point<Pixels>, alt: bool) {
+    /// `shift` is the multi-select modifier: Shift+click toggles the
+    /// hit shape in/out of the selection, and Shift+drag on blank
+    /// canvas adds the marquee's hits to the existing selection.
+    pub(crate) fn pointer_down(
+        &mut self,
+        name: &str,
+        local: Point<Pixels>,
+        alt: bool,
+        shift: bool,
+    ) {
         if self.blocked {
             return;
         }
@@ -121,8 +157,18 @@ impl ScreenshotSession {
             let p = local + self.screen(name).bounds().origin;
             // a handle of the SELECTED shape grabs first (phase C);
             // the handles sit on the shape's body, so this must run
-            // before the shape hit-test parks a click
-            if let Some(anchor) = self.annotations.selected().and_then(|s| s.handle_at(p)) {
+            // before the shape hit-test parks a click. A multi-selection
+            // owns no handles (they would edit one member out of the
+            // group) — the frame is the affordance, the body moves.
+            //
+            // Shift never grabs: it is the toggle modifier, and a small
+            // shape's body lies almost entirely inside some handle's
+            // GRAB_RADIUS, so grabbing first made Shift+click fail to
+            // deselect exactly the marks the user meant to toggle out.
+            if !shift
+                && self.annotations.selected_count() == 1
+                && let Some(anchor) = self.annotations.selected().and_then(|s| s.handle_at(p))
+            {
                 // handle_at only reports handles of the selected shape —
                 // the same lookup this branch condition just proved — so
                 // zip the index and the copy instead of unwrapping twice.
@@ -147,14 +193,50 @@ impl ScreenshotSession {
             // parks (draw tools draw right over existing ink)
             if selection.contains(&p)
                 && self.annotations.parks_click_select()
-                && let Some(ix) = self.annotations.interaction_hit_test(p)
+                && let Some(ix) = if shift && !self.annotations.enabled() {
+                    self.annotations
+                        .hit_test(p)
+                        .or_else(|| self.annotations.interaction_hit_test(p))
+                } else {
+                    self.annotations.interaction_hit_test(p)
+                }
             {
-                self.pending_click = Some((ix, p));
+                if shift {
+                    // toggle on PRESS: the added/removed highlight is
+                    // the feedback, and a drag that follows moves what
+                    // is still selected
+                    self.annotations.toggle_index(ix);
+                }
+                self.pending_click = Some((ix, p, shift));
                 return;
             }
             if self.annotations.enabled() {
                 self.annotations.deselect(); // click on blank canvas
                 self.annotations.begin(p, selection, alt);
+                return;
+            }
+            if (self.annotations.tool() == Some(crate::annotation::ShapeKind::Select) || shift)
+                && selection.contains(&p)
+            {
+                // blank canvas under the select tool: the marquee. A
+                // plain press clears the selection now — release
+                // without motion is a click on empty canvas (deselect),
+                // and a drag starts from nothing, replacing the old
+                // selection; Shift keeps it as the additive base.
+                let base = if shift {
+                    self.annotations.selected_indices().to_vec()
+                } else {
+                    self.annotations.deselect();
+                    Vec::new()
+                };
+                let press = self.to_global(name, local);
+                self.marquee = Some(super::MarqueeDrag {
+                    start: press,
+                    current: press,
+                    additive: shift,
+                    base,
+                });
+                self.set_active_output(name);
                 return;
             }
         }
@@ -189,6 +271,22 @@ impl ScreenshotSession {
             return false;
         }
         self.pointer_global = Some(self.to_global(name, local));
+        if self.marquee.is_some() {
+            let p = self.to_global(name, local);
+            let Some(selection) = self.selection.bounds() else {
+                return false;
+            };
+            let clamped = point(
+                p.x.clamp(selection.left(), selection.right()),
+                p.y.clamp(selection.top(), selection.bottom()),
+            );
+            let Some(marquee) = self.marquee.as_mut() else {
+                return false;
+            };
+            let changed = clamped != marquee.current;
+            marquee.current = clamped;
+            return changed;
+        }
         if matches!(
             self.selection_gesture,
             Some(
@@ -233,50 +331,57 @@ impl ScreenshotSession {
                     );
                     return true;
                 }
-                if let Some((ix, press)) = self.pending_click {
+                if let Some((ix, press, shift)) = self.pending_click {
                     let dx = f32::from(p.x - press.x);
                     let dy = f32::from(p.y - press.y);
                     if dx * dx + dy * dy <= CLICK_SLOP * CLICK_SLOP {
                         return false; // still within click slop
                     }
                     self.pending_click = None;
-                    // dragging an existing shape moves it
-                    self.annotations.select_index(ix);
-                    if let Some(before) = self.annotations.selected().cloned() {
-                        self.moving = Some(MoveDrag { ix, before, press });
+                    if !self.annotations.is_selected(ix) {
+                        // a Shift+press that REMOVED the shape has
+                        // nothing to drag; an unselected shape under a
+                        // plain press becomes the single selection and
+                        // then moves (the pre-marquee behavior)
+                        if shift {
+                            return false;
+                        }
+                        self.annotations.select_index(ix);
+                    }
+                    // dragging a shape with a live selection moves the
+                    // WHOLE selection — one snapshot per member, primary
+                    // last (`selected_indices` order)
+                    let before: Vec<(usize, crate::annotation::Shape)> = self
+                        .annotations
+                        .selected_indices()
+                        .iter()
+                        .filter_map(|ix| self.annotations.shape(*ix).map(|s| (*ix, s.clone())))
+                        .collect();
+                    if !before.is_empty() {
+                        self.moving = Some(MoveDrag { before, press });
                     }
                 }
                 if let Some(drag) = &self.moving {
-                    let selection = if drag.before.kind == crate::annotation::ShapeKind::Text {
-                        text_area(selection).unwrap_or(selection)
-                    } else {
-                        selection
-                    };
-                    let moving_lens = drag.before.kind == crate::annotation::ShapeKind::Magnifier
-                        && !drag.before.bounds.contains(&drag.press)
-                        && drag
-                            .before
+                    if let [(ix, before)] = drag.before.as_slice()
+                        && before.kind == crate::annotation::ShapeKind::Magnifier
+                        && !before.bounds.contains(&drag.press)
+                        && let Some(bounds) = before
                             .magnified_bounds()
-                            .is_some_and(|b| b.contains(&drag.press));
-                    let moving_bounds = if moving_lens {
-                        drag.before
-                            .magnified_bounds()
-                            .unwrap_or(drag.before.ink_bounds())
-                    } else if drag.before.kind == crate::annotation::ShapeKind::Text {
-                        drag.before.ink_bounds()
-                    } else {
-                        drag.before.selection_box()
+                            .filter(|b| b.contains(&drag.press))
+                    {
+                        let delta =
+                            super::editing::movement_delta(bounds, selection, p - drag.press);
+                        self.annotations
+                            .place_shape(*ix, before, point(px(0.), px(0.)));
+                        self.annotations.move_selected_lens(delta);
+                        return true;
+                    }
+                    let Some(ink) = group_movement_bounds(&drag.before) else {
+                        return false;
                     };
                     let clamped_delta =
-                        super::editing::movement_delta(moving_bounds, selection, p - drag.press);
-                    if moving_lens {
-                        self.annotations
-                            .place_shape(drag.ix, &drag.before, point(px(0.), px(0.)));
-                        self.annotations.move_selected_lens(clamped_delta);
-                    } else {
-                        self.annotations
-                            .place_shape(drag.ix, &drag.before, clamped_delta);
-                    }
+                        super::editing::movement_delta(ink, selection, p - drag.press);
+                    self.annotations.place_shapes(&drag.before, clamped_delta);
                     return true;
                 }
                 if self.annotations.enabled() {
@@ -300,6 +405,35 @@ impl ScreenshotSession {
             return;
         }
         self.pointer_global = Some(self.to_global(name, local));
+        if self.marquee.is_some() {
+            // track the final position before resolving the rectangle
+            self.pointer_move(name, local, square);
+            let Some(marquee) = self.marquee.take() else {
+                return;
+            };
+            let rect = global_rect(marquee.start, marquee.current);
+            // A press that never left the click slop is a click on
+            // empty canvas — the press already cleared a plain
+            // selection. Picking from a sliver would delete nothing and
+            // select accidental shapes the pointer merely crossed.
+            let spanned =
+                f32::from(rect.size.width) > CLICK_SLOP || f32::from(rect.size.height) > CLICK_SLOP;
+            if !spanned {
+                return;
+            }
+            let hits = self.annotations.shapes_in(rect);
+            if marquee.additive {
+                // Shift+drag adds to what was selected at press time;
+                // the marquee's hits come after the base so the topmost
+                // hit takes primary, like a click would
+                let mut all = marquee.base;
+                all.extend(hits);
+                self.annotations.select_indices(all);
+            } else {
+                self.annotations.select_indices(hits);
+            }
+            return;
+        }
         if self.moving.is_some() || self.handle_drag.is_some() || self.pending_click.is_some() {
             self.pointer_move(name, local, square);
         }
@@ -308,14 +442,17 @@ impl ScreenshotSession {
             || self.handle_drag.is_some()
             || self.pending_click.is_some()
         {
-            // a press-release without drag = click-select
-            if let Some((ix, _)) = self.pending_click.take() {
-                self.annotations.select_index(ix);
+            // a press-release without drag = click-select (a Shift+press
+            // already toggled on the way down)
+            if let Some((ix, _, shift)) = self.pending_click.take() {
+                if !shift {
+                    self.annotations.select_index(ix);
+                }
                 return;
             }
-            // release of a move drag: one Edit entry when it moved
+            // release of a move drag: one Edit/EditMany when it moved
             if let Some(drag) = self.moving.take() {
-                self.annotations.commit_move(drag.ix, drag.before);
+                self.annotations.commit_moves(&drag.before);
                 return;
             }
             // release of a handle drag: one Edit entry when it changed
@@ -366,6 +503,7 @@ impl ScreenshotSession {
             || self.moving.is_some()
             || self.handle_drag.is_some()
             || self.pending_click.is_some()
+            || self.marquee.is_some()
         {
             self.cancel_annotation();
             return true;
@@ -390,6 +528,11 @@ impl ScreenshotSession {
             return false;
         }
         self.finish_nudge();
+        // the marquee lives in its own slot, so it must be taken before
+        // the gesture chain below can answer "nothing active"
+        if self.marquee.take().is_some() {
+            return true;
+        }
         if self.cancel_selection_gesture() || self.pending_click.take().is_some() {
             return true;
         }
@@ -397,7 +540,7 @@ impl ScreenshotSession {
         // restore the snapshot
         if let Some(drag) = self.moving.take() {
             self.annotations
-                .place_shape(drag.ix, &drag.before, point(px(0.), px(0.)));
+                .place_shapes(&drag.before, point(px(0.), px(0.)));
             return true;
         }
         if let Some(drag) = self.handle_drag.take() {
@@ -421,6 +564,11 @@ impl ScreenshotSession {
     /// The handle of the selected annotation under the pointer, if
     /// any — the hover probe for the directional cursor.
     pub(crate) fn annotation_handle_hover(&self) -> Option<(crate::annotation::ShapeKind, usize)> {
+        // a multi-selection carries no handles — they would edit one
+        // member out of the group — so hovering offers nothing to grab
+        if self.annotations.selected_count() != 1 {
+            return None;
+        }
         let p = self.pointer_global?;
         let shape = self.annotations.selected()?;
         let anchor = shape.handle_at(p)?;
@@ -462,14 +610,57 @@ impl ScreenshotSession {
         Some(shape)
     }
 
-    /// The selected shape cloned into the output's local coordinates —
-    /// the highlight layer paints its visual geometry from this.
-    pub(crate) fn selected_shape_local(&self, name: &str) -> Option<crate::annotation::Shape> {
+    /// The selected shapes cloned into the output's local coordinates —
+    /// the highlight layer paints every selection frame from this.
+    /// Selection order is preserved, so the PRIMARY (the one that owns
+    /// handle dots and size/number edits) is the last element.
+    pub(crate) fn selected_shapes_local(&self, name: &str) -> Vec<crate::annotation::Shape> {
         let origin = self.screen(name).bounds().origin;
-        self.annotations.selected().map(|shape| {
-            let mut s = shape.clone();
-            s.translate(-origin);
-            s
+        self.annotations
+            .selected_shapes()
+            .into_iter()
+            .map(|shape| {
+                let mut s = shape.clone();
+                s.translate(-origin);
+                s
+            })
+            .collect()
+    }
+
+    /// The live marquee rectangle in `name`'s window-local coordinates.
+    /// None while no marquee is live, or when the drag sits entirely on
+    /// another output — each overlay paints only what it froze.
+    pub(crate) fn marquee_bounds_local(&self, name: &str) -> Option<Bounds<Pixels>> {
+        let marquee = self.marquee.as_ref()?;
+        let screen = self.screen(name).bounds();
+        let rect = global_rect(marquee.start, marquee.current);
+        // clip to this output: a marquee dragged across monitors keeps
+        // the band it actually covers here instead of vanishing
+        let left = if rect.origin.x < screen.left() {
+            screen.left()
+        } else {
+            rect.origin.x
+        };
+        let top = if rect.origin.y < screen.top() {
+            screen.top()
+        } else {
+            rect.origin.y
+        };
+        let right = if rect.bottom_right().x > screen.right() {
+            screen.right()
+        } else {
+            rect.bottom_right().x
+        };
+        let bottom = if rect.bottom_right().y > screen.bottom() {
+            screen.bottom()
+        } else {
+            rect.bottom_right().y
+        };
+        (right > left && bottom > top).then(|| {
+            Bounds::from_corners(
+                point(left - screen.origin.x, top - screen.origin.y),
+                point(right - screen.origin.x, bottom - screen.origin.y),
+            )
         })
     }
 
@@ -481,6 +672,7 @@ impl ScreenshotSession {
             || self.moving.is_some()
             || self.handle_drag.is_some()
             || self.toolbar_drag.is_some()
+            || self.marquee.is_some()
             || !matches!(
                 self.annotations.tool(),
                 None | Some(crate::annotation::ShapeKind::Select)
@@ -493,7 +685,7 @@ impl ScreenshotSession {
             return None;
         }
         let ix = self.annotations.hit_test(p)?;
-        (self.annotations.selected_index() != Some(ix)).then_some(ix)
+        (!self.annotations.is_selected(ix)).then_some(ix)
     }
 
     pub(crate) fn annotation_hover_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
@@ -567,7 +759,13 @@ impl ScreenshotSession {
     /// probe the cursor maps onto pointing hand / open hand (issue
     /// #17).
     pub(crate) fn annotation_hover(&self) -> Option<crate::annotation::ShapeHover> {
-        if self.blocked || !self.selection.is_selected() || self.selection_gesture.is_some() {
+        // the marquee owns the pointer: no per-shape hover while it is
+        // sweeping (the marquee rectangle is the feedback)
+        if self.blocked
+            || !self.selection.is_selected()
+            || self.selection_gesture.is_some()
+            || self.marquee.is_some()
+        {
             return None;
         }
         let p = self.pointer_global?;

@@ -5,9 +5,21 @@
 use super::*;
 
 impl Render for PinSurface {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let board = self.board.clone();
         let output = self.output.bounds;
+        // Focus drives the halo below: the frame itself always draws, the
+        // glow only while this surface holds keyboard focus (a focused pin
+        // is the one Esc/keys address; an unfocused one is just desktop
+        // furniture and must not glare).
+        //
+        // TWO gates, because a surface hosts EVERY pin on its output: the
+        // window-level `is_window_active` alone made one focused pin light
+        // up all the others sharing the surface. The per-pin gate is
+        // `selected_id` — the menu's pin, else the topmost one, i.e. the
+        // pin the keyboard and Esc actually address.
+        let active = window.is_window_active();
+        let focused = board.read(cx).selected_id();
         let menu = board
             .read(cx)
             .menu
@@ -98,25 +110,33 @@ impl Render for PinSurface {
                         .border_color(rgba(crate::ui::theme::c().accent))
                         // neon halo: the accent blurred around the frame —
                         // a tight hot ring hugging the border plus a wide
-                        // soft wash. Derived from the accent so custom
-                        // themes glow in their own color. Drop shadows are
-                        // painted before the element's own content mask
-                        // (Style::paint), so the overflow_hidden above
-                        // does not clip them
-                        .shadow(vec![
-                            BoxShadow::new(
-                                px(0.),
-                                px(0.),
-                                rgba((crate::ui::theme::c().accent & 0xFFFFFF00) | 0x8C).into(),
-                            )
-                            .blur_radius(px(6.)),
-                            BoxShadow::new(
-                                px(0.),
-                                px(0.),
-                                rgba((crate::ui::theme::c().accent & 0xFFFFFF00) | 0x47).into(),
-                            )
-                            .blur_radius(px(24.)),
-                        ])
+                        // soft wash. FOCUS GATED: only while the pin surface
+                        // is active, so an idle pin sits quietly on the
+                        // desktop and the glow means "keys go here". Empty
+                        // list = no shadow (`Style::paint_drop_shadows`
+                        // just skips an empty slice). Derived from the accent
+                        // so custom themes glow in their own color. Drop
+                        // shadows are painted before the element's own
+                        // content mask (Style::paint), so the overflow_hidden
+                        // above does not clip them.
+                        .shadow(if active && focused == Some(id) {
+                            vec![
+                                BoxShadow::new(
+                                    px(0.),
+                                    px(0.),
+                                    rgba((crate::ui::theme::c().accent & 0xFFFFFF00) | 0x8C).into(),
+                                )
+                                .blur_radius(px(6.)),
+                                BoxShadow::new(
+                                    px(0.),
+                                    px(0.),
+                                    rgba((crate::ui::theme::c().accent & 0xFFFFFF00) | 0x47).into(),
+                                )
+                                .blur_radius(px(24.)),
+                            ]
+                        } else {
+                            Vec::new()
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {

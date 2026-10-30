@@ -1,6 +1,6 @@
 //! Crop transactions, keyboard movement and the shared edit history.
 
-use super::{ScreenshotSession, annotations::text_area};
+use super::{ScreenshotSession, annotations::group_movement_bounds};
 use crate::annotation::{HistoryEffect, Shape};
 use crate::model::selection::Selection;
 use gpui_kit::{Bounds, Pixels, Point, point, px};
@@ -21,7 +21,7 @@ pub(super) enum SelectionGesture {
 }
 
 pub(super) enum NudgeGesture {
-    Shape { ix: usize, before: Shape },
+    Shapes { before: Vec<(usize, Shape)> },
     Selection { before: Bounds<Pixels> },
 }
 
@@ -71,7 +71,7 @@ impl ScreenshotSession {
         true
     }
 
-    /// Move the selected mark, or the crop when no mark is selected.
+    /// Move all selected marks, or the crop when no mark is selected.
     /// Repeated key presses form one edit until release or another operation.
     pub(crate) fn nudge(&mut self, delta: Point<Pixels>) -> bool {
         if self.blocked
@@ -81,6 +81,7 @@ impl ScreenshotSession {
             || self.moving.is_some()
             || self.handle_drag.is_some()
             || self.pending_click.is_some()
+            || self.marquee.is_some()
             || self.toolbar_drag.is_some()
             || self.annotations.is_pressed()
             || self.annotations.is_drawing_polyline()
@@ -90,29 +91,24 @@ impl ScreenshotSession {
         let Some(selection) = self.selection.bounds() else {
             return false;
         };
-        if let Some(ix) = self.annotations.selected_index() {
-            let Some(current) = self.annotations.selected().cloned() else {
+        if self.annotations.selected_count() > 0 {
+            let current: Vec<_> = self
+                .annotations
+                .selected_indices()
+                .iter()
+                .filter_map(|&ix| self.annotations.shape(ix).cloned().map(|shape| (ix, shape)))
+                .collect();
+            let Some(bounds) = group_movement_bounds(&current) else {
                 return false;
             };
-            let area = if current.kind == crate::annotation::ShapeKind::Text {
-                text_area(selection).unwrap_or(selection)
-            } else {
-                selection
-            };
-            let bounds = if current.kind == crate::annotation::ShapeKind::Text {
-                current.ink_bounds()
-            } else {
-                current.selection_box()
-            };
-            let delta = movement_delta(bounds, area, delta);
+            let delta = movement_delta(bounds, selection, delta);
             if delta == point(px(0.), px(0.)) {
                 return false;
             }
-            self.nudge.get_or_insert_with(|| NudgeGesture::Shape {
-                ix,
+            self.nudge.get_or_insert_with(|| NudgeGesture::Shapes {
                 before: current.clone(),
             });
-            self.annotations.place_shape(ix, &current, delta);
+            self.annotations.place_shapes(&current, delta);
         } else {
             let Some(desktop) = self.desktop_bounds() else {
                 return false;
@@ -162,7 +158,7 @@ impl ScreenshotSession {
 
     pub(crate) fn finish_nudge(&mut self) {
         match self.nudge.take() {
-            Some(NudgeGesture::Shape { ix, before }) => self.annotations.commit_move(ix, before),
+            Some(NudgeGesture::Shapes { before }) => self.annotations.commit_moves(&before),
             Some(NudgeGesture::Selection { before }) => {
                 if let Some(after) = self.selection.bounds() {
                     self.annotations.record_selection(before, after);
@@ -185,7 +181,7 @@ impl ScreenshotSession {
             self.cancel_drag();
             return;
         }
-        if self.moving.is_some() || self.handle_drag.is_some() {
+        if self.moving.is_some() || self.handle_drag.is_some() || self.marquee.is_some() {
             self.cancel_annotation();
             return;
         }
@@ -199,7 +195,11 @@ impl ScreenshotSession {
             return;
         }
         self.finish_nudge();
-        if self.moving.is_none() && self.handle_drag.is_none() && self.pending_click.is_none() {
+        if self.moving.is_none()
+            && self.handle_drag.is_none()
+            && self.pending_click.is_none()
+            && self.marquee.is_none()
+        {
             let effect = self.annotations.redo();
             self.apply_history_effect(effect);
         }
@@ -273,7 +273,7 @@ mod tests {
         session.begin("screen", p(40., 40.));
         session.end("screen", p(240., 220.));
         session.edit_annotations(|a| a.toggle(ShapeKind::Rectangle));
-        session.pointer_down("screen", p(80., 80.), false);
+        session.pointer_down("screen", p(80., 80.), false, false);
         session.pointer_up("screen", p(140., 130.), false);
         session.edit_annotations(|a| a.toggle(ShapeKind::Select));
         session
@@ -310,7 +310,7 @@ mod tests {
                     s.annotation_hover(),
                     Some(crate::annotation::ShapeHover::Move)
                 );
-                s.pointer_down("screen", press, false);
+                s.pointer_down("screen", press, false, false);
                 s.pointer_move("screen", press + p(20., 10.), false);
                 s.pointer_up("screen", press + p(20., 10.), false);
                 assert_eq!(s.selection.bounds(), Some(crop));
@@ -325,7 +325,7 @@ mod tests {
                     a.select_index(1);
                 });
                 if let Some(handle) = moved.handle_points().first() {
-                    s.pointer_down("screen", *handle, false);
+                    s.pointer_down("screen", *handle, false, false);
                     assert!(s.handle_drag_anchor().is_some());
                 }
             }
@@ -402,6 +402,9 @@ mod tests {
                 a.toggle(kind);
                 a.select_index(0);
             });
+            // A lit tool / armed mark consumes the FIRST Escape: the
+            // overlay must not close out from under the annotation
+            // ("Esc in annotation mode quit the screenshot" bug).
             assert!(
                 s.escape_interaction(),
                 "passive {kind:?} must exit its tool before closing"
@@ -433,7 +436,7 @@ mod tests {
                 a.finish_interaction();
                 a.toggle(kind);
             });
-            s.pointer_down("screen", p(80., 100.), false);
+            s.pointer_down("screen", p(80., 100.), false, false);
             s.pointer_move("screen", p(110., 110.), false);
             assert!(s.escape_interaction(), "active {kind:?}");
             assert_eq!(s.annotations.tool(), Some(kind));
@@ -456,13 +459,13 @@ mod tests {
         s.toolbar_pos = Some(p(15., 250.));
         s.undo();
         assert!(s.annotations.committed().is_empty());
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         assert_eq!(s.selection.bounds(), Some(original));
         s.pointer_up("screen", p(302., 101.), false);
         assert_eq!(s.selection.bounds(), Some(original));
         s.redo();
         assert_eq!(s.annotations.committed(), marks);
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         s.pointer_move("screen", p(360., 160.), false);
         assert!(s.selection.is_dragging());
         assert_eq!(s.annotations.committed(), marks);
@@ -491,7 +494,7 @@ mod tests {
         });
         let original = s.selection.bounds().unwrap();
         s.toolbar_pos = Some(p(15., 250.));
-        s.pointer_down("second", p(30., 40.), false);
+        s.pointer_down("second", p(30., 40.), false, false);
         s.pointer_move("second", p(100., 140.), false);
         assert!(s.active_on("second"));
         assert!(s.cancel_annotation());
@@ -499,7 +502,7 @@ mod tests {
         assert_eq!(s.toolbar_pos, Some(p(15., 250.)));
         assert_eq!(s.selection.bounds(), Some(original));
         assert_eq!(s.annotations.committed().len(), 1);
-        s.pointer_down("second", p(30., 40.), false);
+        s.pointer_down("second", p(30., 40.), false, false);
         s.pointer_up("second", p(100., 140.), false);
         assert!(s.active_on("second"));
         s.undo();
@@ -512,7 +515,7 @@ mod tests {
         let mut s = session();
         let original = s.selection.bounds().unwrap();
         let marks = s.annotations.committed().to_vec();
-        s.pointer_down("screen", p(300., 100.), false);
+        s.pointer_down("screen", p(300., 100.), false, false);
         s.pointer_up("screen", p(380., 180.), false);
         let reselected = s.selection.bounds().unwrap();
         assert_eq!(
@@ -521,7 +524,7 @@ mod tests {
         );
         assert_eq!(s.annotations.committed(), marks);
         s.edit_annotations(|a| a.toggle(ShapeKind::Number));
-        s.pointer_down("screen", p(340., 140.), false);
+        s.pointer_down("screen", p(340., 140.), false, false);
         s.pointer_up("screen", p(340., 140.), false);
         assert_eq!(s.annotations.committed().len(), 2);
         s.undo();
@@ -556,16 +559,19 @@ mod tests {
     #[test]
     fn moving_and_resizing_crop_keep_marks_and_record_one_step_per_drag() {
         let mut s = session();
+        // The select tool sweeps a marquee on blank canvas, so region
+        // editing needs it off — that is the "no tool" path.
+        s.edit_annotations(|a| a.toggle(ShapeKind::Select));
         let original = s.selection.bounds().unwrap();
         let marks = s.annotations.committed().to_vec();
-        s.pointer_down("screen", p(190., 180.), false);
+        s.pointer_down("screen", p(190., 180.), false, false);
         for x in [200., 210., 220.] {
             s.pointer_move("screen", p(x, 190.), false);
         }
         s.pointer_up("screen", p(230., 200.), false);
         let moved = s.selection.bounds().unwrap();
         assert_eq!(moved.origin, original.origin + p(40., 20.));
-        s.pointer_down("screen", moved.bottom_right(), false);
+        s.pointer_down("screen", moved.bottom_right(), false, false);
         s.pointer_up("screen", moved.bottom_right() + p(20., 30.), false);
         let resized = s.selection.bounds().unwrap();
         assert_eq!(resized.size, moved.size + size(px(20.), px(30.)));
@@ -586,8 +592,9 @@ mod tests {
     #[test]
     fn undo_cancels_active_crop_edit_before_touching_history() {
         let mut s = session();
+        s.edit_annotations(|a| a.toggle(ShapeKind::Select));
         let original = s.selection.bounds().unwrap();
-        s.pointer_down("screen", p(190., 180.), false);
+        s.pointer_down("screen", p(190., 180.), false, false);
         s.pointer_move("screen", p(210., 195.), false);
         s.undo();
         assert_eq!(s.selection.bounds(), Some(original));
@@ -595,6 +602,130 @@ mod tests {
         s.pointer_up("screen", p(210., 195.), false);
         s.undo();
         assert!(s.annotations.committed().is_empty());
+    }
+
+    #[test]
+    fn group_pointer_and_keyboard_moves_share_bounds_and_one_history_step() {
+        for keyboard in [false, true] {
+            let mut s = session();
+            let crop = s.selection.bounds().unwrap();
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Number);
+                a.begin(p(165., 100.), crop, false);
+                a.drag_to(p(195., 140.), crop, false);
+                a.end();
+                a.add_text(
+                    Bounds::new(p(155., 165.), size(px(55.), px(25.))),
+                    "Sample".into(),
+                );
+                a.finish_interaction();
+                a.select_indices(vec![0, 1, 2]);
+            });
+            let original = s.annotations.committed().to_vec();
+            if keyboard {
+                assert!(s.nudge(p(10., 10.)));
+                assert!(s.nudge(p(1_000., 1_000.)));
+                assert!(!s.nudge(p(1., 1.)));
+                s.finish_nudge();
+            } else {
+                s.pointer_down("screen", p(110., 105.), false, false);
+                s.pointer_move("screen", p(1_110., 1_105.), false);
+                s.pointer_up("screen", p(1_110., 1_105.), false);
+            }
+            let moved = s.annotations.committed().to_vec();
+            let delta = moved[0].bounds.origin - original[0].bounds.origin;
+            assert_ne!(delta, p(0., 0.));
+            for (before, after) in original.iter().zip(&moved) {
+                let mut expected = before.clone();
+                expected.translate(delta);
+                assert_eq!(*after, expected);
+                assert!(crop.contains(&after.ink_bounds().origin));
+                assert!(crop.contains(&after.ink_bounds().bottom_right()));
+            }
+            assert_eq!(s.selection.bounds(), Some(crop));
+            assert_eq!(s.annotations.selected_count(), 3);
+            s.undo();
+            assert_eq!(s.annotations.committed(), original);
+            s.redo();
+            assert_eq!(s.annotations.committed(), moved);
+        }
+    }
+
+    #[test]
+    fn dragging_a_grouped_magnified_image_moves_source_and_other_marks_together() {
+        let mut s = session();
+        let crop = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Magnifier);
+            a.begin(p(65., 150.), crop, false);
+            a.drag_to(p(90., 170.), crop, false);
+            a.end();
+            a.finish_interaction();
+            a.select_indices(vec![0, 1]);
+        });
+        let original = s.annotations.committed().to_vec();
+        let press = original[1].magnified_bounds().unwrap().center();
+        s.pointer_down("screen", press, false, false);
+        s.pointer_up("screen", press + p(10., 10.), false);
+        let moved = s.annotations.committed().to_vec();
+        for (before, after) in original.iter().zip(&moved) {
+            let mut expected = before.clone();
+            expected.translate(p(10., 10.));
+            assert_eq!(*after, expected);
+        }
+        s.undo();
+        assert_eq!(s.annotations.committed(), original);
+        s.redo();
+        assert_eq!(s.annotations.committed(), moved);
+        s.edit_annotations(|a| a.select_indices(vec![0, 1]));
+        s.pointer_down("screen", press + p(10., 10.), false, false);
+        s.pointer_move("screen", press, false);
+        assert!(s.escape_interaction());
+        assert_eq!(s.annotations.committed(), moved);
+        assert_eq!(s.annotations.selected_count(), 2);
+    }
+
+    #[test]
+    fn idle_shift_marquee_can_cancel_without_moving_crop_or_marks() {
+        let mut s = session();
+        s.edit_annotations(|a| {
+            a.finish_interaction();
+        });
+        let crop = s.selection.bounds();
+        let original = s.annotations.committed().to_vec();
+        s.pointer_down("screen", p(60., 60.), false, true);
+        s.pointer_move("screen", p(150., 145.), false);
+        assert!(s.marquee_bounds_local("screen").is_some());
+        assert!(!s.nudge(p(1., 1.)));
+        assert!(s.escape_interaction());
+        assert!(s.marquee_bounds_local("screen").is_none());
+        assert_eq!(s.selection.bounds(), crop);
+        assert_eq!(s.annotations.committed(), original);
+        s.pointer_down("screen", p(60., 60.), false, true);
+        s.pointer_up("screen", p(150., 145.), false);
+        assert_eq!(s.annotations.selected_indices(), &[0]);
+        assert!(s.escape_interaction());
+        assert!(!s.escape_interaction());
+    }
+
+    #[test]
+    fn shift_click_prefers_nested_ink_over_the_selected_outer_frame() {
+        let mut s = session();
+        let crop = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Ellipse);
+            a.begin(p(100., 95.), crop, false);
+            a.drag_to(p(120., 115.), crop, false);
+            a.end();
+            a.finish_interaction();
+            a.select_index(0);
+        });
+        s.pointer_down("screen", p(100., 105.), false, true);
+        s.pointer_up("screen", p(100., 105.), false);
+        assert_eq!(s.annotations.selected_indices(), &[0, 1]);
+        s.pointer_down("screen", p(100., 105.), false, true);
+        s.pointer_up("screen", p(100., 105.), false);
+        assert_eq!(s.annotations.selected_indices(), &[0]);
     }
 
     #[test]
@@ -641,7 +772,7 @@ mod tests {
     fn freehand_movement_clamps_the_whole_stroke_and_undo_restores_every_point() {
         let mut s = session();
         s.edit_annotations(|a| a.toggle(ShapeKind::Pencil));
-        s.pointer_down("screen", p(100., 160.), false);
+        s.pointer_down("screen", p(100., 160.), false, false);
         s.pointer_move("screen", p(150., 175.), false);
         s.pointer_up("screen", p(200., 190.), false);
         s.edit_annotations(|a| {
@@ -712,7 +843,7 @@ mod tests {
         s.pointer_move("screen", p(110., 76.), false);
         assert_eq!(s.hovered_annotation(), Some(0));
         assert!(s.annotation_hover_bounds("screen").is_some());
-        s.pointer_down("screen", p(110., 76.), false);
+        s.pointer_down("screen", p(110., 76.), false, false);
         s.pointer_up("screen", p(110., 76.), false);
         assert_eq!(s.annotations.selected_index(), Some(0));
         assert_eq!(s.hovered_annotation(), None);
@@ -756,7 +887,7 @@ mod tests {
         let mut s = session();
         assert!(!s.zoom_selection(0));
         // a drag in flight owns the pointer gesture: the wheel is inert
-        s.pointer_down("screen", p(300., 250.), false);
+        s.pointer_down("screen", p(300., 250.), false, false);
         s.pointer_move("screen", p(350., 280.), false);
         assert!(!s.zoom_selection(1));
         s.pointer_up("screen", p(350., 280.), false);

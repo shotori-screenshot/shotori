@@ -32,6 +32,12 @@ User-selected interaction requirements take precedence over reference defaults:
 - Rectangle and ellipse are chosen in the main toolbar only. Stroke width remains the
   primary slider and wheel target; rectangle radius has its own numeric icon and popover
 - Dragging inside the selected mark's frame moves it; its geometry remains inside the crop
+- Shift-click toggles selection; Select-tool dragging sweeps a marquee. With no drawing
+  tool active, Shift-drag also selects marks while a plain blank-canvas drag moves the crop
+- Group dragging and arrow-key movement preserve spacing and crop containment; grouped
+  deletion and optional sequence renumbering share one undo/redo entry
+- Multi-selection has one frame per mark and no resize handles. Style controls edit the
+  primary mark; dragging a grouped magnifier moves both its source and enlarged image
 - Drawing does not show hover selection on unrelated marks
 - Magnifier border width is fixed; its slider and wheel only change zoom, and wheel
   input outside the source and enlarged image leaves the selected lens unchanged
@@ -58,7 +64,8 @@ frame sequences. Compilation and unit/widget tests do not establish visual parit
 ## Native scene coverage
 
 Private Wayland compositor checks at scale 1.25 cover text style controls, sequence
-badges with arrows and value controls, separate rectangle/ellipse options, a magnifier
+badges with arrows and value controls, separate rectangle/ellipse options, grouped
+selection frames without individual handles, a magnifier
 drag with an unrelated arrow, and spotlight drawing with a held-button pause. The
 spotlight pause retains an identical frame until pointer movement resumes. These
 checks validate the generated scenes only; they do not establish whole-system parity.

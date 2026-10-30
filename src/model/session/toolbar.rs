@@ -301,13 +301,13 @@ mod tests {
         assert_ne!(dragged, anchored);
 
         // moving the SELECTION (an edit) keeps the user's placement
-        s.pointer_down("right", point(px(120.), px(100.)), false); // interior
+        s.pointer_down("right", point(px(120.), px(100.)), false, false); // interior
         s.pointer_move("right", point(px(220.), px(200.)), false);
         s.pointer_up("right", point(px(220.), px(200.)), false);
         assert_eq!(s.toolbar_bounds("right").unwrap().origin, dragged);
 
         // a NEW selection re-anchors
-        s.pointer_down("right", point(px(500.), px(500.)), false);
+        s.pointer_down("right", point(px(500.), px(500.)), false, false);
         s.pointer_move("right", point(px(700.), px(650.)), false);
         s.pointer_up("right", point(px(700.), px(650.)), false);
         assert_ne!(s.toolbar_bounds("right").unwrap().origin, dragged);

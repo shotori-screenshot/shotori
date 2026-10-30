@@ -79,7 +79,7 @@ impl Annotations {
         if meaningful {
             self.record_add(shape);
             if !rect {
-                self.selected = None;
+                self.selected.clear();
             }
         }
     }

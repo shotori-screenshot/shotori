@@ -16,7 +16,7 @@
 //!   clear-all annotations action (issue #15)
 //!   "textnew", "textmiddle", "textedit" and "textempty" open synthetic
 //!   text editing states through keyboard and pointer dispatch
-//! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel|textstyles|spotlight|lens|numbers|rectangle|ellipse` —
+//! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel|textstyles|spotlight|lens|multiselect|numbers|rectangle|ellipse` —
 //!   seed annotation and crop interaction states on the target output
 //! - `SHOTORI_DEBUG_ACTION=spotlightdraw|lensdrag` replays a pointer gesture
 //!   with a held-button pause to inspect asynchronous preview transitions
@@ -121,7 +121,7 @@ pub(crate) fn debug_editing_scene(
         });
         return;
     }
-    if scene == "lens" {
+    if scene == "lens" || scene == "multiselect" {
         session.edit_annotations(|a| {
             let p = |x, y| bounds.origin + point(px(x), px(y));
             a.toggle(crate::annotation::ShapeKind::Rectangle);
@@ -136,6 +136,10 @@ pub(crate) fn debug_editing_scene(
             a.begin(p(80., 90.), bounds, false);
             a.drag_to(p(240., 210.), bounds, false);
             a.end();
+            if scene == "multiselect" {
+                a.finish_interaction();
+                a.select_indices(vec![0, 1, 2]);
+            }
         });
         return;
     }
@@ -211,12 +215,12 @@ pub(crate) fn debug_editing_scene(
     let local = |x, y| p(x, y) - origin;
     session.pointer_move(output, local(180., 66.), false);
     if scene == "selected" {
-        session.pointer_down(output, local(180., 66.), false);
+        session.pointer_down(output, local(180., 66.), false, false);
         session.pointer_up(output, local(180., 66.), false);
         session.nudge(point(px(10.), px(10.)));
         session.finish_nudge();
     } else if scene == "reselect" || scene == "cancel" {
-        session.pointer_down(output, local(-60., -60.), false);
+        session.pointer_down(output, local(-60., -60.), false, false);
         session.pointer_move(output, local(100., 100.), false);
         if scene == "cancel" {
             session.cancel_annotation();

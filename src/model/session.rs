@@ -31,13 +31,30 @@ struct Screen {
     detector: Option<Arc<crate::model::regiondetect::RegionDetector>>,
 }
 
-/// An in-flight move of the selected shape (issue #5 phase B): the
-/// press-time snapshot plus the press point — every move re-derives
-/// the shape from the snapshot, and commit records one Edit.
+/// An in-flight move of the selected shape(s) (issue #5 phase B, group
+/// drags since the marquee): the press-time snapshots plus the press
+/// point — every move re-derives each shape from its snapshot, and
+/// commit records one `Edit`/`EditMany`.
 struct MoveDrag {
-    ix: usize,
-    before: crate::annotation::Shape,
+    /// Every shape that moves, primary last; each with its press-time
+    /// snapshot.
+    before: Vec<(usize, crate::annotation::Shape)>,
     press: Point<Pixels>,
+}
+
+/// The marquee (rubber-band) selection in flight: a drag that started
+/// on blank canvas under the select tool. The rectangle lives in global
+/// logical coordinates; release picks every shape whose frame
+/// intersects it.
+struct MarqueeDrag {
+    start: Point<Pixels>,
+    current: Point<Pixels>,
+    /// Shift held at press: keep the existing selection and add the
+    /// marquee's hits to it instead of replacing.
+    additive: bool,
+    /// The selection as it was at press time — the additive base (a
+    /// plain marquee replaces it, so it only matters for Shift).
+    base: Vec<usize>,
 }
 
 /// An in-flight handle drag (issue #5 phase C): which handle anchor of
@@ -150,8 +167,13 @@ pub struct ScreenshotSession {
     /// resolve: release without motion CLICKS (select), motion past
     /// CLICK_SLOP converts it into a normal draw stroke starting at the
     /// press point (draw-through — pressing on a shape never blocks
-    /// drawing, issue #5).
-    pending_click: Option<(usize, Point<Pixels>)>,
+    /// drawing, issue #5). The flag is the press's Shift state, so a
+    /// Shift+click that TOGGLED the shape out does not start a drag.
+    pending_click: Option<(usize, Point<Pixels>, bool)>,
+    /// The marquee selection in flight (select tool, press on blank
+    /// canvas). Set at press and dropped on release; a press that never
+    /// leaves CLICK_SLOP is a click (deselect), not a marquee.
+    marquee: Option<MarqueeDrag>,
     /// Drag-move of the selected annotation in flight (phase B). Set
     /// when a press on the ALREADY-SELECTED shape moves past the click
     /// slop; the shape follows the pointer until release.
@@ -224,6 +246,7 @@ impl ScreenshotSession {
             nudge: None,
             pointer_global: None,
             pending_click: None,
+            marquee: None,
             moving: None,
             handle_drag: None,
             blocked: false,
@@ -863,7 +886,7 @@ mod tests {
         assert!(s.text_bounds("left", source, 16.).is_some());
         s.edit_annotations(|a| a.toggle(ShapeKind::Number));
         for p in [source, point(px(65.), px(65.)), destination] {
-            s.pointer_down("left", p, false);
+            s.pointer_down("left", p, false, false);
             s.pointer_up("left", p, false);
             assert_eq!(s.annotations.tool(), Some(ShapeKind::Number));
             assert_eq!(s.annotations.selected().unwrap().kind, ShapeKind::Number);
@@ -922,7 +945,7 @@ mod tests {
             });
             verify(s, cx);
             let press = s.annotations.selected().unwrap().bounds.center();
-            s.pointer_down("left", press, false);
+            s.pointer_down("left", press, false, false);
             for delta in [10., 20., 30.] {
                 s.pointer_move("left", press + point(px(delta), px(delta)), false);
                 assert!(s.is_body_moving());
@@ -1019,7 +1042,7 @@ mod tests {
                 } else {
                     shape.bounds.center()
                 };
-                s.pointer_down("left", press, false);
+                s.pointer_down("left", press, false, false);
                 let destination = press - point(px(25.), px(25.));
                 s.pointer_move("left", destination, false);
                 assert!(s.is_body_moving());
@@ -1435,7 +1458,7 @@ mod tests {
         // move it across the seam: press inside on right's window, drag
         // and release with the pointer already on "left" — Wayland's
         // implicit grab delivers the WHOLE gesture to the press window
-        s.pointer_down("right", point(px(30.), px(30.)), false);
+        s.pointer_down("right", point(px(30.), px(30.)), false, false);
         assert!(s.selection.is_editing());
         s.pointer_move("right", point(px(-40.), px(50.)), false);
         s.pointer_up("right", point(px(-40.), px(50.)), false);
@@ -1710,14 +1733,14 @@ mod tests {
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.))); // global (-90,30) 20×20
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
-        s.pointer_down("left", point(px(12.), px(12.)), false);
+        s.pointer_down("left", point(px(12.), px(12.)), false, false);
         s.pointer_up("left", point(px(28.), px(28.)), false);
         assert_eq!(s.annotations().visible().count(), 1);
         // untoggle: back to selection mode (editing only works without a tool)
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
 
         // press the interior, drag, release → translated, annotations intact
-        s.pointer_down("left", point(px(20.), px(20.)), false); // global (-80,40): interior
+        s.pointer_down("left", point(px(20.), px(20.)), false, false); // global (-80,40): interior
         assert!(s.selection().is_editing());
         assert!(!s.selection().is_selected()); // toolbar hides mid-edit
         s.pointer_move("left", point(px(40.), px(40.)), false); // global (-60,60)
@@ -1735,7 +1758,7 @@ mod tests {
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.))); // global (-90,30) 20×20
         // press right at the bottom-right corner (within the 8px band)
-        s.pointer_down("left", point(px(30.), px(30.)), false);
+        s.pointer_down("left", point(px(30.), px(30.)), false, false);
         assert!(s.selection().is_editing());
         s.pointer_move("left", point(px(50.), px(60.)), false); // global (-50,80)
         s.pointer_up("left", point(px(50.), px(60.)), false);
@@ -1753,7 +1776,7 @@ mod tests {
         s.end("left", point(px(30.), px(30.))); // global (-90,30) 20×20
         // grab the bottom-right corner, drag to local (50,60) →
         // global (-50,80)
-        s.pointer_down("left", point(px(30.), px(30.)), false);
+        s.pointer_down("left", point(px(30.), px(30.)), false, false);
         s.pointer_move("left", point(px(50.), px(60.)), false);
         let loupe = s.local_loupe("left").expect("corner drag → loupe");
         assert_eq!(loupe.focus, point(px(50.), px(60.))); // global − left origin
@@ -1769,12 +1792,12 @@ mod tests {
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.)));
         // top-EDGE midpoint grab: aims a line, not a pixel
-        s.pointer_down("left", point(px(20.), px(10.)), false);
+        s.pointer_down("left", point(px(20.), px(10.)), false, false);
         s.pointer_move("left", point(px(20.), px(5.)), false);
         assert!(s.local_loupe("left").is_none());
         s.pointer_up("left", point(px(20.), px(5.)), false);
         // interior move: no precise point either
-        s.pointer_down("left", point(px(20.), px(20.)), false);
+        s.pointer_down("left", point(px(20.), px(20.)), false, false);
         s.pointer_move("left", point(px(25.), px(25.)), false);
         assert!(s.local_loupe("left").is_none());
         s.pointer_up("left", point(px(25.), px(25.)), false);
@@ -1800,10 +1823,10 @@ mod tests {
             (line.points[0].x + line.points[1].x) / 2.,
             (line.points[0].y + line.points[1].y) / 2.,
         );
-        s.pointer_down("left", local(mid), false);
+        s.pointer_down("left", local(mid), false, false);
         s.pointer_up("left", local(mid), false);
         let target = point(px(80.), px(20.));
-        s.pointer_down("left", local(line.points[1]), false);
+        s.pointer_down("left", local(line.points[1]), false, false);
         s.pointer_move("left", local(target), false);
         // The handle now lives on the RIGHT output (target is global
         // (80,20)): the loupe routes to the output that OWNS the focus,
@@ -1823,12 +1846,12 @@ mod tests {
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.)));
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
-        s.pointer_down("left", point(px(15.), px(15.)), false);
+        s.pointer_down("left", point(px(15.), px(15.)), false, false);
         s.pointer_up("left", point(px(25.), px(25.)), false);
         assert_eq!(s.annotations().visible().count(), 1);
         // Outside presses preserve the crop until an intentional drag.
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
-        s.pointer_down("left", point(px(60.), px(60.)), false);
+        s.pointer_down("left", point(px(60.), px(60.)), false, false);
         assert!(s.selection().is_selected());
         s.pointer_move("left", point(px(80.), px(80.)), false);
         assert!(s.selection().is_dragging());
@@ -1843,7 +1866,7 @@ mod tests {
         let mut s = session();
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(30.), px(30.)));
-        s.pointer_down("left", point(px(20.), px(20.)), false);
+        s.pointer_down("left", point(px(20.), px(20.)), false, false);
         s.pointer_move("left", point(px(60.), px(60.)), false);
         s.cancel_drag();
         assert!(s.selection().is_selected());
@@ -1858,7 +1881,7 @@ mod tests {
         s.begin("left", point(px(80.), px(20.)));
         s.end("right", point(px(20.), px(60.))); // global (-20,40) 40×20, spans the seam
         // grab the part that lives on the RIGHT screen…
-        s.pointer_down("right", point(px(10.), px(50.)), false); // global (10,50): interior
+        s.pointer_down("right", point(px(10.), px(50.)), false, false); // global (10,50): interior
         // …and the drag continues with the LEFT overlay delivering events
         // (left origin is (-100,20): local (90,40) → global (-10,60))
         s.pointer_move("left", point(px(90.), px(40.)), false);
@@ -1883,7 +1906,7 @@ mod tests {
         s.end("right", point(px(55.), px(75.)));
         // a click (no drag) at a point that ALSO sits on a snap window:
         // editing semantics win — the current selection is kept, no re-snap
-        s.pointer_down("right", point(px(40.), px(55.)), false);
+        s.pointer_down("right", point(px(40.), px(55.)), false, false);
         s.pointer_up("right", point(px(40.), px(55.)), false);
         assert!(s.selection().is_selected());
         let b = s.selection().bounds().unwrap();
@@ -1896,7 +1919,7 @@ mod tests {
         let mut s = snapped_session();
         s.begin("right", point(px(25.), px(35.)));
         s.end("right", point(px(55.), px(75.)));
-        s.pointer_down("right", point(px(40.), px(55.)), false); // move grab
+        s.pointer_down("right", point(px(40.), px(55.)), false, false); // move grab
         assert!(!s.hover_at("right", point(px(30.), px(40.)))); // over a window, but editing
         assert!(s.hover_bounds("right").is_none());
         s.pointer_up("right", point(px(40.), px(55.)), false);
@@ -1914,7 +1937,7 @@ mod tests {
         s.begin("left", point(px(80.), px(20.)));
         s.end("right", point(px(20.), px(60.)));
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Rectangle));
-        s.pointer_down("left", point(px(90.), px(25.)), false);
+        s.pointer_down("left", point(px(90.), px(25.)), false, false);
         s.pointer_up("right", point(px(10.), px(55.)), false);
         let (w, h, pixels) = s.crop("right").unwrap();
         let png = crate::model::export::encode_png(w, h, &pixels).unwrap();
@@ -1938,7 +1961,7 @@ mod tests {
             a.toggle(crate::annotation::ShapeKind::Ellipse);
             a.set_color(4);
         });
-        s.pointer_down("left", point(px(90.), px(25.)), false);
+        s.pointer_down("left", point(px(90.), px(25.)), false, false);
         s.pointer_up("right", point(px(10.), px(55.)), false);
         let left = s.local_annotations("left")[0].clone();
         let right = s.local_annotations("right")[0].clone();
@@ -1974,10 +1997,10 @@ mod tests {
                 a.toggle(kind);
                 a.set_color(4);
             });
-            s.pointer_down("left", point(px(90.), px(30.)), false);
+            s.pointer_down("left", point(px(90.), px(30.)), false, false);
             if kind == crate::annotation::ShapeKind::Polyline {
                 s.pointer_up("left", point(px(90.), px(30.)), false);
-                s.pointer_down("right", point(px(10.), px(50.)), false);
+                s.pointer_down("right", point(px(10.), px(50.)), false, false);
             }
             s.pointer_up("right", point(px(10.), px(50.)), false);
             s.pointer_move("right", point(px(10.), px(58.)), false);
@@ -2134,7 +2157,7 @@ mod tests {
         let image = before.magnified_bounds().unwrap();
         let start = image.center() - point(px(-100.), px(20.));
         let end = start - point(px(20.), px(0.));
-        s.pointer_down("left", start, false);
+        s.pointer_down("left", start, false, false);
         s.pointer_move("left", end, false);
         s.pointer_move("left", end, false);
         s.pointer_up("left", end, false);
@@ -2150,7 +2173,7 @@ mod tests {
         s.redo();
         assert_eq!(s.annotations().committed()[0], after);
         let start = after.magnified_bounds().unwrap().center() - point(px(-100.), px(20.));
-        s.pointer_down("left", start, false);
+        s.pointer_down("left", start, false, false);
         s.pointer_move("left", start + point(px(15.), px(10.)), false);
         s.cancel_annotation();
         assert_eq!(s.annotations().committed()[0], after);
@@ -2172,7 +2195,7 @@ mod tests {
         });
 
         // single click on the left edge band selects
-        s.pointer_down("left", point(px(101.), px(5.)), false); // local → global (1,25)
+        s.pointer_down("left", point(px(101.), px(5.)), false, false); // local → global (1,25)
         s.pointer_up("left", point(px(101.), px(5.)), false);
         assert!(s.annotations().selected().is_some());
 
@@ -2180,13 +2203,13 @@ mod tests {
         // with the select tool a blank press is region editing, and a
         // blank press OUTSIDE would start a fresh selection (wiping
         // the annotations) before this click-selects anything again
-        s.pointer_down("left", point(px(150.), px(60.)), false); // global (50,80)
+        s.pointer_down("left", point(px(150.), px(60.)), false, false); // global (50,80)
         s.pointer_up("left", point(px(150.), px(60.)), false);
         assert!(s.annotations().selected().is_none());
 
         // Dragging a hit shape selects and moves it even if it was deselected.
         let before = s.annotations().committed()[0].clone();
-        s.pointer_down("left", point(px(101.), px(5.)), false);
+        s.pointer_down("left", point(px(101.), px(5.)), false, false);
         s.pointer_move("left", point(px(160.), px(60.)), false);
         assert!(s.annotations().draft_shape().is_none());
         s.pointer_up("left", point(px(160.), px(60.)), false);
@@ -2197,11 +2220,113 @@ mod tests {
         assert_eq!(s.annotations().committed()[0], before);
 
         // a press that only wiggles within the slop still click-selects
-        s.pointer_down("left", point(px(101.), px(5.)), false);
+        s.pointer_down("left", point(px(101.), px(5.)), false, false);
         s.pointer_move("left", point(px(103.), px(7.)), false); // < CLICK_SLOP
         s.pointer_up("left", point(px(103.), px(7.)), false);
         assert!(s.annotations().selected().is_some());
         assert_eq!(s.annotations().committed().len(), 1);
+    }
+
+    #[test]
+    fn marquee_selects_every_swept_shape_and_shift_toggles_membership() {
+        use crate::annotation::ShapeKind;
+        let mut s = session();
+        s.select_all();
+        let sel = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Rectangle);
+            a.begin(point(px(-90.), px(10.)), sel, false); // A → (-60,40)
+            a.drag_to(point(px(-60.), px(40.)), sel, false);
+            a.end();
+            a.begin(point(px(-40.), px(10.)), sel, false); // B → (-10,40)
+            a.drag_to(point(px(-10.), px(40.)), sel, false);
+            a.end();
+            a.toggle(ShapeKind::Select);
+        });
+        assert_eq!(s.annotations().committed().len(), 2);
+
+        // a blank-canvas drag sweeps both marks: local (5,-15) → (95,25)
+        // is global (-95,5) → (-5,45), clear of either shape's ink
+        s.pointer_down("left", point(px(5.), px(-15.)), false, false);
+        s.pointer_move("left", point(px(95.), px(25.)), false);
+        s.pointer_up("left", point(px(95.), px(25.)), false);
+        assert_eq!(s.annotations().selected_count(), 2);
+
+        // a press that never leaves the click slop is a CLICK on blank
+        // canvas, so it clears instead of picking up a sliver
+        s.pointer_down("left", point(px(150.), px(90.)), false, false);
+        s.pointer_up("left", point(px(151.), px(90.)), false);
+        assert_eq!(s.annotations().selected_count(), 0);
+
+        // Shift+click adds a shape to a non-empty selection, and a
+        // second Shift+click takes it back out
+        s.pointer_down("left", point(px(11.), px(5.)), false, false); // A, plain click
+        s.pointer_up("left", point(px(11.), px(5.)), false);
+        assert_eq!(s.annotations().selected_count(), 1);
+        s.pointer_down("left", point(px(61.), px(5.)), false, true); // B, Shift
+        s.pointer_up("left", point(px(61.), px(5.)), false);
+        assert_eq!(s.annotations().selected_count(), 2);
+        s.pointer_down("left", point(px(61.), px(5.)), false, true); // B again, Shift
+        s.pointer_up("left", point(px(61.), px(5.)), false);
+        assert_eq!(s.annotations().selected_count(), 1);
+        s.pointer_down("left", point(px(61.), px(5.)), false, true);
+        s.pointer_up("left", point(px(61.), px(5.)), false);
+        assert_eq!(s.annotations().selected_count(), 2);
+
+        // dragging a member of the selection moves the WHOLE group and
+        // records a single history step
+        let marks = s.annotations().committed().to_vec();
+        s.pointer_down("left", point(px(11.), px(5.)), false, false); // A's left edge
+        s.pointer_move("left", point(px(21.), px(15.)), false);
+        s.pointer_up("left", point(px(21.), px(15.)), false);
+        let moved = s.annotations().committed().to_vec();
+        for (before, after) in marks.iter().zip(&moved) {
+            assert_eq!(
+                after.bounds.origin,
+                before.bounds.origin + point(px(10.), px(10.))
+            );
+        }
+        s.undo();
+        assert_eq!(s.annotations().committed(), marks);
+
+        // deleting the multi-selection is one step too
+        s.pointer_down("left", point(px(5.), px(-15.)), false, false);
+        s.pointer_move("left", point(px(95.), px(25.)), false);
+        s.pointer_up("left", point(px(95.), px(25.)), false);
+        assert_eq!(s.annotations().selected_count(), 2);
+        s.edit_annotations(|a| {
+            assert!(a.delete_selected());
+        });
+        assert!(s.annotations().committed().is_empty());
+        s.undo();
+        assert_eq!(s.annotations().committed(), marks);
+    }
+
+    #[test]
+    fn shift_click_on_a_handle_toggles_instead_of_grabbing_it() {
+        // Shift is the toggle modifier and a small shape's body lies
+        // almost entirely inside a handle's grab radius: had the handle
+        // branch kept priority, the one mark the user meant to Shift out
+        // of the selection would instead start resizing itself.
+        use crate::annotation::ShapeKind;
+        let mut s = session();
+        s.select_all();
+        let sel = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Rectangle);
+            a.begin(point(px(-90.), px(10.)), sel, false); // A → (-60,40)
+            a.drag_to(point(px(-60.), px(40.)), sel, false);
+            a.end();
+            a.toggle(ShapeKind::Select);
+        });
+        s.pointer_down("left", point(px(11.), px(5.)), false, false);
+        s.pointer_up("left", point(px(11.), px(5.)), false);
+        assert_eq!(s.annotations().selected_count(), 1);
+
+        // the bottom-right corner handle of A: global (-60,40) → local (40,20)
+        s.pointer_down("left", point(px(40.), px(20.)), false, true);
+        s.pointer_up("left", point(px(40.), px(20.)), false);
+        assert_eq!(s.annotations().selected_count(), 0);
     }
 
     #[test]
@@ -2223,7 +2348,7 @@ mod tests {
         });
         // press ON the placed rectangle's edge and drag: a new stroke
         // is inked over it, nothing gets selected
-        s.pointer_down("left", point(px(101.), px(5.)), false); // global (1,25)
+        s.pointer_down("left", point(px(101.), px(5.)), false, false); // global (1,25)
         s.pointer_move("left", point(px(130.), px(40.)), false);
         s.pointer_up("left", point(px(130.), px(40.)), false);
         assert_eq!(s.annotations().committed().len(), 2);
@@ -2231,20 +2356,23 @@ mod tests {
     }
 
     #[test]
-    fn select_tool_blank_press_edits_the_region_like_no_tool() {
-        // The select tool has no gesture of its own: a blank-canvas
-        // press falls through to region editing exactly like having
-        // no tool at all (interior press = move the region).
+    fn select_tool_blank_press_marquees_and_leaves_the_region_alone() {
+        // Blank canvas under the select tool is the marquee now: the
+        // region no longer moves when a press starts inside it — that
+        // was the pre-marquee fall-through to region editing.
         let mut s = session();
         s.begin("left", point(px(10.), px(10.)));
         s.end("left", point(px(60.), px(60.))); // global (-90,30)-(-40,80)
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Select));
         assert!(!s.annotations().enabled());
-        s.pointer_down("left", point(px(30.), px(30.)), false); // global (-70,50): interior
+        let before = s.selection.bounds().unwrap();
+        s.pointer_down("left", point(px(30.), px(30.)), false, false); // global (-70,50): interior
         s.pointer_move("left", point(px(40.), px(35.)), false); // delta (10,5)
+        let marquee = s.marquee_bounds_local("left").expect("marquee is live");
+        assert_eq!(marquee.size, size(px(10.), px(5.)));
         s.pointer_up("left", point(px(40.), px(35.)), false);
-        let b = s.selection.bounds().unwrap();
-        assert_eq!(b.origin, point(px(-80.), px(35.)));
+        assert!(s.marquee_bounds_local("left").is_none());
+        assert_eq!(s.selection.bounds(), Some(before));
     }
 
     #[test]
@@ -2267,14 +2395,14 @@ mod tests {
         let edge = |b: Bounds<gpui_kit::Pixels>| point(b.left() + px(2.), b.top() + px(15.));
 
         // click-select
-        s.pointer_down("left", local(edge(rect)), false);
+        s.pointer_down("left", local(edge(rect)), false, false);
         s.pointer_up("left", local(edge(rect)), false);
         assert!(s.annotations().selected().is_some());
 
         // press again and DRAG: the selected shape moves
         let delta = point(px(30.), px(10.));
         let moved_origin = rect.origin + delta;
-        s.pointer_down("left", local(rect.center()), false);
+        s.pointer_down("left", local(rect.center()), false, false);
         s.pointer_move("left", local(rect.center() + delta), false);
         s.pointer_up("left", local(rect.center() + delta), false);
         let now = s.annotations().selected().unwrap().bounds;
@@ -2289,10 +2417,10 @@ mod tests {
 
         // Escape mid-move restores the press-time snapshot. Undo/redo
         // dropped the selection — click to reselect first.
-        s.pointer_down("left", local(edge(rect) + delta), false);
+        s.pointer_down("left", local(edge(rect) + delta), false, false);
         s.pointer_up("left", local(edge(rect) + delta), false);
         assert!(s.annotations().selected().is_some());
-        s.pointer_down("left", local(rect.center() + delta), false);
+        s.pointer_down("left", local(rect.center() + delta), false, false);
         s.pointer_move(
             "left",
             local(rect.center() + delta + point(px(50.), px(0.))),
@@ -2327,12 +2455,12 @@ mod tests {
             (line.points[0].x + line.points[1].x) / 2.,
             (line.points[0].y + line.points[1].y) / 2.,
         );
-        s.pointer_down("left", local(mid), false);
+        s.pointer_down("left", local(mid), false, false);
         s.pointer_up("left", local(mid), false);
         assert!(s.annotations().selected().is_some());
 
         let target = point(px(80.), px(20.));
-        s.pointer_down("left", local(line.points[1]), false);
+        s.pointer_down("left", local(line.points[1]), false, false);
         s.pointer_move("left", local(target), false);
         s.pointer_up("left", local(target), false);
         let edited = s.annotations().committed()[0].clone();
@@ -2350,14 +2478,14 @@ mod tests {
             a.end();
             a.toggle(ShapeKind::Select); // click-select needs the mode
         });
-        s.pointer_down("left", local(point(px(2.), px(25.))), false);
+        s.pointer_down("left", local(point(px(2.), px(25.))), false, false);
         s.pointer_up("left", local(point(px(2.), px(25.))), false);
         let br = {
             let b = s.annotations().selected().unwrap().bounds;
             point(b.right() - px(2.), b.bottom() - px(2.))
         };
         let through = point(px(-20.), px(-10.));
-        s.pointer_down("left", local(br), false);
+        s.pointer_down("left", local(br), false, false);
         s.pointer_move("left", local(through), false);
         s.pointer_up("left", local(through), false);
         let after = s.annotations().selected().unwrap().bounds;
@@ -2368,7 +2496,7 @@ mod tests {
 
         // Escape mid-handle-drag restores the press-time snapshot
         let br = point(after.right() - px(2.), after.bottom() - px(2.));
-        s.pointer_down("left", local(br), false);
+        s.pointer_down("left", local(br), false, false);
         s.pointer_move("left", local(point(px(60.), px(70.))), false);
         assert!(s.handle_drag_anchor().is_some());
         s.cancel_annotation();
@@ -2525,7 +2653,7 @@ mod tests {
         let mut s = ScreenshotSession::new(vec![Arc::new(cap)], Vec::new());
         s.select_all();
         s.edit_annotations(|a| a.toggle(ShapeKind::Pencil));
-        s.pointer_down("left", point(px(10.), px(10.)), false);
+        s.pointer_down("left", point(px(10.), px(10.)), false, false);
         for i in 1..=20000 {
             s.pointer_move(
                 "left",
@@ -2573,7 +2701,7 @@ mod tests {
         s.filtered_preview("left").unwrap();
         let start = std::time::Instant::now();
         for i in 0..30 {
-            s.pointer_down("left", point(px(10.), px(10.)), false);
+            s.pointer_down("left", point(px(10.), px(10.)), false, false);
             s.pointer_move("left", point(px(50. + i as f32), px(50.)), false);
             s.filtered_preview("left").unwrap();
             s.pointer_up("left", point(px(50. + i as f32), px(50.)), false);
@@ -2598,12 +2726,12 @@ mod tests {
         s.select_all();
         s.edit_annotations(|a| a.toggle(ShapeKind::Blur));
         for _ in 0..6 {
-            s.pointer_down("left", point(px(0.), px(0.)), false);
+            s.pointer_down("left", point(px(0.), px(0.)), false, false);
             s.pointer_up("left", point(px(1280.), px(720.)), false);
         }
         s.filtered_preview("left").unwrap();
         s.edit_annotations(|a| a.toggle(ShapeKind::Pencil));
-        s.pointer_down("left", point(px(100.), px(100.)), false);
+        s.pointer_down("left", point(px(100.), px(100.)), false, false);
         let mut full = std::time::Duration::ZERO;
         let mut cached = std::time::Duration::ZERO;
         for i in 1..=30 {
@@ -2709,7 +2837,7 @@ mod tests {
             s.end("right", point(px(20.), px(60.)));
             let original = s.crop_original("left").unwrap().2;
             s.edit_annotations(|a| a.toggle(kind));
-            s.pointer_down("right", point(px(18.), px(58.)), false);
+            s.pointer_down("right", point(px(18.), px(58.)), false, false);
             s.pointer_up("left", point(px(82.), px(22.)), false);
             let (w, h, pixels) = s.crop("left").unwrap();
             assert_ne!(pixels, original);
@@ -2741,7 +2869,7 @@ mod tests {
             assert_eq!(s.crop("left").unwrap().2, original);
             s.redo();
             assert_eq!(s.crop("left").unwrap().2, pixels);
-            s.pointer_down("left", point(px(82.), px(22.)), false);
+            s.pointer_down("left", point(px(82.), px(22.)), false, false);
             s.pointer_move("right", point(px(5.), px(55.)), false);
             let (_, draft) = s.filtered_preview("left").unwrap();
             assert!(!Arc::ptr_eq(&left, &draft));
@@ -2759,7 +2887,7 @@ mod tests {
             a.toggle(crate::annotation::ShapeKind::Highlighter);
             a.set_color(4);
         });
-        s.pointer_down("left", point(px(90.), px(30.)), false);
+        s.pointer_down("left", point(px(90.), px(30.)), false, false);
         s.pointer_up("right", point(px(10.), px(50.)), false);
         assert_eq!(
             s.local_annotations("right")[0].points[0],
@@ -2791,7 +2919,7 @@ mod tests {
         s.begin("left", point(px(0.), px(0.)));
         s.end("right", point(px(90.), px(95.)));
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Number));
-        s.pointer_down("left", point(px(40.), px(40.)), false);
+        s.pointer_down("left", point(px(40.), px(40.)), false, false);
         s.pointer_up("right", point(px(50.), px(60.)), false);
         let global = s.annotations().committed()[0].clone();
         assert_eq!(global.bounds.center(), point(px(-60.), px(60.)));
@@ -2803,7 +2931,7 @@ mod tests {
             let mut expected = global.clone();
             expected.translate(-s.screen(output).bounds().origin);
             assert_eq!(s.local_annotations(output), vec![expected.clone()]);
-            assert_eq!(s.selected_shape_local(output), Some(expected));
+            assert_eq!(s.selected_shapes_local(output), vec![expected]);
         }
         assert_ne!(
             s.crop("right").unwrap().2,
@@ -2822,9 +2950,9 @@ mod tests {
             a.toggle(crate::annotation::ShapeKind::Number);
             a.set_color(4);
         });
-        s.pointer_down("left", point(px(98.), px(20.)), false);
+        s.pointer_down("left", point(px(98.), px(20.)), false, false);
         s.pointer_up("left", point(px(98.), px(20.)), false);
-        s.pointer_down("right", point(px(2.), px(75.)), false);
+        s.pointer_down("right", point(px(2.), px(75.)), false, false);
         s.pointer_up("right", point(px(2.), px(75.)), false);
         assert_eq!(
             s.annotations()
@@ -2858,7 +2986,7 @@ mod tests {
         s.begin("left", point(px(0.), px(0.)));
         s.end("left", point(px(100.), px(100.)));
         s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Number));
-        s.pointer_down("left", point(px(50.), px(50.)), false);
+        s.pointer_down("left", point(px(50.), px(50.)), false, false);
         s.pointer_up("left", point(px(50.), px(50.)), false);
         assert_eq!(s.annotations().visible().count(), 1);
         let orig_pos = s.annotations().visible().next().unwrap().bounds.origin;
@@ -2871,7 +2999,7 @@ mod tests {
         assert!(!s.annotations().enabled()); // select is a mode, not a draw tool
         assert!(s.annotations().selected().is_none());
 
-        s.pointer_down("left", point(px(50.), px(50.)), false);
+        s.pointer_down("left", point(px(50.), px(50.)), false, false);
         s.pointer_up("left", point(px(50.), px(50.)), false);
         assert_eq!(s.annotations().selected_index(), Some(0));
 
@@ -2881,7 +3009,7 @@ mod tests {
             crate::model::settings::current().annotation_colors()[1]
         );
 
-        s.pointer_down("left", point(px(50.), px(50.)), false);
+        s.pointer_down("left", point(px(50.), px(50.)), false, false);
         s.pointer_move("left", point(px(60.), px(65.)), false);
         s.pointer_up("left", point(px(60.), px(65.)), false);
         let moved_pos = s.annotations().visible().next().unwrap().bounds.origin;
@@ -2909,7 +3037,7 @@ mod tests {
             selection.bottom_right() + point(px(100.), px(100.)),
         ] {
             let before = s.annotations().committed()[0].bounds;
-            s.pointer_down("left", before.center() - origin, false);
+            s.pointer_down("left", before.center() - origin, false, false);
             s.pointer_move("left", target - origin, false);
             s.pointer_up("left", target - origin, false);
             let after = s.annotations().committed()[0].bounds;

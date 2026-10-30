@@ -15,7 +15,7 @@ impl Annotations {
             return;
         }
         // starting a new stroke gives up the selection
-        self.selected = None;
+        self.selected.clear();
         if self.tool == Some(ShapeKind::Number)
             && (selection.size.width < px(16.) || selection.size.height < px(16.))
         {
@@ -375,7 +375,7 @@ impl Annotations {
         self.pressed = false;
         self.draft = None;
         self.eraser = None;
-        self.selected = None;
+        self.selected.clear();
         self.tool = None;
         self.size_drag_active = false;
         active
@@ -391,7 +391,8 @@ impl Annotations {
         if self.draft.take().is_some() || erasing {
             return true;
         }
-        if self.selected.take().is_some() {
+        if self.selected_index().is_some() {
+            self.selected.clear();
             return true;
         }
         // any lit tool button goes dark — the select tool included

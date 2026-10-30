@@ -635,6 +635,39 @@ mod cursor_tests {
     }
 
     #[test]
+    fn grouped_deletion_preserves_duplicate_numbers_and_cursor_through_undo() {
+        for enabled in [false, true] {
+            let mut marks = Annotations {
+                renumber_on_delete: enabled,
+                ..Default::default()
+            };
+            marks.toggle(ShapeKind::Number);
+            for value in [4, 2, 4, 9] {
+                marks.set_number_value(value);
+                place(&mut marks, false);
+            }
+            marks.set_number_value(20);
+            let original = marks.committed().to_vec();
+            marks.select_indices(vec![1, 2, 1, usize::MAX]);
+            assert!(marks.delete_selected());
+            assert_eq!(
+                values(&marks),
+                if enabled { vec![3, 7] } else { vec![4, 9] }
+            );
+            assert_eq!(marks.next_number(), if enabled { 18 } else { 20 });
+            let deleted = marks.committed().to_vec();
+            marks.undo();
+            assert_eq!(marks.committed(), original);
+            assert_eq!(marks.next_number(), 20);
+            marks.redo();
+            assert_eq!(marks.committed(), deleted);
+            marks.undo();
+            assert_eq!(marks.committed(), original);
+            assert_eq!(marks.next_number(), 20);
+        }
+    }
+
+    #[test]
     fn deletion_renumbers_values_and_cursor_in_one_reversible_operation() {
         for enabled in [false, true] {
             let mut marks = Annotations {

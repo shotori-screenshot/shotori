@@ -33,7 +33,7 @@ fn all_image_annotation_tools_release_replaced_previews(cx: &mut TestAppContext)
                 s.begin("screen", point(px(0.), px(0.)));
                 s.end("screen", point(px(190.), px(190.)));
                 s.edit_annotations(|a| a.toggle(kind));
-                s.pointer_down("screen", point(px(10.), px(10.)), false);
+                s.pointer_down("screen", point(px(10.), px(10.)), false, false);
                 cx.notify();
             })
         });
@@ -85,7 +85,7 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
         session.update(cx, |s, cx| {
             s.select_all();
             s.edit_annotations(|a| a.toggle(crate::annotation::ShapeKind::Pencil));
-            s.pointer_down("screen", point(px(10.), px(10.)), false);
+            s.pointer_down("screen", point(px(10.), px(10.)), false, false);
             cx.notify();
         })
     });
@@ -100,7 +100,7 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
                 );
                 if i % 25 == 24 {
                     s.pointer_up("screen", point(px(170.), px(100.)), false);
-                    s.pointer_down("screen", point(px(10.), px(10.)), false);
+                    s.pointer_down("screen", point(px(10.), px(10.)), false, false);
                 }
                 cx.notify();
             });
