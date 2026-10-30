@@ -19,6 +19,7 @@ pub(crate) struct TextInput {
     limit: f32,
     font_size: f32,
     text_color: u32,
+    style: text::TextStyle,
     bounds: Bounds<Pixels>,
     dragging: bool,
     truncated_input: bool,
@@ -55,6 +56,7 @@ impl TextInput {
             limit,
             font_size,
             text_color: 0,
+            style: Default::default(),
             bounds: Bounds::default(),
             dragging: false,
             truncated_input: false,
@@ -152,6 +154,7 @@ impl TextInput {
             run_height.max(min_lines_h)
         })
     }
+    #[cfg(test)]
     pub(crate) fn set_font_size(&mut self, font_size: f32, cx: &mut Context<Self>) -> bool {
         let old_size = self.font_size;
         let before = self.editor.clone();
@@ -163,6 +166,32 @@ impl TextInput {
             return false;
         }
         self.changed(cx);
+        true
+    }
+
+    /// Change font metrics and decorations atomically without losing the cursor or IME state.
+    pub(crate) fn set_appearance(
+        &mut self,
+        style: &text::TextStyle,
+        size: f32,
+        width: f32,
+        limit: f32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let before = self.editor.clone();
+        let old = (self.style.clone(), self.font_size, self.width, self.limit);
+        self.style = style.clone();
+        self.font_size = size;
+        self.width = width;
+        self.limit = limit;
+        self.shape();
+        if !self.layout_fits() {
+            (self.style, self.font_size, self.width, self.limit) = old;
+            self.editor = before;
+            return false;
+        }
+        // The owner already requested this update; only user edits emit Change.
+        cx.notify();
         true
     }
 
@@ -186,6 +215,10 @@ impl TextInput {
     fn shape(&mut self) {
         text::with_fonts(|fonts| {
             self.editor.with_buffer_mut(|b| {
+                for line in &mut b.lines {
+                    line.set_attrs_list(cosmic_text::AttrsList::new(&self.style.attrs()));
+                }
+                b.set_wrap(self.style.wrapping());
                 b.set_metrics(Metrics::new(self.font_size, self.font_size * 1.35));
                 b.set_size(Some(self.width), None);
                 b.set_scroll(Scroll::default());

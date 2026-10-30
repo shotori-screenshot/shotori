@@ -56,6 +56,9 @@ rust-embed = "8"
 # Sequence badge text: parse and rasterize a bundled font.
 ab_glyph = "0.2.32"
 
+# Use the same stroke/fill tessellator as GPUI for caps, joins and concave geometry.
+lyon_tessellation = "=1.0.22"
+
 # Multilingual text annotations use the same shaping stack as GPUI.
 cosmic-text = "0.19.0"
 

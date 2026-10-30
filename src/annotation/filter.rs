@@ -1,8 +1,78 @@
-//! Rectangular pixel filters, applied in annotation order to the composed image.
+//! Pixel filters with rectangular or brush masks, applied in annotation order.
 use super::{Shape, ShapeKind};
 use gpui_kit::{Pixels, Point};
 
 pub(super) fn rasterize(
+    shape: &Shape,
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    origin: Point<Pixels>,
+    scale: f32,
+) {
+    let Some(super::FilterArea::Brush { diameter }) = shape.filter_area() else {
+        rasterize_rect(shape, rgba, w, h, origin, scale);
+        return;
+    };
+    let bounds = shape.ink_bounds();
+    let left = (f32::from(bounds.left() - origin.x) * scale)
+        .floor()
+        .clamp(0., w as f32) as u32;
+    let top = (f32::from(bounds.top() - origin.y) * scale)
+        .floor()
+        .clamp(0., h as f32) as u32;
+    let right = (f32::from(bounds.right() - origin.x) * scale)
+        .ceil()
+        .clamp(0., w as f32) as u32;
+    let bottom = (f32::from(bounds.bottom() - origin.y) * scale)
+        .ceil()
+        .clamp(0., h as f32) as u32;
+    if right <= left || bottom <= top {
+        return;
+    }
+    let (width, height) = (right - left, bottom - top);
+    let local_origin = origin
+        + gpui_kit::point(
+            gpui_kit::px(left as f32 / scale),
+            gpui_kit::px(top as f32 / scale),
+        );
+    let mut filtered = Vec::with_capacity((width * height * 4) as usize);
+    for y in top..bottom {
+        let start = ((y * w + left) * 4) as usize;
+        filtered.extend_from_slice(&rgba[start..start + (width * 4) as usize]);
+    }
+    let mut region = shape.clone();
+    region.bounds = gpui_kit::Bounds::new(
+        local_origin,
+        gpui_kit::size(
+            gpui_kit::px(width as f32 / scale),
+            gpui_kit::px(height as f32 / scale),
+        ),
+    );
+    rasterize_rect(&region, &mut filtered, width, height, local_origin, scale);
+    // Rasterize the same capsule geometry used by picking, including antialiased edges.
+    let mut mask: Vec<u8> = (0..width * height).flat_map(|_| [0, 0, 0, 255]).collect();
+    let mut stroke = shape.clone();
+    stroke.kind = ShapeKind::Pencil;
+    stroke.parameters = super::ShapeParameters::new(ShapeKind::Pencil, diameter);
+    stroke.color = 0xffffffff;
+    super::line::rasterize(&stroke, &mut mask, width, height, local_origin, scale);
+    for y in 0..height {
+        for x in 0..width {
+            let source = ((y * width + x) * 4) as usize;
+            let target = (((y + top) * w + x + left) * 4) as usize;
+            let coverage = mask[source] as u32;
+            for channel in 0..3 {
+                rgba[target + channel] = ((filtered[source + channel] as u32 * coverage
+                    + rgba[target + channel] as u32 * (255 - coverage)
+                    + 127)
+                    / 255) as u8;
+            }
+        }
+    }
+}
+
+fn rasterize_rect(
     shape: &Shape,
     rgba: &mut [u8],
     w: u32,
@@ -31,7 +101,7 @@ pub(super) fn rasterize(
     }
     let (width, height) = (right - left, bottom - top);
     let stride = w as usize;
-    let strength = (shape.width * scale).round().max(1.) as usize;
+    let strength = (shape.size() * scale).round().max(1.) as usize;
     if shape.kind == ShapeKind::Mosaic {
         for y in (top..bottom).step_by(strength) {
             for x in (left..right).step_by(strength) {
@@ -143,9 +213,10 @@ mod tests {
             kind,
             number: None,
             text: None,
+            text_style: Default::default(),
             bounds: Bounds::new(point(px(2.), px(2.)), size(px(8.), px(8.))),
             color: 0,
-            width: 4.,
+            parameters: crate::annotation::ShapeParameters::new(kind, 4.),
             points: vec![],
         }
     }
@@ -154,7 +225,7 @@ mod tests {
     fn benchmark_4k_blur() {
         let mut mark = shape(ShapeKind::Blur);
         mark.bounds = Bounds::new(point(px(0.), px(0.)), size(px(3840.), px(2160.)));
-        mark.width = 16.;
+        mark.parameters.set_size(16.);
         let mut data: Vec<_> = (0..3840 * 2160)
             .flat_map(|i| [(i % 251) as u8, 70, 120, 255])
             .collect();
@@ -214,7 +285,7 @@ mod tests {
         for strength in [1., 4., 7., 16., 100.] {
             let radius = (strength as usize / 2).max(1);
             let mut mark = shape(ShapeKind::Blur);
-            mark.width = strength;
+            mark.parameters.set_size(strength);
             let mut actual = before.clone();
             rasterize(&mark, &mut actual, 12, 12, point(px(0.), px(0.)), 1.);
             for y in 2_usize..10 {
@@ -258,6 +329,54 @@ mod tests {
                 );
                 mark.bounds.size = size(px(0.1), px(0.1));
                 rasterize(&mark, &mut pixels, 12, 12, point(px(0.), px(0.)), scale);
+            }
+        }
+    }
+    #[test]
+    fn brush_filters_preserve_pixels_outside_capsules_and_destination_alpha() {
+        for kind in [ShapeKind::Mosaic, ShapeKind::Blur] {
+            for scale in [1., 1.25, 2.] {
+                for dot in [false, true] {
+                    let origin = point(px(-3.), px(5.));
+                    let mut mark = shape(kind);
+                    mark.parameters = super::super::ShapeParameters::Filter {
+                        strength: 8.,
+                        area: super::super::FilterArea::Brush { diameter: 8. },
+                    };
+                    mark.points = vec![origin + point(px(12.), px(12.))];
+                    if !dot {
+                        mark.points.push(origin + point(px(36.), px(36.)));
+                    }
+                    let before: Vec<u8> = (0..96 * 96)
+                        .flat_map(|i| {
+                            [
+                                (i * 37 % 251) as u8,
+                                (i * 13 % 251) as u8,
+                                80,
+                                if i % 17 == 0 { 0 } else { 200 },
+                            ]
+                        })
+                        .collect();
+                    let mut pixels = before.clone();
+                    rasterize(&mark, &mut pixels, 96, 96, origin, scale);
+                    assert_ne!(pixels, before);
+                    for y in 0..96 {
+                        for x in 0..96 {
+                            let at = (y * 96 + x) * 4;
+                            assert_eq!(pixels[at + 3], before[at + 3]);
+                            let (lx, ly) = ((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale);
+                            let t = if dot {
+                                0.
+                            } else {
+                                ((lx + ly - 24.) / 48.).clamp(0., 1.)
+                            };
+                            let center = 12. + t * 24.;
+                            if (lx - center).hypot(ly - center) > 5. || before[at + 3] == 0 {
+                                assert_eq!(&pixels[at..at + 4], &before[at..at + 4]);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -6,6 +6,11 @@
 //! active. Geometry lives in [`crate::model::placement`].
 
 mod annot_options;
+mod geometry_options;
+mod line_options;
+mod number_options;
+mod spotlight_options;
+mod text_options;
 use annot_options::annot_options;
 use gpui_kit::{
     assets::IconName,
@@ -23,8 +28,8 @@ use crate::ui::{color_picker::ColorPicker, theme};
 use crate::actions::{
     ClearAnnotations, CopySelection, OcrSelection, PinSelection, QuitOverlay, SaveSelection,
     ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
-    ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect,
-    ToggleText,
+    ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
+    ToggleSelect, ToggleSpotlight, ToggleText,
 };
 use crate::model::placement::{GRIP_W, ROW_H};
 
@@ -34,6 +39,10 @@ gpui_kit::assets::icon_assets!(
     [
         Eraser,
         Type,
+        Bold,
+        Italic,
+        TypeOutline,
+        SquareDashed,
         MirrorRectangular,
         Highlighter,
         Pencil,
@@ -43,6 +52,8 @@ gpui_kit::assets::icon_assets!(
         Waypoints,
         ArrowUpRight,
         ListOrdered,
+        Plus,
+        Minus,
         ScanText,
         ArrowDown,
         Pause,
@@ -72,6 +83,8 @@ gpui_kit::assets::icon_assets!(
         MoveDiagonal2,
         Check,
         Search,
+        Sun,
+        Sparkles,
         Scan,
         ChevronDown,
         ChevronRight,
@@ -246,6 +259,20 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         icon: ButtonIcon::Own("icons/mosaic.svg"),
     },
     ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Magnifier,
+        debug_id: "tb-magnifier",
+        label_key: "toolbar.magnifier",
+        shortcut: "G",
+        icon: ButtonIcon::Kit(IconName::Search),
+    },
+    ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Spotlight,
+        debug_id: "tb-spotlight",
+        label_key: "toolbar.spotlight",
+        shortcut: "Shift+H",
+        icon: ButtonIcon::Kit(IconName::Sun),
+    },
+    ButtonMeta {
         button: crate::model::settings::ToolbarButton::Eraser,
         debug_id: "tb-eraser",
         label_key: "toolbar.eraser",
@@ -349,6 +376,8 @@ fn action_for(button: crate::model::settings::ToolbarButton) -> Box<dyn gpui_kit
         B::Pencil => Box::new(TogglePencil),
         B::Highlighter => Box::new(ToggleHighlighter),
         B::Mosaic => Box::new(ToggleMosaic),
+        B::Magnifier => Box::new(ToggleMagnifier),
+        B::Spotlight => Box::new(ToggleSpotlight),
         B::Eraser => Box::new(ToggleEraser),
         B::Text => Box::new(ToggleText),
         B::Clear => Box::new(ClearAnnotations),
@@ -384,6 +413,8 @@ fn selected_state(
         B::Pencil => tool == Some(K::Pencil),
         B::Highlighter => tool == Some(K::Highlighter),
         B::Number => edit == Some(K::Number),
+        B::Magnifier => edit == Some(K::Magnifier),
+        B::Spotlight => edit == Some(K::Spotlight),
         B::Mosaic => matches!(edit, Some(K::Mosaic | K::Blur)),
         B::Eraser => matches!(edit, Some(K::Eraser | K::EraserRect)),
         B::Text => edit == Some(K::Text),
@@ -496,15 +527,25 @@ pub(crate) fn selection_toolbar(
                 .child(grip("tb-grip-right", output, session.clone())),
         )
         .children(edit_kind.is_some().then(|| {
-            annot_options(
-                edit_kind,
-                annotations,
-                &session,
-                &focus,
-                &size_slider,
-                &swatch_picker,
-                selected_color,
-            )
+            div()
+                .id("annotation-options-scroll")
+                .debug_selector(|| "annotation-options-scroll".into())
+                .flex()
+                .flex_row()
+                .max_w(rect.size.width)
+                .overflow_x_scroll()
+                .child(
+                    annot_options(
+                        edit_kind,
+                        annotations,
+                        &session,
+                        &focus,
+                        &size_slider,
+                        &swatch_picker,
+                        selected_color,
+                    )
+                    .flex_shrink_0(),
+                )
         }))
 }
 
@@ -533,7 +574,7 @@ pub(crate) fn hsla_to_u32(color: Hsla) -> u32 {
 /// legacy presets as clickable detents on the track. Behavior comes
 /// from the base primitives (track click-to-position, thumb drag);
 /// this is presentation only.
-fn size_control(sc: &SizeSlider) -> Div {
+fn size_control(sc: &SizeSlider, suffix: &str) -> Div {
     /// track length; the thumb travels TRACK_W - THUMB inside it
     const TRACK_W: f32 = 108.;
     const THUMB: f32 = 12.;
@@ -585,7 +626,7 @@ fn size_control(sc: &SizeSlider) -> Div {
                 .w(px(26.))
                 .text_size(px(12.))
                 .text_color(rgba(theme::c().toolbar_text))
-                .child(format!("{:.0}", sc.current)),
+                .child(format!("{:.0}{suffix}", sc.current)),
         )
 }
 
@@ -719,6 +760,7 @@ pub(crate) fn preview_control(
 /// The bar container — shared with the settings editor's preview.
 pub(crate) fn bar() -> Div {
     div()
+        .text_color(rgba(theme::c().toolbar_text))
         .flex()
         .items_center()
         .gap(px(2.))
@@ -773,6 +815,74 @@ fn control(
                     .border_color(rgba(theme::c().accent))
             })
         })
+}
+
+fn choice_menu<T: Copy + PartialEq + 'static, V: Copy + 'static>(
+    id: &'static str,
+    label: &'static str,
+    value: T,
+    choices: &'static [(T, &'static str, V)],
+    focus: &FocusHandle,
+    preview: fn(V) -> Svg,
+    apply: impl Fn(T, &mut App) + 'static,
+) -> impl IntoElement {
+    let selected = choices.iter().find(|(choice, _, _)| *choice == value);
+    let current_label = selected.map(|(_, key, _)| *key).unwrap_or(label);
+    let trigger = control(
+        id.into(),
+        crate::i18n::t!(current_label).into_owned(),
+        focus.clone(),
+        |_, _| {},
+    )
+    // Popover owns focus after mouse-down; activation must not return it to the canvas.
+    .on_click(|_, _, _| {})
+    .w(px(38.))
+    .p(px(0.))
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .children(selected.map(|(_, _, icon)| preview(*icon)))
+            .child(annot_options::menu_icon(IconName::ChevronDown, 10.)),
+    );
+    let focus = focus.clone();
+    let apply = std::rc::Rc::new(apply);
+    gpui_kit::component::popover::Popover::new(id)
+        .p(px(0.))
+        .bg(rgba(theme::c().toolbar_bg))
+        .trigger(trigger)
+        .content(move |_, _, cx| {
+            let popup = cx.entity();
+            let mut panel = annotation_menu_panel().flex().flex_col().gap(px(2.));
+            for &(choice, key, path) in choices {
+                let apply = apply.clone();
+                let popup = popup.clone();
+                panel = panel.child(
+                    control(
+                        key.into(),
+                        crate::i18n::t!(key).into_owned(),
+                        focus.clone(),
+                        move |window, cx| {
+                            popup.update(cx, |state, cx| state.dismiss(window, cx));
+                            apply(choice, cx);
+                        },
+                    )
+                    .w(px(34.))
+                    .selected(choice == value)
+                    .child(preview(path)),
+                );
+            }
+            panel
+        })
+}
+
+/// Deferred menu surfaces must consume presses before the window-level canvas listener.
+fn annotation_menu_panel() -> Div {
+    div()
+        .p(px(4.))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 pub(crate) struct ToolbarTooltip(pub(crate) SharedString);

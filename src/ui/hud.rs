@@ -83,8 +83,8 @@ pub(crate) fn handle_cursor(h: Handle) -> CursorStyle {
 /// border it sits on — issue #18 deliberately kept it solid: a white
 /// chip there read as clutter). The dot is what you SEE — what you can
 /// GRAB stays the larger band ([`HANDLE_HIT`] here,
-/// `Shape::handle_at` for shapes). Annotation handles are the same
-/// SIZE but a two-tone fill — see [`paint_shape_handle_dot`].
+/// `Shape::handle_at` for shapes). Annotation handles use a larger
+/// two-tone fill — see [`paint_shape_handle_dot`].
 fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
     let half = HANDLE_VIS / 2.;
     let b = Bounds::new(
@@ -96,8 +96,7 @@ fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
 }
 
 /// One ANNOTATION handle dot centered on `p` (window-local): a white
-/// core inside an accent ring (same [`HANDLE_VIS`] diameter as the
-/// region's dots). Shape handles sit ON the ink, and a solid accent
+/// core inside an accent ring. Shape handles sit ON the ink, and a solid accent
 /// dot vanishes on same-hue ink — an arrow's tip dot landed dead on
 /// the red arrowhead, orange-on-red (user-reported right after the
 /// select-tool flip). White guarantees a visible core on any
@@ -106,18 +105,25 @@ fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
 /// chrome families stay legible each on their own ground: region =
 /// solid accent on dim, object = accent-and-white on ink.
 fn paint_shape_handle_dot(window: &mut Window, p: Point<Pixels>) {
-    let half = HANDLE_VIS / 2.;
+    const ANNOTATION_HANDLE_DIAMETER: f32 = 8.;
+    let half = ANNOTATION_HANDLE_DIAMETER / 2.;
     let ring = px(1.5);
     let b = Bounds::new(
         point(p.x - px(half), p.y - px(half)),
-        size(px(HANDLE_VIS), px(HANDLE_VIS)),
+        size(
+            px(ANNOTATION_HANDLE_DIAMETER),
+            px(ANNOTATION_HANDLE_DIAMETER),
+        ),
     );
     window.paint_quad(fill(b, rgba(theme::c().accent)).corner_radii(half));
     window.paint_quad(
         fill(
             Bounds::new(
                 point(p.x - px(half) + ring, p.y - px(half) + ring),
-                size(px(HANDLE_VIS) - ring * 2., px(HANDLE_VIS) - ring * 2.),
+                size(
+                    px(ANNOTATION_HANDLE_DIAMETER) - ring * 2.,
+                    px(ANNOTATION_HANDLE_DIAMETER) - ring * 2.,
+                ),
             ),
             rgba(0xffffffff),
         )
@@ -211,6 +217,30 @@ pub(crate) fn selection_label(
         .into_any_element()
 }
 
+/// The lens source follows the pointer even when raster preview work is pending.
+pub(crate) fn lens_draft_chrome(shape: crate::annotation::Shape) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |viewport, (), window, _| {
+            let color = rgba(theme::c().accent);
+            if shape.kind == crate::annotation::ShapeKind::Ellipse {
+                if let Some(path) = shape.ellipse_path(viewport.origin) {
+                    window.paint_path(path, color);
+                }
+            } else {
+                for mut stroke in shape.strokes() {
+                    stroke.origin += viewport.origin;
+                    window.paint_quad(fill(stroke, color));
+                }
+            }
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
 /// A dashed frame around the selected mark's visible ink, with contrasting
 /// backing and white-cored handles at its editable anchors. Geometry comes
 /// from the mark and is shared with hover feedback and hit testing.
@@ -221,9 +251,7 @@ pub(crate) fn annotation_chrome(selected: Option<crate::annotation::Shape>) -> i
             let Some(shape) = &selected else {
                 return;
             };
-            let mut b = shape.selection_box();
-            b.origin += viewport.origin;
-            paint_annotation_frame(window, b);
+            paint_annotation_polygon(window, &shape.frame_corners().map(|p| p + viewport.origin));
             // One size, two fills: a shape's resize affordance wears
             // the same diameter the selection border does, but the
             // two-tone fill — see [`paint_shape_handle_dot`].
@@ -260,9 +288,13 @@ fn paint_annotation_frame(window: &mut Window, b: Bounds<Pixels>) {
         b.bottom_right(),
         point(b.left(), b.bottom()),
     ];
+    paint_annotation_polygon(window, &points);
+}
+
+fn paint_annotation_polygon(window: &mut Window, points: &[Point<Pixels>]) {
     for (width, color) in [(3., 0x00000080), (1., theme::c().accent)] {
         let mut path = PathBuilder::stroke(px(width)).dash_array(&[px(4.), px(3.)]);
-        path.add_polygon(&points, true);
+        path.add_polygon(points, true);
         if let Ok(path) = path.build() {
             window.paint_path(path, rgba(color));
         }

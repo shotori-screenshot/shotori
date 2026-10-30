@@ -10,6 +10,7 @@ pub(crate) struct TextEditor {
     visible_width: f32,
     pub(crate) font_size: f32,
     pub(crate) color: u32,
+    pub(crate) style: crate::annotation::text::TextStyle,
 }
 impl TextEditor {
     pub(crate) fn new(
@@ -53,6 +54,7 @@ impl TextEditor {
             input,
             font_size,
             color,
+            style: Default::default(),
             bounds,
             local,
             visible_width: 1.,
@@ -61,6 +63,18 @@ impl TextEditor {
         editor.refresh(cx);
         editor
     }
+    /// Hit-test after font metrics and decoration insets have been synchronized.
+    pub(crate) fn place_caret(&self, click: Point<Pixels>, cx: &mut App) {
+        let p = click - self.local - point(px(self.style.inset()), px(self.style.inset()));
+        self.input.update(cx, |input, cx| {
+            input.action(cosmic_text::Action::Click {
+                x: f32::from(p.x) as i32,
+                y: f32::from(p.y) as i32,
+            });
+            cx.notify();
+        });
+    }
+
     pub(crate) fn input(&self) -> &Entity<TextInput> {
         &self.input
     }
@@ -79,14 +93,27 @@ impl TextEditor {
         self.input.read(cx).value()
     }
     pub(crate) fn refresh(&mut self, cx: &App) {
-        self.height = self.input.read(cx).height();
-        self.visible_width = self.input.read(cx).content_width();
+        self.height = self.input.read(cx).height() + self.style.inset() * 2.;
+        self.visible_width = self.input.read(cx).content_width() + self.style.inset() * 2.;
     }
-    pub(crate) fn sync_style(&mut self, size: f32, color: u32, cx: &mut App) -> bool {
-        let changed = self.font_size != size || self.color != color;
-        if self.font_size != size {
-            if self.input.update(cx, |s, cx| s.set_font_size(size, cx)) {
+    pub(crate) fn sync_style(
+        &mut self,
+        size: f32,
+        color: u32,
+        style: &crate::annotation::text::TextStyle,
+        cx: &mut App,
+    ) -> bool {
+        let changed = self.font_size != size || self.color != color || self.style != *style;
+        if self.font_size != size || self.style != *style {
+            let inset = style.inset() * 2.;
+            let width = (f32::from(self.bounds.size.width) - inset).max(1.);
+            let limit = (f32::from(self.bounds.size.height) - inset).max(0.);
+            if self
+                .input
+                .update(cx, |s, cx| s.set_appearance(style, size, width, limit, cx))
+            {
                 self.font_size = size;
+                self.style = style.clone();
             }
             self.refresh(cx);
         }
@@ -120,7 +147,13 @@ impl TextEditor {
             .w(visible.width)
             .h(visible.height)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(self.input.clone())
+            .child(
+                div()
+                    .absolute()
+                    .left(px(self.style.inset()))
+                    .top(px(self.style.inset()))
+                    .child(self.input.clone()),
+            )
     }
 }
 

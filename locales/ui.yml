@@ -111,6 +111,20 @@ settings:
       body:
         en: Highlight detected regions on hover and select them with a click
         zh-CN: 悬停高亮区域，点击选中
+    renumber_on_delete:
+      title:
+        en: Renumber after deleting a badge
+        zh-CN: 删除序号后递补编号
+      body:
+        en: Decrease higher badge values by one after deleting a badge
+        zh-CN: 删除序号时，将更大的编号减一
+    text_wrap:
+      title:
+        en: Text wrapping
+        zh-CN: 文字换行模式
+      body:
+        en: Applies to text created in the next capture
+        zh-CN: 下一次截图中新建的文字使用此设置
     annotation_auto_select:
       title:
         en: Auto-select after drawing
@@ -451,6 +465,249 @@ scroll:
         en: The clipboard refused the image.
         zh-CN: 剪贴板拒绝了图片。
 toolbar:
+  text_size:
+    en: Text size
+    zh-CN: 字号
+  text_bold:
+    en: Bold
+    zh-CN: 粗体
+  text_italic:
+    en: Italic
+    zh-CN: 斜体
+  text_outline:
+    en: Text outline
+    zh-CN: 文字描边
+  text_background:
+    en: Text background
+    zh-CN: 文字背景
+  text_outline_color:
+    en: Outline color
+    zh-CN: 描边颜色
+  text_background_settings:
+    en: Background settings
+    zh-CN: 背景设置
+  text_background_color:
+    en: Background color and opacity
+    zh-CN: 背景颜色与不透明度
+  text_padding:
+    en: Padding
+    zh-CN: 内边距
+  text_font:
+    en: Font
+    zh-CN: 字体
+  text_font_default:
+    en: System font
+    zh-CN: 系统字体
+  wrap_word:
+    en: Wrap words
+    zh-CN: 按词换行
+  wrap_character:
+    en: Wrap characters
+    zh-CN: 按字符换行
+  wrap_none:
+    en: No wrapping
+    zh-CN: 不自动换行
+  line_start:
+    en: Start arrow
+    zh-CN: 起点箭头
+  line_end:
+    en: End arrow
+    zh-CN: 终点箭头
+  endpoint_none:
+    en: No arrow
+    zh-CN: 无箭头
+  endpoint_open:
+    en: Open arrow
+    zh-CN: 开放箭头
+  endpoint_triangle:
+    en: Filled arrowhead
+    zh-CN: 实心箭头头部
+  endpoint_bar:
+    en: Bar
+    zh-CN: 端点横杠
+  line_caps:
+    en: Line caps
+    zh-CN: 端点样式
+  cap_round:
+    en: Round caps
+    zh-CN: 圆形端点
+  cap_square:
+    en: Square caps
+    zh-CN: 方形端点
+  line_joins:
+    en: Line joins
+    zh-CN: 连接样式
+  join_round:
+    en: Round joins
+    zh-CN: 圆角连接
+  join_sharp:
+    en: Sharp joins
+    zh-CN: 尖角连接
+  highlighter_area:
+    en: Highlighter area
+    zh-CN: 荧光笔绘制方式
+  highlighter_brush:
+    en: Brush
+    zh-CN: 笔刷
+  highlighter_rectangle:
+    en: Rectangle
+    zh-CN: 矩形
+  highlighter_blend:
+    en: Highlighter blend
+    zh-CN: 荧光笔混合方式
+  highlighter_multiply:
+    en: Multiply
+    zh-CN: 正片叠底
+  highlighter_translucent:
+    en: Translucent
+    zh-CN: 半透明
+  spotlight:
+    en: Spotlight
+    zh-CN: 聚光灯
+  region_shape:
+    en: Region shape
+    zh-CN: 区域形状
+  spotlight_opacity:
+    en: Background opacity
+    zh-CN: 背景不透明度
+  spotlight_outline:
+    en: Spotlight outline
+    zh-CN: 聚光灯描边
+  spotlight_outline_width:
+    en: Outline width
+    zh-CN: 描边宽度
+  lens_color:
+    en: Border and connector color
+    zh-CN: 边框与连接线颜色
+  magnifier:
+    en: Magnifier
+    zh-CN: 放大镜
+  lens_rectangle:
+    en: Rectangle
+    zh-CN: 矩形
+  lens_ellipse:
+    en: Ellipse
+    zh-CN: 椭圆
+  lens_smooth:
+    en: Antialiasing
+    zh-CN: 抗锯齿
+  lens_shadow:
+    en: Magnifier shadow
+    zh-CN: 放大镜阴影
+  lens_annotations:
+    en: Include annotations
+    zh-CN: 显示标注
+  line_style:
+    en: Line style
+    zh-CN: 线条类型
+  line_solid:
+    en: Solid
+    zh-CN: 实线
+  line_dashed:
+    en: Dashed
+    zh-CN: 虚线
+  line_dotted:
+    en: Dotted
+    zh-CN: 点线
+  line_dash_dot:
+    en: Dash-dot
+    zh-CN: 点划线
+  line_dash_dot_dot:
+    en: Dash-dot-dot
+    zh-CN: 双点划线
+  pencil_smooth:
+    en: Smooth pencil strokes
+    zh-CN: 平滑笔迹
+  pencil_angle:
+    en: Pencil angle while holding Shift
+    zh-CN: Shift 直线角度
+  angle_free:
+    en: Free angle
+    zh-CN: 自由角度
+  angle_45:
+    en: Snap to 45°
+    zh-CN: 对齐 45°
+  angle_30:
+    en: Snap to 30°
+    zh-CN: 对齐 30°
+  angle_15:
+    en: Snap to 15°
+    zh-CN: 对齐 15°
+  angle_10:
+    en: Snap to 10°
+    zh-CN: 对齐 10°
+  angle_5:
+    en: Snap to 5°
+    zh-CN: 对齐 5°
+  geometry_fill:
+    en: Fill shape
+    zh-CN: 填充形状
+  line_width:
+    en: Stroke width
+    zh-CN: 线条粗细
+  corner_radius:
+    en: Corner radius
+    zh-CN: 圆角半径
+  number_value:
+    en: Sequence value
+    zh-CN: 序号数值
+  number_format:
+    en: Sequence format
+    zh-CN: 序列号类型
+  number_decimal:
+    en: Numbers
+    zh-CN: 数字
+  number_alphabetic:
+    en: Letters
+    zh-CN: 字母
+  number_roman:
+    en: Roman numerals
+    zh-CN: 罗马数字
+  number_decrease:
+    en: Decrease sequence value
+    zh-CN: 减少序号
+  number_increase:
+    en: Increase sequence value
+    zh-CN: 增加序号
+  arrow_style:
+    en: Arrow type
+    zh-CN: 箭头类型
+  arrow_open:
+    en: Open arrow
+    zh-CN: 单向箭头
+  arrow_double_open:
+    en: Double open arrow
+    zh-CN: 双向箭头
+  arrow_outline:
+    en: Outline tapered arrow
+    zh-CN: 空心箭头
+  arrow_filled:
+    en: Filled tapered arrow
+    zh-CN: 实心箭头
+  arrow_dimension:
+    en: Dimension line
+    zh-CN: 尺寸线
+  arrow_triangle:
+    en: Triangle arrow
+    zh-CN: 三角单向箭头
+  arrow_double_triangle:
+    en: Double triangle arrow
+    zh-CN: 三角双向箭头
+  connector_center:
+    en: Center line
+    zh-CN: 中心连线
+  connector_center_dot:
+    en: Center line with dot
+    zh-CN: 中心实心点连线
+  connector_border:
+    en: Border connection
+    zh-CN: 边框连线
+  connector_none:
+    en: No connection
+    zh-CN: 无连接线
+  lens_connector:
+    en: Connector
+    zh-CN: 连接线
   select:
     en: Select
     zh-CN: 选择
@@ -484,6 +741,18 @@ toolbar:
   filter_mosaic:
     en: Mosaic
     zh-CN: 马赛克
+  filter_rectangle:
+    en: Rectangle
+    zh-CN: 矩形
+  filter_brush:
+    en: Brush
+    zh-CN: 画笔
+  filter_strength:
+    en: Strength
+    zh-CN: 强度
+  filter_diameter:
+    en: Brush size
+    zh-CN: 画笔大小
   filter_blur:
     en: Blur
     zh-CN: 模糊

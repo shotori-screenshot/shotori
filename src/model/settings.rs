@@ -28,6 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
+use crate::annotation::text::TextWrap;
 use serde::Deserialize;
 
 mod ocr;
@@ -122,11 +123,10 @@ pub struct Settings {
     /// layer and stays available either way (the detector's quality
     /// itself is issue #27's topic).
     smart_region: bool,
-    /// A freshly placed annotation selects itself on release, so the
-    /// wheel and a drag tune it without a second click. Off by
-    /// default: since the 2026-10-06 select-tool flip selection is an
-    /// explicit mode, and this switch only opts back in.
+    /// Select a new mark for immediate movement and style edits.
     annotation_auto_select: bool,
+    annotation_text_wrap: TextWrap,
+    annotation_renumber_on_delete: bool,
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
@@ -146,7 +146,9 @@ impl Default for Settings {
             language: Language::Auto,
             sidebar_collapsed: false,
             smart_region: true,
-            annotation_auto_select: false,
+            annotation_auto_select: true,
+            annotation_text_wrap: TextWrap::default(),
+            annotation_renumber_on_delete: false,
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
             keys: crate::actions::default_keys(),
         }
@@ -172,9 +174,16 @@ struct File {
     /// preference files written before the key existed keep the
     /// shipped behavior).
     smart_region: Option<bool>,
-    /// Auto-select an annotation on placement (`annotation_auto_select`,
-    /// absent = off — the shipped select-tool behavior).
+    /// Auto-select an annotation on placement (absent = on).
     annotation_auto_select: Option<bool>,
+    annotation: AnnotationFile,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AnnotationFile {
+    text_wrap: Option<String>,
+    renumber_on_delete: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -300,14 +309,29 @@ impl Settings {
         self.smart_region = enabled;
     }
 
-    /// Whether a placed annotation selects itself (default off —
-    /// selection belongs to the select tool).
+    /// Whether a placed annotation selects itself (default on).
     pub fn annotation_auto_select(&self) -> bool {
         self.annotation_auto_select
     }
 
     pub fn set_annotation_auto_select(&mut self, enabled: bool) {
         self.annotation_auto_select = enabled;
+    }
+
+    pub(crate) fn annotation_renumber_on_delete(&self) -> bool {
+        self.annotation_renumber_on_delete
+    }
+
+    pub(crate) fn set_annotation_renumber_on_delete(&mut self, enabled: bool) {
+        self.annotation_renumber_on_delete = enabled;
+    }
+
+    pub(crate) fn annotation_text_wrap(&self) -> TextWrap {
+        self.annotation_text_wrap
+    }
+
+    pub(crate) fn set_annotation_text_wrap(&mut self, mode: TextWrap) {
+        self.annotation_text_wrap = mode;
     }
 
     /// The resolved shortcut keystrokes (id → keystroke, defaults
@@ -488,6 +512,19 @@ impl Settings {
                 }
             },
         };
+        let annotation_text_wrap =
+            file.annotation
+                .text_wrap
+                .as_deref()
+                .map_or(TextWrap::default(), |id| {
+                    TextWrap::from_id(id).unwrap_or_else(|| {
+                        errors.push(format!(
+                            "{}: unknown annotation.text_wrap {id:?} (using word)",
+                            path.display()
+                        ));
+                        TextWrap::default()
+                    })
+                });
         // [keys]: resolved against the registry — unknown ids,
         // unparseable keystrokes and duplicates degrade per entry with
         // a warning (same contract as the other fields).
@@ -503,7 +540,9 @@ impl Settings {
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 smart_region: file.smart_region.unwrap_or(true),
-                annotation_auto_select: file.annotation_auto_select.unwrap_or(false),
+                annotation_auto_select: file.annotation_auto_select.unwrap_or(true),
+                annotation_text_wrap,
+                annotation_renumber_on_delete: file.annotation.renumber_on_delete.unwrap_or(false),
                 annotation_colors,
                 keys,
             },
@@ -564,6 +603,23 @@ impl Settings {
         table.insert(
             "annotation_auto_select".into(),
             toml::Value::from(self.annotation_auto_select),
+        );
+        let annotation = table
+            .entry("annotation")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let Some(annotation) = annotation.as_table_mut() else {
+            return Err(format!(
+                "{}: [annotation] is not a table — refusing to overwrite",
+                path.display()
+            ));
+        };
+        annotation.insert(
+            "text_wrap".into(),
+            toml::Value::from(self.annotation_text_wrap.id()),
+        );
+        annotation.insert(
+            "renumber_on_delete".into(),
+            toml::Value::from(self.annotation_renumber_on_delete),
         );
         let ocr = table
             .entry("ocr")
@@ -820,6 +876,68 @@ mod tests {
     }
 
     #[test]
+    fn text_wrapping_round_trips_without_replacing_other_annotation_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "[annotation]\nfuture_preference = true\n").unwrap();
+        let mut settings = Settings::default();
+        for mode in TextWrap::ALL {
+            settings.set_annotation_text_wrap(mode);
+            settings.save(&path).unwrap();
+            let (loaded, errors) = Settings::load(Some(&path));
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(loaded.annotation_text_wrap(), mode);
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                saved["annotation"]["future_preference"].as_bool(),
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn renumbering_preference_round_trips_without_changing_text_wrapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.toml");
+        let mut settings = Settings::default();
+        assert!(!settings.annotation_renumber_on_delete());
+        settings.set_annotation_text_wrap(TextWrap::Character);
+        settings.set_annotation_renumber_on_delete(true);
+        settings.save(&path).unwrap();
+        let (loaded, warnings) = Settings::load(Some(&path));
+        assert!(warnings.is_empty());
+        assert!(loaded.annotation_renumber_on_delete());
+        assert_eq!(loaded.annotation_text_wrap(), TextWrap::Character);
+    }
+
+    #[test]
+    fn unknown_text_wrapping_keeps_other_valid_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(
+            &path,
+            "smart_region = false\n[annotation]\ntext_wrap = \"future-mode\"\n",
+        )
+        .unwrap();
+        let (loaded, errors) = Settings::load(Some(&path));
+        assert!(!loaded.smart_region());
+        assert_eq!(loaded.annotation_text_wrap(), TextWrap::Word);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("annotation.text_wrap"));
+    }
+
+    #[test]
+    fn save_rejects_non_table_annotation_preferences_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let original = "annotation = true\n";
+        std::fs::write(&path, original).unwrap();
+        assert!(Settings::default().save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
     fn keys_round_trip_and_per_entry_degrade() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
@@ -996,7 +1114,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let mut s = Settings::default();
-        assert!(!s.annotation_auto_select());
+        assert!(s.annotation_auto_select());
         s.set_annotation_auto_select(true);
         s.save(&path).unwrap();
         let (back, errors) = Settings::load(Some(&path));
@@ -1006,7 +1124,7 @@ mod tests {
         // behavior), and an absent key (a preference file written
         // before the key existed) loads as off too.
         let (fresh, _) = Settings::load(Some(&dir.path().join("nonexistent.toml")));
-        assert!(!fresh.annotation_auto_select());
+        assert!(fresh.annotation_auto_select());
     }
 
     #[test]

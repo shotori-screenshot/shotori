@@ -25,7 +25,15 @@ impl ScreenshotSession {
     ) {
         if !self.blocked && self.selection.is_selected() {
             self.finish_nudge();
-            edit(&mut self.annotations);
+            if let Some(area) = self.selection.bounds() {
+                let area =
+                    if self.annotations.edit_kind() == Some(crate::annotation::ShapeKind::Text) {
+                        text_area(area).unwrap_or(area)
+                    } else {
+                        area
+                    };
+                self.annotations.edit_within(area, edit);
+            }
         }
     }
 
@@ -92,9 +100,7 @@ impl ScreenshotSession {
         name: &str,
         local: Point<Pixels>,
     ) -> Option<(usize, Point<Pixels>)> {
-        if self.annotations.tool() != Some(crate::annotation::ShapeKind::Select)
-            || self.selection.bounds().is_none()
-        {
+        if !self.annotations.parks_click_select() || self.selection.bounds().is_none() {
             return None;
         }
         let origin = self.screen(name).bounds().origin;
@@ -128,7 +134,12 @@ impl ScreenshotSession {
                     return;
                 };
                 let before = before.clone();
-                self.handle_drag = Some(HandleDrag { ix, anchor, before });
+                self.handle_drag = Some(HandleDrag {
+                    ix,
+                    anchor,
+                    before,
+                    press: p,
+                });
                 return;
             }
             // press on a shape: click-or-drag resolves on the
@@ -136,7 +147,7 @@ impl ScreenshotSession {
             // parks (draw tools draw right over existing ink)
             if selection.contains(&p)
                 && self.annotations.parks_click_select()
-                && let Some(ix) = self.annotations.hit_test(p)
+                && let Some(ix) = self.annotations.interaction_hit_test(p)
             {
                 self.pending_click = Some((ix, p));
                 return;
@@ -202,8 +213,24 @@ impl ScreenshotSession {
                         p.x.clamp(selection.left(), selection.right()),
                         p.y.clamp(selection.top(), selection.bottom()),
                     );
-                    self.annotations
-                        .place_handle(drag.ix, drag.anchor, &drag.before, clamped_p);
+                    if drag.anchor == crate::annotation::ROTATION_HANDLE {
+                        self.annotations.rotate_shape(
+                            drag.ix,
+                            &drag.before,
+                            drag.press,
+                            p,
+                            selection,
+                            square,
+                        );
+                        return true;
+                    }
+                    self.annotations.place_handle(
+                        drag.ix,
+                        drag.anchor,
+                        &drag.before,
+                        clamped_p,
+                        selection,
+                    );
                     return true;
                 }
                 if let Some((ix, press)) = self.pending_click {
@@ -225,13 +252,31 @@ impl ScreenshotSession {
                     } else {
                         selection
                     };
-                    let clamped_delta = super::editing::movement_delta(
-                        drag.before.ink_bounds(),
-                        selection,
-                        p - drag.press,
-                    );
-                    self.annotations
-                        .place_shape(drag.ix, &drag.before, clamped_delta);
+                    let moving_lens = drag.before.kind == crate::annotation::ShapeKind::Magnifier
+                        && !drag.before.bounds.contains(&drag.press)
+                        && drag
+                            .before
+                            .magnified_bounds()
+                            .is_some_and(|b| b.contains(&drag.press));
+                    let moving_bounds = if moving_lens {
+                        drag.before
+                            .magnified_bounds()
+                            .unwrap_or(drag.before.ink_bounds())
+                    } else if drag.before.kind == crate::annotation::ShapeKind::Text {
+                        drag.before.ink_bounds()
+                    } else {
+                        drag.before.selection_box()
+                    };
+                    let clamped_delta =
+                        super::editing::movement_delta(moving_bounds, selection, p - drag.press);
+                    if moving_lens {
+                        self.annotations
+                            .place_shape(drag.ix, &drag.before, point(px(0.), px(0.)));
+                        self.annotations.move_selected_lens(clamped_delta);
+                    } else {
+                        self.annotations
+                            .place_shape(drag.ix, &drag.before, clamped_delta);
+                    }
                     return true;
                 }
                 if self.annotations.enabled() {
@@ -295,22 +340,49 @@ impl ScreenshotSession {
         }
     }
 
-    /// Cancel active manipulation and clear passive tool/shape selection together.
-    /// False means no operation was active, so Escape may close the screenshot.
+    /// Finish an active polyline first; otherwise leave annotation mode.
+    pub(crate) fn finish_or_exit_annotation(&mut self) {
+        if self.blocked
+            || (self.annotations.tool().is_none() && self.annotations.selected_index().is_none())
+        {
+            return;
+        }
+        if self.annotations.is_drawing_polyline() {
+            self.annotations.finish_polyline();
+            return;
+        }
+        self.cancel_annotation();
+        self.annotations.finish_interaction();
+    }
+
+    /// Cancel one interaction level before allowing Escape to close the screenshot.
     pub(crate) fn escape_interaction(&mut self) -> bool {
         if self.blocked {
             return true;
         }
         self.finish_nudge();
-        let drawing = self.annotations.finish_interaction();
-        let geometry = self.cancel_annotation();
-        let dragging = self.selection.is_dragging()
-            || self.selection.is_editing()
-            || self.toolbar_drag_active();
-        if dragging {
-            self.cancel_drag();
+        if self.annotations.is_pressed()
+            || self.annotations.is_drawing_polyline()
+            || self.moving.is_some()
+            || self.handle_drag.is_some()
+            || self.pending_click.is_some()
+        {
+            self.cancel_annotation();
+            return true;
         }
-        drawing || geometry || dragging
+        if self.selection.is_dragging()
+            || self.selection.is_editing()
+            || self.toolbar_drag_active()
+            || self.selection_gesture.is_some()
+        {
+            self.cancel_drag();
+            return true;
+        }
+        if self.annotations.tool().is_some() || self.annotations.selected_index().is_some() {
+            self.annotations.finish_interaction();
+            return true;
+        }
+        false
     }
 
     pub(crate) fn cancel_annotation(&mut self) -> bool {
@@ -361,10 +433,7 @@ impl ScreenshotSession {
             .visible()
             .cloned()
             .map(|mut shape| {
-                shape.bounds.origin -= origin;
-                for point in &mut shape.points {
-                    *point -= origin;
-                }
+                shape.translate(-origin);
                 shape
             })
             .collect()
@@ -379,16 +448,17 @@ impl ScreenshotSession {
     pub(crate) fn local_draft(&self, name: &str) -> Option<crate::annotation::Shape> {
         let origin = self.screen(name).bounds().origin;
         let mut shape = self.annotations.draft_shape()?.clone();
-        if !matches!(
-            shape.kind,
-            crate::annotation::ShapeKind::Pencil | crate::annotation::ShapeKind::Highlighter
-        ) {
+        if !shape.is_freehand() || self.annotations.composite_draft() {
             return None;
         }
-        shape.bounds.origin -= origin;
-        for point in &mut shape.points {
-            *point -= origin;
-        }
+        shape.translate(-origin);
+        Some(shape)
+    }
+
+    /// Immediate source geometry; independent of background preview jobs.
+    pub(crate) fn local_lens_draft_outline(&self, name: &str) -> Option<crate::annotation::Shape> {
+        let mut shape = self.annotations.draft_shape()?.lens_source_outline()?;
+        shape.translate(-self.screen(name).bounds().origin);
         Some(shape)
     }
 
@@ -398,10 +468,7 @@ impl ScreenshotSession {
         let origin = self.screen(name).bounds().origin;
         self.annotations.selected().map(|shape| {
             let mut s = shape.clone();
-            s.bounds.origin -= origin;
-            for p in &mut s.points {
-                *p -= origin;
-            }
+            s.translate(-origin);
             s
         })
     }
@@ -414,7 +481,10 @@ impl ScreenshotSession {
             || self.moving.is_some()
             || self.handle_drag.is_some()
             || self.toolbar_drag.is_some()
-            || !self.annotations.parks_click_select()
+            || !matches!(
+                self.annotations.tool(),
+                None | Some(crate::annotation::ShapeKind::Select)
+            )
         {
             return None;
         }

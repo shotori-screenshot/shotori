@@ -8,13 +8,13 @@ use crate::actions::{
     ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline, Nudge,
     OcrSelection, OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection,
     ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
-    ToggleLine, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
-    ToggleSelect, ToggleText, UndoAnnotation,
+    ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline,
+    ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
-    annotation_chrome, annotation_hover_chrome, eraser_chrome, hover_outline, magnifier_loupe,
-    selection_backdrop, selection_handles, selection_label,
+    annotation_chrome, annotation_hover_chrome, eraser_chrome, hover_outline, lens_draft_chrome,
+    magnifier_loupe, selection_backdrop, selection_handles, selection_label,
 };
 use crate::ui::toolbar::selection_toolbar;
 use gpui_kit::*;
@@ -44,8 +44,8 @@ impl Render for Overlay {
             // slider position, readout and writes all follow it
             let edit = a.edit_kind().map(|kind| {
                 (
-                    kind,
-                    crate::annotation::size_spec(kind),
+                    (kind, a.editing_filter_brush_size()),
+                    a.current_size_spec(),
                     a.current_edit_size(),
                 )
             });
@@ -130,6 +130,7 @@ impl Render for Overlay {
             } else {
                 None
             };
+        let lens_draft = shared.local_lens_draft_outline(&self.capture.output_name);
         let annotation_hover = shared.annotation_hover_bounds(&self.capture.output_name);
         let raster_preview = shared.uses_raster_preview();
         let shapes = if raster_preview {
@@ -169,6 +170,10 @@ impl Render for Overlay {
                 "ShotoriTextEditing"
             } else if self.session.read(cx).blocked() {
                 "ShotoriBlocked"
+            } else if !self.focus_handle.is_focused(window) {
+                // Child inputs and popup controls own their keyboard commands.
+                // Plain annotation shortcuts must not intercept typed characters.
+                "ShotoriControls"
             } else if drawing_polyline {
                 "ShotoriOverlay PolylineDrawing"
             } else {
@@ -207,11 +212,16 @@ impl Render for Overlay {
             )
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Escape, window, cx| {
-                    if this.text_editing.is_some() {
-                        this.escape(window, cx);
+                    if let Some(editor) = &this.text_editing {
+                        if editor.focus_handle(cx).is_focused(window) {
+                            this.escape(window, cx);
+                        } else {
+                            editor.focus(window, cx);
+                        }
                     } else {
-                        cx.propagate();
+                        window.focus(&this.focus_handle, cx);
                     }
+                    cx.stop_propagation();
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleNumber, window, cx| {
@@ -237,6 +247,12 @@ impl Render for Overlay {
                     });
                     cx.notify();
                 });
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSpotlight, window, cx| {
+                this.toggle_tool(crate::annotation::ShapeKind::Spotlight, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMagnifier, window, cx| {
+                this.toggle_tool(crate::annotation::ShapeKind::Magnifier, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleMosaic, window, cx| {
                 // The toolbar's mosaic slot re-toggles BLUR when that is
@@ -398,14 +414,16 @@ impl Render for Overlay {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    if this.session.read(cx).blocked() {
+                    if this.session.read(cx).blocked() && this.text_editing.is_none() {
                         return;
                     }
+                    this.finish_text(true, window, cx);
                     window.focus(&this.focus_handle, cx);
                     this.session.update(cx, |s, cx| {
-                        s.edit_annotations(|a| a.finish_polyline());
+                        s.finish_or_exit_annotation();
                         cx.notify();
                     });
+                    cx.stop_propagation();
                 }),
             )
             // Wheel has three phases. (0) A FINALIZED selection with no
@@ -466,7 +484,7 @@ impl Render for Overlay {
                     cx.stop_propagation();
                     return;
                 }
-                if this.session.read(cx).annotations().tool().is_none() {
+                if this.session.read(cx).annotations().edit_kind().is_none() {
                     // phase 1 — hierarchy stepping (drains whole units)
                     let mut consumed = false;
                     while this.size_scroll_acc >= 1.0 {
@@ -493,13 +511,29 @@ impl Render for Overlay {
                 let mut changed = false;
                 while this.size_scroll_acc >= 1.0 {
                     this.session.update(cx, |s, _| {
-                        s.edit_annotations(|a| changed |= a.step_size(true));
+                        let position = s.to_global(&this.capture.output_name, event.position);
+                        s.edit_annotations(|a| {
+                            changed |=
+                                if a.edit_kind() == Some(crate::annotation::ShapeKind::Spotlight) {
+                                    a.step_spotlight(spotlight_adjustment(event), true)
+                                } else {
+                                    a.step_size_at(position, true)
+                                };
+                        });
                     });
                     this.size_scroll_acc -= 1.0;
                 }
                 while this.size_scroll_acc <= -1.0 {
                     this.session.update(cx, |s, _| {
-                        s.edit_annotations(|a| changed |= a.step_size(false));
+                        let position = s.to_global(&this.capture.output_name, event.position);
+                        s.edit_annotations(|a| {
+                            changed |=
+                                if a.edit_kind() == Some(crate::annotation::ShapeKind::Spotlight) {
+                                    a.step_spotlight(spotlight_adjustment(event), false)
+                                } else {
+                                    a.step_size_at(position, false)
+                                };
+                        });
                     });
                     this.size_scroll_acc += 1.0;
                 }
@@ -577,6 +611,11 @@ impl Render for Overlay {
                                     continue;
                                 }
                                 if let Some(mut number_image) = number_image {
+                                    if let Some(arrow) = shape.number_arrow() {
+                                        for path in arrow.line_paths(viewport.origin) {
+                                            window.paint_path(path, rgba(shape.color));
+                                        }
+                                    }
                                     number_image.bounds.origin += viewport.origin;
                                     if let Err(error) = window.paint_image(
                                         number_image.bounds,
@@ -590,7 +629,7 @@ impl Render for Overlay {
                                     }
                                     continue;
                                 }
-                                if matches!(
+                                if shape.has_custom_geometry() || matches!(
                                     shape.kind,
                                     crate::annotation::ShapeKind::Line
                                         | crate::annotation::ShapeKind::Arrow
@@ -631,6 +670,7 @@ impl Render for Overlay {
             // above the marks, below the selection border.
             .children(annotation_hover.map(annotation_hover_chrome))
             .child(annotation_chrome(selected_shape))
+            .children(lens_draft.map(lens_draft_chrome))
             // ①¾ Eraser chrome (issue #14): the brush ring / the area
             // rect — pointer affordances, above the marks they erase.
             .children(eraser.map(eraser_chrome))
@@ -775,7 +815,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                     if event.click_count >= 2
                         && matches!(
                             tool,
-                            Some(
+                            None | Some(
                                 crate::annotation::ShapeKind::Select
                                     | crate::annotation::ShapeKind::Text
                             )
@@ -798,7 +838,12 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                     }
                     if this.session.read(cx).annotations().tool()
                         == Some(crate::annotation::ShapeKind::Text)
-                        && this.session.read(cx).annotations().hit_test(p).is_none()
+                        && this
+                            .session
+                            .read(cx)
+                            .annotations()
+                            .interaction_hit_test(p)
+                            .is_none()
                     {
                         // The first click of a double-click must select the
                         // existing mark, not open an empty editor over it.
@@ -899,4 +944,15 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
     )
     .absolute()
     .size_full()
+}
+
+fn spotlight_adjustment(event: &ScrollEvent) -> crate::annotation::SpotlightAdjustment {
+    use crate::annotation::SpotlightAdjustment;
+    if event.modifiers.control {
+        SpotlightAdjustment::Outline
+    } else if event.modifiers.shift {
+        SpotlightAdjustment::Region
+    } else {
+        SpotlightAdjustment::Opacity
+    }
 }

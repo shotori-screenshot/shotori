@@ -9,11 +9,20 @@
 //! line, number, select, text) predate this split.
 mod chrome;
 mod filter;
+mod magnifier;
+mod spotlight;
+pub(crate) use magnifier::{LensConnector, LensOption};
+pub(crate) use spotlight::SpotlightAdjustment;
+mod geometry;
+pub(crate) const ROTATION_HANDLE: usize = usize::MAX;
+mod parameters;
+use parameters::ShapeParameters;
+pub(crate) use parameters::{ArrowStyle, EndMarker, FilterArea, LineEnds, LineStyle, NumberFormat};
 mod highlighter;
 mod line;
 pub(crate) use line::StrokePreview;
 pub(crate) mod text;
-pub(crate) use highlighter::HighlighterCache;
+pub(crate) use highlighter::{HighlightBlend, HighlighterCache};
 mod number;
 mod select;
 pub(crate) use number::NumberCache;
@@ -32,17 +41,15 @@ pub(crate) enum ShapeKind {
     Highlighter,
     Mosaic,
     Blur,
+    Magnifier,
+    Spotlight,
     Rectangle,
     Ellipse,
     Line,
     Arrow,
     Polyline,
-    /// The select tool — a MODE, never a shape record (the erasers'
-    /// pattern: tool-only variants of this enum). Selection is
-    /// normally its exclusive job: draw tools never park a
-    /// click-select, and auto-select on place only happens with the
-    /// opt-in `auto_select` switch (2026-10-06 flip), so a selected
-    /// shape implies this tool is active or that switch is on.
+    /// Explicit selection mode retained for custom toolbars and shortcuts.
+    /// Selection is also available when no drawing tool is active.
     Select,
 }
 
@@ -51,7 +58,10 @@ impl ShapeKind {
     /// (corner-handle editing); point-cloud kinds as `points`
     /// (endpoint/vertex editing).
     pub(crate) fn is_region(self) -> bool {
-        matches!(self, ShapeKind::Rectangle | ShapeKind::Ellipse)
+        matches!(
+            self,
+            ShapeKind::Rectangle | ShapeKind::Ellipse | ShapeKind::Magnifier | ShapeKind::Spotlight
+        )
     }
 }
 
@@ -68,6 +78,8 @@ pub(crate) struct SizeSpec {
 /// range.
 pub(crate) fn size_spec(kind: ShapeKind) -> SizeSpec {
     match kind {
+        ShapeKind::Spotlight => SizeSpec { min: 0., max: 100. },
+        ShapeKind::Magnifier => SizeSpec { min: 1., max: 8. },
         ShapeKind::Highlighter => SizeSpec { min: 8., max: 60. },
         ShapeKind::Mosaic | ShapeKind::Blur => SizeSpec { min: 4., max: 48. },
         ShapeKind::Eraser | ShapeKind::EraserRect => SizeSpec { min: 8., max: 96. },
@@ -82,13 +94,27 @@ pub(crate) struct Shape {
     pub(crate) kind: ShapeKind,
     pub(crate) number: Option<u32>,
     pub(crate) text: Option<String>,
+    pub(crate) text_style: text::TextStyle,
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) color: u32,
-    pub(crate) width: f32,
+    parameters: ShapeParameters,
     pub(crate) points: Vec<Point<Pixels>>,
 }
 
 impl Shape {
+    /// Translate every absolute coordinate together for movement and output projection.
+    pub(crate) fn translate(&mut self, delta: Point<Pixels>) {
+        self.bounds.origin += delta;
+        for point in &mut self.points {
+            *point += delta;
+        }
+        self.set_number_tip(self.number_tip().map(|tip| tip + delta));
+    }
+
+    pub(crate) fn size(&self) -> f32 {
+        self.parameters.size()
+    }
+
     pub(crate) fn line_paths(&self, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
         line::paths(self, offset)
     }
@@ -105,7 +131,8 @@ impl Shape {
     /// preview and rasterization paths are unique (see `StrokePreview`,
     /// `line::coverage`).
     pub(crate) fn is_freehand(&self) -> bool {
-        matches!(self.kind, ShapeKind::Pencil | ShapeKind::Highlighter)
+        self.kind == ShapeKind::Pencil
+            || (self.kind == ShapeKind::Highlighter && !self.highlighter_options().rectangle)
     }
 
     /// Match export's inward ellipse ring; reverse the inner contour to cut a hole.
@@ -118,8 +145,8 @@ impl Shape {
         let center = self.bounds.origin + offset + point(px(rx), px(ry));
         let mut path = PathBuilder::fill();
         ellipse_contour(&mut path, center, rx, ry, 1.);
-        if rx > self.width && ry > self.width {
-            ellipse_contour(&mut path, center, rx - self.width, ry - self.width, -1.);
+        if rx > self.size() && ry > self.size() {
+            ellipse_contour(&mut path, center, rx - self.size(), ry - self.size(), -1.);
         }
         path.build().ok()
     }
@@ -139,8 +166,8 @@ impl Shape {
         }
         let cx = f32::from(self.bounds.left() - origin.x) * scale + rx;
         let cy = f32::from(self.bounds.top() - origin.y) * scale + ry;
-        let inner_rx = rx - self.width * scale;
-        let inner_ry = ry - self.width * scale;
+        let inner_rx = rx - self.size() * scale;
+        let inner_ry = ry - self.size() * scale;
         let left = (cx - rx).floor().clamp(0., w as f32) as usize;
         let right = (cx + rx).ceil().clamp(0., w as f32) as usize;
         let top = (cy - ry).floor().clamp(0., h as f32) as usize;
@@ -189,7 +216,7 @@ impl Shape {
     /// Inward strokes keep both preview and export within the rectangle.
     pub(crate) fn strokes(&self) -> [Bounds<Pixels>; 4] {
         let b = self.bounds;
-        let width = px(self.width)
+        let width = px(self.size())
             .min(b.size.width / 2.)
             .min(b.size.height / 2.);
         [
@@ -230,6 +257,8 @@ struct Draft {
     /// continuous curve. Committed points ARE the smoothed cursor, so
     /// preview, export and hit-testing all share one geometry.
     pub(super) ink: Point<Pixels>,
+    pub(super) straight_anchor: Option<usize>,
+    pub(super) repeat_number: bool,
 }
 
 /// Per-tool size memory: every ShapeKind remembers its own last-used
@@ -257,6 +286,26 @@ pub(crate) struct Annotations {
     tool: Option<ShapeKind>,
     color_ix: usize,
     preset: ToolSizes,
+    spotlight_opacity: f32,
+    spotlight_ellipse: bool,
+    spotlight_outline: spotlight::SpotlightOutline,
+    lens: magnifier::Lens,
+    line_style: LineStyle,
+    arrow_style: ArrowStyle,
+    line_ends: LineEnds,
+    highlighter: highlighter::HighlighterOptions,
+    text_style: text::TextStyle,
+    pencil_smooth: bool,
+    pencil_angle: u16,
+    geometry_fill: bool,
+    geometry_radius: f32,
+    number_format: NumberFormat,
+    number_arrow_style: ArrowStyle,
+    number_override: Option<u32>,
+    renumber_on_delete: bool,
+    filter_area: FilterArea,
+    filter_brush_size: f32,
+    filter_edit_brush_size: bool,
     highlighter_color_ix: usize,
     shapes: Vec<Shape>,
     history: Vec<HistoryEntry>,
@@ -264,23 +313,18 @@ pub(crate) struct Annotations {
     draft: Option<Draft>,
     draft_generation: u64,
     pressed: bool,
-    /// The eraser gesture in flight (no draft exists while Some).
+    /// Pointer state accompanying the editable erase draft.
     eraser: Option<EraserGesture>,
-    /// The history's trailing RemoveMany entry belongs to the live
-    /// gesture and extends with each removal; cleared when the
-    /// gesture ends (see `commit_removals`).
-    eraser_entry_open: bool,
     /// Index into `shapes` of the currently selected annotation, if any.
     /// Editing actions (wheel size stepping, later drags) target it.
     selected: Option<usize>,
-    /// Whether a placed mark selects itself on release (the settings
-    /// switch; default off — the 2026-10-06 flip made selection the
-    /// select tool's exclusive job, and this flag only opts back in).
+    /// Select newly placed marks for immediate editing when enabled in settings.
     auto_select: bool,
     text_original: Option<(usize, Shape)>,
     /// A slider size-drag is in flight: consecutive `apply_size` calls
     /// merge into one history entry (see `apply_size`).
     size_drag_active: bool,
+    resize_bounds: Option<Bounds<Pixels>>,
 }
 
 impl Default for Annotations {
@@ -288,6 +332,26 @@ impl Default for Annotations {
         Self {
             tool: None,
             color_ix: 0,
+            spotlight_opacity: 55.,
+            spotlight_ellipse: false,
+            spotlight_outline: Default::default(),
+            lens: magnifier::Lens::default(),
+            line_style: LineStyle::Solid,
+            arrow_style: ArrowStyle::default(),
+            line_ends: LineEnds::default(),
+            highlighter: Default::default(),
+            text_style: Default::default(),
+            pencil_smooth: true,
+            pencil_angle: 0,
+            geometry_fill: false,
+            geometry_radius: 0.,
+            number_format: NumberFormat::default(),
+            number_arrow_style: ArrowStyle::default(),
+            number_override: None,
+            renumber_on_delete: false,
+            filter_area: FilterArea::Rectangle,
+            filter_brush_size: 32.,
+            filter_edit_brush_size: false,
             preset: ToolSizes {
                 rectangle: 3.,
                 ellipse: 3.,
@@ -311,11 +375,11 @@ impl Default for Annotations {
             draft_generation: 0,
             pressed: false,
             eraser: None,
-            eraser_entry_open: false,
             selected: None,
             auto_select: false,
             text_original: None,
             size_drag_active: false,
+            resize_bounds: None,
         }
     }
 }
@@ -373,6 +437,8 @@ impl Annotations {
             ShapeKind::Highlighter => self.preset.highlighter,
             ShapeKind::Mosaic => self.preset.mosaic,
             ShapeKind::Blur => self.preset.blur,
+            ShapeKind::Magnifier => self.lens.zoom,
+            ShapeKind::Spotlight => self.spotlight_opacity,
             ShapeKind::Eraser => self.preset.eraser,
             ShapeKind::EraserRect => self.preset.eraser_rect,
             ShapeKind::Number => self.preset.number,
@@ -396,6 +462,8 @@ impl Annotations {
             ShapeKind::Highlighter => &mut self.preset.highlighter,
             ShapeKind::Mosaic => &mut self.preset.mosaic,
             ShapeKind::Blur => &mut self.preset.blur,
+            ShapeKind::Magnifier => &mut self.lens.zoom,
+            ShapeKind::Spotlight => &mut self.spotlight_opacity,
             ShapeKind::Eraser => &mut self.preset.eraser,
             ShapeKind::EraserRect => &mut self.preset.eraser_rect,
             ShapeKind::Number => &mut self.preset.number,
@@ -412,7 +480,11 @@ impl Annotations {
     }
     pub(crate) fn text_size(&self) -> f32 {
         self.editing_text()
-            .map_or(self.preset.text, |shape| shape.width)
+            .or_else(|| {
+                self.selected()
+                    .filter(|shape| shape.kind == ShapeKind::Text)
+            })
+            .map_or(self.preset.text, |shape| shape.size())
     }
     /// The active tool's current size — whatever that means for the
     /// tool; one continuous value the slider shows.
@@ -424,6 +496,14 @@ impl Annotations {
         let Some(tool) = self.tool else { return };
         self.set_size_of(tool, v);
     }
+    /// A lens or multiply blend needs captured pixels, not a transparent vector overlay.
+    pub(crate) fn composite_draft(&self) -> bool {
+        self.draft_shape().is_some_and(|draft| {
+            draft.needs_composited_ink()
+                || self.shapes.iter().any(|s| s.kind == ShapeKind::Magnifier)
+        })
+    }
+
     pub(crate) fn draft_generation(&self) -> u64 {
         self.draft_generation
     }
@@ -446,15 +526,18 @@ impl Annotations {
             self.draft_generation += 1;
         }
         self.draft = Some(Draft {
+            straight_anchor: None,
+            repeat_number: false,
             start: bounds.origin,
             ink: bounds.origin,
             shape: Shape {
                 kind: ShapeKind::Text,
                 number: None,
                 text: Some(value),
+                text_style: self.text_style.clone(),
                 bounds,
                 color,
-                width,
+                parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, width),
                 points: Vec::new(),
             },
         });
@@ -473,9 +556,10 @@ impl Annotations {
             kind: ShapeKind::Text,
             number: None,
             text: Some(value),
+            text_style: self.text_style.clone(),
             bounds,
             color: self.color().0,
-            width: self.text_size(),
+            parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, self.text_size()),
             points: Vec::new(),
         });
     }
@@ -483,6 +567,9 @@ impl Annotations {
         self.preset.number
     }
     pub(crate) fn next_number(&self) -> u32 {
+        if let Some(value) = self.number_override {
+            return value;
+        }
         self.shapes
             .iter()
             .filter_map(|s| s.number)
@@ -517,6 +604,11 @@ impl Annotations {
     pub(crate) fn from_settings() -> Self {
         Self {
             auto_select: crate::model::settings::current().annotation_auto_select(),
+            renumber_on_delete: crate::model::settings::current().annotation_renumber_on_delete(),
+            text_style: text::TextStyle {
+                wrap: crate::model::settings::current().annotation_text_wrap(),
+                ..Default::default()
+            },
             ..Self::default()
         }
     }
@@ -529,7 +621,6 @@ impl Annotations {
         // must stop with it (a stale gesture would keep erasing under
         // the next tool's pointer moves)
         self.eraser = None;
-        self.eraser_entry_open = false;
         self.tool = if self.tool == Some(kind) {
             None
         } else {
@@ -557,11 +648,7 @@ impl Annotations {
             }
             if !matches!(kind, ShapeKind::Mosaic | ShapeKind::Blur) {
                 let raw_color = crate::model::settings::current().annotation_colors()[ix];
-                let color = if kind == ShapeKind::Highlighter {
-                    (raw_color & 0xffffff00) | 96
-                } else {
-                    raw_color
-                };
+                let color = raw_color;
                 if self.shapes[selected_ix].color != color {
                     let before = self.shapes[selected_ix].clone();
                     self.shapes[selected_ix].color = color;
@@ -587,21 +674,23 @@ impl Annotations {
     /// edit); otherwise it steps the active tool's size — the value the
     /// NEXT stroke will take. Continuous within the tool's [`SizeSpec`].
     pub(crate) fn step_size(&mut self, up: bool) -> bool {
+        if self.editing_filter_brush_size() {
+            let current = self.current_edit_size();
+            let spec = self.current_size_spec();
+            let next = (current + if up { 1. } else { -1. }).clamp(spec.min, spec.max);
+            if next == current {
+                return false;
+            }
+            self.end_size_drag();
+            self.apply_size(next);
+            self.end_size_drag();
+            return true;
+        }
         // invariant: `selected` is a valid index or None — every path
         // that mutates `shapes` (undo/redo/reset/record_add) or leaves
         // edit mode (begin/toggle) clears it
         debug_assert!(self.selected.is_none_or(|ix| self.shapes.get(ix).is_some()));
         if let Some(ix) = self.selected {
-            // The wheel over a selected NUMBER tunes its value (issue
-            // #2's quick nudge — diameter stays with the slider);
-            // every other kind steps its size as before.
-            if self
-                .shapes
-                .get(ix)
-                .is_some_and(|s| s.kind == ShapeKind::Number)
-            {
-                return self.step_selected_number(ix, up);
-            }
             return self.step_selected_size(ix, up);
         }
         let Some(tool) = self.tool else {
@@ -619,13 +708,13 @@ impl Annotations {
 
     pub(crate) fn reset(&mut self) {
         self.shapes.clear();
+        self.number_override = None;
         self.text_original = None;
         self.history.clear();
         self.redo.clear();
         self.draft = None;
         self.pressed = false;
         self.eraser = None;
-        self.eraser_entry_open = false;
         self.tool = None;
         self.selected = None;
     }
@@ -676,18 +765,13 @@ impl Annotations {
             let Some(slot) = self.shapes.get_mut(ix) else {
                 return;
             };
-            let edited = std::mem::replace(slot, original);
+            let edited = std::mem::replace(slot, original.clone());
             if commit {
                 if edited.text.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     self.delete_shape(ix);
                 } else {
-                    self.update_text(
-                        ix,
-                        edited.bounds,
-                        edited.text.unwrap_or_default(),
-                        edited.width,
-                        edited.color,
-                    );
+                    self.shapes[ix] = edited;
+                    self.commit_move(ix, original);
                 }
             }
         } else if self.has_text_preview() {
@@ -712,38 +796,6 @@ impl Annotations {
         self.shapes.get(ix).map(|s| s.kind)
     }
 
-    pub(crate) fn update_text(
-        &mut self,
-        ix: usize,
-        bounds: Bounds<Pixels>,
-        text: String,
-        font_size: f32,
-        color: u32,
-    ) {
-        if let Some(shape) = self.shapes.get_mut(ix) {
-            let before = shape.clone();
-            shape.text = Some(text);
-            shape.bounds = bounds;
-            shape.width = font_size;
-            shape.color = color;
-            let after = shape.clone();
-            if after != before {
-                self.history.push(HistoryEntry::Edit { ix, before, after });
-                self.redo.clear();
-            }
-            self.selected = Some(ix);
-        }
-    }
-
-    pub(crate) fn delete_shape(&mut self, ix: usize) {
-        if ix < self.shapes.len() {
-            let shape = self.shapes.remove(ix);
-            self.history.push(HistoryEntry::Remove { ix, shape });
-            self.redo.clear();
-            self.selected = None;
-        }
-    }
-
     /// Remove every placed shape as ONE history entry (issue #15), so
     /// a single Ctrl+Z restores the whole sequence in order and redo
     /// re-clears. Selection/editing state that references shape
@@ -762,7 +814,6 @@ impl Annotations {
         self.text_original = None;
         self.size_drag_active = false;
         self.eraser = None;
-        self.eraser_entry_open = false;
         self.history.push(HistoryEntry::RemoveAll {
             shapes: std::mem::take(&mut self.shapes),
         });
@@ -772,6 +823,12 @@ impl Annotations {
 
     pub(crate) fn committed(&self) -> &[Shape] {
         &self.shapes
+    }
+
+    /// Lens selection paints a cheap outline until release, without resampling the crop.
+    pub(crate) fn raster_draft_shape(&self) -> Option<&Shape> {
+        self.draft_shape()
+            .filter(|s| s.kind != ShapeKind::Magnifier)
     }
 
     pub(crate) fn draft_shape(&self) -> Option<&Shape> {
@@ -797,7 +854,88 @@ impl Annotations {
         origin: Point<Pixels>,
         scale: f32,
     ) {
+        let shapes: Vec<_> = shapes.collect();
+        let original = shapes
+            .iter()
+            .any(|s| {
+                matches!(
+                    s.kind,
+                    ShapeKind::Magnifier | ShapeKind::Eraser | ShapeKind::EraserRect
+                )
+            })
+            .then(|| rgba.to_vec());
+        spotlight::rasterize(
+            shapes
+                .iter()
+                .copied()
+                .filter(|s| s.kind == ShapeKind::Spotlight),
+            rgba,
+            w,
+            h,
+            origin,
+            scale,
+        );
+        if let Some(original) = original {
+            // Sampling excludes lenses, but display compositing retains creation
+            // order. Marks added over a lens must remain above that lens.
+            let mut marked = rgba.to_vec();
+            Self::rasterize_ordinary(
+                shapes.iter().copied(),
+                &mut marked,
+                Some(&original),
+                w,
+                h,
+                origin,
+                scale,
+            );
+            for shape in shapes {
+                if let Some(lens) = shape.lens() {
+                    let source = if lens.annotations { &marked } else { &original };
+                    magnifier::rasterize(shape, rgba, source, w, h, origin, scale);
+                } else {
+                    Self::rasterize_ordinary(
+                        std::iter::once(shape),
+                        rgba,
+                        Some(&original),
+                        w,
+                        h,
+                        origin,
+                        scale,
+                    );
+                }
+            }
+        } else {
+            Self::rasterize_ordinary(shapes.into_iter(), rgba, None, w, h, origin, scale);
+        }
+    }
+
+    fn rasterize_ordinary<'a>(
+        shapes: impl Iterator<Item = &'a Shape>,
+        rgba: &mut [u8],
+        original: Option<&[u8]>,
+        w: u32,
+        h: u32,
+        origin: Point<Pixels>,
+        scale: f32,
+    ) {
         for shape in shapes {
+            if matches!(shape.kind, ShapeKind::Eraser | ShapeKind::EraserRect) {
+                if let Some(original) = original {
+                    eraser::rasterize(shape, rgba, original, w, h, origin, scale);
+                }
+                continue;
+            }
+            if shape.kind == ShapeKind::Spotlight {
+                spotlight::rasterize_outline(shape, rgba, w, h, origin, scale);
+                continue;
+            }
+            if shape.kind == ShapeKind::Magnifier {
+                continue;
+            }
+            if shape.has_custom_geometry() {
+                line::rasterize(shape, rgba, w, h, origin, scale);
+                continue;
+            }
             if shape.kind == ShapeKind::Text {
                 text::rasterize(shape, rgba, w, h, origin, scale);
                 continue;
@@ -859,6 +997,16 @@ use eraser::EraserGesture;
 use gesture::distance;
 pub(crate) use history::HistoryEffect;
 use history::HistoryEntry;
+/// Use the same silhouette for toolbar previews and captured marks.
+pub(crate) fn arrow_preview_geometry(style: ArrowStyle) -> Vec<Vec<Point<Pixels>>> {
+    line::arrow_geometry(
+        &[point(px(4.), px(12.)), point(px(32.), px(12.))],
+        1.6,
+        style,
+        LineStyle::Solid,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Annotations, ShapeHover, ShapeKind};
@@ -984,9 +1132,9 @@ mod tests {
         assert_eq!(
             handles(&a),
             vec![
-                (ShapeKind::Rectangle, 4),
-                (ShapeKind::Line, 2),
-                (ShapeKind::Ellipse, 4),
+                (ShapeKind::Rectangle, 12),
+                (ShapeKind::Line, 3),
+                (ShapeKind::Ellipse, 9),
                 (ShapeKind::Pencil, 0),
             ]
         );
@@ -1024,27 +1172,22 @@ mod tests {
             Some(ShapeHover::Move)
         );
 
-        // at the overlap the TOPMOST shape decides even though the
-        // selected one is hit too — a press parks its click on the
-        // topmost, so the affordance must promise the same
+        // The selected frame owns overlapping content until it is deselected.
         assert_eq!(
             a.shape_hover(point(px(30.), px(10.))),
-            Some(ShapeHover::Pick)
+            Some(ShapeHover::Move)
         );
     }
 
     #[test]
     fn auto_select_option_selects_the_fresh_mark() {
-        // Factory default stays unselected — the select-tool flip is
-        // the shipped behavior (also asserted in
-        // hover_splits_pick_from_move_by_selection).
+        // The pure model can disable auto-selection independently of settings.
         let mut a = Annotations::default();
         a.toggle(ShapeKind::Rectangle);
         rectangle(&mut a);
         assert_eq!(a.selected_index(), None);
 
-        // The switch opts the pre-flip behavior back in: the placed
-        // mark parks its own selection, ready for wheel/drag tuning.
+        // Enabled selection makes the fresh mark ready for wheel/drag tuning.
         let mut a = Annotations {
             auto_select: true,
             ..Annotations::default()
@@ -1070,7 +1213,7 @@ mod tests {
         assert!(click(&mut a, point(px(10.), px(25.))));
 
         assert!(a.step_size(true)); // 3 → 4 on the SHAPE
-        assert_eq!(a.selected().map(|s| s.width), Some(4.));
+        assert_eq!(a.selected().map(|s| s.size()), Some(4.));
         assert_eq!(a.width(), 4.); // the edit became the preset too
 
         // deselected, the same wheel steps the preset directly
@@ -1087,16 +1230,16 @@ mod tests {
         rectangle(&mut a); // committed at width 3 (M)
         assert!(click(&mut a, point(px(10.), px(25.))));
         assert!(a.step_size(true)); // 3 → 4
-        assert_eq!(a.visible().next().unwrap().width, 4.);
+        assert_eq!(a.visible().next().unwrap().size(), 4.);
 
         a.undo(); // Edit reversed
-        assert_eq!(a.visible().next().unwrap().width, 3.);
+        assert_eq!(a.visible().next().unwrap().size(), 3.);
         a.undo(); // Add reversed — shape leaves
         assert_eq!(a.visible().count(), 0);
         a.redo(); // Add replayed
-        assert_eq!(a.visible().next().unwrap().width, 3.);
+        assert_eq!(a.visible().next().unwrap().size(), 3.);
         a.redo(); // Edit replayed
-        assert_eq!(a.visible().next().unwrap().width, 4.);
+        assert_eq!(a.visible().next().unwrap().size(), 4.);
     }
 
     #[test]
@@ -1135,10 +1278,9 @@ mod tests {
         assert!(click(&mut a, point(px(40.), px(30.))));
         assert_eq!(a.selected().map(|s| s.kind), Some(super::ShapeKind::Pencil));
         assert!(a.step_size(true));
-        assert_eq!(a.selected().map(|s| s.width), Some(4.));
+        assert_eq!(a.selected().map(|s| s.size()), Some(4.));
 
-        // number badge: circle hit, miss outside; the wheel tunes the
-        // VALUE now (issue #2) — the diameter stays with the slider;
+        // Number value buttons edit independently of wheel/slider diameter;
         // undo restores. (This badge is #2 in the sequence: the pencil
         // stroke placed first is not numbered, `next_number` starts at 1.)
         a.toggle(super::ShapeKind::Number);
@@ -1148,14 +1290,14 @@ mod tests {
         assert_eq!(a.selected().map(|s| s.kind), Some(super::ShapeKind::Number));
         assert!(a.hit_test(point(px(30.), px(70.))).is_none());
         let diameter = f32::from(a.selected().unwrap().bounds.size.width);
-        assert!(a.step_size(true)); // value 1 → 2
+        assert!(a.step_selected_number(a.selected_index().unwrap(), true)); // value 1 → 2
         assert_eq!(a.selected().and_then(|s| s.number), Some(2));
         assert_eq!(
             f32::from(a.selected().unwrap().bounds.size.width),
             diameter,
-            "the wheel no longer resizes a badge"
+            "value edits preserve badge diameter"
         );
-        assert!(a.step_size(false)); // back to 1
+        assert!(a.step_selected_number(a.selected_index().unwrap(), false)); // back to 1
         a.undo(); // undoes the LAST notch (1 → 2 again); undo drops the selection
         macro_rules! badge {
             () => {
@@ -1179,7 +1321,7 @@ mod tests {
         assert!(click(&mut a, point(px(25.), px(70.))));
         assert_eq!(a.selected().map(|s| s.kind), Some(super::ShapeKind::Text));
         assert!(a.step_size(true));
-        assert_eq!(a.selected().map(|s| s.width), Some(25.));
+        assert_eq!(a.selected().map(|s| s.size()), Some(25.));
 
         // mosaic: solid-bounds hit; wheel steps filter strength (16 → 17)
         a.toggle(super::ShapeKind::Mosaic);
@@ -1189,7 +1331,7 @@ mod tests {
         assert!(click(&mut a, point(px(5.), px(25.))));
         assert_eq!(a.selected().map(|s| s.kind), Some(super::ShapeKind::Mosaic));
         assert!(a.step_size(true));
-        assert_eq!(a.selected().map(|s| s.width), Some(17.));
+        assert_eq!(a.selected().map(|s| s.size()), Some(17.));
     }
 
     #[test]
@@ -1335,150 +1477,6 @@ mod tests {
     }
 
     #[test]
-    fn brush_eraser_deletes_whole_shapes_as_one_history_entry() {
-        let mut a = Annotations::default();
-        a.toggle(ShapeKind::Rectangle);
-        rectangle(&mut a); // (10,10) → (30,40)
-        a.toggle(ShapeKind::Pencil);
-        a.begin(point(px(40.), px(10.)), selection(), false);
-        a.drag_to(point(px(60.), px(40.)), selection(), false);
-        a.end(); // diagonal stroke beside it
-        let before = a.committed().to_vec();
-        assert_eq!(before.len(), 2);
-        a.toggle(ShapeKind::Eraser);
-        a.set_tool_size(24.); // radius 12
-        let history_len = a.history.len();
-        // One sweep crossing BOTH: the press lands on the rectangle's
-        // right band (a drawing tool would park a click-select there),
-        // the drag reaches the diagonal.
-        assert!(!a.parks_click_select());
-        a.begin(point(px(28.), px(25.)), selection(), false);
-        assert_eq!(a.committed().len(), 1, "the press itself erases");
-        a.drag_to(point(px(50.), px(25.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 0);
-        // ONE entry for the whole gesture — not one per shape
-        assert_eq!(a.history.len(), history_len + 1);
-        a.undo(); // a single Ctrl+Z brings both back, in layer order
-        assert_eq!(a.committed(), before.as_slice());
-        a.redo(); // …and redo re-takes them in one step
-        assert_eq!(a.committed().len(), 0);
-    }
-
-    #[test]
-    fn brush_radius_decides_touching_and_interpolation_covers_gaps() {
-        let mut a = Annotations::default();
-        a.toggle(ShapeKind::Line);
-        a.set_tool_size(2.); // hairline: 1 px half-width
-        a.begin(point(px(10.), px(50.)), selection(), false);
-        a.drag_to(point(px(70.), px(50.)), selection(), false);
-        a.end();
-        a.toggle(ShapeKind::Eraser);
-        a.set_tool_size(16.); // radius 8 → reaches 9 px off the ink
-        // near-miss: beyond radius + half-width
-        a.begin(point(px(40.), px(60.5)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 1, "beyond the brush: untouched");
-        // a fast flick whose ENDPOINTS both miss but whose path
-        // crosses the ink — sampling only the endpoints would leave
-        // the line alive
-        a.begin(point(px(40.), px(30.)), selection(), false);
-        a.drag_to(point(px(40.), px(70.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 0, "the sweep crossed the line");
-    }
-
-    #[test]
-    fn closed_polygon_interior_is_not_erasable_without_touching_ink() {
-        let mut a = Annotations::default();
-        a.toggle(ShapeKind::Polyline);
-        // vertices must sit INSIDE the selection: begin() guards on
-        // it, and an outside click places no vertex
-        for (x, y) in [(10., 10.), (70., 10.), (70., 60.), (10., 60.), (10., 10.)] {
-            let p = point(px(x), px(y));
-            a.begin(p, selection(), false);
-            a.drag_to(p, selection(), false);
-            a.end();
-        }
-        a.finish_polyline();
-        a.toggle(ShapeKind::Eraser);
-        a.set_tool_size(16.); // radius 8, well inside the ring
-        // Scrub the middle: the interior SELECTS (issue #16) but holds
-        // no ink — a brush there must leave the ring alone, or nothing
-        // inside it could ever be erased individually.
-        a.begin(point(px(40.), px(35.)), selection(), false);
-        a.drag_to(point(px(30.), px(35.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        // touching the outline erases the whole polygon as one object
-        a.begin(point(px(40.), px(10.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 0);
-    }
-
-    #[test]
-    fn rect_eraser_deletes_intersecting_bounds_on_release_only() {
-        let mut a = Annotations::default();
-        a.toggle(ShapeKind::Rectangle);
-        rectangle(&mut a); // (10,10) → (30,40)
-        a.toggle(ShapeKind::Text);
-        a.add_text(
-            Bounds::new(point(px(50.), px(50.)), size(px(100.), px(20.))),
-            "far".into(),
-        );
-        let history_len = a.history.len();
-        a.toggle(ShapeKind::EraserRect);
-        // drag an area covering the rectangle but not the far text
-        a.begin(point(px(5.), px(5.)), selection(), false);
-        a.drag_to(point(px(35.), px(45.)), selection(), false);
-        // in-flight: nothing is deleted yet — the bounds are only
-        // final on release, so the dashed rect is honest feedback
-        assert_eq!(a.committed().len(), 2);
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.committed()[0].text.as_deref(), Some("far"));
-        assert_eq!(a.history.len(), history_len + 1); // one entry
-        // a stray click (zero-area rect) deletes nothing and records
-        // nothing — even ON a shape's bounds
-        let h = a.history.len();
-        a.begin(point(px(50.), px(50.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.history.len(), h);
-        a.undo();
-        assert_eq!(a.committed().len(), 2);
-        a.redo();
-        assert_eq!(a.committed().len(), 1);
-    }
-
-    #[test]
-    fn mid_gesture_undo_reverts_removal_so_far_and_diverges_redo() {
-        let mut a = Annotations::default();
-        a.toggle(ShapeKind::Pencil);
-        a.begin(point(px(10.), px(10.)), selection(), false);
-        a.drag_to(point(px(10.), px(40.)), selection(), false);
-        a.end();
-        a.toggle(ShapeKind::Rectangle);
-        rectangle(&mut a);
-        let before = a.committed().to_vec();
-        a.toggle(ShapeKind::Eraser);
-        a.set_tool_size(24.);
-        // the press erases the rectangle; the gesture stays open
-        a.begin(point(px(28.), px(25.)), selection(), false);
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.history.len(), 3); // pencil, rect, RemoveMany
-        // Ctrl+Z mid-sweep: removals are history-recorded as they
-        // happen, so the undo cleanly reverts the sweep so far
-        a.undo();
-        assert_eq!(a.committed(), before.as_slice());
-        // the sweep continues: a NEW entry; the redo stack is gone
-        a.drag_to(point(px(10.), px(25.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 0);
-        assert_eq!(a.history.len(), 3);
-    }
-
-    #[test]
     fn slider_drag_edits_the_selection_as_one_history_entry() {
         let mut a = Annotations::default();
         a.toggle(super::ShapeKind::Rectangle);
@@ -1492,10 +1490,10 @@ mod tests {
         for v in [4., 6., 9., 12.] {
             a.apply_size(v);
         }
-        assert_eq!(a.selected().map(|s| s.width), Some(12.));
+        assert_eq!(a.selected().map(|s| s.size()), Some(12.));
         a.end_size_drag();
         a.undo(); // ONE undo restores the pre-drag width
-        assert_eq!(a.committed()[0].width, 3.);
+        assert_eq!(a.committed()[0].size(), 3.);
 
         // without a selection, the same write targets the tool preset
         let _ = a.cancel();
@@ -1504,7 +1502,7 @@ mod tests {
         a.apply_size(7.);
         a.end_size_drag();
         assert_eq!(a.width(), 7.);
-        assert_eq!(a.committed()[0].width, 3.); // shape untouched
+        assert_eq!(a.committed()[0].size(), 3.); // shape untouched
     }
 
     #[test]
@@ -1521,7 +1519,7 @@ mod tests {
         a.end_size_drag();
         a.deselect();
         a.begin(point(px(5.), px(5.)), selection(), false); // next pencil stroke
-        assert_eq!(a.draft_shape().unwrap().width, 9.);
+        assert_eq!(a.draft_shape().unwrap().size(), 9.);
 
         // the rectangle tool keeps its OWN memory
         a.end();
@@ -1583,8 +1581,8 @@ mod tests {
         a.drag_to(point(px(60.), px(30.)), selection(), false);
         a.end();
         let mark = a.visible().next().unwrap().clone();
-        assert_eq!(mark.color & 255, 96);
-        assert_eq!(mark.width, 32.);
+        assert_eq!(mark.color & 255, 255);
+        assert_eq!(mark.size(), 32.);
         a.toggle(super::ShapeKind::Pencil);
         assert_eq!(a.color(), original_color);
         assert_eq!(a.width(), 3.);
@@ -1848,11 +1846,12 @@ mod tests {
             let ellipse = super::Shape {
                 number: None,
                 text: None,
+                text_style: Default::default(),
                 kind: super::ShapeKind::Ellipse,
                 bounds: Bounds::new(point(px(-10.), px(15.)), size(px(60.), px(40.))),
                 color: 0xff0000ff,
                 points: Vec::new(),
-                width: 3.,
+                parameters: crate::annotation::ShapeParameters::new(super::ShapeKind::Ellipse, 3.),
             };
             let w = (100. * scale) as u32;
             let mut pixels = [0, 0, 0, 255].repeat((w * w) as usize);
@@ -1887,11 +1886,12 @@ mod tests {
             let ellipse = super::Shape {
                 number: None,
                 text: None,
+                text_style: Default::default(),
                 kind: super::ShapeKind::Ellipse,
                 bounds: Bounds::new(point(px(-10.), px(-10.)), size(px(width), px(height))),
                 color: 0xff0000ff,
                 points: Vec::new(),
-                width: 5.,
+                parameters: crate::annotation::ShapeParameters::new(super::ShapeKind::Ellipse, 5.),
             };
             let mut pixels = [0, 0, 0, 255].repeat(400);
             ellipse.rasterize_ellipse(&mut pixels, 20, 20, point(px(0.), px(0.)), 1.25);
@@ -1976,6 +1976,7 @@ mod tests {
             let shape = super::Shape {
                 number: None,
                 text: None,
+                text_style: Default::default(),
                 kind: super::ShapeKind::Polyline,
                 bounds: selection(),
                 points: vec![
@@ -1983,7 +1984,7 @@ mod tests {
                     point(px(60.), px(30.)),
                     point(px(60.), px(60.)),
                 ],
-                width: 5.,
+                parameters: crate::annotation::ShapeParameters::new(super::ShapeKind::Polyline, 5.),
                 color: 0xff0000ff,
             };
             let w = (100. * scale) as u32;
@@ -2094,7 +2095,7 @@ mod tests {
 
         // the wheel floors at 1 (0 is not a badge)
         a.select_index(ix);
-        assert!(!a.step_size(false), "1 is the floor");
+        assert!(!a.step_selected_number(ix, false), "1 is the floor");
     }
     #[test]
     fn number_drag_and_size_stay_inside_selection_and_tiny_regions_do_not_count() {
@@ -2106,8 +2107,11 @@ mod tests {
         a.end();
         let mark = a.visible().next().unwrap();
         assert_eq!(mark.bounds.size, size(px(40.), px(40.)));
-        assert_eq!(mark.bounds.right(), selection().right());
-        assert_eq!(mark.bounds.bottom(), selection().bottom());
+        assert_eq!(mark.bounds.left(), selection().left());
+        assert_eq!(mark.bounds.top(), selection().top());
+        assert!(mark.number_arrow().is_some());
+        assert!(mark.ink_bounds().right() <= selection().right());
+        assert!(mark.ink_bounds().bottom() <= selection().bottom());
         // the number slot is its own — other tools' presets untouched
         assert_eq!(a.size_of(super::ShapeKind::Rectangle), 3.);
         let tiny = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));

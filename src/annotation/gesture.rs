@@ -23,10 +23,24 @@ impl Annotations {
         }
         self.pressed = true;
         if matches!(self.tool, Some(ShapeKind::Eraser | ShapeKind::EraserRect)) {
-            // Object eraser (issue #14): no draft, no pixel math —
-            // the press itself already deletes what it lands on
-            self.eraser_entry_open = false; // a new gesture never
-            // merges into the previous one's history entry
+            self.draft_generation += 1;
+            let kind = self.tool.unwrap_or(ShapeKind::Eraser);
+            self.draft = Some(Draft {
+                straight_anchor: None,
+                repeat_number: false,
+                ink: p,
+                start: p,
+                shape: Shape {
+                    kind,
+                    bounds: Bounds::new(p, size(px(0.), px(0.))),
+                    color: 0,
+                    number: None,
+                    text: None,
+                    text_style: Default::default(),
+                    parameters: super::ShapeParameters::new(kind, self.erase_radius() * 2.),
+                    points: vec![p],
+                },
+            });
             if self.tool == Some(ShapeKind::EraserRect) {
                 self.eraser = Some(EraserGesture::Rect { start: p, end: p });
             } else {
@@ -45,30 +59,77 @@ impl Annotations {
         let Some(tool) = self.tool else {
             return;
         };
+        let filter_brush = matches!(tool, ShapeKind::Mosaic | ShapeKind::Blur)
+            && matches!(self.filter_area, super::FilterArea::Brush { .. });
+        let mut parameters = super::ShapeParameters::new(tool, self.width());
+        if matches!(
+            tool,
+            ShapeKind::Line | ShapeKind::Polyline | ShapeKind::Arrow
+        ) && let super::ShapeParameters::Stroke {
+            style, arrow, ends, ..
+        } = &mut parameters
+        {
+            *style = self.line_style;
+            *arrow = self.arrow_style;
+            *ends = self.line_ends;
+        }
+        if let super::ShapeParameters::Geometry {
+            fill,
+            radius,
+            style,
+            ..
+        } = &mut parameters
+        {
+            *fill = self.geometry_fill;
+            *radius = self.geometry_radius;
+            *style = self.line_style;
+        }
+        if let super::ShapeParameters::Highlighter { options, .. } = &mut parameters {
+            *options = self.highlighter;
+        }
+        if let super::ShapeParameters::Badge { format, arrow, .. } = &mut parameters {
+            *format = self.number_format;
+            *arrow = self.number_arrow_style;
+        }
+        if tool == ShapeKind::Spotlight {
+            parameters = super::ShapeParameters::Spotlight {
+                opacity: self.spotlight_opacity,
+                ellipse: self.spotlight_ellipse,
+                outline: self.spotlight_outline,
+            };
+        }
+        if tool == ShapeKind::Magnifier {
+            parameters = super::ShapeParameters::Magnifier(self.lens);
+        }
+        if let super::ShapeParameters::Filter { area, .. } = &mut parameters {
+            *area = self.filter_area;
+        }
         self.draft = Some(Draft {
+            straight_anchor: None,
+            repeat_number: same_number,
             start: p,
             ink: p,
             shape: Shape {
                 kind: tool,
                 text: None,
+                text_style: Default::default(),
                 number: (tool == ShapeKind::Number).then(|| self.placement_number(same_number)),
                 bounds: if tool == ShapeKind::Number {
                     number_bounds(p, selection, self.number_size())
                 } else {
                     Bounds::new(p, size(px(0.), px(0.)))
                 },
-                color: if tool == ShapeKind::Highlighter {
-                    (self.color().0 & 0xffffff00) | 96
-                } else {
-                    self.color().0
-                },
-                width: self.width(),
+                color: self.color().0,
+                parameters,
                 points: if matches!(
                     tool,
                     ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Polyline
                 ) {
                     vec![p, p]
-                } else if matches!(tool, ShapeKind::Pencil | ShapeKind::Highlighter) {
+                } else if filter_brush
+                    || tool == ShapeKind::Pencil
+                    || (tool == ShapeKind::Highlighter && !self.highlighter.rectangle)
+                {
                     vec![p]
                 } else {
                     Vec::new()
@@ -115,12 +176,47 @@ impl Annotations {
             );
             let changed = cur != end;
             self.eraser = Some(EraserGesture::Rect { start, end });
+            self.erase_rect(Bounds::from_corners(
+                point(start.x.min(end.x), start.y.min(end.y)),
+                point(start.x.max(end.x), start.y.max(end.y)),
+            ));
             return changed;
         }
         let Some(draft) = self.draft.as_mut() else {
             return false;
         };
-        if matches!(draft.shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
+        if let Some(super::FilterArea::Brush { .. }) = draft.shape.filter_area() {
+            let end = line_endpoint(draft.start, p, selection, false);
+            if draft
+                .shape
+                .points
+                .last()
+                .is_some_and(|last| distance(*last, end) < INK_RESAMPLE_STEP)
+            {
+                return false;
+            }
+            draft.shape.points.push(end);
+            return true;
+        }
+        if draft.shape.is_freehand() {
+            if draft.shape.kind == ShapeKind::Pencil && square {
+                let anchor = *draft
+                    .straight_anchor
+                    .get_or_insert(draft.shape.points.len().saturating_sub(1));
+                let start = draft
+                    .shape
+                    .points
+                    .get(anchor)
+                    .copied()
+                    .unwrap_or(draft.start);
+                let end = angle_endpoint(start, p, selection, self.pencil_angle);
+                let changed = draft.shape.points.last().copied() != Some(end);
+                draft.shape.points.truncate(anchor + 1);
+                draft.shape.points.push(end);
+                draft.ink = end;
+                return changed;
+            }
+            draft.straight_anchor = None;
             let end = line_endpoint(draft.start, p, selection, false);
             // Distance-adaptive exponential smoothing (see Draft::ink):
             // micro tremor is damped hard, fast flicks pass through
@@ -130,7 +226,11 @@ impl Annotations {
             let ink = draft.ink;
             let (dx, dy) = (f32::from(end.x - ink.x), f32::from(end.y - ink.y));
             let dist = dx.hypot(dy);
-            let alpha = dist / (dist + INK_SMOOTHING_RADIUS);
+            let alpha = if draft.shape.kind == ShapeKind::Pencil && !self.pencil_smooth {
+                1.
+            } else {
+                dist / (dist + INK_SMOOTHING_RADIUS)
+            };
             let next = point(ink.x + px(dx * alpha), ink.y + px(dy * alpha));
             draft.ink = next;
             let changed = draft.shape.points.last().is_some_and(|last| {
@@ -142,10 +242,8 @@ impl Annotations {
             return changed;
         }
         if draft.shape.kind == ShapeKind::Number {
-            let bounds = number_bounds(p, selection, f32::from(draft.shape.bounds.size.width));
-            let changed = bounds != draft.shape.bounds;
-            draft.shape.bounds = bounds;
-            return changed;
+            let tip = line_endpoint(draft.shape.bounds.center(), p, selection, square);
+            return draft.shape.drag_number_tip(tip, selection);
         }
         if matches!(
             draft.shape.kind,
@@ -192,24 +290,19 @@ impl Annotations {
         );
         let changed = draft.shape.bounds != bounds;
         draft.shape.bounds = bounds;
+        if draft.shape.kind == ShapeKind::Magnifier {
+            draft.shape.place_lens_beside_source(selection);
+        }
         changed
     }
 
     pub(crate) fn end(&mut self) {
         let pressed = std::mem::take(&mut self.pressed);
-        // The eraser gesture closes regardless of `pressed` — an
-        // undo mid-sweep already cleared the flag, and a stale
-        // gesture must never leak into the next tool's drags.
-        if let Some(gesture) = self.eraser.take() {
-            self.eraser_entry_open = false;
-            if pressed && let EraserGesture::Rect { start, end } = gesture {
-                // The area eraser deletes on release — the bounds are
-                // only final now
-                let area = Bounds::from_corners(
-                    point(start.x.min(end.x), start.y.min(end.y)),
-                    point(start.x.max(end.x), start.y.max(end.y)),
-                );
-                self.erase_rect(area);
+        if self.eraser.take().is_some() {
+            if pressed {
+                self.finish_erase();
+            } else {
+                self.draft = None;
             }
             return;
         }
@@ -231,13 +324,17 @@ impl Annotations {
         if let Some(draft) = self.draft.take() {
             let valid = if matches!(draft.shape.kind, ShapeKind::Line | ShapeKind::Arrow) {
                 distance(draft.shape.points[0], draft.shape.points[1]) >= 2.
-            } else if matches!(draft.shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
+            } else if matches!(
+                draft.shape.filter_area(),
+                Some(super::FilterArea::Brush { .. })
+            ) || draft.shape.is_freehand()
+            {
                 true
             } else {
                 draft.shape.bounds.size.width >= px(2.) && draft.shape.bounds.size.height >= px(2.)
             };
             if valid {
-                self.record_add(draft.shape);
+                self.record_placement(draft.shape, draft.repeat_number);
             }
         }
     }
@@ -278,7 +375,6 @@ impl Annotations {
         self.pressed = false;
         self.draft = None;
         self.eraser = None;
-        self.eraser_entry_open = false;
         self.selected = None;
         self.tool = None;
         self.size_drag_active = false;
@@ -287,12 +383,12 @@ impl Annotations {
 
     /// Cancel one annotation state for internal editing commands.
     /// Completed eraser deletions remain in history for Undo.
-    /// User-facing Escape clears all interaction state via `finish_interaction`.
+    /// Tool exit clears passive selection and tool state via `finish_interaction`.
     pub(crate) fn cancel(&mut self) -> bool {
+        let erasing = self.eraser.is_some();
         self.pressed = false;
         self.eraser = None;
-        self.eraser_entry_open = false;
-        if self.draft.take().is_some() {
+        if self.draft.take().is_some() || erasing {
             return true;
         }
         if self.selected.take().is_some() {
@@ -381,4 +477,93 @@ pub(super) fn line_endpoint(
         (start.x + px(x * length)).clamp(bounds.left(), bounds.right()),
         (start.y + px(y * length)).clamp(bounds.top(), bounds.bottom()),
     )
+}
+
+/// Quantize a ray and clip its length, keeping the selected angle at crop edges.
+fn angle_endpoint(
+    start: Point<Pixels>,
+    p: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    degrees: u16,
+) -> Point<Pixels> {
+    if degrees == 0 {
+        return line_endpoint(start, p, bounds, false);
+    }
+    let delta = p - start;
+    let dx = f32::from(delta.x);
+    let dy = f32::from(delta.y);
+    let step = (degrees as f32).to_radians();
+    let angle = (dy.atan2(dx) / step).round() * step;
+    let (sin, cos) = angle.sin_cos();
+    let mut length = dx.hypot(dy);
+    for (component, position, low, high) in [
+        (cos, start.x, bounds.left(), bounds.right()),
+        (sin, start.y, bounds.top(), bounds.bottom()),
+    ] {
+        if component.abs() > 0.00001 {
+            let available = if component > 0. {
+                high - position
+            } else {
+                position - low
+            };
+            length = length.min(f32::from(available).max(0.) / component.abs());
+        }
+    }
+    start + point(px(cos * length), px(sin * length))
+}
+
+#[cfg(test)]
+mod pencil_tests {
+    use super::*;
+
+    #[test]
+    fn shift_replaces_only_the_live_segment_and_releases_back_to_freehand() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(220.)));
+        let mut marks = Annotations::default();
+        marks.toggle(ShapeKind::Pencil);
+        marks.set_pencil_smooth(false);
+        marks.begin(point(px(20.), px(20.)), area, false);
+        marks.drag_to(point(px(40.), px(40.)), area, false);
+        let prefix = marks.draft_shape().unwrap().points.clone();
+        marks.set_pencil_angle(45);
+        marks.drag_to(point(px(110.), px(85.)), area, true);
+        marks.drag_to(point(px(160.), px(150.)), area, true);
+        let shape = marks.draft_shape().unwrap();
+        assert_eq!(&shape.points[..prefix.len()], &prefix);
+        assert_eq!(shape.points.len(), prefix.len() + 1);
+        let delta = shape.points.last().copied().unwrap() - prefix[prefix.len() - 1];
+        assert!((f32::from(delta.x) - f32::from(delta.y)).abs() < 0.001);
+        marks.drag_to(point(px(180.), px(160.)), area, false);
+        assert_eq!(
+            marks.draft_shape().unwrap().points.last().copied(),
+            Some(point(px(180.), px(160.)))
+        );
+        marks.end();
+        assert_eq!(marks.committed().len(), 1);
+        marks.undo();
+        assert!(marks.committed().is_empty());
+    }
+
+    #[test]
+    fn all_angle_constraints_clip_length_without_changing_direction() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(80.)));
+        let start = point(px(50.), px(40.));
+        for degrees in [5, 10, 15, 30, 45] {
+            for target in [
+                point(px(-200.), px(300.)),
+                point(px(300.), px(-200.)),
+                point(px(50.), px(40.)),
+            ] {
+                let end = angle_endpoint(start, target, bounds, degrees);
+                assert!(end.x >= bounds.left() - px(0.001) && end.x <= bounds.right() + px(0.001));
+                assert!(end.y >= bounds.top() - px(0.001) && end.y <= bounds.bottom() + px(0.001));
+                if distance(start, end) > 0.001 {
+                    let delta = end - start;
+                    let steps =
+                        f32::from(delta.y).atan2(f32::from(delta.x)).to_degrees() / degrees as f32;
+                    assert!((steps - steps.round()).abs() < 0.001);
+                }
+            }
+        }
+    }
 }

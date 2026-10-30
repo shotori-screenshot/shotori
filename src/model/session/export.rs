@@ -66,11 +66,22 @@ impl ScreenshotSession {
             self.preview_display = None;
             return None;
         }
+        // Text geometry and its selection frame must be published together.
+        // A heavy lens elsewhere must not leave the text at an older position.
+        if self.annotations.editing_text().is_some()
+            || self
+                .annotations
+                .selected()
+                .is_some_and(|shape| shape.kind == crate::annotation::ShapeKind::Text)
+        {
+            self.preview_display = None;
+            return self.filtered_preview(output);
+        }
         if !self.preview_busy {
             let unchanged = self.filter_preview.borrow().as_ref().is_some_and(|cache| {
                 cache.selection == self.selection.bounds()
                     && cache.committed == self.annotations.committed()
-                    && cache.draft.as_ref() == self.annotations.draft_shape()
+                    && cache.draft.as_ref() == self.annotations.raster_draft_shape()
                     && cache.draft_generation == self.annotations.draft_generation()
             });
             let max_scale = self
@@ -83,10 +94,11 @@ impl ScreenshotSession {
             // the worker — nor respawn it on every landing while the
             // gesture continues. Only committed/selection changes and
             // pixel-filter (blur/mosaic) marks re-render off-thread.
-            let ink_only = self
-                .annotations
-                .draft_shape()
-                .is_some_and(|shape| shape.is_freehand())
+            let ink_only = !self.annotations.composite_draft()
+                && self
+                    .annotations
+                    .draft_shape()
+                    .is_some_and(|shape| shape.is_freehand())
                 && self.filter_preview.borrow().as_ref().is_some_and(|cache| {
                     cache.selection == self.selection.bounds()
                         && cache.committed == self.annotations.committed()
@@ -97,6 +109,11 @@ impl ScreenshotSession {
             // the fresh ink until the worker lands.
             let promotable = self.filter_preview.borrow().as_ref().is_some_and(|cache| {
                 cache.stroke.is_some()
+                    && !self
+                        .annotations
+                        .committed()
+                        .iter()
+                        .any(|s| s.kind == crate::annotation::ShapeKind::Magnifier)
                     && self.annotations.draft_shape().is_none()
                     && self.annotations.committed().len() == cache.committed.len() + 1
                     && self.annotations.committed().starts_with(&cache.committed)
@@ -106,26 +123,35 @@ impl ScreenshotSession {
                         .last()
                         .is_some_and(|shape| shape.is_freehand())
             });
-            let heavy = self.annotations.committed().iter().any(|shape| {
-                shape.points.len() > 1024
-                    || (matches!(
+            let heavy = self
+                .annotations
+                .visible()
+                .any(|shape| shape.kind == crate::annotation::ShapeKind::Spotlight)
+                || self.annotations.committed().iter().any(|shape| {
+                    shape.points.len() > 1024
+                        || (matches!(
+                            shape.kind,
+                            crate::annotation::ShapeKind::Blur
+                                | crate::annotation::ShapeKind::Mosaic
+                                | crate::annotation::ShapeKind::Magnifier
+                        ) && f32::from(shape.ink_bounds().size.width)
+                            * f32::from(shape.ink_bounds().size.height)
+                            * max_scale
+                            * max_scale
+                            >= 262_144.)
+                })
+                || self.annotations.raster_draft_shape().is_some_and(|shape| {
+                    matches!(
                         shape.kind,
-                        crate::annotation::ShapeKind::Blur | crate::annotation::ShapeKind::Mosaic
-                    ) && f32::from(shape.bounds.size.width)
-                        * f32::from(shape.bounds.size.height)
+                        crate::annotation::ShapeKind::Blur
+                            | crate::annotation::ShapeKind::Mosaic
+                            | crate::annotation::ShapeKind::Magnifier
+                    ) && f32::from(shape.ink_bounds().size.width)
+                        * f32::from(shape.ink_bounds().size.height)
                         * max_scale
                         * max_scale
-                        >= 262_144.)
-            }) || self.annotations.visible().any(|shape| {
-                matches!(
-                    shape.kind,
-                    crate::annotation::ShapeKind::Blur | crate::annotation::ShapeKind::Mosaic
-                ) && f32::from(shape.bounds.size.width)
-                    * f32::from(shape.bounds.size.height)
-                    * max_scale
-                    * max_scale
-                    >= 262_144.
-            });
+                        >= 262_144.
+                });
             if unchanged || !heavy || ink_only || promotable {
                 self.preview_display = None;
                 return self.filtered_preview(output);
@@ -178,7 +204,20 @@ impl ScreenshotSession {
                         if session.geometry_revision == geometry_revision
                             && session.selection.bounds() == selection.bounds()
                         {
-                            *session.filter_preview.get_mut() = cache;
+                            let current_is_fresh = session
+                                .filter_preview
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|current| {
+                                    current.committed == session.annotations.committed()
+                                        && current.draft.as_ref()
+                                            == session.annotations.raster_draft_shape()
+                                        && current.draft_generation
+                                            == session.annotations.draft_generation()
+                                });
+                            if !current_is_fresh {
+                                *session.filter_preview.get_mut() = cache;
+                            }
                         }
                         session.request_filtered_preview(&output, cx);
                         cx.notify();
@@ -195,17 +234,34 @@ impl ScreenshotSession {
         // resurrect a cancelled stroke or undone history while the worker drains.
         let committed = self.annotations.committed();
         let same_history = display.committed == committed;
+        // Editing one selected object must not hide every other annotation while
+        // the worker replaces the composite. The old full frame remains valid
+        // across move/resize and release, but never across deletion or a new draft.
+        let selected_edit = display.committed.len() == committed.len()
+            && display
+                .committed
+                .iter()
+                .zip(committed)
+                .enumerate()
+                .all(|(ix, (old, new))| {
+                    old == new
+                        || (self.annotations.selected_index() == Some(ix) && old.kind == new.kind)
+                });
         let same_gesture = display.draft_generation == self.annotations.draft_generation();
         let just_finished = same_gesture
             && self.annotations.draft_shape().is_none()
             && committed.len() == display.committed.len() + 1
             && committed.starts_with(&display.committed)
-            && committed.last().map(|shape| shape.kind) == display.draft_kind;
+            && (committed.last().map(|shape| shape.kind) == display.draft_kind
+                || (display.draft_kind.is_none()
+                    && committed
+                        .last()
+                        .is_some_and(|s| s.kind == crate::annotation::ShapeKind::Magnifier)));
         let valid_draft = display.draft_kind.is_none()
             || (same_gesture
                 && display.draft_kind == self.annotations.draft_shape().map(|shape| shape.kind));
         if display.selection != self.selection.bounds()
-            || !(just_finished || (same_history && valid_draft))
+            || !(just_finished || ((same_history || selected_edit) && valid_draft))
         {
             return None;
         }
@@ -220,9 +276,13 @@ impl ScreenshotSession {
             || self.annotations.visible().any(|shape| {
                 matches!(
                     shape.kind,
-                    ShapeKind::Pencil
+                    ShapeKind::Eraser
+                        | ShapeKind::EraserRect
+                        | ShapeKind::Pencil
                         | ShapeKind::Highlighter
                         | ShapeKind::Polyline
+                        | ShapeKind::Spotlight
+                        | ShapeKind::Magnifier
                         | ShapeKind::Mosaic
                         | ShapeKind::Blur
                         | ShapeKind::Text
@@ -244,7 +304,7 @@ impl ScreenshotSession {
         }
         let selection = self.selection.bounds();
         let committed = self.annotations.committed();
-        let draft = self.annotations.draft_shape();
+        let draft = self.annotations.raster_draft_shape();
         if cache.as_ref().is_none_or(|c| c.selection != selection) {
             let original = self.crop_impl(output, false)?;
             let pixels = original.rgba.clone();
@@ -283,12 +343,13 @@ impl ScreenshotSession {
             // immutable capture. The pair lookup degrades instead of
             // unwrapping; any miss lands in the full rebuild below, which is
             // always correct.
-            let suffix = if appended_one {
-                cached.stroke.as_mut().zip(committed.last())
-            } else {
-                None
-            }
-            .filter(|(_, shape)| matches!(shape.kind, ShapeKind::Pencil | ShapeKind::Highlighter));
+            let suffix =
+                if appended_one && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier) {
+                    cached.stroke.as_mut().zip(committed.last())
+                } else {
+                    None
+                }
+                .filter(|(_, shape)| shape.is_freehand());
             if let Some((stroke, last)) = suffix {
                 // Promote the final incremental draft, including a new release
                 // point, instead of rasterizing the entire long stroke again.
@@ -302,7 +363,19 @@ impl ScreenshotSession {
                     )
                     .to_vec();
             } else {
-                if !committed.starts_with(&cached.committed) {
+                // Lenses can sample the unmarked capture; a suffix-only replay
+                // would incorrectly treat already painted annotations as the source.
+                // Spotlight masks also need the entire union, without repeated dimming.
+                if committed.iter().any(|s| {
+                    matches!(
+                        s.kind,
+                        ShapeKind::Magnifier
+                            | ShapeKind::Spotlight
+                            | ShapeKind::Eraser
+                            | ShapeKind::EraserRect
+                    )
+                }) || !committed.starts_with(&cached.committed)
+                {
                     cached.pixels.clone_from(&original.rgba);
                     cached.committed.clear();
                 }
@@ -321,7 +394,9 @@ impl ScreenshotSession {
             if cached.committed != committed {
                 cached.committed = committed.to_vec();
             }
-            if let Some(shape) = draft.filter(|s| s.is_freehand()) {
+            if let Some(shape) =
+                draft.filter(|s| s.is_freehand() && !self.annotations.composite_draft())
+            {
                 // Live freehand stroke: advance the incremental raster so
                 // the release promotion stays O(new segments), but do NOT
                 // rebuild the selection image — the stroke paints as a
@@ -339,14 +414,36 @@ impl ScreenshotSession {
             } else {
                 cached.stroke = None;
                 let mut pixels = cached.pixels.clone();
-                crate::annotation::Annotations::rasterize_shapes(
-                    draft.into_iter(),
-                    &mut pixels,
-                    original.width,
-                    original.height,
-                    original.bounds.origin,
-                    original.scale,
-                );
+                if draft.is_some_and(|s| {
+                    matches!(
+                        s.kind,
+                        ShapeKind::Magnifier
+                            | ShapeKind::Spotlight
+                            | ShapeKind::Eraser
+                            | ShapeKind::EraserRect
+                    )
+                }) || (draft.is_some()
+                    && committed.iter().any(|s| s.kind == ShapeKind::Magnifier))
+                {
+                    pixels.clone_from(&original.rgba);
+                    crate::annotation::Annotations::rasterize_shapes(
+                        committed.iter().chain(draft),
+                        &mut pixels,
+                        original.width,
+                        original.height,
+                        original.bounds.origin,
+                        original.scale,
+                    );
+                } else {
+                    crate::annotation::Annotations::rasterize_shapes(
+                        draft.into_iter(),
+                        &mut pixels,
+                        original.width,
+                        original.height,
+                        original.bounds.origin,
+                        original.scale,
+                    );
+                }
                 cached.image = crate::render_image::rgba_to_render_image(
                     pixels,
                     original.width,
@@ -394,6 +491,7 @@ impl ScreenshotSession {
             && let Some(selection) = self.selection.bounds()
             && cached.selection == Some(selection)
             && cached.draft.is_none()
+            && self.annotations.draft_shape().is_none()
             && cached.committed == self.annotations.committed()
             && cached.draft_generation == self.annotations.draft_generation()
         {

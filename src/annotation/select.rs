@@ -1,7 +1,8 @@
 //! Selecting placed shapes: hit-testing and the selection state.
 //!
 //! Picks prefer visible ink and allow a small margin around thin strokes.
-//! Hollow interiors stay transparent to selection. This module owns
+//! Unselected hollow interiors stay transparent; selected frames own their interior.
+//! This module owns
 //! the geometry probes and the `selected` slot on [`Annotations`];
 //! the pointer-level state machine (click vs. draw-through) lives in
 //! the session, which drives these APIs.
@@ -50,18 +51,33 @@ impl Annotations {
             })
     }
 
-    /// Classify the hover at `p` for the cursor affordance. The
-    /// topmost hit decides — the same shape a press would act on
-    /// (`pointer_down` parks its click on the topmost hit, selected
-    /// or not) — so a selected shape buried under a newer one still
-    /// reads as Pick at the overlap. Every tool but the select tool
-    /// advertises no shape affordance at all: their press means
-    /// something else (draw, erase, region edit).
+    /// Drawing only picks the current selection; idle mode also picks other marks.
+    /// Text keeps existing text selectable for double-click editing.
+    pub(crate) fn interaction_hit_test(&self, p: Point<Pixels>) -> Option<usize> {
+        self.selected_index()
+            .filter(|_| {
+                self.selected()
+                    .is_some_and(|shape| shape.selection_box().contains(&p))
+            })
+            .or_else(|| match self.tool {
+                None | Some(ShapeKind::Select) => self.hit_test(p),
+                Some(ShapeKind::Text) => self
+                    .hit_test(p)
+                    .filter(|&ix| self.shapes[ix].kind == ShapeKind::Text),
+                _ => None,
+            })
+    }
+
+    /// Match the move cursor to the selected frame, suppressing unrelated drawing hover.
     pub(crate) fn shape_hover(&self, p: Point<Pixels>) -> Option<ShapeHover> {
         if !self.parks_click_select() {
             return None;
         }
-        let ix = self.hit_test(p)?;
+        let ix = self.interaction_hit_test(p)?;
+        if !matches!(self.tool, None | Some(ShapeKind::Select)) && self.selected_index() != Some(ix)
+        {
+            return None;
+        }
         Some(if self.selected_index() == Some(ix) {
             ShapeHover::Move
         } else {
@@ -114,12 +130,17 @@ impl Annotations {
     /// when one is live, else the active tool's preset — one truth for
     /// the slider's position, its readout and the write paths.
     pub(crate) fn current_edit_size(&self) -> f32 {
+        if self.editing_filter_brush_size()
+            && let super::FilterArea::Brush { diameter } = self.filter_area()
+        {
+            return diameter;
+        }
         if let Some(shape) = self.editing_text() {
-            return shape.width;
+            return shape.size();
         }
         match self.selected() {
             Some(shape) if shape.kind == ShapeKind::Number => f32::from(shape.bounds.size.width),
-            Some(shape) => shape.width,
+            Some(shape) => shape.size(),
             None => self.tool_size(),
         }
     }
@@ -144,20 +165,37 @@ impl Annotations {
         }
         if let Some(shape) = self.editing_text_mut() {
             let spec = super::size_spec(ShapeKind::Text);
-            shape.width = v.clamp(spec.min, spec.max);
+            shape.parameters.set_size(v.clamp(spec.min, spec.max));
             return;
         }
+        let brush_size = self.editing_filter_brush_size();
+        let spec = self.current_size_spec();
+        let v = v.clamp(spec.min, spec.max);
+        let v = self.bounded_size(v, brush_size);
+        if brush_size {
+            self.filter_brush_size = v;
+            self.filter_area = super::FilterArea::Brush { diameter: v };
+        }
         let Some(ix) = self.selected_index() else {
-            self.set_tool_size(v);
+            if !brush_size {
+                self.set_tool_size(v);
+            }
             return;
         };
         let kind = self.shapes[ix].kind;
-        let spec = super::size_spec(kind);
         let v = v.clamp(spec.min, spec.max);
-        self.set_size_of(kind, v); // remember for the next stroke
+        if !brush_size {
+            self.set_size_of(kind, v);
+        }
         let write = |shapes: &mut Vec<Shape>| {
             if let Some(shape) = shapes.get_mut(ix) {
-                resize_shape(shape, v);
+                if brush_size {
+                    if let super::ShapeParameters::Filter { area, .. } = &mut shape.parameters {
+                        *area = super::FilterArea::Brush { diameter: v };
+                    }
+                } else {
+                    resize_shape(shape, v);
+                }
             }
         };
         // merge into the previous entry while the same drag continues
@@ -177,9 +215,62 @@ impl Annotations {
             if after != before {
                 self.history.push(HistoryEntry::Edit { ix, before, after });
                 self.redo.clear();
+                self.size_drag_active = true;
             }
-            self.size_drag_active = true;
         }
+    }
+
+    fn bounded_size(&self, requested: f32, brush: bool) -> f32 {
+        let (Some(before), Some(area)) = (self.selected(), self.resize_bounds) else {
+            return requested;
+        };
+        let current = self.current_edit_size();
+        if requested <= current || before.kind == ShapeKind::Spotlight {
+            return requested;
+        }
+        // Preserve already clipped marks after a crop change without allowing
+        // a subsequent size edit to extend their clipping.
+        let limit = area.union(&before.ink_bounds());
+        let fits = |value| {
+            let mut candidate = before.clone();
+            if brush {
+                if let super::ShapeParameters::Filter { area, .. } = &mut candidate.parameters {
+                    *area = super::FilterArea::Brush { diameter: value };
+                }
+            } else {
+                resize_shape(&mut candidate, value);
+            }
+            let bounds = candidate.ink_bounds();
+            bounds.left() >= limit.left()
+                && bounds.top() >= limit.top()
+                && bounds.right() <= limit.right()
+                && bounds.bottom() <= limit.bottom()
+        };
+        if fits(requested) {
+            return requested;
+        }
+        let (mut low, mut high) = (current, requested);
+        for _ in 0..24 {
+            let mid = (low + high) / 2.;
+            if fits(mid) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        // Integral controls must not accumulate subpixel growth at a blocked edge.
+        if before.kind == ShapeKind::Magnifier {
+            low
+        } else {
+            low.floor().max(current)
+        }
+    }
+
+    /// Scope size edits to the capture before recording history or clearing redo.
+    pub(crate) fn edit_within(&mut self, area: Bounds<Pixels>, edit: impl FnOnce(&mut Self)) {
+        let previous = self.resize_bounds.replace(area);
+        edit(self);
+        self.resize_bounds = previous;
     }
 
     /// Close the slider drag: the next `apply_size` starts a new
@@ -194,8 +285,8 @@ impl Annotations {
     /// (the Escape path).
     pub(crate) fn place_shape(&mut self, ix: usize, before: &Shape, delta: Point<Pixels>) {
         if let Some(shape) = self.shapes.get_mut(ix) {
-            shape.bounds = Bounds::new(before.bounds.origin + delta, before.bounds.size);
-            shape.points = before.points.iter().map(|p| *p + delta).collect();
+            *shape = before.clone();
+            shape.translate(delta);
         }
     }
 
@@ -207,10 +298,41 @@ impl Annotations {
         anchor: usize,
         before: &Shape,
         p: Point<Pixels>,
+        area: Bounds<Pixels>,
     ) {
+        let Some(start) = before.handle_points().get(anchor).copied() else {
+            return;
+        };
+        // A curve may overshoot its handles. Constrain the resulting outline,
+        // including selection padding, rather than just the pointer position.
+        // Existing clipping after crop changes must not make a drag jump.
+        let limit = area.union(&before.selection_box());
+        let fits = |shape: &Shape| {
+            let b = shape.selection_box();
+            b.left() >= limit.left()
+                && b.right() <= limit.right()
+                && b.top() >= limit.top()
+                && b.bottom() <= limit.bottom()
+        };
         if let Some(shape) = self.shapes.get_mut(ix) {
             *shape = before.clone();
             shape.set_handle(anchor, p);
+            if fits(shape) {
+                return;
+            }
+            let (mut low, mut high) = (0., 1.);
+            for _ in 0..20 {
+                let fraction = (low + high) / 2.;
+                *shape = before.clone();
+                shape.set_handle(anchor, start + (p - start) * fraction);
+                if fits(shape) {
+                    low = fraction;
+                } else {
+                    high = fraction;
+                }
+            }
+            *shape = before.clone();
+            shape.set_handle(anchor, start + (p - start) * low);
         }
     }
 
@@ -231,9 +353,7 @@ impl Annotations {
         }
     }
 
-    /// Step the selected badge's VALUE ±1 — the wheel over a selected
-    /// number (issue #2's quick tune); the size slider keeps owning the
-    /// diameter. Floors at 1 (0 is not a badge); one reversible Edit
+    /// Step the selected badge value independently of wheel/slider diameter. Floors at 1 (0 is not a badge); one reversible Edit
     /// entry per notch.
     pub(crate) fn step_selected_number(&mut self, ix: usize, up: bool) -> bool {
         let Some(current) = self.shapes.get(ix).and_then(|s| s.number) else {
@@ -266,16 +386,10 @@ impl Annotations {
         }
     }
 
-    /// Whether a press right now should park a click-select pending
-    /// resolution (release = select, drag past the slop = move it).
-    /// Since the 2026-10-06 select-tool flip this is the select
-    /// tool's EXCLUSIVE job: draw tools always draw (a pencil press
-    /// on an existing stroke inks over it, never selects it), and
-    /// having no tool at all is pure region editing. The cursor
-    /// affordance follows automatically (`shape_hover` gates on
-    /// this).
+    /// Idle interaction selects marks; a newly placed selection stays editable.
+    /// Explicitly activating a drawing tool clears selection and draws over ink.
     pub(crate) fn parks_click_select(&self) -> bool {
-        self.tool == Some(ShapeKind::Select)
+        matches!(self.tool, None | Some(ShapeKind::Select)) || self.selected.is_some()
     }
 
     /// Step the selected shape's size through its OWN preset ladder —
@@ -288,19 +402,17 @@ impl Annotations {
         let current = if kind == ShapeKind::Number {
             f32::from(self.shapes[ix].bounds.size.width)
         } else {
-            self.shapes[ix].width
+            self.shapes[ix].size()
         };
         let next = if up { current + 1. } else { current - 1. };
         if next == current || next < spec.min || next > spec.max {
             return false;
         }
-        self.set_size_of(kind, next); // remember for the next stroke
         let before = self.shapes[ix].clone();
-        resize_shape(&mut self.shapes[ix], next);
-        let after = self.shapes[ix].clone();
-        self.history.push(HistoryEntry::Edit { ix, before, after });
-        self.redo.clear();
-        true
+        self.end_size_drag();
+        self.apply_size(next);
+        self.end_size_drag();
+        self.shapes[ix] != before
     }
 }
 
@@ -308,6 +420,7 @@ impl Annotations {
 fn resize_shape(shape: &mut Shape, value: f32) {
     match shape.kind {
         ShapeKind::Number => {
+            shape.parameters.set_size(value);
             let b = shape.bounds;
             let center = point(b.left() + b.size.width / 2., b.top() + b.size.height / 2.);
             shape.bounds = Bounds::new(
@@ -318,14 +431,15 @@ fn resize_shape(shape: &mut Shape, value: f32) {
         ShapeKind::Text => {
             // Scale the wrapping width and height with the glyphs, preserving
             // the text origin and line layout instead of clipping to the old box.
-            let ratio = value / shape.width;
+            let ratio = value / shape.size();
+            let inset = px(shape.text_style.inset() * 2.);
             shape.bounds.size = size(
-                shape.bounds.size.width * ratio,
-                shape.bounds.size.height * ratio,
+                (shape.bounds.size.width - inset).max(px(1.)) * ratio + inset,
+                (shape.bounds.size.height - inset).max(px(1.)) * ratio + inset,
             );
-            shape.width = value;
+            shape.parameters.set_size(value);
         }
-        _ => shape.width = value,
+        _ => shape.parameters.set_size(value),
     }
 }
 
@@ -333,10 +447,22 @@ fn resize_shape(shape: &mut Shape, value: f32) {
 /// its visible stroke or body; see [`line::geometry`] for the shared
 /// visual outline.
 pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
+    if shape.has_custom_geometry() {
+        return line::shape_geometry(shape)
+            .iter()
+            .any(|poly| polygon_touched(p, poly, HIT_TOLERANCE));
+    }
+    if let Some(super::FilterArea::Brush { diameter }) = shape.filter_area() {
+        return line::geometry(&shape.points, diameter, false)
+            .iter()
+            .any(|poly| point_in_polygon(p, poly));
+    }
     let (x, y) = (f32::from(p.x), f32::from(p.y));
     match shape.kind {
         // stroke band: any of the four edge rectangles, inflated by the
         // antialiased fringe
+        ShapeKind::Magnifier => super::magnifier::contains(shape, p),
+        ShapeKind::Spotlight => super::spotlight::contains(shape, p),
         ShapeKind::Rectangle => shape
             .strokes()
             .iter()
@@ -351,8 +477,8 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
             let cy = f32::from(shape.bounds.origin.y) + ry;
             let outer = ((x - cx) / (rx + HIT_TOLERANCE)).powi(2)
                 + ((y - cy) / (ry + HIT_TOLERANCE)).powi(2);
-            let inner_rx = (rx - shape.width - HIT_TOLERANCE).max(0.);
-            let inner_ry = (ry - shape.width - HIT_TOLERANCE).max(0.);
+            let inner_rx = (rx - shape.size() - HIT_TOLERANCE).max(0.);
+            let inner_ry = (ry - shape.size() - HIT_TOLERANCE).max(0.);
             // a band thinner than the tolerance means even the center
             // is within reach — the whole disc hits
             let inner_clear = inner_rx <= 0.
@@ -363,7 +489,7 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
         ShapeKind::Line | ShapeKind::Arrow => {
             // the exact visual geometry (capsule / arrowhead polygon):
             // what you see is what you can click
-            line::geometry(&shape.points, shape.width, shape.kind == ShapeKind::Arrow)
+            line::shape_geometry(shape)
                 .iter()
                 .any(|poly| point_in_polygon(p, poly))
         }
@@ -374,14 +500,14 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
         // (issue #16). Ray casting over the vertex ring stays exact
         // for concave outlines a bounding-box test would misjudge.
         ShapeKind::Polyline => {
-            let band = line::geometry(&shape.points, shape.width, false)
+            let band = line::geometry(&shape.points, shape.size(), false)
                 .iter()
                 .any(|poly| point_in_polygon(p, poly));
             band || ring_is_closed(shape) && point_in_polygon(p, &shape.points)
         }
         // freehand families share the same visual-polygon outline
-        ShapeKind::Pencil | ShapeKind::Highlighter => {
-            line::geometry(&shape.points, shape.width, false)
+        ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser => {
+            line::shape_geometry(shape)
                 .iter()
                 .any(|poly| point_in_polygon(p, poly))
         }
@@ -393,6 +519,9 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
             }
             let c = shape.bounds.origin + point(px(r), px(r));
             (f32::from(p.x - c.x)).hypot(f32::from(p.y - c.y)) <= r + 3.0
+                || shape
+                    .number_arrow()
+                    .is_some_and(|arrow| shape_erased(&arrow, p, PICK_TOLERANCE))
         }
         // solid regions: anywhere inside the bounds
         ShapeKind::Text | ShapeKind::Mosaic | ShapeKind::Blur => {
@@ -410,6 +539,16 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
 /// could ever be erased individually. Hollow rectangle/ellipse
 /// outlines likewise erase only from their stroke band.
 pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
+    if shape.has_custom_geometry() {
+        return line::shape_geometry(shape)
+            .iter()
+            .any(|poly| polygon_touched(p, poly, radius));
+    }
+    if let Some(super::FilterArea::Brush { diameter }) = shape.filter_area() {
+        return line::geometry(&shape.points, diameter, false)
+            .iter()
+            .any(|poly| polygon_touched(p, poly, radius));
+    }
     match shape.kind {
         // Stroke families: the exact visual polygons (capsules,
         // arrowheads — the same geometry `shape_hit` trusts), each
@@ -418,11 +557,12 @@ pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool
         | ShapeKind::Arrow
         | ShapeKind::Polyline
         | ShapeKind::Pencil
-        | ShapeKind::Highlighter => {
-            line::geometry(&shape.points, shape.width, shape.kind == ShapeKind::Arrow)
-                .iter()
-                .any(|poly| polygon_touched(p, poly, radius))
-        }
+        | ShapeKind::Highlighter
+        | ShapeKind::Eraser => line::shape_geometry(shape)
+            .iter()
+            .any(|poly| polygon_touched(p, poly, radius)),
+        ShapeKind::Magnifier => super::magnifier::contains(shape, p),
+        ShapeKind::Spotlight => super::spotlight::contains(shape, p),
         ShapeKind::Rectangle => shape
             .strokes()
             .iter()
@@ -434,6 +574,9 @@ pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool
             r > 0. && {
                 let c = shape.bounds.origin + point(px(r), px(r));
                 (f32::from(p.x - c.x)).hypot(f32::from(p.y - c.y)) <= r + radius
+                    || shape
+                        .number_arrow()
+                        .is_some_and(|arrow| shape_erased(&arrow, p, radius))
             }
         }
         // Solid regions: the whole bounds is ink.
@@ -482,8 +625,8 @@ fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
     let cy = f32::from(shape.bounds.origin.y) + ry;
     let point_at =
         |rx: f32, ry: f32, theta: f32| point(px(cx + rx * theta.cos()), px(cy + ry * theta.sin()));
-    let inner_rx = rx - shape.width;
-    let inner_ry = ry - shape.width;
+    let inner_rx = rx - shape.size();
+    let inner_ry = ry - shape.size();
     for contour in [(rx, ry, 0.), (inner_rx, inner_ry, std::f32::consts::PI)] {
         if contour.0 <= 0. || contour.1 <= 0. {
             continue; // band thinner than the stroke: no hole
@@ -543,7 +686,7 @@ fn ring_is_closed(shape: &Shape) -> bool {
         // simply never passes the ray-cast test, so 3 is the only
         // floor that matters.
         (Some(first), Some(last)) if shape.points.len() >= 3 => {
-            super::distance(*first, *last) <= CLOSURE_SLOP + shape.width
+            super::distance(*first, *last) <= CLOSURE_SLOP + shape.size()
         }
         _ => false,
     }
@@ -559,6 +702,58 @@ pub(crate) fn inflate(b: &Bounds<Pixels>, by: Pixels) -> Bounds<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_curve_handles_keep_the_entire_outline_inside_the_crop() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        use crate::annotation::ArrowStyle;
+        for (kind, arrow) in [
+            (ShapeKind::Line, ArrowStyle::Open),
+            (ShapeKind::Arrow, ArrowStyle::Open),
+            (ShapeKind::Arrow, ArrowStyle::DoubleOpen),
+            (ShapeKind::Arrow, ArrowStyle::Outline),
+            (ShapeKind::Arrow, ArrowStyle::Filled),
+            (ShapeKind::Arrow, ArrowStyle::Dimension),
+            (ShapeKind::Arrow, ArrowStyle::Triangle),
+            (ShapeKind::Arrow, ArrowStyle::DoubleTriangle),
+        ] {
+            let mut a = Annotations::default();
+            a.toggle(kind);
+            a.set_arrow_style(arrow);
+            a.begin(point(px(100.), px(150.)), area, false);
+            a.drag_to(point(px(300.), px(150.)), area, false);
+            a.end();
+            let before = a.shapes[0].clone();
+            // Near either endpoint, the handle follows both pointer coordinates.
+            for target in [point(px(101.), px(140.)), point(px(299.), px(160.))] {
+                a.place_handle(0, 2, &before, target, area);
+                assert_eq!(a.shapes[0].handle_points()[2], target);
+            }
+            for anchor in 0..3 {
+                for target in [
+                    point(px(-200.), px(150.)),
+                    point(px(600.), px(150.)),
+                    point(px(200.), px(-200.)),
+                    point(px(200.), px(500.)),
+                    point(px(1.), px(1.)),
+                    point(px(399.), px(299.)),
+                ] {
+                    a.place_handle(0, anchor, &before, target, area);
+                    let bounds = a.shapes[0].selection_box();
+                    assert!(bounds.left() >= area.left());
+                    assert!(bounds.right() <= area.right());
+                    assert!(bounds.top() >= area.top());
+                    assert!(bounds.bottom() <= area.bottom());
+                }
+            }
+            let after = a.shapes[0].clone();
+            a.commit_move(0, before.clone());
+            a.undo();
+            assert_eq!(a.shapes[0], before);
+            a.redo();
+            assert_eq!(a.shapes[0], after);
+        }
+    }
 
     #[test]
     fn resizing_placed_text_updates_bounds_and_history() {
@@ -578,7 +773,7 @@ mod tests {
                 a.end_size_drag();
             }
             let enlarged = a.selected().unwrap().clone();
-            let ratio = enlarged.width / original.width;
+            let ratio = enlarged.size() / original.size();
             assert_eq!(enlarged.bounds.origin, original.bounds.origin);
             assert_eq!(
                 enlarged.bounds.size,
@@ -600,7 +795,7 @@ mod tests {
                 a.end_size_drag();
             }
             let restored = &a.shapes[0];
-            assert_eq!(restored.width, original.width);
+            assert_eq!(restored.size(), original.size());
             assert!(
                 (f32::from(restored.bounds.size.width - original.bounds.size.width)).abs() < 0.001
             );
@@ -663,9 +858,10 @@ mod tests {
             kind: ShapeKind::Polyline,
             number: None,
             text: None,
+            text_style: Default::default(),
             bounds: Bounds::default(),
             color: 0xffd43b60,
-            width,
+            parameters: crate::annotation::ShapeParameters::new(ShapeKind::Polyline, width),
             points: points.iter().map(|&(x, y)| point(px(x), px(y))).collect(),
         }
     }
@@ -836,7 +1032,10 @@ mod tests {
         assert_eq!(a.selected_index(), None);
         assert_eq!(a.shape_hover(point(px(35.), px(35.))), None);
         a.toggle(ShapeKind::Polyline); // off
-        assert_eq!(a.shape_hover(point(px(35.), px(35.))), None); // no tool: no affordance
+        assert_eq!(
+            a.shape_hover(point(px(35.), px(35.))),
+            Some(ShapeHover::Pick)
+        );
         a.toggle(ShapeKind::Select);
         assert_eq!(
             a.shape_hover(point(px(35.), px(35.))),

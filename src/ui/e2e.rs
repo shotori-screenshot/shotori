@@ -16,8 +16,10 @@
 //!   clear-all annotations action (issue #15)
 //!   "textnew", "textmiddle", "textedit" and "textempty" open synthetic
 //!   text editing states through keyboard and pointer dispatch
-//! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel` —
+//! - `SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel|textstyles|spotlight|lens|numbers|rectangle|ellipse` —
 //!   seed annotation and crop interaction states on the target output
+//! - `SHOTORI_DEBUG_ACTION=spotlightdraw|lensdrag` replays a pointer gesture
+//!   with a held-button pause to inspect asynchronous preview transitions
 //! - `SHOTORI_DEBUG_SETTINGS_PAGE=general|toolbar|keys|ocr|appearance|about`
 //!   — open the settings window on that page. A headless seat has no
 //!   pointer AND no keyboard (docs/headless-e2e.md), so without this
@@ -69,12 +71,130 @@ pub(crate) fn debug_editing_scene(
     let Ok(scene) = std::env::var("SHOTORI_DEBUG_EDITING_SCENE") else {
         return;
     };
-    if !matches!(scene.as_str(), "hover" | "selected" | "reselect" | "cancel") {
-        return;
-    }
     let Some(bounds) = session.selection().bounds() else {
         return;
     };
+    if scene == "rectangle" || scene == "ellipse" {
+        session.edit_annotations(|a| {
+            let kind = if scene == "rectangle" {
+                crate::annotation::ShapeKind::Rectangle
+            } else {
+                crate::annotation::ShapeKind::Ellipse
+            };
+            a.toggle(kind);
+            a.apply_size(6.);
+            a.set_geometry_radius(24.);
+            a.begin(bounds.origin + point(px(140.), px(90.)), bounds, false);
+            a.drag_to(bounds.origin + point(px(540.), px(330.)), bounds, false);
+            a.end();
+            a.select_index(0);
+        });
+        return;
+    }
+    if scene == "numbers" {
+        session.edit_annotations(|a| {
+            a.toggle(crate::annotation::ShapeKind::Number);
+            for (index, format) in [
+                crate::annotation::NumberFormat::Decimal,
+                crate::annotation::NumberFormat::Alphabetic,
+                crate::annotation::NumberFormat::Roman,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                a.deselect();
+                a.set_number_format(format);
+                a.set_number_value(12);
+                a.begin(
+                    bounds.origin + point(px(100. + index as f32 * 120.), px(100.)),
+                    bounds,
+                    false,
+                );
+                a.drag_to(
+                    bounds.origin + point(px(100. + index as f32 * 120.), px(240.)),
+                    bounds,
+                    false,
+                );
+                a.end();
+            }
+            a.select_index(2);
+        });
+        return;
+    }
+    if scene == "lens" {
+        session.edit_annotations(|a| {
+            let p = |x, y| bounds.origin + point(px(x), px(y));
+            a.toggle(crate::annotation::ShapeKind::Rectangle);
+            a.begin(p(100., 110.), bounds, false);
+            a.drag_to(p(210., 170.), bounds, false);
+            a.end();
+            a.toggle(crate::annotation::ShapeKind::Arrow);
+            a.begin(p(80., 400.), bounds, false);
+            a.drag_to(p(500., 430.), bounds, false);
+            a.end();
+            a.toggle(crate::annotation::ShapeKind::Magnifier);
+            a.begin(p(80., 90.), bounds, false);
+            a.drag_to(p(240., 210.), bounds, false);
+            a.end();
+        });
+        return;
+    }
+    if scene == "spotlight" {
+        session.edit_annotations(|a| {
+            a.toggle(crate::annotation::ShapeKind::Spotlight);
+            a.set_spotlight_outline(true);
+            a.set_spotlight_outline_width(3.);
+            for (x, ellipse) in [(80., false), (520., true)] {
+                a.deselect();
+                a.set_spotlight_ellipse(ellipse);
+                a.begin(bounds.origin + point(px(x), px(90.)), bounds, false);
+                a.drag_to(bounds.origin + point(px(x + 300.), px(320.)), bounds, false);
+                a.end();
+            }
+            a.select_index(1);
+        });
+        return;
+    }
+    if scene == "textstyles" {
+        session.edit_annotations(|a| {
+            a.toggle(crate::annotation::ShapeKind::Text);
+            for (row, style) in [
+                crate::annotation::text::TextStyle::default(),
+                crate::annotation::text::TextStyle {
+                    bold: true,
+                    italic: true,
+                    outline: Some(0xffffffff),
+                    ..Default::default()
+                },
+                crate::annotation::text::TextStyle {
+                    background: Some(0x225577bb),
+                    outline: Some(0xffffffff),
+                    padding: 12.,
+                    radius: 10.,
+                    ..Default::default()
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                a.deselect();
+                a.set_text_style(style);
+                a.preview_text(
+                    Bounds::new(
+                        bounds.origin + point(px(60.), px(80. + row as f32 * 120.)),
+                        size(px(420.), px(76.)),
+                    ),
+                    "Canvas text 文字样式".into(),
+                );
+                a.finish_text_edit(true);
+            }
+            a.select_index(2);
+        });
+        return;
+    }
+    if !matches!(scene.as_str(), "hover" | "selected" | "reselect" | "cancel") {
+        return;
+    }
     let p = |x, y| bounds.origin + point(px(x), px(y));
     session.edit_annotations(|a| {
         a.toggle(crate::annotation::ShapeKind::Rectangle);
@@ -171,6 +291,8 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
             || a == "ocrsetup"
             || a == "clear"
             || a == "scroll"
+            || a == "spotlightdraw"
+            || a == "lensdrag"
             || matches!(
                 a.as_str(),
                 "textnew" | "textmiddle" | "textedit" | "textempty"
@@ -183,6 +305,92 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
         cx.background_executor()
             .timer(std::time::Duration::from_millis(1500))
             .await;
+        if action == "spotlightdraw" || action == "lensdrag" {
+            let Some(bounds) = debug_selection(true).bounds() else {
+                eprintln!("[shotori] drag review requires a debug selection");
+                return;
+            };
+            let (start, delta, tool): (_, _, Box<dyn Action>) = if action == "spotlightdraw" {
+                (
+                    bounds.origin + point(px(820.), px(360.)),
+                    point(px(220.), px(190.)),
+                    Box::new(crate::actions::ToggleSpotlight),
+                )
+            } else {
+                (
+                    bounds.origin + point(px(416.), px(150.)),
+                    point(px(200.), px(100.)),
+                    Box::new(crate::actions::ToggleSelect),
+                )
+            };
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                if action == "spotlightdraw" {
+                    window.dispatch_action(Box::new(crate::actions::ToggleSelect), cx);
+                }
+                window.dispatch_action(tool, cx);
+            }) {
+                eprintln!("[shotori] drag review tool failed: {error}");
+                return;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        position: start,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }) {
+                eprintln!("[shotori] drag review press failed: {error}");
+                return;
+            }
+            for step in 1..=16 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(80))
+                    .await;
+                let position = start + delta * (step as f32 / 16.);
+                if let Err(error) = win.update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position,
+                            pressed_button: Some(MouseButton::Left),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                }) {
+                    eprintln!("[shotori] drag review movement failed: {error}");
+                    return;
+                }
+                if step == 8 {
+                    eprintln!("[shotori] drag review: hold");
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(1500))
+                        .await;
+                    eprintln!("[shotori] drag review: resume");
+                }
+            }
+            if let Err(error) = win.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        position: start + delta,
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }) {
+                eprintln!("[shotori] drag review release failed: {error}");
+            }
+            eprintln!("[shotori] drag review: released");
+            return;
+        }
         if matches!(
             action.as_str(),
             "textnew" | "textmiddle" | "textedit" | "textempty"

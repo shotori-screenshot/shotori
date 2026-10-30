@@ -99,7 +99,12 @@ impl ScreenshotSession {
             } else {
                 selection
             };
-            let delta = movement_delta(current.ink_bounds(), area, delta);
+            let bounds = if current.kind == crate::annotation::ShapeKind::Text {
+                current.ink_bounds()
+            } else {
+                current.selection_box()
+            };
+            let delta = movement_delta(bounds, area, delta);
             if delta == point(px(0.), px(0.)) {
                 return false;
             }
@@ -275,7 +280,106 @@ mod tests {
     }
 
     #[test]
-    fn escape_skips_passive_tools_and_resets_active_gestures_once() {
+    fn selected_frame_interior_moves_marks_without_moving_the_crop() {
+        for kind in [
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+            ShapeKind::Pencil,
+            ShapeKind::Highlighter,
+        ] {
+            for tool_active in [false, true] {
+                let mut s = session();
+                let crop = s.selection.bounds().unwrap();
+                s.edit_annotations(|a| {
+                    a.toggle(kind);
+                    a.begin(p(80., 80.), crop, false);
+                    a.drag_to(p(180., 160.), crop, false);
+                    a.end();
+                    if !tool_active {
+                        a.finish_interaction();
+                    }
+                    a.select_index(1);
+                });
+                let original = s.annotations.committed()[1].clone();
+                let press = p(100., 140.);
+                assert_eq!(s.annotations.hit_test(press), None);
+                s.pointer_move("screen", press, false);
+                assert_eq!(
+                    s.annotation_hover(),
+                    Some(crate::annotation::ShapeHover::Move)
+                );
+                s.pointer_down("screen", press, false);
+                s.pointer_move("screen", press + p(20., 10.), false);
+                s.pointer_up("screen", press + p(20., 10.), false);
+                assert_eq!(s.selection.bounds(), Some(crop));
+                assert_eq!(s.annotations.selected_index(), Some(1));
+                let moved = s.annotations.committed()[1].clone();
+                assert_eq!(moved.bounds.origin, original.bounds.origin + p(20., 10.));
+                s.undo();
+                assert_eq!(s.annotations.committed()[1], original);
+                s.redo();
+                assert_eq!(s.annotations.committed()[1], moved);
+                s.edit_annotations(|a| {
+                    a.select_index(1);
+                });
+                if let Some(handle) = moved.handle_points().first() {
+                    s.pointer_down("screen", *handle, false);
+                    assert!(s.handle_drag_anchor().is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drawing_tools_do_not_hover_other_marks_after_auto_selection() {
+        let mut s = session();
+        let area = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Ellipse);
+            a.begin(p(160., 150.), area, false);
+            a.drag_to(p(200., 190.), area, false);
+            a.end();
+            a.select_index(1);
+        });
+        s.pointer_move("screen", p(80., 105.), false);
+        assert_eq!(s.hovered_annotation(), None);
+        assert_eq!(s.annotations.shape_hover(p(80., 105.)), None);
+        assert_eq!(s.annotations.selected_index(), Some(1));
+        s.edit_annotations(|a| a.toggle(ShapeKind::Ellipse));
+        assert_eq!(s.hovered_annotation(), Some(0));
+    }
+
+    #[test]
+    fn right_click_finishes_polyline_before_leaving_its_tool() {
+        for vertices in [1, 2] {
+            let mut s = session();
+            let crop = s.selection.bounds().unwrap();
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Polyline);
+                for index in 0..vertices {
+                    let vertex = p(90. + index as f32 * 50., 170.);
+                    a.begin(vertex, crop, false);
+                    a.drag_to(vertex, crop, false);
+                    a.end();
+                }
+            });
+            assert!(s.annotations.is_drawing_polyline());
+            s.finish_or_exit_annotation();
+            assert!(!s.annotations.is_drawing_polyline());
+            assert_eq!(s.annotations.tool(), Some(ShapeKind::Polyline));
+            let count = 1 + usize::from(vertices == 2);
+            assert_eq!(s.annotations.committed().len(), count);
+            s.finish_or_exit_annotation();
+            assert_eq!(s.annotations.tool(), None);
+            assert_eq!(s.annotations.committed().len(), count);
+            assert_eq!(s.selection.bounds(), Some(crop));
+        }
+    }
+
+    #[test]
+    fn escape_cancels_gesture_then_tool_before_closing() {
         for kind in [
             ShapeKind::Text,
             ShapeKind::Select,
@@ -299,12 +403,21 @@ mod tests {
                 a.select_index(0);
             });
             assert!(
-                !s.escape_interaction(),
-                "passive {kind:?} must not consume Escape"
+                s.escape_interaction(),
+                "passive {kind:?} must exit its tool before closing"
             );
             assert_eq!(s.annotations.tool(), None);
             assert_eq!(s.annotations.selected_index(), None);
             assert_eq!(s.annotations.committed().len(), 1);
+            assert!(!s.escape_interaction());
+            let crop = s.selection.bounds();
+            s.edit_annotations(|a| a.toggle(kind));
+            s.finish_or_exit_annotation();
+            s.finish_or_exit_annotation();
+            assert_eq!(s.annotations.tool(), None);
+            assert_eq!(s.annotations.selected_index(), None);
+            assert_eq!(s.annotations.committed().len(), 1);
+            assert_eq!(s.selection.bounds(), crop);
         }
         for kind in [
             ShapeKind::Rectangle,
@@ -323,12 +436,14 @@ mod tests {
             s.pointer_down("screen", p(80., 100.), false);
             s.pointer_move("screen", p(110., 110.), false);
             assert!(s.escape_interaction(), "active {kind:?}");
-            assert!(!s.escape_interaction(), "second Escape must exit: {kind:?}");
+            assert_eq!(s.annotations.tool(), Some(kind));
+            assert!(
+                s.escape_interaction(),
+                "second Escape leaves the tool: {kind:?}"
+            );
+            assert!(!s.escape_interaction(), "third Escape may close: {kind:?}");
             assert_eq!(s.annotations.tool(), None);
             assert_eq!(s.annotations.selected_index(), None);
-            if kind == ShapeKind::Eraser {
-                s.undo();
-            }
             assert_eq!(s.annotations.committed(), original);
         }
     }
@@ -508,7 +623,7 @@ mod tests {
             a.select_index(0);
         });
         assert!(s.nudge(p(1_000., 1_000.)));
-        let bounds = s.annotations.selected().unwrap().bounds;
+        let bounds = s.annotations.selected().unwrap().selection_box();
         assert_eq!(
             bounds.bottom_right(),
             s.selection.bounds().unwrap().bottom_right()
@@ -535,7 +650,7 @@ mod tests {
         });
         let original = s.annotations.selected().unwrap().clone();
         assert!(s.nudge(p(1_000., 1_000.)));
-        let ink = s.annotations.selected().unwrap().ink_bounds();
+        let ink = s.annotations.selected().unwrap().selection_box();
         let crop = s.selection.bounds().unwrap();
         assert!((f32::from(ink.right() - crop.right())).abs() < 0.001);
         assert!((f32::from(ink.bottom() - crop.bottom())).abs() < 0.001);

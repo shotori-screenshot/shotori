@@ -126,6 +126,28 @@ impl SearchableListItem for LanguageItem {
     }
 }
 
+#[derive(Clone)]
+struct TextWrapItem(crate::annotation::text::TextWrap);
+
+impl SearchableListItem for TextWrapItem {
+    type Value = crate::annotation::text::TextWrap;
+
+    fn title(&self) -> SharedString {
+        use crate::annotation::text::TextWrap;
+        match self.0 {
+            TextWrap::Word => crate::i18n::t!("toolbar.wrap_word"),
+            TextWrap::Character => crate::i18n::t!("toolbar.wrap_character"),
+            TextWrap::None => crate::i18n::t!("toolbar.wrap_none"),
+        }
+        .into_owned()
+        .into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
 /// One row of the OCR model Select (title = the model's localized
 /// label; the langs/tier detail line renders outside the dropdown).
 #[derive(Clone)]
@@ -265,6 +287,7 @@ struct SettingsWindow {
     appearance: AppearanceState,
     /// The language picker's Select state (Appearance page).
     language_select: gpui_kit::Entity<SelectState<SearchableVec<LanguageItem>>>,
+    text_wrap_select: Entity<SelectState<SearchableVec<TextWrapItem>>>,
     /// The OCR model picker's Select state (OCR page). Selection
     /// commits through the Confirm subscription; the detail line below
     /// renders from `settings` — the file stays the single truth.
@@ -413,6 +436,25 @@ impl SettingsWindow {
                 }
             },
         ));
+        let text_wrap_select = cx.new(|cx| {
+            let current = settings.annotation_text_wrap();
+            let values = crate::annotation::text::TextWrap::ALL;
+            SelectState::new(
+                SearchableVec::new(values.map(TextWrapItem).to_vec()),
+                values
+                    .iter()
+                    .position(|mode| *mode == current)
+                    .map(IndexPath::new),
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe(&text_wrap_select, |this, _, event, cx| {
+            if let SelectEvent::Confirm(Some(mode)) = event {
+                this.settings.set_annotation_text_wrap(*mode);
+                this.persist(cx);
+            }
+        }));
         // OCR model picker: same shape, without the locale flip.
         let ocr_current = settings.ocr_model();
         let ocr_select = cx.new(|cx| {
@@ -450,6 +492,7 @@ impl SettingsWindow {
             drag: None,
             appearance,
             language_select,
+            text_wrap_select,
             ocr_select,
             preview_scroll: ScrollHandle::new(),
             page_scroll: std::array::from_fn(|_| ScrollHandle::new()),

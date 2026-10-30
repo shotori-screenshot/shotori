@@ -6741,6 +6741,7 @@ dependencies = [
  "gpui-kit",
  "gpui-tray",
  "image",
+ "lyon_tessellation",
  "memmap2",
  "niri-ipc",
  "notify-rust",

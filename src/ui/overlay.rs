@@ -65,7 +65,7 @@ pub struct Overlay {
     /// spec) changes; `SliderEvent::Change` writes through to the
     /// session. UI state, never crosses to the model.
     slider: Option<(
-        crate::annotation::ShapeKind,
+        (crate::annotation::ShapeKind, bool),
         Entity<gpui_kit::base::slider::SliderState>,
     )>,
     slider_sub: Option<Subscription>,
@@ -176,6 +176,19 @@ impl Overlay {
 
     fn attach_observers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self._subscriptions = vec![
+            cx.on_focus_lost(window, |this, window, cx| {
+                // Restore only when the focused control leaves the tree. Session
+                // notifications also arrive while typing in toolbar inputs.
+                if this.ocr_setup.is_none()
+                    && !gpui_kit::base::GlobalState::is_in_deferred_context(cx)
+                {
+                    if let Some(editor) = &this.text_editing {
+                        editor.focus(window, cx);
+                    } else {
+                        window.focus(&this.focus_handle, cx);
+                    }
+                }
+            }),
             window.observe_window_appearance(|_, cx| {
                 // a system appearance flip can reset the component design
                 // system — re-align it with the active palette (the
@@ -183,22 +196,24 @@ impl Overlay {
                 crate::ui::settings::sync_shell_theme(cx);
                 cx.refresh_windows();
             }),
-            cx.observe_in(&self.session, window, |this, _, window, cx| {
-                // A change from another output can remove this toolbar while
-                // one of its controls still owns the local keyboard focus.
-                if let Some(editor) = &mut this.text_editing {
+            cx.observe_in(&self.session, window, |this, _, _window, cx| {
+                if let Some(editor) = &mut this.text_editing
+                    && this.number_edit.is_none()
+                {
                     let a = this.session.read(cx).annotations();
-                    if editor.sync_style(a.text_size(), a.color().0, cx) {
+                    let style = a.text_style().clone();
+                    if editor.sync_style(a.text_size(), a.color().0, &style, cx) {
                         let accepted_size = editor.font_size;
+                        let accepted_style = editor.style.clone();
                         this.session.update(cx, |s, cx| {
-                            s.edit_annotation_settings(|a| a.apply_size(accepted_size));
+                            s.edit_annotation_settings(|a| {
+                                a.apply_size(accepted_size);
+                                a.set_text_style(accepted_style);
+                            });
                             cx.notify();
                         });
                         this.refresh_text(cx);
                     }
-                }
-                if this.ocr_setup.is_none() && this.text_editing.is_none() {
-                    window.focus(&this.focus_handle, cx);
                 }
                 // The repaint below re-derives the window cursor in
                 // render() — no cursor plumbing needed here.
@@ -403,9 +418,13 @@ impl Overlay {
 /// handles (line endpoints, polyline vertices) reposition — plain
 /// arrow, grabbing feedback would add nothing there.
 fn annotation_handle_cursor(kind: crate::annotation::ShapeKind, anchor: usize) -> CursorStyle {
-    if kind.is_region() {
+    if anchor == crate::annotation::ROTATION_HANDLE || anchor >= 8 {
+        CursorStyle::Crosshair
+    } else if kind.is_region() {
         match anchor {
             0 | 2 => CursorStyle::ResizeUpLeftDownRight,
+            4 | 6 => CursorStyle::ResizeUpDown,
+            5 | 7 => CursorStyle::ResizeLeftRight,
             _ => CursorStyle::ResizeUpRightDownLeft,
         }
     } else {

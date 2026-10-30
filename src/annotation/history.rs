@@ -15,7 +15,15 @@ pub(crate) enum HistoryEffect {
 /// the moment of recording and are restored by reverse-order undo.
 #[derive(Clone)]
 pub(super) enum HistoryEntry {
-    Add(Shape),
+    Add {
+        shape: Shape,
+        number_before: Option<u32>,
+        number_after: Option<u32>,
+    },
+    NumberCursor {
+        before: Option<u32>,
+        after: Option<u32>,
+    },
     Selection {
         before: Bounds<Pixels>,
         after: Bounds<Pixels>,
@@ -32,15 +40,9 @@ pub(super) enum HistoryEntry {
     Remove {
         ix: usize,
         shape: Shape,
-    },
-    /// An eraser gesture's whole-shape deletions (issue #14), one
-    /// entry per gesture so a single undo restores everything the
-    /// sweep took (and redo re-takes it). Recorded LIVE — removals
-    /// hit `shapes` as the brush touches them — so each pair's index
-    /// is the moment it left; undo re-inserts in reverse, redo
-    /// removes in forward order.
-    RemoveMany {
-        removals: Vec<(usize, Shape)>,
+        renumbered: Vec<(usize, u32)>,
+        number_before: Option<u32>,
+        number_after: Option<u32>,
     },
     /// Clear-all (issue #15): every placed shape leaves as ONE entry,
     /// so a single undo restores the whole sequence in order. A
@@ -48,43 +50,64 @@ pub(super) enum HistoryEntry {
     /// saved sequence is self-describing, so undo puts the exact list
     /// back no matter what interleaves after the clear — no index
     /// arithmetic over a list that empties and refills.
-    RemoveAll {
-        shapes: Vec<Shape>,
-    },
+    RemoveAll { shapes: Vec<Shape> },
 }
 
 impl Annotations {
-    /// Append a placed mark, invalidate redo, and leave it unselected
-    /// — unless the auto-select switch is on, in which case the fresh
-    /// mark parks its own selection for immediate wheel/drag tuning
-    /// (the pre-flip behavior, now opt-in via `from_settings`).
+    /// Append a placed mark, invalidate redo, and apply the selection preference.
     pub(super) fn record_add(&mut self, shape: Shape) {
+        self.record_placement(shape, false);
+    }
+
+    pub(super) fn record_placement(&mut self, shape: Shape, repeat_number: bool) {
+        let number_before = self.number_override;
+        if !repeat_number
+            && number_before.is_some()
+            && let Some(value) = shape.number
+        {
+            self.number_override = Some(value.saturating_add(1));
+        }
         self.shapes.push(shape.clone());
-        self.history.push(HistoryEntry::Add(shape));
+        self.history.push(HistoryEntry::Add {
+            shape,
+            number_before,
+            number_after: self.number_override,
+        });
         self.redo.clear();
         self.selected = self.auto_select.then(|| self.shapes.len() - 1);
     }
 
-    /// The stroke eraser records its whole sweep as one entry:
-    /// commit_removals extends the open entry (or opens one). One undo
-    /// then restores the entire sweep.
-    pub(super) fn commit_removals(&mut self, removed: Vec<(usize, Shape)>) -> bool {
-        if removed.is_empty() {
-            return false;
-        }
-        self.selected = None; // indices shift below
-        match self.history.last_mut() {
-            Some(HistoryEntry::RemoveMany { removals }) if self.eraser_entry_open => {
-                removals.extend(removed);
+    /// Delete a mark and optionally close a numbering gap in the same history entry.
+    pub(crate) fn delete_shape(&mut self, ix: usize) {
+        let Some(shape) = self.shapes.get(ix).cloned() else {
+            return;
+        };
+        self.end_size_drag();
+        let number_before = self.number_override;
+        let mut renumbered = Vec::new();
+        if self.renumber_on_delete
+            && let Some(removed) = shape.number
+        {
+            for (other_ix, other) in self.shapes.iter_mut().enumerate() {
+                if let Some(number) = other.number.filter(|number| *number > removed) {
+                    renumbered.push((other_ix, number));
+                    other.number = Some(number - 1);
+                }
             }
-            _ => {
-                self.history
-                    .push(HistoryEntry::RemoveMany { removals: removed });
-                self.redo.clear();
-                self.eraser_entry_open = true;
+            if let Some(next) = self.number_override.filter(|next| *next > removed) {
+                self.number_override = Some(next - 1);
             }
         }
-        true
+        self.shapes.remove(ix);
+        self.history.push(HistoryEntry::Remove {
+            ix,
+            shape,
+            renumbered,
+            number_before,
+            number_after: self.number_override,
+        });
+        self.redo.clear();
+        self.selected = None;
     }
 
     /// Record a finalized crop change in the same ledger as annotation edits.
@@ -114,23 +137,30 @@ impl Annotations {
                 HistoryEntry::Selection { before, .. } => {
                     effect = HistoryEffect::Selection(*before);
                 }
-                HistoryEntry::Add(_) => {
+                HistoryEntry::Add { number_before, .. } => {
                     self.shapes.pop();
+                    self.number_override = *number_before;
+                }
+                HistoryEntry::NumberCursor { before, .. } => {
+                    self.number_override = *before;
                 }
                 HistoryEntry::Edit { ix, before, .. } => {
                     if let Some(shape) = self.shapes.get_mut(*ix) {
                         *shape = before.clone();
                     }
                 }
-                HistoryEntry::Remove { ix, shape } => {
+                HistoryEntry::Remove {
+                    ix,
+                    shape,
+                    renumbered,
+                    number_before,
+                    ..
+                } => {
                     self.shapes.insert(*ix, shape.clone());
-                }
-                HistoryEntry::RemoveMany { removals } => {
-                    // reverse gesture order: each index matches the
-                    // list state at the moment that shape left
-                    for (ix, shape) in removals.iter().rev() {
-                        self.shapes.insert(*ix, shape.clone());
+                    for &(ix, number) in renumbered {
+                        self.shapes[ix].number = Some(number);
                     }
+                    self.number_override = *number_before;
                 }
                 HistoryEntry::RemoveAll { shapes } => {
                     self.shapes = shapes.clone();
@@ -163,23 +193,33 @@ impl Annotations {
                 HistoryEntry::Selection { after, .. } => {
                     effect = HistoryEffect::Selection(*after);
                 }
-                HistoryEntry::Add(shape) => {
+                HistoryEntry::Add {
+                    shape,
+                    number_after,
+                    ..
+                } => {
                     self.shapes.push(shape.clone());
+                    self.number_override = *number_after;
+                }
+                HistoryEntry::NumberCursor { after, .. } => {
+                    self.number_override = *after;
                 }
                 HistoryEntry::Edit { ix, after, .. } => {
                     if let Some(shape) = self.shapes.get_mut(*ix) {
                         *shape = after.clone();
                     }
                 }
-                HistoryEntry::Remove { ix, .. } => {
-                    self.shapes.remove(*ix);
-                }
-                HistoryEntry::RemoveMany { removals } => {
-                    // forward gesture order reproduces the states the
-                    // indices were recorded against
-                    for (ix, _) in removals {
-                        self.shapes.remove(*ix);
+                HistoryEntry::Remove {
+                    ix,
+                    renumbered,
+                    number_after,
+                    ..
+                } => {
+                    for &(ix, number) in renumbered {
+                        self.shapes[ix].number = Some(number - 1);
                     }
+                    self.shapes.remove(*ix);
+                    self.number_override = *number_after;
                 }
                 HistoryEntry::RemoveAll { .. } => {
                     self.shapes.clear();

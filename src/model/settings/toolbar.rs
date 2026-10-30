@@ -20,6 +20,8 @@ pub enum ToolbarButton {
     Pencil,
     Highlighter,
     Mosaic,
+    Magnifier,
+    Spotlight,
     Eraser,
     Text,
     Clear,
@@ -46,7 +48,7 @@ impl ToolbarButton {
     /// Every button, in factory/display order. The settings palette
     /// lists and the factory row both iterate this — one order
     /// everywhere.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::Select,
         Self::Rectangle,
         Self::Ellipse,
@@ -57,6 +59,8 @@ impl ToolbarButton {
         Self::Pencil,
         Self::Highlighter,
         Self::Mosaic,
+        Self::Magnifier,
+        Self::Spotlight,
         Self::Eraser,
         Self::Text,
         Self::Clear,
@@ -82,6 +86,8 @@ impl ToolbarButton {
             Self::Pencil => "pencil",
             Self::Highlighter => "highlighter",
             Self::Mosaic => "mosaic",
+            Self::Magnifier => "magnifier",
+            Self::Spotlight => "spotlight",
             Self::Eraser => "eraser",
             Self::Text => "text",
             Self::Clear => "clear",
@@ -111,6 +117,8 @@ impl ToolbarButton {
             | Self::Number
             | Self::Pencil
             | Self::Highlighter
+            | Self::Spotlight
+            | Self::Magnifier
             | Self::Mosaic
             | Self::Eraser
             | Self::Text
@@ -168,7 +176,6 @@ impl ToolbarItem {
 /// cancel pair. A fresh install, "Reset to defaults" and legacy
 /// `hidden`-format migration all land here.
 pub const DEFAULT_ROW: [ToolbarItem; 22] = [
-    ToolbarItem::Button(ToolbarButton::Select),
     ToolbarItem::Button(ToolbarButton::Rectangle),
     ToolbarItem::Button(ToolbarButton::Ellipse),
     ToolbarItem::Button(ToolbarButton::Line),
@@ -178,6 +185,7 @@ pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Pencil),
     ToolbarItem::Button(ToolbarButton::Highlighter),
     ToolbarItem::Button(ToolbarButton::Mosaic),
+    ToolbarItem::Button(ToolbarButton::Magnifier),
     ToolbarItem::Button(ToolbarButton::Eraser),
     ToolbarItem::Button(ToolbarButton::Text),
     ToolbarItem::Button(ToolbarButton::Clear),
@@ -228,7 +236,7 @@ mod tests {
         // tools | ocr pin scroll save copy | settings cancel — two
         // group breaks, cancel (not the gear) closes the row
         assert_eq!(row.len(), 22);
-        assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Select));
+        assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Rectangle));
         assert_eq!(row[13], ToolbarItem::Separator);
         assert_eq!(row[19], ToolbarItem::Separator);
         assert_eq!(row[20], ToolbarItem::Button(ToolbarButton::Settings));
@@ -238,7 +246,10 @@ mod tests {
         );
         // every button placed exactly once
         for button in ToolbarButton::ALL {
-            assert!(Settings::default().toolbar_visible(button));
+            assert_eq!(
+                Settings::default().toolbar_visible(button),
+                !matches!(button, ToolbarButton::Select | ToolbarButton::Spotlight)
+            );
         }
         assert_eq!(Settings::default().row1_button_count(), 20);
         assert_eq!(Settings::default().row1_separator_count(), 2);

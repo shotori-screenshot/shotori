@@ -141,6 +141,23 @@ impl SettingsWindow {
         })
     }
 
+    fn renumber_on_delete_switch(&self, window: &mut Window, cx: &mut Context<Self>) -> Switch {
+        let entity = cx.entity();
+        super::layout::settings_switch(
+            "annotation-renumber-on-delete",
+            self.settings.annotation_renumber_on_delete(),
+            crate::i18n::t!("settings.general.renumber_on_delete.title").to_string(),
+            window,
+            cx,
+        )
+        .on_change(move |checked, _, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.settings.set_annotation_renumber_on_delete(checked);
+                this.persist(cx);
+            });
+        })
+    }
+
     /// Restore the factory toolbar layout without changing capture preferences.
     pub(super) fn reset_toolbar(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
@@ -496,17 +513,36 @@ impl SettingsWindow {
             ))
             .child({
                 let auto_select = self.annotation_auto_select_switch(window, cx);
+                let renumber = self.renumber_on_delete_switch(window, cx);
                 card_group(
                     cx,
                     Some(crate::i18n::t!("settings.general.group.annotation").as_ref()),
-                    vec![super::layout::compact_row(
-                        cx,
-                        crate::i18n::t!("settings.general.annotation_auto_select.title")
-                            .to_string(),
-                        Some("settings.general.annotation_auto_select.body"),
-                        None,
-                        auto_select,
-                    )],
+                    vec![
+                        super::layout::compact_row(
+                            cx,
+                            crate::i18n::t!("settings.general.annotation_auto_select.title")
+                                .to_string(),
+                            Some("settings.general.annotation_auto_select.body"),
+                            None,
+                            auto_select,
+                        ),
+                        super::layout::compact_row(
+                            cx,
+                            crate::i18n::t!("settings.general.renumber_on_delete.title")
+                                .to_string(),
+                            Some("settings.general.renumber_on_delete.body"),
+                            None,
+                            renumber,
+                        ),
+                        super::layout::compact_row(
+                            cx,
+                            crate::i18n::t!("settings.general.text_wrap.title").to_string(),
+                            Some("settings.general.text_wrap.body"),
+                            None,
+                            gpui_kit::component::select::Select::new(&self.text_wrap_select)
+                                .w_full(),
+                        ),
+                    ],
                 )
             })
             .child(card_group(

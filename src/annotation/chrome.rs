@@ -17,8 +17,24 @@ const FRAME_PAD: f32 = 3.;
 impl Shape {
     /// Visible ink bounds, including stroke caps and arrowhead wings.
     pub(crate) fn ink_bounds(&self) -> Bounds<Pixels> {
+        if let Some(super::FilterArea::Brush { diameter }) = self.filter_area() {
+            let mut stroke = self.clone();
+            stroke.kind = ShapeKind::Pencil;
+            stroke.parameters = super::ShapeParameters::new(ShapeKind::Pencil, diameter);
+            return ink_aabb(&stroke);
+        }
+        if let Some(arrow) = self.number_arrow() {
+            return self.bounds.union(&arrow.ink_bounds());
+        }
+        if let Some(bounds) = self.magnified_bounds() {
+            return bounds.union(&self.bounds);
+        }
+        if self.has_custom_geometry() {
+            return ink_aabb(self);
+        }
         match self.kind {
-            ShapeKind::Pencil
+            ShapeKind::Eraser
+            | ShapeKind::Pencil
             | ShapeKind::Highlighter
             | ShapeKind::Polyline
             | ShapeKind::Line
@@ -33,16 +49,28 @@ impl Shape {
     }
 
     /// Handle anchors for the selection chrome — the points where a
-    /// grab makes sense for geometry editing: the two endpoints of a
+    /// grab makes sense for geometry editing: endpoints and bend point of a
     /// line/arrow, every vertex of a polyline, the four corners of
-    /// rectangles/ellipses (TL, TR, BR, BL). Freehand strokes and
-    /// content shapes (badges, text, filters) have no per-point editing
-    /// semantics and get the frame alone.
+    /// region marks (TL, TR, BR, BL), and an attached sequence arrow tip.
+    /// Freehand strokes, plain badges, text and filters get the frame alone.
     pub(crate) fn handle_points(&self) -> Vec<Point<Pixels>> {
         match self.kind {
-            ShapeKind::Line | ShapeKind::Arrow => self.points.iter().take(2).cloned().collect(),
+            ShapeKind::Number => self.number_tip().into_iter().collect(),
+            ShapeKind::Line | ShapeKind::Arrow => {
+                let mut handles: Vec<_> = self.points.iter().take(2).copied().collect();
+                if handles.len() == 2 {
+                    handles.push(
+                        self.points
+                            .get(2)
+                            .copied()
+                            .unwrap_or((handles[0] + handles[1]) / 2.),
+                    );
+                }
+                handles
+            }
             ShapeKind::Polyline => self.points.clone(),
-            ShapeKind::Rectangle | ShapeKind::Ellipse => vec![
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.geometry_handles(),
+            ShapeKind::Magnifier | ShapeKind::Spotlight | ShapeKind::EraserRect => vec![
                 point(self.bounds.left(), self.bounds.top()),
                 point(self.bounds.right(), self.bounds.top()),
                 point(self.bounds.right(), self.bounds.bottom()),
@@ -58,25 +86,39 @@ impl Shape {
     /// see `ui::hud::paint_handle_dot`), so the small dot stays easy to
     /// catch — what you see and what you can grab are separate budgets.
     pub(crate) fn handle_at(&self, p: Point<Pixels>) -> Option<usize> {
-        const GRAB_RADIUS: f32 = 7.;
+        const GRAB_RADIUS: f32 = 10.;
         self.handle_points()
             .iter()
-            .position(|h| (f32::from(p.x - h.x)).hypot(f32::from(p.y - h.y)) <= GRAB_RADIUS)
+            .enumerate()
+            .map(|(ix, h)| (ix, f32::from(p.x - h.x).hypot(f32::from(p.y - h.y))))
+            .filter(|(_, distance)| *distance <= GRAB_RADIUS)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(ix, _)| ix)
+            .or_else(|| self.rotation_hit(p).then_some(super::ROTATION_HANDLE))
     }
 
     /// Re-derive the geometry with handle `anchor` placed at `p` —
     /// the phase-C edit. Endpoints/vertices move in place; corners
     /// re-normalize the bounds around the opposite corner, so dragging
-    /// through the anchor flips the rectangle like drawing did. No 45°
-    /// snapping here (yet): the handle follows the pointer exactly.
+    /// through the anchor flips the rectangle like drawing did. The bend handle
+    /// is an interpolated point on the curve and can move independently of endpoints.
     pub(crate) fn set_handle(&mut self, anchor: usize, p: Point<Pixels>) {
         match self.kind {
-            ShapeKind::Line | ShapeKind::Arrow | ShapeKind::Polyline => {
+            ShapeKind::Rectangle | ShapeKind::Ellipse => self.set_geometry_handle(anchor, p),
+            ShapeKind::Number if anchor == 0 => self.set_number_tip(Some(p)),
+            ShapeKind::Line | ShapeKind::Arrow if self.points.len() >= 2 => {
+                if anchor == 2 && self.points.len() == 2 {
+                    self.points.push(p);
+                } else if let Some(handle) = self.points.get_mut(anchor) {
+                    *handle = p;
+                }
+            }
+            ShapeKind::Polyline => {
                 if let Some(q) = self.points.get_mut(anchor) {
                     *q = p;
                 }
             }
-            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+            ShapeKind::Magnifier | ShapeKind::Spotlight | ShapeKind::EraserRect => {
                 let b = self.bounds;
                 // opposite corner stays fixed (TL, TR, BR, BL order);
                 // dragging through it must re-normalize like drawing
@@ -112,7 +154,7 @@ fn ink_aabb(shape: &Shape) -> Bounds<Pixels> {
     for p in &shape.points {
         absorb(*p);
     }
-    for poly in super::line::geometry(&shape.points, shape.width, shape.kind == ShapeKind::Arrow) {
+    for poly in super::line::shape_geometry(shape) {
         for p in poly {
             absorb(p);
         }
@@ -155,11 +197,20 @@ mod tests {
             kind,
             number: None,
             text: None,
+            text_style: Default::default(),
             bounds: Bounds::default(),
             color: 0xffd43b60,
-            width: 20.,
+            parameters: crate::annotation::ShapeParameters::new(kind, 20.),
             points: points.iter().map(|&(x, y)| point(px(x), px(y))).collect(),
         }
+    }
+
+    #[test]
+    fn larger_handles_pick_the_nearest_node_when_hit_regions_overlap() {
+        let mark = shape(ShapeKind::Line, &[(20., 20.), (100., 20.), (26., 24.)]);
+        assert_eq!(mark.handle_at(point(px(28.), px(25.))), Some(2));
+        assert_eq!(mark.handle_at(point(px(12.), px(20.))), Some(0));
+        assert_eq!(mark.handle_at(point(px(9.), px(20.))), None);
     }
 
     /// Containment with slack: the sampled n-gon rims hit axis-aligned
@@ -180,7 +231,11 @@ mod tests {
         // reaching ±27 perpendicular. An endpoints-plus-half-width box
         // would stop at y=40/60 and clip the wings; the ink box must
         // not.
-        let b = shape(ShapeKind::Arrow, &[(10., 50.), (110., 50.)]).selection_box();
+        let mut mark = shape(ShapeKind::Arrow, &[(10., 50.), (110., 50.)]);
+        if let crate::annotation::ShapeParameters::Stroke { arrow, .. } = &mut mark.parameters {
+            *arrow = crate::annotation::ArrowStyle::Triangle;
+        }
+        let b = mark.selection_box();
         for (x, y) in [(10., 50.), (110., 50.), (50., 23.), (50., 77.)] {
             assert!(covers(&b, x, y), "ink point ({x},{y}) outside frame {b:?}");
         }

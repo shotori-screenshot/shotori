@@ -10,17 +10,15 @@ impl Overlay {
     pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ocr_setup.is_some() {
             self.ocr_setup_cancel(window, cx);
+        } else if self.text_editing.is_some() {
+            self.finish_text(true, window, cx);
         } else {
-            let editing_text = self.text_editing.is_some();
-            if editing_text {
-                self.finish_text(true, window, cx);
-            }
             let interrupted = self.session.update(cx, |s, cx| {
                 let interrupted = s.escape_interaction();
                 cx.notify();
                 interrupted
             });
-            if !editing_text && !interrupted {
+            if !interrupted {
                 cx.quit();
             }
         }
@@ -70,7 +68,10 @@ impl Overlay {
                 .session
                 .read(cx)
                 .screen_origin(&self.capture.output_name);
-        let editor = crate::ui::text_editor::TextEditor::new(bounds, local, font_size, color, cx);
+        let mut editor =
+            crate::ui::text_editor::TextEditor::new(bounds, local, font_size, color, cx);
+        let style = self.session.read(cx).annotations().text_style().clone();
+        editor.sync_style(font_size, color, &style, cx);
         self.subscribe_text(editor.input(), window, cx);
         self.text_editing = Some(editor);
         self.refresh_text(cx);
@@ -175,24 +176,26 @@ impl Overlay {
             // screenshot edge, just like a newly placed text annotation.
             let local_origin = shape.bounds.origin - screen_origin;
             let Some(available) =
-                s.text_bounds(&self.capture.output_name, local_origin, shape.width)
+                s.text_bounds(&self.capture.output_name, local_origin, shape.size())
             else {
                 return;
             };
             (shape, available.origin - screen_origin, available)
         };
         let text = shape.text.as_deref().unwrap_or("");
-        let font_size = shape.width;
+        let font_size = shape.size();
         let color = shape.color;
-        let editor = crate::ui::text_editor::TextEditor::new_with_text(
+        let mut editor = crate::ui::text_editor::TextEditor::new_with_text(
             available,
             local_origin,
             font_size,
             color,
             text,
-            Some(click_local),
+            None,
             cx,
         );
+        editor.sync_style(font_size, color, &shape.text_style, cx);
+        editor.place_caret(click_local, cx);
         let started = self.session.update(cx, |s, cx| {
             let started = s.begin_text_edit(ix);
             if started {
