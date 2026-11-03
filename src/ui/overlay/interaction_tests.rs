@@ -674,3 +674,127 @@ fn secondary_sliders_move_the_thumb_and_keep_one_undo_step(cx: &mut TestAppConte
         }
     });
 }
+
+#[gpui_kit::test]
+fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut TestAppContext) {
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1200;
+        capture.height = 700;
+        capture.rgba = vec![255; 1200 * 700 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1200.), px(700.)));
+        cx.update(|_, cx| {
+            session.update(cx, |s, cx| {
+                s.set_size("screen", size(px(1200.), px(700.)));
+                s.begin("screen", point(px(1000.), px(80.)));
+                s.end("screen", point(px(1180.), px(450.)));
+                s.edit_annotations(|a| {
+                    let mut style = a.text_style().clone();
+                    style.outline = Some(0x3388ffff);
+                    style.background = Some(0xffeeccff);
+                    a.set_text_style(style);
+                });
+                cx.notify();
+            });
+        });
+        for kind in [
+            ShapeKind::Line,
+            ShapeKind::Polyline,
+            ShapeKind::Arrow,
+            ShapeKind::Number,
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Pencil,
+            ShapeKind::Highlighter,
+            ShapeKind::Mosaic,
+            ShapeKind::Blur,
+            ShapeKind::Eraser,
+            ShapeKind::EraserRect,
+            ShapeKind::Magnifier,
+            ShapeKind::Spotlight,
+            ShapeKind::Text,
+        ] {
+            cx.update(|_, cx| {
+                session.update(cx, |s, cx| {
+                    s.edit_annotations(|a| a.toggle(kind));
+                    cx.notify();
+                })
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let options = cx.debug_bounds("tb-options").unwrap();
+            let viewport = cx.debug_bounds("annotation-options-scroll").unwrap();
+            assert!(
+                options.right() <= viewport.right(),
+                "{kind:?}: {options:?} exceeds {viewport:?}"
+            );
+            assert!(
+                options.size.width <= px(crate::model::placement::TB_W),
+                "{kind:?}: options budget {options:?}"
+            );
+            let grip = cx.debug_bounds("tb-grip-right").unwrap();
+            cx.update(|_, cx| {
+                let bounds = session.read(cx).toolbar_bounds("screen").unwrap();
+                assert!(bounds.right() <= px(1192.));
+                assert!(grip.right() <= bounds.right());
+                assert!(options.right() <= bounds.right());
+            });
+        }
+        // Resize with the widest text options active, then use the actual
+        // scrollbar track to expose and click the final palette entry.
+        cx.simulate_resize(size(px(480.), px(700.)));
+        cx.update(|_, cx| {
+            session.update(cx, |s, cx| {
+                s.select_all();
+                s.edit_annotations(|a| {
+                    a.add_text(
+                        gpui_kit::Bounds::new(point(px(40.), px(60.)), size(px(160.), px(40.))),
+                        "Selection survives scrolling".into(),
+                    );
+                    a.select_index(0);
+                });
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let strip = cx.debug_bounds("annotation-options-scroll").unwrap();
+        assert!(strip.right() <= px(472.));
+        let scroll_end = point(strip.right() - px(2.), strip.bottom() - px(2.));
+        cx.simulate_click(scroll_end, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let color = cx.debug_bounds("tb-color-6").unwrap();
+        assert!(
+            color.right() <= strip.right(),
+            "last color not exposed by scrollbar: {color:?} vs {strip:?}"
+        );
+        cx.simulate_click(color.center(), Default::default());
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.selected_index(), Some(0));
+            assert_eq!(a.color_index(), 6);
+        });
+        // The main row obeys the same viewport and can expose its right grip.
+        let strip = cx.debug_bounds("toolbar-actions-scroll").unwrap();
+        cx.simulate_click(
+            point(strip.right() - px(2.), strip.bottom() - px(2.)),
+            Default::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let grip = cx.debug_bounds("tb-grip-right").unwrap();
+        assert!(grip.right() <= strip.right());
+        assert!(grip.left() >= strip.left());
+    });
+}

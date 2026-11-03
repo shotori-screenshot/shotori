@@ -1081,7 +1081,16 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
         // right margin on this narrow test window
         assert_eq!(
             session.read(cx).toolbar_bounds("main").unwrap().origin,
-            point(px(800. - crate::model::placement::TB_W - 8.), px(281.))
+            point(
+                px(800.
+                    - crate::model::placement::toolbar_size(
+                        true,
+                        crate::model::settings::current()
+                    )
+                    .0
+                    - 8.),
+                px(281.)
+            )
         );
     });
 }

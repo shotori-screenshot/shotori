@@ -9,6 +9,7 @@ mod annot_options;
 mod geometry_options;
 mod line_options;
 mod number_options;
+mod row;
 mod spotlight_options;
 mod text_options;
 use annot_options::annot_options;
@@ -509,43 +510,35 @@ pub(crate) fn selection_toolbar(
         .absolute()
         .left(rect.origin.x)
         .top(rect.origin.y)
-        // No fixed width: each row hugs its own natural width (row one
-        // ≈ TB_W_ROW1, the settings row is wider). The old fixed TB_W
-        // stretched row one, and its flex_1 spacer ballooned into the
-        // giant gap between tool cluster and action cluster. The width
-        // basis still drives placement/clamping via `toolbar_bounds` —
-        // rendering just no longer forces it onto every row.
+        // Rows retain their natural width within the shared placement bounds.
+        .w(rect.size.width)
         .flex()
         .flex_col()
         .items_start()
         .gap(px(6.))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
+        .child(row::ToolbarRow::new(
+            "toolbar-actions-scroll",
+            rect.size.width,
             bar()
                 .child(grip("tb-grip-left", output.clone(), session.clone()))
                 .children(row_one(annotations, &focus, settings))
                 .child(grip("tb-grip-right", output, session.clone())),
-        )
+        ))
         .children(edit_kind.is_some().then(|| {
-            div()
-                .id("annotation-options-scroll")
-                .debug_selector(|| "annotation-options-scroll".into())
-                .flex()
-                .flex_row()
-                .max_w(rect.size.width)
-                .overflow_x_scroll()
-                .child(
-                    annot_options(
-                        edit_kind,
-                        annotations,
-                        &session,
-                        &focus,
-                        &size_slider,
-                        &swatch_picker,
-                        selected_color,
-                    )
-                    .flex_shrink_0(),
-                )
+            row::ToolbarRow::new(
+                "annotation-options-scroll",
+                rect.size.width,
+                annot_options(
+                    edit_kind,
+                    annotations,
+                    &session,
+                    &focus,
+                    &size_slider,
+                    &swatch_picker,
+                    selected_color,
+                ),
+            )
         }))
 }
 

@@ -25,17 +25,10 @@ pub(crate) const LABEL_H: f32 = 24.;
 /// flush against the border line looks glued-on (user-reported).
 const INSET: f32 = 12.;
 
-/// Toolbar: [Copy][Save][OCR][Cancel] on row one; annotation tools,
-/// colors and widths on row two (only while a tool is active).
-/// Includes the two edge drag-grips (see [`GRIP_W`]).
-/// Toolbar width — MEASURED live (grim + per-icon ink-slot scan of the
-/// final layout): the full row demands a ~631px window; 632 keeps a
-/// hair of headroom (narrow screens clamp it down; see
-/// `toolbar_bounds`). Do not "fix" this back to a first-principles
-/// 16×30+gaps estimate — the real pitch is 33px/button and the naive
-/// sum runs ~70px short, which silently clips copy + the right grip
-/// (bit us at 544, 576 AND 608).
-pub(crate) const TB_W: f32 = 632.;
+/// Options-row width budget, including text font/size, enabled outline and
+/// background controls, and the complete palette. Rendered-control regression
+/// tests verify this budget; placement must also reserve the configured first row.
+pub(crate) const TB_W: f32 = 672.;
 /// Toolbar width for the SINGLE-ROW state (no tool active): row one's
 /// natural content width, measured via test probe
 /// (`toolbar_hugs_its_content`): the full TB_W leaves a ~70px dead
@@ -119,20 +112,14 @@ pub(crate) fn toolbar_bounds(
     }
 }
 
-/// The toolbar's (width, height) basis for its two row-count states.
-/// Two-row bars keep the measured TB_W — the color settings row needs
-/// it; single-row bars take the configured row's basis instead.
-///
-/// The basis must track the toolbar settings: the rendered bar hugs
-/// its configured content, and render, grip hit-tests and the drag
-/// clamp all derive from THIS — a stale basis shows up instantly as
-/// "draggable but not a hand" (the grip/cursor alignment trap).
+/// Reserve both rows while editing. The configured tool row can be wider than
+/// the options row; neither may extend beyond the shared drag/placement bounds.
 pub(crate) fn toolbar_size(
     annotating: bool,
     settings: &crate::model::settings::Settings,
 ) -> (f32, f32) {
     if annotating {
-        (TB_W, TB_H)
+        (TB_W.max(row1_basis(settings)), TB_H)
     } else {
         (row1_basis(settings), ROW_H)
     }
@@ -551,7 +538,10 @@ mod tests {
     fn toolbar_size_switches_with_state() {
         let s = crate::model::settings::Settings::default();
         assert_eq!(toolbar_size(false, &s), (super::row1_basis(&s), ROW_H));
-        assert_eq!(toolbar_size(true, &s), (TB_W, TB_H));
+        assert_eq!(
+            toolbar_size(true, &s),
+            (TB_W.max(super::row1_basis(&s)), TB_H)
+        );
     }
 
     #[test]
@@ -582,8 +572,11 @@ mod tests {
             TB_W_ROW1 - super::GONE_SPACER_GAP - 2. * super::BTN_PITCH + super::SEP_PITCH
         );
         assert_eq!(h, ROW_H);
-        // annotating is the fixed-width settings row — unaffected
-        assert_eq!(toolbar_size(true, &s), (TB_W, TB_H));
+        // Both rows contribute to the editing bounds
+        assert_eq!(
+            toolbar_size(true, &s),
+            (TB_W.max(super::row1_basis(&s)), TB_H)
+        );
 
         // an extra separator grows the basis by its pitch
         let mut s = Settings::default();
