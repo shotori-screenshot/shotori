@@ -26,6 +26,12 @@ Native desktop visual acceptance remains required for every implemented row.
 User-selected interaction requirements take precedence over reference defaults:
 
 - Escape dismisses the innermost active interaction before leaving annotation or capture
+- Switching tools, deleting or clearing marks cancels uncommitted move/handle geometry
+  before changing the mark list; releasing the old drag cannot modify another mark
+- Font-menu confirmation or cancellation returns focus to the canvas or the active text
+  editor; undo and typing continue without another canvas click
+- Inline sequence editing previews valid positive values while canvas gestures remain
+  blocked; invalid input retains the last preview and restores the original on commit
 - Right click finishes a live polyline before a subsequent click can exit drawing
 - Clicking a parameter menu preserves the edited mark and applies a reversible edit
 - Multi-choice controls use icon previews in dropdowns; independent flags remain toggles

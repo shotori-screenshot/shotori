@@ -28,6 +28,7 @@ impl TextOptions {
 }
 
 struct TextControls {
+    return_focus: FocusHandle,
     font: Entity<SelectState<SearchableVec<String>>>,
     size: Entity<InputState>,
     outline: Entity<ColorPickerState>,
@@ -40,6 +41,7 @@ struct TextControls {
 impl TextControls {
     fn new(
         session: Entity<ScreenshotSession>,
+        return_focus: FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -83,6 +85,18 @@ impl TextControls {
                 edit(&font_session, cx, |style| style.font = Some(font.clone()));
             }
         })];
+        subscriptions.push(cx.subscribe_in(
+            &font,
+            window,
+            |this, font, _: &DismissEvent, window, cx| {
+                // The generic Select restores its trigger. Annotation controls
+                // return to the canvas/editor so drawing shortcuts and typing resume.
+                // An outside click may already have focused another input.
+                if font.read(cx).focus_handle(cx).is_focused(window) {
+                    window.focus(&this.return_focus, cx);
+                }
+            },
+        ));
         let size_session = session.clone();
         subscriptions.push(
             cx.subscribe_in(&size, window, move |_, input, event, window, cx| {
@@ -143,6 +157,7 @@ impl TextControls {
             }));
         }
         let mut this = Self {
+            return_focus,
             font,
             size,
             outline,
@@ -217,9 +232,11 @@ fn rgba_value(value: Hsla) -> u32 {
 impl RenderOnce for TextOptions {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let session = self.session.clone();
+        let return_focus = self.focus.clone();
         let state = window.use_keyed_state("annotation-text-controls", cx, |window, cx| {
-            TextControls::new(session, window, cx)
+            TextControls::new(session, return_focus, window, cx)
         });
+        state.update(cx, |controls, _| controls.return_focus = self.focus.clone());
         let controls = state.read(cx);
         let style = self.session.read(cx).annotations().text_style().clone();
         let mut row = div().flex().items_center().gap(px(2.));

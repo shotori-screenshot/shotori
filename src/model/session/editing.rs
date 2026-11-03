@@ -333,6 +333,33 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_handle_edits_leave_no_history_or_stale_indices() {
+        for clear in [false, true] {
+            let mut s = session();
+            let original = s.annotations.committed().to_vec();
+            s.edit_annotations(|a| {
+                a.select_index(0);
+            });
+            let handle = original[0].handle_points()[2];
+            s.pointer_down("screen", handle, false, false);
+            s.pointer_move("screen", handle + p(20., 15.), false);
+            assert!(s.handle_drag_anchor().is_some());
+            if clear {
+                s.clear_annotations();
+            } else {
+                s.delete_selected_annotations();
+            }
+            s.pointer_up("screen", handle + p(30., 20.), false);
+            assert!(s.handle_drag_anchor().is_none());
+            assert!(s.annotations.committed().is_empty());
+            s.undo();
+            assert_eq!(s.annotations.committed(), original);
+            s.redo();
+            assert!(s.annotations.committed().is_empty());
+        }
+    }
+
+    #[test]
     fn drawing_tools_do_not_hover_other_marks_after_auto_selection() {
         let mut s = session();
         let area = s.selection.bounds().unwrap();

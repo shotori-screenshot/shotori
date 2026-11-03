@@ -365,7 +365,7 @@ impl Overlay {
         self.finish_text(true, window, cx);
         window.focus(&self.focus_handle, cx);
         self.session.update(cx, |s, cx| {
-            s.edit_annotations(|a| a.toggle(kind));
+            s.toggle_annotation_tool(kind);
             cx.notify();
         });
     }
@@ -442,6 +442,8 @@ fn annotation_handle_cursor(kind: crate::annotation::ShapeKind, anchor: usize) -
 }
 
 mod exits;
+#[cfg(test)]
+mod interaction_tests;
 #[cfg(test)]
 mod multi_output_tests;
 mod render;

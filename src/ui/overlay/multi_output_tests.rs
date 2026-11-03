@@ -1653,6 +1653,7 @@ fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
             );
             assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
             assert_eq!(session.read(cx).annotations().committed()[0], original);
+            assert!(view.read(cx).focus_handle.is_focused(window));
             window.draw(cx).clear(cx);
         });
         cx.simulate_click(font.center(), Default::default());
@@ -1706,7 +1707,6 @@ fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
             );
             assert_eq!(a.committed().len(), 1);
         });
-        cx.update(|window, cx| window.focus(&view.read(cx).focus_handle.clone(), cx));
         cx.simulate_keystrokes("ctrl-z");
         cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed()[0], original));
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1747,7 +1747,6 @@ fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
                 Some(false)
             );
         });
-        cx.simulate_click(position, Default::default());
         assert_inline_text_caret(&view, cx);
         cx.simulate_input("!");
         cx.simulate_keystrokes("enter");

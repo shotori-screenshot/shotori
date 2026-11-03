@@ -145,7 +145,7 @@ impl Overlay {
             // the buffer parses again
             if let Ok(v) = value.trim().parse::<u32>() {
                 self.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| a.preview_number(*ix, v));
+                    s.preview_number_edit(*ix, v);
                     cx.notify();
                 });
             }
@@ -231,10 +231,13 @@ impl Overlay {
             .input()
             .update(cx, |input, cx| input.discard_preedit(cx));
         if let Some((ix, before)) = self.number_edit.take() {
-            // commit only a full integer; anything else (Esc, empty,
-            // trailing junk) restores the pre-edit value
+            // Commit only a positive integer; cancellation, empty input,
+            // zero or trailing junk restores the pre-edit value.
             let value = editor.value(cx);
-            let parsed = commit.then(|| value.trim().parse::<u32>().ok()).flatten();
+            let parsed = commit
+                .then(|| value.trim().parse::<u32>().ok())
+                .flatten()
+                .filter(|value| *value > 0);
             self.session.update(cx, |s, cx| {
                 s.set_blocked(false);
                 s.edit_annotations(|a| match parsed {

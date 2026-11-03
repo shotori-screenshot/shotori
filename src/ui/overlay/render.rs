@@ -243,14 +243,14 @@ impl Render for Overlay {
                 this.finish_text(true, window, cx);
                 window.focus(&this.focus_handle, cx);
                 this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| {
-                        let kind = if a.tool() == Some(crate::annotation::ShapeKind::EraserRect) {
-                            crate::annotation::ShapeKind::EraserRect
-                        } else {
-                            crate::annotation::ShapeKind::Eraser
-                        };
-                        a.toggle(kind);
-                    });
+                    let kind = if s.annotations().tool()
+                        == Some(crate::annotation::ShapeKind::EraserRect)
+                    {
+                        crate::annotation::ShapeKind::EraserRect
+                    } else {
+                        crate::annotation::ShapeKind::Eraser
+                    };
+                    s.toggle_annotation_tool(kind);
                     cx.notify();
                 });
             }))
@@ -307,9 +307,7 @@ impl Render for Overlay {
             .on_action(cx.listener(|this, _: &DeleteAnnotation, window, cx| {
                 window.focus(&this.focus_handle, cx);
                 this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| {
-                        a.delete_selected();
-                    });
+                    s.delete_selected_annotations();
                     cx.notify();
                 });
             }))
@@ -321,9 +319,7 @@ impl Render for Overlay {
                 this.finish_text(false, window, cx);
                 window.focus(&this.focus_handle, cx);
                 this.session.update(cx, |s, cx| {
-                    s.edit_annotations(|a| {
-                        a.clear_all();
-                    });
+                    s.clear_annotations();
                     cx.notify();
                 });
             }))

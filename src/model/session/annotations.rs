@@ -46,6 +46,51 @@ pub(super) fn text_area(selection: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
 }
 
 impl ScreenshotSession {
+    /// Switching tools cancels the previous gesture before arming the new one.
+    pub(crate) fn toggle_annotation_tool(&mut self, kind: crate::annotation::ShapeKind) {
+        if self.blocked || !self.selection.is_selected() {
+            return;
+        }
+        self.cancel_annotation_gesture();
+        if self.toolbar_drag_active() {
+            self.cancel_drag();
+        }
+        self.edit_annotations(|a| a.toggle(kind));
+    }
+
+    /// Delete the selected marks after cancelling uncommitted pointer geometry.
+    pub(crate) fn delete_selected_annotations(&mut self) {
+        if self.blocked || !self.selection.is_selected() {
+            return;
+        }
+        self.cancel_annotation_gesture();
+        self.edit_annotations(|a| {
+            a.delete_selected();
+        });
+    }
+
+    /// Clear marks as one undo step without leaving stale drag indices behind.
+    pub(crate) fn clear_annotations(&mut self) {
+        if self.blocked || !self.selection.is_selected() {
+            return;
+        }
+        self.cancel_annotation_gesture();
+        self.edit_annotations(|a| {
+            a.clear_all();
+        });
+    }
+
+    /// Live badge editing is allowed while ordinary canvas gestures are blocked.
+    /// The editor retains the original value for a single commit or cancellation.
+    pub(crate) fn preview_number_edit(&mut self, ix: usize, value: u32) {
+        if self.blocked
+            && value > 0
+            && self.annotations.shape_kind(ix) == Some(crate::annotation::ShapeKind::Number)
+        {
+            self.annotations.preview_number(ix, value);
+        }
+    }
+
     pub(crate) fn edit_annotations(
         &mut self,
         edit: impl FnOnce(&mut crate::annotation::Annotations),
@@ -527,6 +572,10 @@ impl ScreenshotSession {
         if self.blocked {
             return false;
         }
+        self.cancel_annotation_gesture() || self.annotations.cancel()
+    }
+
+    fn cancel_annotation_gesture(&mut self) -> bool {
         self.finish_nudge();
         // the marquee lives in its own slot, so it must be taken before
         // the gesture chain below can answer "nothing active"
@@ -548,7 +597,10 @@ impl ScreenshotSession {
                 .place_shape(drag.ix, &drag.before, point(px(0.), px(0.)));
             return true;
         }
-        !self.blocked && self.annotations.cancel()
+        if self.annotations.is_pressed() || self.annotations.is_drawing_polyline() {
+            return self.annotations.cancel();
+        }
+        false
     }
 
     /// Whether the body-move drag (phase B) is in flight.
