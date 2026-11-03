@@ -137,14 +137,26 @@ impl Overlay {
             ColorPickerState::new(window, cx).default_value(u32_to_hsla(seed))
         });
         overlay.swatch_picker = Some(swatch_picker.clone());
-        let sub = cx.subscribe(&swatch_picker, |this, _, event, cx| {
+        let sub = cx.subscribe_in(&swatch_picker, window, |this, picker, event, window, cx| {
             if let ColorPickerEvent::Change(Some(hsla)) = event {
                 // The edit lands on the ACTIVE swatch index — the
                 // picker renders exactly there — and writes through
                 // to settings.toml; the repaint picks the new color
                 // up everywhere.
                 let ix = this.session.read(cx).annotations().color_index();
-                crate::model::settings::set_annotation_color(ix, hsla_to_u32(*hsla));
+                let color = hsla_to_u32(*hsla);
+                // Palette slots do not store alpha. Reflect the accepted value
+                // in the editor as well, including eight-digit hex input.
+                if hsla.a != 1. {
+                    picker.update(cx, |state, cx| {
+                        state.set_value(u32_to_hsla(color), window, cx);
+                    });
+                }
+                crate::model::settings::set_annotation_color(ix, color);
+                this.session.update(cx, |s, cx| {
+                    s.edit_annotation_settings(|a| a.set_color(ix));
+                    cx.notify();
+                });
                 cx.notify();
             }
         });

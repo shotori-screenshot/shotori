@@ -228,3 +228,449 @@ fn deleting_during_a_drag_does_not_move_or_replace_the_next_mark(cx: &mut TestAp
     cx.simulate_keystrokes("ctrl-z");
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed(), original));
 }
+
+#[gpui_kit::test]
+fn text_colors_are_direct_controls_and_preserve_editing_and_history(cx: &mut TestAppContext) {
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1200;
+        capture.height = 700;
+        capture.rgba = vec![255; 1200 * 700 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1200.), px(700.)));
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.pointer_down("screen", point(px(20.), px(20.)), false, false);
+                s.pointer_up("screen", point(px(1150.), px(500.)), false);
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let text = cx.debug_bounds("tb-text").unwrap();
+        cx.simulate_click(text.center(), Default::default());
+        cx.simulate_click(point(px(80.), px(80.)), Default::default());
+        cx.run_until_parked();
+        cx.simulate_input("Editable colors");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        for (toggle, picker, background) in [
+            ("text_background", "text-background-color", true),
+            ("text_outline", "text-outline-color", false),
+        ] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let target = cx.debug_bounds(toggle).unwrap().center();
+            cx.simulate_click(target, Default::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().selected_index(),
+                    Some(0),
+                    "after {toggle}"
+                );
+                window.draw(cx).clear(cx);
+            });
+            let target = cx.debug_bounds(picker).unwrap().center();
+            cx.simulate_click(target, Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().selected_index(),
+                    Some(0),
+                    "after opening {picker}"
+                )
+            });
+            let target = cx.debug_bounds("palette-1-5").unwrap().center();
+            cx.simulate_click(target, Default::default());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let a = session.read(cx).annotations();
+                let style = &a.selected().unwrap().text_style;
+                let color = if background {
+                    style.background
+                } else {
+                    style.outline
+                };
+                assert_eq!(
+                    color,
+                    Some(super::hsla_to_u32(gpui_kit::component::theme::red(500)))
+                );
+                assert_eq!(a.selected_index(), Some(0));
+                assert!(view.read(cx).focus_handle.is_focused(window));
+            });
+            cx.simulate_keystrokes("ctrl-z");
+            cx.update(|_, cx| {
+                let style = &session.read(cx).annotations().committed()[0].text_style;
+                assert_eq!(
+                    if background {
+                        style.background
+                    } else {
+                        style.outline
+                    },
+                    Some(0xffffffff)
+                );
+            });
+            cx.simulate_keystrokes("ctrl-y");
+            cx.update(|_, cx| {
+                session.update(cx, |s, cx| {
+                    s.edit_annotations(|a| {
+                        a.select_index(0);
+                    });
+                    cx.notify();
+                })
+            });
+        }
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let options = cx.debug_bounds("text-background-options").unwrap().center();
+        cx.simulate_click(options, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("toolbar.corner_radius").is_some());
+        let color = cx.debug_bounds("text-background-color").unwrap().center();
+        cx.simulate_click(color, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("palette-1-5").is_some(),
+            "one click switches from parameters to color"
+        );
+        assert!(cx.debug_bounds("toolbar.corner_radius").is_none());
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+            assert!(view.read(cx).focus_handle.is_focused(window));
+        });
+        let position = cx.update(|_, cx| {
+            session.read(cx).annotations().committed()[0]
+                .bounds
+                .center()
+        });
+        cx.simulate_event(gpui_kit::MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui_kit::MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(view.read(cx).text_editing.is_some());
+            window.draw(cx).clear(cx);
+        });
+        let target = cx.debug_bounds("text-background-color").unwrap().center();
+        cx.simulate_click(target, Default::default());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let target = cx.debug_bounds("palette-4-5").unwrap().center();
+        cx.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        cx.simulate_input(" continued");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let shape = &session.read(cx).annotations().committed()[0];
+            assert!(shape.text.as_ref().unwrap().contains(" continued"));
+            assert_eq!(
+                shape.text_style.background,
+                Some(super::hsla_to_u32(gpui_kit::component::theme::green(500)))
+            );
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn custom_palette_applies_to_selected_marks_and_live_text(cx: &mut TestAppContext) {
+    // Color edits persist global palette slots. Exercise that production path in
+    // a separate process so neither the user's config nor other tests are changed.
+    const CHILD: &str = "SHOTORI_TEST_PALETTE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let config = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ui::overlay::interaction_tests::custom_palette_applies_to_selected_marks_and_live_text",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", config.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1200;
+        capture.height = 700;
+        capture.rgba = vec![255; 1200 * 700 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1200.), px(700.)));
+        for kind in [
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+            ShapeKind::Pencil,
+            ShapeKind::Highlighter,
+            ShapeKind::Magnifier,
+            ShapeKind::Spotlight,
+            ShapeKind::Number,
+            ShapeKind::Text,
+        ] {
+            cx.update(|window, cx| {
+                session.update(cx, |s, cx| {
+                    s.clear_annotations();
+                    s.begin("screen", point(px(20.), px(20.)));
+                    s.end("screen", point(px(1150.), px(500.)));
+                    s.edit_annotations(|a| {
+                        a.toggle(kind);
+                        let bounds =
+                            gpui_kit::Bounds::new(point(px(80.), px(80.)), size(px(180.), px(90.)));
+                        if kind == ShapeKind::Text {
+                            a.add_text(bounds, "Editable color".into());
+                        } else {
+                            a.begin(
+                                bounds.origin,
+                                gpui_kit::Bounds::new(
+                                    point(px(20.), px(20.)),
+                                    size(px(1130.), px(480.)),
+                                ),
+                                false,
+                            );
+                            a.drag_to(
+                                bounds.bottom_right(),
+                                gpui_kit::Bounds::new(
+                                    point(px(20.), px(20.)),
+                                    size(px(1130.), px(480.)),
+                                ),
+                                false,
+                            );
+                            a.end();
+                        }
+                        a.select_index(0);
+                        if kind == ShapeKind::Spotlight {
+                            a.set_spotlight_outline(true);
+                        }
+                    });
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let trigger = cx
+                .debug_bounds("color-picker-trigger")
+                .expect("active swatch")
+                .center();
+            let before = cx.update(|_, cx| session.read(cx).annotations().committed()[0].color);
+            let expected = super::hsla_to_u32(
+                if before == super::hsla_to_u32(gpui_kit::component::theme::red(500)) {
+                    gpui_kit::component::theme::green(500)
+                } else {
+                    gpui_kit::component::theme::red(500)
+                },
+            );
+            cx.simulate_click(trigger, Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let selector = if expected == super::hsla_to_u32(gpui_kit::component::theme::red(500)) {
+                "palette-1-5"
+            } else {
+                "palette-4-5"
+            };
+            let target = cx.debug_bounds(selector).unwrap().center();
+            cx.simulate_click(target, Default::default());
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                let a = session.read(cx).annotations();
+                assert_eq!(a.selected_index(), Some(0), "{kind:?}");
+                assert_eq!(a.committed()[0].color, expected, "{kind:?}");
+            });
+            cx.simulate_keystrokes("ctrl-z");
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().committed()[0].color,
+                    before,
+                    "undo {kind:?}"
+                )
+            });
+            cx.simulate_keystrokes("ctrl-y");
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().committed()[0].color,
+                    expected,
+                    "redo {kind:?}"
+                )
+            });
+        }
+        // The same subscription must update the live editor while canvas edits
+        // are blocked, without prematurely committing its text transaction.
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.edit_annotations(|a| {
+                    a.begin_text_edit(0);
+                });
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+            let picker = view.read(cx).swatch_picker.clone().unwrap();
+            picker.update(cx, |state, cx| {
+                state.update_color(gpui_kit::hsla(0.6, 0.8, 0.5, 0.25), window, cx)
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let expected = super::hsla_to_u32(gpui_kit::hsla(0.6, 0.8, 0.5, 1.));
+            assert_eq!(
+                session.read(cx).annotations().editing_text().unwrap().color,
+                expected
+            );
+            assert_eq!(
+                view.read(cx)
+                    .swatch_picker
+                    .as_ref()
+                    .unwrap()
+                    .read(cx)
+                    .value()
+                    .unwrap()
+                    .a,
+                1.
+            );
+        });
+    });
+}
+
+#[gpui_kit::test]
+fn secondary_sliders_move_the_thumb_and_keep_one_undo_step(cx: &mut TestAppContext) {
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1200;
+        capture.height = 700;
+        capture.rgba = vec![255; 1200 * 700 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1200.), px(700.)));
+        for (kind, menu) in [
+            (ShapeKind::Rectangle, "corner-radius"),
+            (ShapeKind::Spotlight, "spotlight-outline-options"),
+            (ShapeKind::Text, "text-background-options"),
+        ] {
+            cx.update(|window, cx| {
+                session.update(cx, |s, cx| {
+                    s.clear_annotations();
+                    s.begin("screen", point(px(20.), px(20.)));
+                    s.end("screen", point(px(1150.), px(500.)));
+                    s.edit_annotations(|a| {
+                        a.toggle(kind);
+                        let bounds =
+                            gpui_kit::Bounds::new(point(px(80.), px(80.)), size(px(180.), px(90.)));
+                        if kind == ShapeKind::Text {
+                            a.add_text(bounds, "Rounded background".into());
+                        } else {
+                            let area = gpui_kit::Bounds::new(
+                                point(px(20.), px(20.)),
+                                size(px(1130.), px(480.)),
+                            );
+                            a.begin(bounds.origin, area, false);
+                            a.drag_to(bounds.bottom_right(), area, false);
+                            a.end();
+                        }
+                        a.select_index(0);
+                        if kind == ShapeKind::Text {
+                            let mut style = a.text_style().clone();
+                            style.background = Some(0xffffffff);
+                            a.set_text_style(style);
+                        } else if kind == ShapeKind::Spotlight {
+                            a.set_spotlight_outline(true);
+                        }
+                    });
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let before = cx.update(|_, cx| session.read(cx).annotations().committed()[0].clone());
+            let trigger = cx.debug_bounds(menu).unwrap().center();
+            cx.simulate_click(trigger, Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let track = cx.debug_bounds("annotation-slider-track").unwrap();
+            let thumb_before = cx.debug_bounds("annotation-slider-thumb").unwrap();
+            cx.simulate_mouse_down(track.center(), MouseButton::Left, Default::default());
+            cx.simulate_mouse_move(
+                point(track.origin.x + track.size.width * 0.8, track.center().y),
+                Some(MouseButton::Left),
+                Default::default(),
+            );
+            cx.simulate_mouse_up(
+                point(track.origin.x + track.size.width * 0.8, track.center().y),
+                MouseButton::Left,
+                Default::default(),
+            );
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let thumb_after = cx.debug_bounds("annotation-slider-thumb").unwrap();
+            assert!(thumb_after.center().x > thumb_before.center().x, "{kind:?}");
+            let after = cx.update(|_, cx| {
+                let a = session.read(cx).annotations();
+                assert_eq!(a.selected_index(), Some(0));
+                a.committed()[0].clone()
+            });
+            assert_ne!(before, after, "{kind:?}");
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| {
+                assert_eq!(session.read(cx).annotations().selected_index(), Some(0));
+                assert!(
+                    view.read(cx).focus_handle.is_focused(window),
+                    "focus after {menu}"
+                );
+            });
+            cx.simulate_keystrokes("ctrl-z");
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().committed()[0],
+                    before,
+                    "{kind:?}"
+                )
+            });
+            cx.simulate_keystrokes("ctrl-y");
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().committed()[0],
+                    after,
+                    "{kind:?}"
+                )
+            });
+        }
+    });
+}

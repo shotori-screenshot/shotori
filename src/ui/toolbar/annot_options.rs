@@ -127,10 +127,10 @@ pub(super) fn annot_options(
             options = options.child(size_control(sc, "×"));
         }
         if let Some(picker) = swatch_picker {
-            options = options.child(separator()).child(ColorPicker::new(
-                picker,
-                crate::i18n::t!("toolbar.lens_color").into_owned(),
-            ));
+            options = options.child(separator()).child(
+                ColorPicker::new(picker, crate::i18n::t!("toolbar.lens_color").into_owned())
+                    .opaque(),
+            );
         }
         return options;
     }
@@ -416,6 +416,7 @@ pub(super) fn annot_options(
                     picker,
                     crate::i18n::t!("toolbar.color_edit_aria", name = name).to_string(),
                 )
+                .opaque()
                 .selected(true),
             );
             continue;

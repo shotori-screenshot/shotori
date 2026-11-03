@@ -74,6 +74,20 @@ impl RenderOnce for SpotlightOptions {
             let slider = state.read(cx).width.clone();
             row = row.child(
                 Popover::new("spotlight-outline-options")
+                    .p(px(0.))
+                    .bg(rgba(theme::c().toolbar_bg))
+                    .on_open_change({
+                        let session = self.session.clone();
+                        let focus = self.focus.clone();
+                        move |open, window, cx| {
+                            if !open {
+                                window.focus(&focus, cx);
+                            }
+                            session.update(cx, |s, _| {
+                                s.edit_annotation_settings(|a| a.end_size_drag());
+                            });
+                        }
+                    })
                     .trigger(
                         control(
                             "spotlight-outline-options".into(),
@@ -95,7 +109,7 @@ impl RenderOnce for SpotlightOptions {
                     .content(move |_, _, cx| {
                         let sc = SizeSlider {
                             current: slider.read(cx).value().start(),
-                            percentage: slider.read(cx).percentage().start,
+                            percentage: slider.read(cx).percentage().end,
                             state: slider.clone(),
                         };
                         annotation_menu_panel()
@@ -105,10 +119,13 @@ impl RenderOnce for SpotlightOptions {
                     }),
             );
             if let Some(color) = self.color {
-                row = row.child(ColorPicker::new(
-                    &color,
-                    crate::i18n::t!("toolbar.spotlight_outline").into_owned(),
-                ));
+                row = row.child(
+                    ColorPicker::new(
+                        &color,
+                        crate::i18n::t!("toolbar.spotlight_outline").into_owned(),
+                    )
+                    .opaque(),
+                );
             }
         }
         row

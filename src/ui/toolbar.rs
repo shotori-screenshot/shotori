@@ -585,6 +585,7 @@ fn size_control(sc: &SizeSlider, suffix: &str) -> Div {
         .gap(px(8.))
         .child(
             div()
+                .debug_selector(|| "annotation-slider-track".into())
                 .relative()
                 .w(px(TRACK_W))
                 .h(px(20.))
@@ -610,6 +611,7 @@ fn size_control(sc: &SizeSlider, suffix: &str) -> Div {
                 )
                 .child(
                     SliderThumb::new(state)
+                        .debug_selector(|| "annotation-slider-thumb".into())
                         .absolute()
                         .top(px(10. - THUMB / 2.))
                         .left(px(sc.percentage * (TRACK_W - THUMB)))

@@ -286,19 +286,48 @@ impl RenderOnce for TextOptions {
                 .selected(active)
                 .child(annot_options::menu_icon(icon, 18.)),
             );
-        }
-        if style.outline.is_some() {
-            row = row.child(ColorPicker::new(
-                &controls.outline,
-                crate::i18n::t!("toolbar.text_outline_color").into_owned(),
-            ));
+            // Keep each enabled color next to its toggle. Nesting a picker inside
+            // another popover lets the parent dismiss before a palette click finishes.
+            if active {
+                let color = match id {
+                    "toolbar.text_outline" => Some((
+                        &controls.outline,
+                        "text-outline-color",
+                        "toolbar.text_outline_color",
+                    )),
+                    "toolbar.text_background" => Some((
+                        &controls.background,
+                        "text-background-color",
+                        "toolbar.text_background_color",
+                    )),
+                    _ => None,
+                };
+                if let Some((picker, selector, label)) = color {
+                    row = row.child(div().debug_selector(move || selector.into()).child(
+                        ColorPicker::new(picker, crate::i18n::t!(label).into_owned()),
+                    ));
+                }
+            }
         }
         if style.background.is_some() {
-            let background = controls.background.clone();
             let padding = controls.padding.clone();
             let radius = controls.radius.clone();
             row = row.child(
                 Popover::new("text-background-options")
+                    .p(px(0.))
+                    .bg(rgba(theme::c().toolbar_bg))
+                    .on_open_change({
+                        let session = self.session.clone();
+                        let focus = self.focus.clone();
+                        move |open, window, cx| {
+                            if !open {
+                                window.focus(&focus, cx);
+                            }
+                            session.update(cx, |s, _| {
+                                s.edit_annotation_settings(|a| a.end_size_drag());
+                            });
+                        }
+                    })
                     .trigger(
                         control(
                             "text-background-options".into(),
@@ -310,39 +339,34 @@ impl RenderOnce for TextOptions {
                         .child(annot_options::menu_icon(IconName::Settings2, 18.)),
                     )
                     .content(move |_, _, cx| {
-                        annotation_menu_panel()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(ColorPicker::new(
-                                &background,
-                                crate::i18n::t!("toolbar.text_background_color").into_owned(),
-                            ))
-                            .children(
-                                [
-                                    (&padding, "toolbar.text_padding"),
-                                    (&radius, "toolbar.corner_radius"),
-                                ]
-                                .into_iter()
-                                .map(|(state, key)| {
-                                    let sc = SizeSlider {
-                                        state: state.clone(),
-                                        current: state.read(cx).value().start(),
-                                        percentage: state.read(cx).percentage().start,
-                                    };
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .w_20()
-                                                .child(crate::i18n::t!(key).into_owned()),
-                                        )
-                                        .child(size_control(&sc, ""))
-                                }),
-                            )
+                        annotation_menu_panel().flex().flex_col().gap_2().children(
+                            [
+                                (&padding, "toolbar.text_padding"),
+                                (&radius, "toolbar.corner_radius"),
+                            ]
+                            .into_iter()
+                            .map(|(state, key)| {
+                                let sc = SizeSlider {
+                                    state: state.clone(),
+                                    current: state.read(cx).value().start(),
+                                    percentage: state.read(cx).percentage().end,
+                                };
+                                div()
+                                    .debug_selector(move || key.to_owned())
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .w(rems(7.))
+                                            .flex_shrink_0()
+                                            .whitespace_nowrap()
+                                            .child(crate::i18n::t!(key).into_owned()),
+                                    )
+                                    .child(size_control(&sc, ""))
+                            }),
+                        )
                     }),
             );
         }

@@ -34,6 +34,13 @@ User-selected interaction requirements take precedence over reference defaults:
   blocked; invalid input retains the last preview and restores the original on commit
 - Right click finishes a live polyline before a subsequent click can exit drawing
 - Clicking a parameter menu preserves the edited mark and applies a reversible edit
+- Text outline and background colors sit beside their toggles; padding and corner radius
+  share a separate parameter popover, with no nested color picker
+- Custom palette edits update both the saved slot and the selected mark or live text;
+  the selected-mark color is undoable. Palette slots expose HSL because they are opaque,
+  while text outlines and backgrounds retain HSLA controls
+- Secondary slider thumbs track their values. Closing a parameter popover returns focus
+  to the canvas or live text editor without clearing the edited mark
 - Multi-choice controls use icon previews in dropdowns; independent flags remain toggles
 - Rectangle and ellipse are chosen in the main toolbar only. Stroke width remains the
   primary slider and wheel target; rectangle radius has its own numeric icon and popover

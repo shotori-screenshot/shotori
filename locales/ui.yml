@@ -484,8 +484,8 @@ toolbar:
     en: Outline color
     zh-CN: 描边颜色
   text_background_settings:
-    en: Background settings
-    zh-CN: 背景设置
+    en: Background padding and corners
+    zh-CN: 背景内边距与圆角
   text_background_color:
     en: Background color and opacity
     zh-CN: 背景颜色与不透明度

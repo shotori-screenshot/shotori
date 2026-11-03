@@ -9,6 +9,7 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::slider::Slider;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Sizable};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 #[derive(IntoElement)]
@@ -16,6 +17,7 @@ pub(super) struct ColorPicker {
     state: Entity<ColorPickerState>,
     label: SharedString,
     selected: bool,
+    opacity: bool,
 }
 
 impl ColorPicker {
@@ -24,11 +26,18 @@ impl ColorPicker {
             state: state.clone(),
             label: label.into(),
             selected: false,
+            opacity: true,
         }
     }
 
     pub(super) fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Palette slots are opaque; text backgrounds and outlines retain alpha.
+    pub(super) fn opaque(mut self) -> Self {
+        self.opacity = false;
         self
     }
 
@@ -204,13 +213,15 @@ impl ColorPicker {
                 color.l * 100.,
                 cx,
             ))
-            .child(self.channel(
-                crate::i18n::t!("settings.picker.alpha").to_string(),
-                sliders.alpha(),
-                samples(&|a| cx.theme().popover.blend(hsla(color.h, color.s, color.l, a))),
-                color.a * 100.,
-                cx,
-            ))
+            .when(self.opacity, |this| {
+                this.child(self.channel(
+                    crate::i18n::t!("settings.picker.alpha").to_string(),
+                    sliders.alpha(),
+                    samples(&|a| cx.theme().popover.blend(hsla(color.h, color.s, color.l, a))),
+                    color.a * 100.,
+                    cx,
+                ))
+            })
     }
 
     fn content(&self, window: &mut Window, cx: &mut App) -> Div {
@@ -222,6 +233,11 @@ impl ColorPicker {
         let color = state.displayed_color().unwrap_or(cx.theme().background);
         let tabs = self.state.clone();
         div()
+            // A palette click may close the popup before the window-level
+            // canvas sees its release. Keep that gesture on the picker surface.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
             .gap_3()
@@ -239,7 +255,11 @@ impl ColorPicker {
                             .flex_1()
                             .label(crate::i18n::t!("settings.picker.palette").to_string()),
                     )
-                    .child(Tab::new().flex_1().label("HSLA")),
+                    .child(
+                        Tab::new()
+                            .flex_1()
+                            .label(if self.opacity { "HSLA" } else { "HSL" }),
+                    ),
             )
             .child(if active_tab == 0 {
                 self.palette(cx)
@@ -293,6 +313,7 @@ impl RenderOnce for ColorPicker {
                     })
                     .trigger(
                         Button::new("swatch-trigger")
+                            .debug_selector(|| "color-picker-trigger".into())
                             .focusable(false)
                             .size_6()
                             .rounded_sm()
@@ -335,6 +356,34 @@ mod tests {
                 picker.render(window, cx).into_any_element()
             }
         }
+    }
+
+    #[gpui_kit::test]
+    fn popup_palette_commits_the_clicked_color(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| PickerFixture {
+            state: cx
+                .new(|cx| ColorPickerState::new(window, cx).default_value(hsla(0., 0., 1., 1.))),
+            palette_only: false,
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.focus(&view.read(cx).state.focus_handle(cx), cx);
+        });
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let red = cx.debug_bounds("palette-1-5").expect("palette is open");
+        cx.simulate_click(red.center(), Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert_eq!(view.read(cx).state.read(cx).value(), Some(theme::red(500)));
+            assert!(!view.read(cx).state.read(cx).is_open());
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("palette-1-5").is_none());
     }
 
     #[gpui_kit::test]
