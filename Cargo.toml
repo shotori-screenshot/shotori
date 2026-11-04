@@ -14,7 +14,7 @@ version = "0.17.1"
 edition = "2024"
 description = "Shotori — Wayland-native screenshot tool: select, annotate, pin, long-capture scrolling pages, with on-device OCR (gpui-kit UI)"
 license = "MIT"
-repository = "https://github.com/mengh04/shotori"
+repository = "https://github.com/shotori-screenshot/shotori"
 keywords = ["screenshot", "wayland", "gpui", "screencopy", "clipboard"]
 categories = ["graphics", "multimedia::images", "command-line-utilities"]
 
@@ -122,10 +122,6 @@ version = "0.11"
 # default-features off here too: feature unification with the main
 # dependency would resurrect component otherwise
 gpui-kit = { version = "0.8", default-features = false, features = ["test-support"] }
-
-# The pin (floating image) feature lives on the `pin` branch (it needs the
-# vendored set_layer_margin patch); once upstream merges it, the branch can
-# return to main without a [patch.crates-io] section
 
 # The symbol tables cost ~26 MiB of the 105 MiB binary and nothing ships
 # a debugger for it. `strip` runs once after linking (measured 0.1 s on

@@ -65,16 +65,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::*;
 
+pub use crate::actions::{ScrollCancel, ScrollFinish, ScrollPause, ScrollSave};
 use crate::model::placement::{
     SCROLL_PANEL_MARGIN, ScrollPanelDock, plan_scroll_panel, scroll_panel_margins,
 };
 use crate::model::scroll_sheet::SheetLimits;
 use crate::platform::scroll_capture::{self, ScrollControls, ScrollEvent, ScrollSpec};
-
-actions!(
-    scroll,
-    [ScrollFinish, ScrollCancel, ScrollSave, ScrollPause]
-);
 
 use frame::FrameView;
 use panel::PreviewPanel;
@@ -102,17 +98,18 @@ const PREVIEW_GUTTER: f32 = 4.;
 /// was correct).
 const PREVIEW_IMG_W: f32 = PANEL_W - 2. * PREVIEW_BORDER - 2. * PREVIEW_GUTTER;
 
-/// Everything `launch` needs about the target output, in logical px.
+/// Everything `launch` needs about the target output, in logical px
+/// plus its physical-to-logical ratio.
 pub(crate) struct ScrollChrome {
     pub display_id: Option<DisplayId>,
     pub output_width: f32,
     pub output_height: f32,
+    pub output_scale: f32,
 }
 
 /// Launch the scroll-capture chrome and start the engine. Must be called
 /// BEFORE the overlays unmap — closing every window would end the app
-/// loop with the capture half-started. Returns the shared capture rect
-/// (already inside `spec`).
+/// loop with the capture half-started.
 pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> anyhow::Result<()> {
     let options = SheetLimits::default();
     let shared_rect = spec.rect.clone();
@@ -133,17 +130,20 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     // yields a live event stream carrying the error, so the lifecycle
     // code stays single-shaped.
     // The engine renders preview pixels only when a panel exists; the
-    // panel writes its well height here once it knows it.
-    let preview_height = spec.preview_rows.clone();
+    // panel writes its well height and sample width here once opened.
+    let preview_geom = spec.preview.clone();
     let (controls, events) = match scroll_capture::start(spec, options) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("[shotori] scroll engine failed to start: {e:#}");
             let (tx, rx) = async_channel::bounded(1);
-            let _ = tx.try_send(ScrollEvent::Failed {
-                reason: format!("could not start the scroll engine: {e:#}"),
-                partial: None,
-            });
+            drop(
+                tx.try_send(ScrollEvent::Failed {
+                    reason: crate::i18n::t!("scroll.fail.start_error", error = format!("{e:#}"))
+                        .into_owned(),
+                    partial: None,
+                }),
+            );
             (ScrollControls::dead(), rx)
         }
     };
@@ -221,18 +221,14 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     }
 
     // The panel docks on its planned side of the capture output — or,
-    // when no side fits, on the OTHER output (display + logical size
-    // come from the pin registry; the preview column math needs that
-    // output's height, not the capture one's).
-    let (panel_display, panel_out_h) = match dock {
-        ScrollPanelDock::OtherOutput => {
-            // `other_output` is Some by construction of the plan; fall
-            // back to the capture display rather than unwrapping.
-            other_output
-                .map(|(id, bounds)| (Some(id), f32::from(bounds.size.height)))
-                .unwrap_or((chrome.display_id, chrome.output_height))
-        }
-        _ => (chrome.display_id, chrome.output_height),
+    // when no side fits, on the OTHER output (display, logical height
+    // and physical scale come from the pin registry; the preview column
+    // math needs that output's height and scale, not the capture one's).
+    let (panel_display, panel_out_h, panel_scale) = match dock {
+        ScrollPanelDock::OtherOutput => other_output
+            .map(|(id, bounds, scale)| (Some(id), f32::from(bounds.size.height), scale))
+            .unwrap_or((chrome.display_id, chrome.output_height, chrome.output_scale)),
+        _ => (chrome.display_id, chrome.output_height, chrome.output_scale),
     };
     // A floating card, not a full-height sidebar: the deck reads as one
     // object instead of a screen-wide slab, and keeps the output's
@@ -293,7 +289,15 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     let pcell = panel_cell.clone();
     let panel = cx.open_window(panel_options, |window, cx| {
         cx.new(|cx| {
-            let panel = PreviewPanel::new(controls, events, panel_h, preview_height, window, cx);
+            let panel = PreviewPanel::new(
+                controls,
+                events,
+                panel_h,
+                panel_scale,
+                preview_geom,
+                window,
+                cx,
+            );
             *pcell.borrow_mut() = Some(cx.entity().downgrade());
             panel
         })
@@ -302,9 +306,9 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     // The panel closes the frame on its terminal paths …
     if let Ok(panel) = &panel {
         let sibling = frame.as_ref().ok().map(|f| (*f).into());
-        let _ = panel.update(cx, |p, _, _| {
+        drop(panel.update(cx, |p, _, _| {
             p.sibling = sibling;
-        });
+        }));
     }
     // … and the frame toolbar gets the engine + panel handles so its
     // buttons work without cross-window action dispatch.

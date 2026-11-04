@@ -266,6 +266,7 @@ fn main() {
                         // for the layer surface request; see window_options
                         let (lw, lh) = cap.logical_size_f32();
                         let logical = size(px(lw), px(lh));
+                        let physical_scale = (cap.width as f32 / lw.max(1.)).max(1.);
                         // The GLOBAL logical rect (the session's space):
                         // pins span outputs through it (see ui::pin)
                         shotori::ui::pin::register_output(
@@ -274,6 +275,7 @@ fn main() {
                                 logical,
                             ),
                             did,
+                            physical_scale,
                         );
                         // perf warm-window suite: remember the first
                         // target so a second overlay can be opened later

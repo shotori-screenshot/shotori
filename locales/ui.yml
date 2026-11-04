@@ -398,8 +398,11 @@ scroll:
       en: Can’t line up
       zh-CN: 画面对不上
     stalled:
-      en: Can’t advance
-      zh-CN: 无法推进
+      en: "Can’t advance · scroll back slightly"
+      zh-CN: "无法推进 · 往回轻滚一点恢复"
+    max_length:
+      en: "Length limit reached · Enter to finish"
+      zh-CN: "已达长度上限 · 按 Enter 完成"
     paused:
       en: Paused
       zh-CN: 已暂停
@@ -464,6 +467,31 @@ scroll:
       body:
         en: The clipboard refused the image.
         zh-CN: 剪贴板拒绝了图片。
+  fail:
+    idle_timeout:
+      en: Nothing new was captured for ten minutes.
+      zh-CN: 已连续十分钟没有捕获到新内容。
+    capture_lost:
+      en: "The compositor stopped delivering frames: %{error}"
+      zh-CN: "合成器停止返回画面：%{error}"
+    region_changed:
+      en: The capture region changed size mid-session.
+      zh-CN: 捕获区域尺寸在截图过程中发生了变化。
+    max_length:
+      en: Reached the maximum capture length.
+      zh-CN: 已达到最大长截图长度限制。
+    rotated_output:
+      en: Long screenshots support unrotated screens only.
+      zh-CN: 长截图仅支持未旋转的屏幕方向。
+    outside_output:
+      en: The selected area lies outside the screen.
+      zh-CN: 所选区域超出了屏幕范围。
+    selection_too_small:
+      en: The selected area is too small for a long screenshot.
+      zh-CN: 所选区域过小，无法进行长截图。
+    start_error:
+      en: "Could not start long screenshot capture: %{error}"
+      zh-CN: "无法启动长截图捕获：%{error}"
 toolbar:
   text_size:
     en: Text size

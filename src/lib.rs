@@ -9,44 +9,43 @@
 //! │  ├─ session               state shared by all overlays (multi-monitor
 //! │  │                        selections, hover, click-snap, cropping)
 //! │  ├─ export                crop → PNG → disk/clipboard bytes
-//! │  ├─ placement             two-zone chrome geometry (label top,
-//! │  │                        toolbar bottom — disjoint by construction)
+//! │  ├─ placement             chrome geometry (label, toolbar, scroll deck)
 //! │  ├─ regiondetect          pixel-based smart-selection candidates
-//! │  │                        (hover / click snap / wheel hierarchy)
-//! │  └─ settings              persistent user settings (toolbar layout)
-//!                           in ~/.config/shotori/settings.toml
+//! │  ├─ scroll_sheet          long-screenshot stitching & preview window
+//! │  └─ settings              persistent user settings in settings.toml
 //! ├─ platform/                compositor & desktop integration
 //! │  ├─ capture/              screen freeze: wlr-screencopy; pixels is
 //! │  │                        pure format/rotation processing
 //! │  ├─ display               capture ↔ gpui display matching
+//! │  ├─ scroll_capture        live region sampling & long-capture coordinator
 //! │  └─ windowsnap/           window-rect backends: niri / sway /
 //! │                           Hyprland IPC
 //! ├─ ui/                      gpui windows & elements
 //! │  ├─ overlay               overlay assembly (one per screen):
 //! │  │                        layer-shell surfaces
 //! │  ├─ hud / toolbar         selection visuals & buttons
+//! │  ├─ pin                   always-on-top floating crops across outputs
+//! │  ├─ scroll_bar            long-screenshot region frame & preview deck
 //! │  ├─ ocr_setup             first-run OCR model dialog
 //! │  ├─ settings              the settings toplevel (`shotori settings`)
 //! │  ├─ e2e                   SHOTORI_DEBUG_* backdoors for headless tests
 //! │  └─ theme / image_util    constants; RGBA → RenderImage
-//! ├─ annotation/             in-canvas annotations: arrow / number /
-//! │                          pencil / highlighter / mosaic+blur
-//! └─ clipboard / notify / ocr / save_dialog / i18n
-//!      the four post-selection exits: clipboard (resident daemon),
-//!      notifications (D-Bus), OCR engine, native save dialog — plus
-//!      the UI string tables (rust-i18n, shared engine with
-//!      gpui-component)
+//! ├─ annotation/             in-canvas annotations: shapes / arrow / number /
+//! │                          pencil / highlighter / mosaic+blur / magnifier /
+//! │                          spotlight / eraser / text
+//! └─ clipboard / notify / ocr / save_dialog / tray / i18n
+//!      the post-selection exits & desktop surfaces: clipboard (resident
+//!      daemon), notifications (D-Bus), OCR engine, native save dialog,
+//!      StatusNotifierItem tray — plus the UI string tables (rust-i18n,
+//!      shared engine with gpui-component)
 //! ```
 //!
 //! Dependency direction: `ui → model`, `model → platform` (session holds
-//! captures and snap rects); `platform` and `ui` never reach back up.
+//! captures and snap rects); `platform` and `ui` never reach back up
+//! (save for `platform::scroll_capture` driving `model::scroll_sheet`).
 //! `actions` is referenced by everyone but references no one — it is the
 //! shared vocabulary between keybindings (main), buttons (toolbar) and
-//! handlers (overlay).
-//!
-//! The pin (floating image) feature lives on the `pin` branch (it depends
-//! on the vendored set_layer_margin patch; can't ship on crates.io until
-//! upstream merges it).
+//! handlers (overlay, scroll_bar, pin).
 
 // The i18n table lives at the CRATE ROOT (lib.rs) — rust-i18n's `t!`
 // expands to `crate::_rust_i18n_translate`, so the declaration must be
