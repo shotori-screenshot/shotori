@@ -2809,7 +2809,9 @@ mod tests {
                 a.drag_to(point(px(5.), px(70.)), selection, false);
                 a.end();
             });
-            assert_eq!(s.annotations().committed().len(), 2);
+            // The erasure edits the line in place (issue #30): no mask
+            // shape is committed alongside it.
+            assert_eq!(s.annotations().committed().len(), 1);
             let erased = s.crop("left").unwrap().2;
             assert_eq!(s.crop("right").unwrap().2, erased);
             // The mask restores both captures at the seam; the rest of the line survives.

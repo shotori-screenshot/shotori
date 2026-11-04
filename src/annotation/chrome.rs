@@ -16,7 +16,113 @@ const FRAME_PAD: f32 = 3.;
 
 impl Shape {
     /// Visible ink bounds, including stroke caps and arrowhead wings.
+    /// Marks with erasure footprints shrink to the SURVIVING ink
+    /// (issue #30), so selection chrome, marquee, crop clamping and
+    /// export bounds reflect the erased result rather than the
+    /// original outline.
     pub(crate) fn ink_bounds(&self) -> Bounds<Pixels> {
+        let full = self.full_ink_bounds();
+        if self.erasures.is_empty() {
+            full
+        } else {
+            self.shrink_to_surviving_ink(full)
+        }
+    }
+
+    /// Whether the mark paints ink at `p` (the same visual region
+    /// `shape_hit` trusts). None for kinds whose ink region has no
+    /// cheap point test (text glyphs, filters, badges, lenses) — their
+    /// bounds stay conservative under erasure.
+    fn inked_at(&self, p: Point<Pixels>) -> Option<bool> {
+        if self.has_custom_geometry() {
+            return Some(
+                super::line::shape_geometry(self)
+                    .iter()
+                    .any(|poly| super::select::point_in_polygon(p, poly)),
+            );
+        }
+        if let Some(super::FilterArea::Brush { diameter }) = self.filter_area() {
+            return Some(
+                super::line::geometry(&self.points, diameter, false)
+                    .iter()
+                    .any(|poly| super::select::point_in_polygon(p, poly)),
+            );
+        }
+        match self.kind {
+            super::ShapeKind::Line
+            | super::ShapeKind::Arrow
+            | super::ShapeKind::Polyline
+            | super::ShapeKind::Pencil
+            | super::ShapeKind::Highlighter
+            | super::ShapeKind::Eraser => Some(
+                super::line::shape_geometry(self)
+                    .iter()
+                    .any(|poly| super::select::point_in_polygon(p, poly)),
+            ),
+            super::ShapeKind::Rectangle => Some(self.strokes().iter().any(|s| s.contains(&p))),
+            super::ShapeKind::Ellipse => Some(super::select::ellipse_ring_touched(self, p, 0.)),
+            _ => None,
+        }
+    }
+
+    /// Sample the full ink box on a grid and keep the extent of the
+    /// samples whose ink survives the footprints. Exact shrink needs
+    /// clipping arbitrary geometry by arbitrary footprints; a ≤1 px
+    /// grid (coarsening only for very large marks, capped in total
+    /// sample count) is within a pixel of the truth — far below the
+    /// selection frame's own padding. Fully surviving-less marks
+    /// collapse to a degenerate box at the ink's center; a grid too
+    /// coarse to find ANY ink (hairline under a huge box) keeps the
+    /// conservative full box instead of lying.
+    fn shrink_to_surviving_ink(&self, full: Bounds<Pixels>) -> Bounds<Pixels> {
+        let (width, height) = (
+            f32::from(full.size.width).max(1.),
+            f32::from(full.size.height).max(1.),
+        );
+        const MAX_SAMPLES: f32 = 16384.;
+        let step = (width * height / MAX_SAMPLES).sqrt().max(1.);
+        let mut survivor: Option<Bounds<Pixels>> = None;
+        let mut any_ink = false;
+        let mut unsupported = false;
+        let mut y = f32::from(full.top()) + step / 2.;
+        while y < f32::from(full.bottom()) {
+            let mut x = f32::from(full.left()) + step / 2.;
+            while x < f32::from(full.right()) {
+                let p = point(px(x), px(y));
+                match self.inked_at(p) {
+                    Some(true) => {
+                        any_ink = true;
+                        if !self.erased_at(p, 0.) {
+                            let dot = Bounds::new(p, size(px(0.), px(0.)));
+                            survivor = Some(match survivor {
+                                Some(b) => b.union(&dot),
+                                None => dot,
+                            });
+                        }
+                    }
+                    Some(false) => {}
+                    None => unsupported = true,
+                }
+                x += step;
+            }
+            y += step;
+        }
+        if unsupported {
+            return full;
+        }
+        match survivor {
+            // No ink anywhere the grid can see: either everything was
+            // erased (collapse) or the grid was too coarse (keep full).
+            Some(b) => {
+                let b = super::select::inflate(&b, px(step / 2.));
+                b.intersect(&full)
+            }
+            None if any_ink => Bounds::new(full.center(), size(px(0.), px(0.))),
+            None => full,
+        }
+    }
+
+    fn full_ink_bounds(&self) -> Bounds<Pixels> {
         if let Some(super::FilterArea::Brush { diameter }) = self.filter_area() {
             let mut stroke = self.clone();
             stroke.kind = ShapeKind::Pencil;
@@ -194,6 +300,7 @@ mod tests {
 
     fn shape(kind: ShapeKind, points: &[(f32, f32)]) -> Shape {
         Shape {
+            erasures: Vec::new(),
             kind,
             number: None,
             text: None,

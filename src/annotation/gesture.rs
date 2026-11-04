@@ -39,6 +39,7 @@ impl Annotations {
                     text_style: Default::default(),
                     parameters: super::ShapeParameters::new(kind, self.erase_radius() * 2.),
                     points: vec![p],
+                    erasures: Vec::new(),
                 },
             });
             if self.tool == Some(ShapeKind::EraserRect) {
@@ -134,6 +135,7 @@ impl Annotations {
                 } else {
                     Vec::new()
                 },
+                erasures: Vec::new(),
             },
         });
     }

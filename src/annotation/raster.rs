@@ -155,71 +155,94 @@ impl Annotations {
         origin: Point<Pixels>,
         scale: f32,
     ) {
+        // One shape at a time: a mark with erasure footprints needs a
+        // snapshot of the canvas from BEFORE its own ink, so the
+        // footprints restore the earlier layers underneath it (issue
+        // #30) instead of the raw capture.
         for shape in shapes {
-            if matches!(shape.kind, ShapeKind::Eraser | ShapeKind::EraserRect) {
-                if let Some(original) = original {
-                    eraser::rasterize(shape, rgba, original, w, h, origin, scale);
-                }
+            let snapshot = (!shape.erasures.is_empty()).then(|| rgba.to_vec());
+            draw_ordinary_shape(shape, rgba, w, h, origin, scale);
+            if let Some(snapshot) = snapshot {
+                shape.apply_erasures(rgba, &snapshot, w, h, origin, scale);
                 continue;
             }
-            if shape.kind == ShapeKind::Spotlight {
-                spotlight::rasterize_outline(shape, rgba, w, h, origin, scale);
-                continue;
+            // The in-flight erase draft still previews as a whole-layer
+            // mask over the capture; commit swaps it for per-mark
+            // footprints (see `eraser::finish_erase`).
+            if matches!(shape.kind, ShapeKind::Eraser | ShapeKind::EraserRect)
+                && let Some(original) = original
+            {
+                eraser::rasterize(shape, rgba, original, w, h, origin, scale);
             }
-            if shape.kind == ShapeKind::Magnifier {
-                continue;
-            }
-            if shape.has_custom_geometry() {
-                line::rasterize(shape, rgba, w, h, origin, scale);
-                continue;
-            }
-            if shape.kind == ShapeKind::Text {
-                text::rasterize(shape, rgba, w, h, origin, scale);
-                continue;
-            }
-            if matches!(shape.kind, ShapeKind::Mosaic | ShapeKind::Blur) {
-                filter::rasterize(shape, rgba, w, h, origin, scale);
-                continue;
-            }
-            if shape.kind == ShapeKind::Number {
-                number::rasterize(shape, rgba, w, h, origin, scale);
-                continue;
-            }
-            if matches!(
-                shape.kind,
-                ShapeKind::Line
-                    | ShapeKind::Arrow
-                    | ShapeKind::Polyline
-                    | ShapeKind::Pencil
-                    | ShapeKind::Highlighter
-            ) {
-                line::rasterize(shape, rgba, w, h, origin, scale);
-                continue;
-            }
-            if shape.kind == ShapeKind::Ellipse {
-                shape.rasterize_ellipse(rgba, w, h, origin, scale);
-                continue;
-            }
-            let color = shape.color.to_be_bytes();
-            for stroke in shape.strokes() {
-                let x = |v: Pixels| {
-                    (f32::from(v - origin.x) * scale)
-                        .round()
-                        .clamp(0., w as f32) as usize
-                };
-                let y = |v: Pixels| {
-                    (f32::from(v - origin.y) * scale)
-                        .round()
-                        .clamp(0., h as f32) as usize
-                };
-                for row in y(stroke.top())..y(stroke.bottom()) {
-                    for col in x(stroke.left())..x(stroke.right()) {
-                        let offset = (row * w as usize + col) * 4;
-                        // Preserve transparent gaps between desktop outputs.
-                        if rgba[offset + 3] != 0 {
-                            rgba[offset..offset + 4].copy_from_slice(&color);
-                        }
-                    }
+        }
+    }
+}
+
+/// Paint one ordinary mark's ink (no spotlight pass, no lens sampling).
+fn draw_ordinary_shape(
+    shape: &Shape,
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    origin: Point<Pixels>,
+    scale: f32,
+) {
+    if shape.kind == ShapeKind::Spotlight {
+        spotlight::rasterize_outline(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if shape.kind == ShapeKind::Magnifier {
+        return;
+    }
+    if shape.has_custom_geometry() {
+        line::rasterize(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if shape.kind == ShapeKind::Text {
+        text::rasterize(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if matches!(shape.kind, ShapeKind::Mosaic | ShapeKind::Blur) {
+        filter::rasterize(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if shape.kind == ShapeKind::Number {
+        number::rasterize(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if matches!(
+        shape.kind,
+        ShapeKind::Line
+            | ShapeKind::Arrow
+            | ShapeKind::Polyline
+            | ShapeKind::Pencil
+            | ShapeKind::Highlighter
+    ) {
+        line::rasterize(shape, rgba, w, h, origin, scale);
+        return;
+    }
+    if shape.kind == ShapeKind::Ellipse {
+        shape.rasterize_ellipse(rgba, w, h, origin, scale);
+        return;
+    }
+    let color = shape.color.to_be_bytes();
+    for stroke in shape.strokes() {
+        let x = |v: Pixels| {
+            (f32::from(v - origin.x) * scale)
+                .round()
+                .clamp(0., w as f32) as usize
+        };
+        let y = |v: Pixels| {
+            (f32::from(v - origin.y) * scale)
+                .round()
+                .clamp(0., h as f32) as usize
+        };
+        for row in y(stroke.top())..y(stroke.bottom()) {
+            for col in x(stroke.left())..x(stroke.right()) {
+                let offset = (row * w as usize + col) * 4;
+                // Preserve transparent gaps between desktop outputs.
+                if rgba[offset + 3] != 0 {
+                    rgba[offset..offset + 4].copy_from_slice(&color);
                 }
             }
         }
@@ -294,6 +317,7 @@ mod tests {
     fn ellipse_raster_has_smooth_edges_and_preserves_hole_corners_and_gaps() {
         for scale in [1., 1.25, 1.5, 1.73, 2.] {
             let ellipse = super::Shape {
+                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),
@@ -334,6 +358,7 @@ mod tests {
     fn tiny_and_clipped_ellipses_render_without_invalid_geometry() {
         for (width, height) in [(0., 0.), (2., 2.), (2., 60.), (60., 2.), (60., 40.)] {
             let ellipse = super::Shape {
+                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),
@@ -356,6 +381,7 @@ mod tests {
     fn line_raster_preserves_gaps_and_has_round_caps_at_fractional_scales() {
         for scale in [1., 1.25, 1.73, 2.] {
             let shape = super::Shape {
+                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),

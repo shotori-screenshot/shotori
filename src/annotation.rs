@@ -87,6 +87,25 @@ pub(crate) fn size_spec(kind: ShapeKind) -> SizeSpec {
     }
 }
 
+/// One committed erase gesture's footprint, stored ON the shapes it
+/// erased (issue #30). The old model committed an independent mask
+/// shape that restored captured pixels at its own layer, so dragging
+/// an erased stroke left the mask behind and the gap "moved" relative
+/// to the ink. Binding the footprint to each touched mark makes the
+/// erasure travel with the mark: the raster path restores the
+/// pre-mark pixels under the footprint, and picking/bounds queries
+/// treat the footprint as missing ink.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Erasure {
+    /// Brush sweep: sampled brush centers plus the brush diameter.
+    Brush {
+        points: Vec<Point<Pixels>>,
+        diameter: f32,
+    },
+    /// Area sweep: the dragged rectangle.
+    Rect(Bounds<Pixels>),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Shape {
     pub(crate) kind: ShapeKind,
@@ -97,6 +116,12 @@ pub(crate) struct Shape {
     pub(crate) color: u32,
     parameters: ShapeParameters,
     pub(crate) points: Vec<Point<Pixels>>,
+    /// Erase footprints cut into this mark (issue #30). Absolute
+    /// canvas coordinates like `points`, so `translate` carries them;
+    /// in-place geometry edits (handle drags, re-wrapped text) keep
+    /// the holes where they were drawn — the footprint records where
+    /// the user erased, not what was under it.
+    pub(crate) erasures: Vec<Erasure>,
 }
 
 impl Shape {
@@ -105,6 +130,16 @@ impl Shape {
         self.bounds.origin += delta;
         for point in &mut self.points {
             *point += delta;
+        }
+        for erasure in &mut self.erasures {
+            match erasure {
+                Erasure::Brush { points, .. } => {
+                    for point in points {
+                        *point += delta;
+                    }
+                }
+                Erasure::Rect(bounds) => bounds.origin += delta,
+            }
         }
         self.set_number_tip(self.number_tip().map(|tip| tip + delta));
     }
@@ -475,6 +510,7 @@ impl Annotations {
                 color,
                 parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, width),
                 points: Vec::new(),
+                erasures: Vec::new(),
             },
         });
     }
@@ -497,6 +533,7 @@ impl Annotations {
             color: self.color().0,
             parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, self.text_size()),
             points: Vec::new(),
+            erasures: Vec::new(),
         });
     }
     pub(crate) fn number_size(&self) -> f32 {

@@ -1,9 +1,14 @@
-//! Editable erasure masks restore captured pixels without deleting entire marks.
+//! The eraser edits the marks it crosses (issue #30): a finished
+//! gesture appends its footprint to every touched shape's `erasures`
+//! instead of committing an independent mask shape. The raster path
+//! restores the pre-mark pixels under each footprint, so the hole is
+//! part of the mark and travels with it; bounds and picking treat the
+//! footprint as missing ink.
 
-use super::{Annotations, ShapeKind};
+use super::{Annotations, Erasure, Shape, ShapeKind};
 use gpui_kit::{Bounds, Pixels, Point, point};
 
-/// Pointer state for an in-flight local erase mask.
+/// Pointer state for an in-flight erase gesture.
 #[derive(Clone, Copy)]
 pub(super) enum EraserGesture {
     /// Brush sweep. `last` is the previous sample; the segment to the
@@ -38,7 +43,8 @@ impl Annotations {
         }
     }
 
-    /// Accumulate a continuous mask without modifying the editable source marks.
+    /// Accumulate the sweep samples without touching the marks; the
+    /// footprint is applied to the touched shapes on release.
     pub(super) fn erase_sample(&mut self, p: Point<Pixels>) -> bool {
         let Some(draft) = self.draft.as_mut() else {
             return false;
@@ -56,36 +62,144 @@ impl Annotations {
         }
     }
 
+    /// Commit the gesture: append the footprint to every shape whose
+    /// ink the sweep crossed, as ONE history step (Edit/EditMany) so a
+    /// single undo restores every mark's pre-erase state. Nothing is
+    /// recorded when no ink was crossed — a sweep through empty canvas
+    /// must not pollute history.
     pub(super) fn finish_erase(&mut self) {
         let Some(draft) = self.draft.take() else {
             return;
         };
         let shape = draft.shape;
-        let rect = shape.kind == ShapeKind::EraserRect;
-        let meaningful = if rect {
-            shape.bounds.size.width > gpui_kit::px(0.)
-                && shape.bounds.size.height > gpui_kit::px(0.)
-                && self.shapes.iter().any(|s| {
-                    let i = s.ink_bounds().intersect(&shape.bounds);
-                    i.size.width > gpui_kit::px(0.) && i.size.height > gpui_kit::px(0.)
-                })
-        } else {
-            shape.points.iter().any(|&p| {
-                self.shapes
-                    .iter()
-                    .any(|s| super::select::shape_erased(s, p, shape.size() / 2.))
-            })
+        let radius = shape.size() / 2.;
+        let touched = |s: &Shape| match shape.kind {
+            ShapeKind::EraserRect => {
+                let i = s.ink_bounds().intersect(&shape.bounds);
+                i.size.width > gpui_kit::px(0.) && i.size.height > gpui_kit::px(0.)
+            }
+            _ => shape
+                .points
+                .iter()
+                .any(|&p| super::select::shape_erased(s, p, radius)),
         };
-        if meaningful {
-            self.record_add(shape);
-            if !rect {
-                self.selected.clear();
+        let before: Vec<(usize, Shape)> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| touched(s))
+            .map(|(ix, s)| (ix, s.clone()))
+            .collect();
+        let erasure = if shape.kind == ShapeKind::EraserRect {
+            Erasure::Rect(shape.bounds)
+        } else {
+            Erasure::Brush {
+                points: shape.points.clone(),
+                diameter: shape.size(),
+            }
+        };
+        for (ix, _) in &before {
+            if let Some(mark) = self.shapes.get_mut(*ix) {
+                mark.erasures.push(erasure.clone());
+            }
+        }
+        self.commit_moves(&before);
+    }
+}
+
+impl Shape {
+    /// Whether `p` falls inside one of this mark's erasure footprints
+    /// (the hole's ≥50%-coverage interior, minus the pointing
+    /// tolerance so the antialiased rim of the hole stays clickable,
+    /// mirroring `HIT_TOLERANCE` on ink). The inverse of
+    /// [`super::select::shape_hit`]'s ink test.
+    pub(crate) fn erased_at(&self, p: Point<Pixels>, tolerance: f32) -> bool {
+        self.erasures.iter().any(|erasure| match erasure {
+            Erasure::Brush { points, diameter } => {
+                let radius = diameter / 2. - tolerance;
+                radius > 0.
+                    && points
+                        .iter()
+                        .zip(points.iter().skip(1).chain(points.first()))
+                        .any(|(a, b)| super::select::point_segment_distance(p, *a, *b) <= radius)
+            }
+            Erasure::Rect(bounds) => {
+                super::select::inflate(bounds, gpui_kit::px(-tolerance)).contains(&p)
+            }
+        })
+    }
+
+    /// Cut this mark's erasure footprints into freshly painted pixels:
+    /// blend every footprint-covered pixel back to the snapshot taken
+    /// BEFORE this mark was painted, which reveals the earlier marks
+    /// and capture underneath — the per-mark equivalent of the old
+    /// whole-layer mask, but scoped to this mark's own ink.
+    pub(super) fn apply_erasures(
+        &self,
+        rgba: &mut [u8],
+        snapshot: &[u8],
+        w: u32,
+        h: u32,
+        origin: Point<Pixels>,
+        scale: f32,
+    ) {
+        for erasure in &self.erasures {
+            match erasure {
+                Erasure::Rect(bounds) => {
+                    let x = |v: Pixels| {
+                        (f32::from(v - origin.x) * scale)
+                            .round()
+                            .clamp(0., w as f32) as usize
+                    };
+                    let y = |v: Pixels| {
+                        (f32::from(v - origin.y) * scale)
+                            .round()
+                            .clamp(0., h as f32) as usize
+                    };
+                    for row in y(bounds.top())..y(bounds.bottom()) {
+                        for col in x(bounds.left())..x(bounds.right()) {
+                            let offset = (row * w as usize + col) * 4;
+                            if rgba.len() >= offset + 4 {
+                                rgba[offset..offset + 4]
+                                    .copy_from_slice(&snapshot[offset..offset + 4]);
+                            }
+                        }
+                    }
+                }
+                Erasure::Brush { points, diameter } => {
+                    // Reuse the stroke coverage engine with a synthetic
+                    // brush shape, exactly like the old mask rasterizer.
+                    let brush = Shape {
+                        kind: ShapeKind::Eraser,
+                        number: None,
+                        text: None,
+                        text_style: Default::default(),
+                        bounds: Bounds::default(),
+                        color: 0,
+                        parameters: super::ShapeParameters::new(ShapeKind::Eraser, *diameter),
+                        points: points.clone(),
+                        erasures: Vec::new(),
+                    };
+                    super::line::coverage(&brush, w, h, origin, scale, |offset, coverage| {
+                        if rgba.len() >= offset + 4 {
+                            for c in 0..4 {
+                                rgba[offset + c] = (rgba[offset + c] as f32 * (1. - coverage)
+                                    + snapshot[offset + c] as f32 * coverage)
+                                    .round()
+                                    as u8;
+                            }
+                        }
+                    });
+                }
             }
         }
     }
 }
 
-/// Restore captured pixels at the mask's layer; later marks remain above the erasure.
+/// Live-preview the in-flight sweep as a whole-layer mask over the
+/// capture (the draft eraser shape in `visible()`). Commit replaces
+/// this with per-mark footprints; the pixels agree wherever the sweep
+/// crosses ink, which is the only place feedback matters.
 pub(super) fn rasterize(
     shape: &super::Shape,
     rgba: &mut [u8],
@@ -149,6 +263,8 @@ mod tests {
             marks.drag_to(point(px(80.), px(100.)), area(), false);
             assert_eq!(marks.committed().len(), 1);
             marks.end();
+            // the erasure edits the stroke in place — no mask shape is added
+            assert_eq!(marks.committed().len(), 1);
             let erased = image(&marks, scale);
             assert_eq!(pixel(&erased, scale, 80., 60.), &[24, 36, 48, 255]);
             assert_eq!(
@@ -183,6 +299,7 @@ mod tests {
         marks.begin(point(px(80.), px(75.)), area(), false);
         marks.end();
         assert_eq!(marks.committed(), before);
+        assert!(marks.committed()[0].erasures.is_empty());
         marks.begin(point(px(80.), px(60.)), area(), false);
         marks.undo();
         marks.drag_to(point(px(40.), px(60.)), area(), false);
@@ -196,23 +313,72 @@ mod tests {
         assert!(marks.committed().is_empty());
     }
 
+    /// The issue #30 repro: erase a chunk, then drag the stroke — the
+    /// gap must travel with the ink, not stay behind as a mask hole.
     #[test]
-    fn rectangle_mask_remains_editable_without_destroying_original_marks() {
+    fn erasure_travels_with_the_mark_when_moved() {
         let mut marks = scene();
-        let original = image(&marks, 1.);
-        marks.toggle(ShapeKind::EraserRect);
-        marks.begin(point(px(70.), px(50.)), area(), false);
-        marks.drag_to(point(px(90.), px(70.)), area(), false);
+        marks.toggle(ShapeKind::Eraser);
+        marks.set_tool_size(16.);
+        marks.begin(point(px(80.), px(20.)), area(), false);
+        marks.drag_to(point(px(80.), px(100.)), area(), false);
         marks.end();
-        assert_eq!(marks.committed().len(), 2);
-        assert_eq!(pixel(&image(&marks, 1.), 1., 80., 60.), &[24, 36, 48, 255]);
-        let mask = marks.committed()[1].clone();
-        marks.place_shape(1, &mask, point(px(0.), px(30.)));
-        marks.commit_move(1, mask);
-        assert_eq!(image(&marks, 1.), original);
+        marks.toggle(ShapeKind::Select);
+        let before = marks.committed()[0].clone();
+        marks.place_shape(0, &before, point(px(0.), px(30.)));
+        marks.commit_move(0, before);
+        let moved = image(&marks, 1.);
+        // the gap moved down with the stroke…
+        assert_eq!(pixel(&moved, 1., 80., 90.), &[24, 36, 48, 255]);
+        // …the ink reads through where the stroke used to be…
+        assert_eq!(pixel(&moved, 1., 30., 90.), pixel(&moved, 1., 130., 90.));
+        assert_eq!(pixel(&moved, 1., 80., 60.), &[24, 36, 48, 255]);
+        // …and undo/redo of the move keeps the gap glued to the ink
         marks.undo();
         assert_eq!(pixel(&image(&marks, 1.), 1., 80., 60.), &[24, 36, 48, 255]);
+        marks.redo();
+        assert_eq!(pixel(&image(&marks, 1.), 1., 80., 90.), &[24, 36, 48, 255]);
+    }
+
+    /// Erasing an end of the stroke shrinks the mark's ink bounds to
+    /// the surviving ink, so selection chrome and marquee match what
+    /// is actually visible (issue #30's AABB requirement).
+    #[test]
+    fn erasures_shrink_ink_bounds_to_the_surviving_ink() {
+        let mut marks = scene();
+        let full = marks.committed()[0].ink_bounds();
+        marks.toggle(ShapeKind::Eraser);
+        marks.set_tool_size(24.);
+        marks.begin(point(px(132.), px(20.)), area(), false);
+        marks.drag_to(point(px(132.), px(100.)), area(), false);
+        marks.end();
+        let shrunken = marks.committed()[0].ink_bounds();
+        assert_eq!(shrunken.left(), full.left());
+        assert_eq!(shrunken.top(), full.top());
+        assert_eq!(shrunken.bottom(), full.bottom());
+        assert!(shrunken.right() <= px(120.), "right edge {shrunken:?}");
+        assert!(shrunken.right() < full.right());
+        // a hole in the middle cannot shrink the extents
         marks.undo();
-        assert_eq!(image(&marks, 1.), original);
+        marks.set_tool_size(16.);
+        marks.begin(point(px(80.), px(20.)), area(), false);
+        marks.drag_to(point(px(80.), px(100.)), area(), false);
+        marks.end();
+        let holed = marks.committed()[0].ink_bounds();
+        assert_eq!(holed.left(), full.left());
+        assert_eq!(holed.right(), full.right());
+        // fully erased: nothing pickable survives
+        marks.undo();
+        marks.set_tool_size(96.);
+        marks.begin(point(px(80.), px(60.)), area(), false);
+        marks.drag_to(point(px(80.), px(60.)), area(), false);
+        marks.end();
+        assert_eq!(marks.committed().len(), 1);
+        let fully_erased = marks.committed()[0].clone();
+        assert!(!crate::annotation::select::shape_hit(
+            &fully_erased,
+            point(px(80.), px(60.))
+        ));
+        assert_eq!(marks.hit_test(point(px(80.), px(60.))), None);
     }
 }

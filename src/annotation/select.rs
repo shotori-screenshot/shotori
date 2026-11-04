@@ -543,6 +543,13 @@ fn resize_shape(shape: &mut Shape, value: f32) {
 /// its visible stroke or body; see [`line::geometry`] for the shared
 /// visual outline.
 pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
+    // A point inside one of the mark's own erasure footprints is a
+    // hole, not ink (issue #30): the mark cannot be picked through
+    // its gaps, exactly like an erased mark could not be picked
+    // through the old mask.
+    if shape.erased_at(p, HIT_TOLERANCE) {
+        return false;
+    }
     if shape.has_custom_geometry() {
         return line::shape_geometry(shape)
             .iter()
@@ -635,6 +642,12 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
 /// could ever be erased individually. Hollow rectangle/ellipse
 /// outlines likewise erase only from their stroke band.
 pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
+    // Already-erased ink is gone: sweeping the same spot again must
+    // not re-touch the mark (a second gesture over a finished hole
+    // records nothing, like a sweep over empty canvas).
+    if shape.erased_at(p, 0.) {
+        return false;
+    }
     if shape.has_custom_geometry() {
         return line::shape_geometry(shape)
             .iter()
@@ -695,7 +708,7 @@ fn polygon_touched(p: Point<Pixels>, poly: &[Point<Pixels>], radius: f32) -> boo
 }
 
 /// Euclidean distance from `p` to the segment `ab`.
-fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) -> f32 {
+pub(super) fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) -> f32 {
     let (dx, dy) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
     let length_sq = dx * dx + dy * dy;
     if length_sq <= f32::EPSILON {
@@ -711,7 +724,7 @@ fn point_segment_distance(p: Point<Pixels>, a: Point<Pixels>, b: Point<Pixels>) 
 /// the inner ring, matching the export path) into chords is within
 /// half a chord of the truth — far below eraser tolerances at 64
 /// samples per contour.
-fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
+pub(super) fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
     let rx = f32::from(shape.bounds.size.width) / 2.;
     let ry = f32::from(shape.bounds.size.height) / 2.;
     if rx <= 0. || ry <= 0. {
@@ -742,7 +755,7 @@ fn ellipse_ring_touched(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
 }
 
 /// Even-odd ray casting: is the point inside the polygon?
-fn point_in_polygon(p: Point<Pixels>, poly: &[Point<Pixels>]) -> bool {
+pub(super) fn point_in_polygon(p: Point<Pixels>, poly: &[Point<Pixels>]) -> bool {
     // Fewer than 3 vertices cannot enclose area, and `j = len - 1`
     // below would wrap on an empty slice. Today's callers only feed
     // real polygons; the guard keeps this generic utility safe for
@@ -951,6 +964,7 @@ mod tests {
 
     fn polyline(points: &[(f32, f32)], width: f32) -> Shape {
         Shape {
+            erasures: Vec::new(),
             kind: ShapeKind::Polyline,
             number: None,
             text: None,

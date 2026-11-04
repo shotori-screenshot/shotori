@@ -846,6 +846,7 @@ mod tests {
             let mut images = Vec::new();
             for arrow in styles {
                 let mut mark = Shape {
+                    erasures: Vec::new(),
                     kind: ShapeKind::Arrow,
                     number: None,
                     text: None,
@@ -933,6 +934,7 @@ mod tests {
                 let normal = point(-tangent.y, tangent.x);
                 let center = point(px(300.), px(300.));
                 let mut mark = Shape {
+                    erasures: Vec::new(),
                     kind,
                     number: None,
                     text: None,
@@ -982,6 +984,7 @@ mod tests {
             LineStyle::DashDotDot,
         ] {
             let mut shape = Shape {
+                erasures: Vec::new(),
                 kind: ShapeKind::Polyline,
                 number: None,
                 text: None,
@@ -1049,6 +1052,7 @@ mod tests {
                     .flat_map(|p| [180, 120, 60, p[3]])
                     .collect();
                 let mut shape = Shape {
+                    erasures: Vec::new(),
                     kind,
                     number: None,
                     text: None,
@@ -1122,6 +1126,7 @@ mod tests {
     #[test]
     fn arrow_export_contains_a_head_without_overshooting_and_preserves_gaps() {
         let shape = super::super::Shape {
+            erasures: Vec::new(),
             kind: super::super::ShapeKind::Arrow,
             number: None,
             text: None,

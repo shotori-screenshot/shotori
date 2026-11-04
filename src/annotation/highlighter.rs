@@ -171,6 +171,7 @@ mod tests {
     use super::*;
     fn stroke() -> Shape {
         Shape {
+            erasures: Vec::new(),
             kind: ShapeKind::Highlighter,
             number: None,
             text: None,
