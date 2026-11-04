@@ -200,7 +200,7 @@ impl Shape {
 /// capture (the draft eraser shape in `visible()`). Commit replaces
 /// this with per-mark footprints; the pixels agree wherever the sweep
 /// crosses ink, which is the only place feedback matters.
-pub(super) fn rasterize(
+pub(crate) fn rasterize(
     shape: &super::Shape,
     rgba: &mut [u8],
     original: &[u8],

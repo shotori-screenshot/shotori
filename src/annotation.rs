@@ -812,7 +812,7 @@ impl Annotations {
     }
 }
 
-mod eraser;
+pub(crate) mod eraser;
 mod gesture;
 mod history;
 
