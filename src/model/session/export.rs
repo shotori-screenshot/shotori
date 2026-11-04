@@ -3,7 +3,9 @@
 //! filtered preview pipeline (rasterized annotations composited over
 //! the frozen capture, cached and invalidated by session state).
 
-use super::{DisplayPreview, FilterPreview, RasterSelection, ScreenshotSession, ScrollRect};
+use super::{
+    DisplayPreview, FilterPreview, MovedReplay, RasterSelection, ScreenshotSession, ScrollRect,
+};
 use gpui_kit::*;
 use std::sync::Arc;
 
@@ -152,7 +154,12 @@ impl ScreenshotSession {
                         * max_scale
                         >= 262_144.
                 });
-            if unchanged || !heavy || ink_only || promotable {
+            // A live move/handle drag replays synchronously over the
+            // split plane (see filtered_preview); spawning the worker
+            // per drag frame would queue full re-renders whose results
+            // land after the next move already invalidated them.
+            let editing = self.editing_shape_indices().is_some();
+            if unchanged || !heavy || ink_only || promotable || editing {
                 self.preview_display = None;
                 return self.filtered_preview(output);
             }
@@ -292,6 +299,26 @@ impl ScreenshotSession {
 
     /// Reuse the exported composite for freehand strokes, pixel filters and text.
     /// Captures are immutable; selection, shapes and display geometry own invalidation.
+    /// The committed indices being edited by a live drag (move or
+    /// handle), if any. `filtered_preview` uses this to repaint only
+    /// the dragged shapes per frame instead of the whole scene.
+    fn editing_shape_indices(&self) -> Option<Vec<usize>> {
+        let mut set: Vec<usize> = Vec::new();
+        if let Some(drag) = &self.moving {
+            set.extend(drag.before.iter().map(|(ix, _)| *ix));
+        }
+        if let Some(drag) = &self.handle_drag {
+            set.push(drag.ix);
+        }
+        if set.is_empty() {
+            None
+        } else {
+            set.sort_unstable();
+            set.dedup();
+            Some(set)
+        }
+    }
+
     pub(crate) fn filtered_preview(
         &self,
         output: &str,
@@ -322,9 +349,92 @@ impl ScreenshotSession {
                 pixels,
                 image,
                 stroke: None,
+                moved: None,
             });
         }
         let cached = cache.as_mut()?;
+        // Live move/handle drag: replaying the whole scene per pointer
+        // move (full-frame base copy + every committed shape
+        // re-rasterized) cost ~20 ms/frame at 1080p and ~65 ms with a
+        // magnifier on screen — the dragged shape visibly trailed the
+        // pointer. Instead, composite the scene WITHOUT the dragged
+        // shapes once (split plane), then repaint only the dragged set
+        // over that stable base each frame.
+        if let Some(editing) = self.editing_shape_indices() {
+            // A spotlight dim applies once over the union of ALL
+            // spotlights and a lens samples the marked layer, so both
+            // always ride with the replay set — a naive split would
+            // double-dim outside the dragged spotlight's hole or leave
+            // the lens showing pre-drag content.
+            let mut replay: Vec<usize> = editing;
+            for (ix, shape) in committed.iter().enumerate() {
+                if matches!(shape.kind, ShapeKind::Spotlight | ShapeKind::Magnifier)
+                    && !replay.contains(&ix)
+                {
+                    replay.push(ix);
+                }
+            }
+            replay.sort_unstable();
+            // Idempotence: the renderer may call this twice for one
+            // frame (element paint + the next frame before the move
+            // lands). Each call would otherwise mint a fresh image
+            // that never reaches the atlas — only a NEW committed
+            // state (a drag frame) rebuilds.
+            if cached.moved.as_ref().is_some_and(|m| m.indices == replay)
+                && cached.committed == committed
+            {
+                return Some((cached.original.bounds, cached.image.clone()));
+            }
+            let dims = (cached.original.width, cached.original.height);
+            let origin = cached.original.bounds.origin;
+            let scale = cached.original.scale;
+            if cached.moved.as_ref().is_none_or(|m| m.indices != replay) {
+                let mut base = cached.original.rgba.clone();
+                crate::annotation::Annotations::rasterize_shapes(
+                    committed
+                        .iter()
+                        .enumerate()
+                        .filter(|(ix, _)| !replay.contains(ix))
+                        .map(|(_, shape)| shape),
+                    &mut base,
+                    dims.0,
+                    dims.1,
+                    origin,
+                    scale,
+                );
+                cached.moved = Some(MovedReplay {
+                    base,
+                    indices: replay.clone(),
+                });
+            }
+            let base = cached.moved.as_ref().map(|m| m.base.clone())?;
+            cached.pixels = base;
+            crate::annotation::Annotations::rasterize_shapes(
+                committed
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, _)| replay.contains(ix))
+                    .map(|(_, shape)| shape),
+                &mut cached.pixels,
+                dims.0,
+                dims.1,
+                origin,
+                scale,
+            );
+            cached.image =
+                crate::render_image::rgba_to_render_image(cached.pixels.clone(), dims.0, dims.1);
+            cached.committed = committed.to_vec();
+            cached.draft = None;
+            cached.stroke = None;
+            return Some((cached.original.bounds, cached.image.clone()));
+        }
+        // A drag just ended: the split composite already equals the full
+        // replay (base + dragged shapes at their final positions), so keep
+        // the frame and just drop the split state.
+        if cached.moved.take().is_some() && cached.committed == committed {
+            cached.draft = draft.cloned();
+            return Some((cached.original.bounds, cached.image.clone()));
+        }
         if cached.committed != committed
             || cached.draft.as_ref() != draft
             || cached.draft_generation != self.annotations.draft_generation()
@@ -411,19 +521,69 @@ impl ScreenshotSession {
                     original.bounds.origin,
                     original.scale,
                 );
+            } else if let Some(shape) = draft.filter(|s| {
+                matches!(s.kind, ShapeKind::Eraser | ShapeKind::EraserRect)
+                    && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier)
+            }) {
+                // Eraser sweep preview. The base is `cached.pixels` — the
+                // committed composite, stable for the whole gesture — and
+                // the footprint reveals the pristine crop, exactly the
+                // pixels `eraser::rasterize` blended, but INCREMENTALLY:
+                // this branch runs on every pointer move, and re-running
+                // the full pipeline (whole-frame clones in rasterize_shapes
+                // + re-rasterizing every committed shape + the ENTIRE trail)
+                // cost ~110 ms per move at 300 samples on 1080p — the
+                // preview could not keep up with the pointer at all.
+                // Magnifier lenses sample the marked layer, so a sweep
+                // under a lens must re-run the full composite instead.
+                if shape.kind == ShapeKind::EraserRect {
+                    // Rect drags reassign `bounds` per move (set semantics,
+                    // not append-only) — no incremental cache applies, but a
+                    // single rectangle punch on the cached composite stays
+                    // O(footprint).
+                    cached.stroke = None;
+                    let mut pixels = cached.pixels.clone();
+                    crate::annotation::eraser::rasterize(
+                        shape,
+                        &mut pixels,
+                        &original.rgba,
+                        original.width,
+                        original.height,
+                        original.bounds.origin,
+                        original.scale,
+                    );
+                    cached.image = crate::render_image::rgba_to_render_image(
+                        pixels,
+                        original.width,
+                        original.height,
+                    );
+                } else {
+                    let out = cached
+                        .stroke
+                        .get_or_insert_with(Default::default)
+                        .render_eraser(
+                            shape,
+                            &cached.pixels,
+                            &original.rgba,
+                            (original.width, original.height),
+                            original.bounds.origin,
+                            original.scale,
+                        );
+                    cached.image = crate::render_image::rgba_to_render_image(
+                        out.to_vec(),
+                        original.width,
+                        original.height,
+                    );
+                }
             } else {
                 cached.stroke = None;
                 let mut pixels = cached.pixels.clone();
-                if draft.is_some_and(|s| {
-                    matches!(
-                        s.kind,
-                        ShapeKind::Magnifier
-                            | ShapeKind::Spotlight
-                            | ShapeKind::Eraser
-                            | ShapeKind::EraserRect
-                    )
-                }) || (draft.is_some()
-                    && committed.iter().any(|s| s.kind == ShapeKind::Magnifier))
+                // Lens and spotlight drafts re-run the whole composite (they
+                // sample/dim the marked layer); an eraser draft only lands
+                // here when a Magnifier is also committed (see its branch).
+                if draft
+                    .is_some_and(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
+                    || (draft.is_some() && committed.iter().any(|s| s.kind == ShapeKind::Magnifier))
                 {
                     pixels.clone_from(&original.rgba);
                     crate::annotation::Annotations::rasterize_shapes(

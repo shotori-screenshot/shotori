@@ -106,7 +106,7 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
             });
             window.draw(cx).clear(cx);
             let (_, image) = session.read(cx).filtered_preview("screen").unwrap();
-            assert!(window.has_image_atlas_entry(&image));
+            assert!(window.has_image_atlas_entry(&image), "frame {i}");
             if let Some(old) = previous.take()
                 && old.id != image.id
             {
@@ -1985,7 +1985,10 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
         Default::default(),
     );
     cx.update(|_, cx| {
-        assert_eq!(session.read(cx).annotations().committed().len(), 2);
+        // The released gesture edits the stroke in place (issue #30):
+        // no mask shape joins the list, and the committed pixels match
+        // the preview the drag showed.
+        assert_eq!(session.read(cx).annotations().committed().len(), 1);
         assert_eq!(session.read(cx).crop("screen").unwrap(), erased);
     });
     cx.simulate_keystrokes("ctrl-z");
@@ -1993,8 +1996,9 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-y");
     cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), erased));
 
-    // Select area erasure through its actual menu. It previews while dragging
-    // and records one editable mask, independent of the source mark.
+    // Select area erasure through its actual menu. It previews while
+    // dragging and commits its footprint onto the marks it covers
+    // (issue #30).
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let trigger = cx.debug_bounds("eraser-mode").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
@@ -2021,7 +2025,7 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     );
     cx.update(|_, cx| {
         let s = session.read(cx);
-        assert_eq!(s.annotations().committed().len(), 2);
+        assert_eq!(s.annotations().committed().len(), 1);
         assert_eq!(s.crop("screen"), s.crop_original("screen"));
     });
     cx.simulate_mouse_up(
@@ -2031,17 +2035,17 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     );
     cx.update(|_, cx| {
         let s = session.read(cx);
-        assert_eq!(s.annotations().committed().len(), 3);
-        assert_eq!(
-            s.annotations().selected().unwrap().kind,
-            ShapeKind::EraserRect
-        );
+        // The rect's footprint lands on the stroke it fully covers —
+        // the list keeps its single mark, now fully erased, and no
+        // selection appears for a gesture that edits in place.
+        assert_eq!(s.annotations().committed().len(), 1);
+        assert_eq!(s.annotations().selected(), None);
         assert_eq!(s.crop("screen"), s.crop_original("screen"));
     });
     cx.simulate_keystrokes("ctrl-z");
     cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), erased));
     cx.simulate_keystrokes("ctrl-y");
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 3));
+    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
     // The shortcut exits the active rectangle eraser without altering history.
     cx.simulate_keystrokes("d");
     cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
