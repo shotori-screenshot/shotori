@@ -137,6 +137,19 @@ struct FilterPreview {
     pixels: Vec<u8>,
     image: Arc<RenderImage>,
     stroke: Option<crate::annotation::StrokePreview>,
+    /// Split-plane state for a live move/handle drag (see export.rs):
+    /// `base` composites every committed shape EXCEPT the replay set,
+    /// so each drag frame repaints only the dragged shapes.
+    moved: Option<MovedReplay>,
+}
+
+/// The stable half of a drag-in-progress composite. `indices` covers
+/// the dragged shapes plus every Spotlight/Magnifier (a spotlight dim
+/// must apply exactly once over the union of all spotlights, and a
+/// lens samples the marked layer — neither survives a naive split).
+struct MovedReplay {
+    indices: Vec<usize>,
+    base: Vec<u8>,
 }
 
 struct DisplayPreview {
@@ -669,6 +682,182 @@ mod tests {
     use gpui_kit::{Bounds, point, px, size};
     use std::sync::Arc;
     #[gpui_kit::test]
+    fn move_drag_preview_matches_full_rasterization(cx: &mut gpui_kit::TestAppContext) {
+        use crate::annotation::ShapeKind;
+        use gpui_kit::AppContext;
+
+        // The lens variant covers the replay-set expansion: a magnifier
+        // always re-rasterizes with the dragged shapes, or its content
+        // would show the pre-drag composite.
+        for lens in [false, true] {
+            let mut capture = Capture::for_test((0, 0), 1.);
+            capture.output_name = "left".into();
+            capture.width = 640;
+            capture.height = 480;
+            capture.rgba = [90, 120, 60, 255].repeat(640 * 480);
+            let session = cx.new(|_| ScreenshotSession::new(vec![Arc::new(capture)], Vec::new()));
+            session.update(cx, |s, _cx| {
+                s.select_all();
+                let area = s.selection.bounds().unwrap();
+                s.edit_annotations(|a| {
+                    a.toggle(ShapeKind::Pencil);
+                    a.set_tool_size(10.);
+                    for base_y in [120_u32, 320] {
+                        a.begin(point(px(60.), px(base_y as f32)), area, false);
+                        for k in 1..30_u32 {
+                            a.drag_to(
+                                point(
+                                    px(60. + k as f32 * 14.),
+                                    px(base_y as f32 + (k % 5) as f32 * 6.),
+                                ),
+                                area,
+                                false,
+                            );
+                        }
+                        a.end();
+                    }
+                    a.toggle(ShapeKind::Mosaic);
+                    a.set_tool_size(16.);
+                    a.begin(point(px(200.), px(380.)), area, false);
+                    a.drag_to(point(px(420.), px(460.)), area, false);
+                    a.end();
+                    if lens {
+                        a.toggle(ShapeKind::Magnifier);
+                        a.begin(point(px(400.), px(60.)), area, false);
+                        a.drag_to(point(px(560.), px(200.)), area, false);
+                        a.end();
+                    }
+                    a.select_index(0);
+                });
+                let press = s.annotations.selected().unwrap().bounds.center();
+                s.pointer_down("left", press, false, false);
+                // Drag in bursts with a preview refresh between them,
+                // exactly like render frames during a move gesture.
+                for burst in 0..6_u32 {
+                    let dest =
+                        press + point(px((burst + 1) as f32 * 9.), px((burst % 3) as f32 * 5.));
+                    s.pointer_move("left", dest, false);
+                    s.filtered_preview("left");
+                }
+                let (_, preview) = s.filtered_preview("left").unwrap();
+                // Expected: the full non-split pipeline over the exact
+                // same state — the split replay must be pixel-identical.
+                let committed = s.annotations.committed().to_vec();
+                let cache = s.filter_preview.borrow();
+                let original = cache.as_ref().unwrap();
+                let mut pixels = original.original.rgba.clone();
+                crate::annotation::Annotations::rasterize_shapes(
+                    committed.iter(),
+                    &mut pixels,
+                    original.original.width,
+                    original.original.height,
+                    original.original.bounds.origin,
+                    original.original.scale,
+                );
+                let expected = crate::render_image::rgba_to_render_image(
+                    pixels,
+                    original.original.width,
+                    original.original.height,
+                );
+                assert_eq!(
+                    preview.as_bytes(0).unwrap(),
+                    expected.as_bytes(0).unwrap(),
+                    "split replay diverged (lens={lens})"
+                );
+                // Release keeps the final frame — the split composite
+                // already equals the full replay, no rebuild fires.
+                drop(cache);
+                s.pointer_up("left", press + point(px(54.), px(10.)), false);
+                let (_, after) = s.filtered_preview("left").unwrap();
+                assert_eq!(preview.id, after.id, "release rebuilt the frame");
+            });
+        }
+    }
+
+    #[gpui_kit::test]
+    fn eraser_draft_preview_matches_full_rasterization(cx: &mut gpui_kit::TestAppContext) {
+        use crate::annotation::ShapeKind;
+        use gpui_kit::AppContext;
+
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "left".into();
+        capture.width = 640;
+        capture.height = 480;
+        capture.rgba = [40, 80, 120, 255].repeat(640 * 480);
+        let session = cx.new(|_| ScreenshotSession::new(vec![Arc::new(capture)], Vec::new()));
+        session.update(cx, |s, _cx| {
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+            // Two committed pencil strokes the sweep will cross.
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Pencil);
+                a.set_tool_size(12.);
+                a.begin(point(px(60.), px(120.)), area, false);
+                for k in 1..40 {
+                    a.drag_to(
+                        point(px(60. + k as f32 * 8.), px(120. + (k % 7) as f32 * 4.)),
+                        area,
+                        false,
+                    );
+                }
+                a.end();
+                a.begin(point(px(80.), px(320.)), area, false);
+                for k in 1..30 {
+                    a.drag_to(
+                        point(px(80. + k as f32 * 10.), px(320. - (k % 5) as f32 * 6.)),
+                        area,
+                        false,
+                    );
+                }
+                a.end();
+                a.toggle(ShapeKind::Eraser);
+                a.begin(point(px(100.), px(60.)), area, false);
+            });
+            // Advance the sweep in bursts, refreshing the preview between
+            // them, so the incremental cache replays appended points across
+            // many calls exactly like pointer-move frames do.
+            for burst in 0..8_u32 {
+                s.edit_annotations(|a| {
+                    for k in 0..10_u32 {
+                        let step = burst * 10 + k;
+                        a.drag_to(
+                            point(
+                                px(100. + step as f32 * 12.),
+                                px(60. + (step % 30) as f32 * 12.),
+                            ),
+                            area,
+                            false,
+                        );
+                    }
+                });
+                s.filtered_preview("left");
+            }
+            let (_, preview) = s.filtered_preview("left").unwrap();
+            // Expected: the full non-incremental pipeline over the exact
+            // same state — the incremental preview must be pixel-identical.
+            let committed = s.annotations.committed().to_vec();
+            let draft = s.annotations.raster_draft_shape().cloned().unwrap();
+            let cache = s.filter_preview.borrow();
+            let original = cache.as_ref().unwrap();
+            let mut pixels = original.original.rgba.clone();
+            crate::annotation::Annotations::rasterize_shapes(
+                committed.iter().chain(std::iter::once(&draft)),
+                &mut pixels,
+                original.original.width,
+                original.original.height,
+                original.original.bounds.origin,
+                original.original.scale,
+            );
+            let expected = crate::render_image::rgba_to_render_image(
+                pixels,
+                original.original.width,
+                original.original.height,
+            );
+            assert_eq!(preview.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
+        });
+    }
+
+    #[gpui_kit::test]
     fn lens_option_changes_keep_the_completed_frame_until_replacement(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -1050,7 +1239,10 @@ mod tests {
                     s.request_filtered_preview("left", cx).is_some(),
                     "{kind:?} cleared the frame"
                 );
-                assert!(s.preview_busy);
+                // Move drags replay synchronously over the split plane;
+                // the retired per-frame worker is the bug this test
+                // guards against.
+                assert!(!s.preview_busy, "{kind:?} spawned a drag worker");
                 s.pointer_move("left", destination - point(px(5.), px(5.)), false);
                 assert!(s.request_filtered_preview("left", cx).is_some());
                 s.pointer_up("left", destination, false);

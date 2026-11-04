@@ -106,7 +106,7 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
             });
             window.draw(cx).clear(cx);
             let (_, image) = session.read(cx).filtered_preview("screen").unwrap();
-            assert!(window.has_image_atlas_entry(&image));
+            assert!(window.has_image_atlas_entry(&image), "frame {i}");
             if let Some(old) = previous.take()
                 && old.id != image.id
             {
