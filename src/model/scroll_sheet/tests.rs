@@ -928,110 +928,107 @@ fn all_moving_bands_keep_the_full_frame_in_the_score() {
     assert_eq!(s.motion.weights, ALL_BANDS);
 }
 
-/// One independently repainted strip models thumbnail/hover changes in
-/// an otherwise scrolling list. Its row means already drop out of the
-/// candidate ranking; pixel verification must tolerate the same strip.
-fn repainted_list(top: u32, changed_bands: &[usize]) -> Vec<u8> {
-    const WIDTH: u32 = 320;
-    const HEIGHT: u32 = 400;
-    let profile = RowProfile::from_rgba(&sidebar_frame(0), WIDTH, HEIGHT);
-    let mut rgba = Vec::with_capacity((WIDTH * HEIGHT * 4) as usize);
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            let changed = changed_bands.iter().any(|&band| {
-                let (start, end) = profile.bands[band];
-                (WIDTH as usize / 8 + start..WIDTH as usize / 8 + end).contains(&(x as usize))
-            });
-            rgba.extend_from_slice(&source_row(if changed {
-                50_000 + y + top * 7
-            } else {
-                top + y
-            }));
+/// Opaque cards/text scroll over a textured, screen-fixed backdrop, as
+/// on translucent browser pages. No real browsing data is embedded.
+fn backdrop_foreground(x: u32, y: u32) -> Option<[u8; 4]> {
+    let line = y % 96;
+    if (40..148).contains(&x) && (8..76).contains(&line) {
+        Some(source_row(y.wrapping_mul(317).wrapping_add(x)))
+    } else if (164..300).contains(&x)
+        && (16..36).contains(&line)
+        && !(x / 3 + line / 3).is_multiple_of(4)
+    {
+        Some([238, 238, 238, 255])
+    } else {
+        None
+    }
+}
+
+fn backdrop_list(top: u32) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(320 * 400 * 4);
+    for y in 0..400 {
+        for x in 0..320 {
+            let background = 15 + (ink_hash(x, y) % 55) as u8;
+            frame.extend_from_slice(
+                &backdrop_foreground(x, top + y)
+                    .unwrap_or([background, background, background, 255]),
+            );
         }
     }
-    rgba
+    frame
 }
 
 #[test]
-fn one_repainted_list_band_does_not_stall_pixel_verification() {
-    const WIDTH: u32 = 320;
-    const HEIGHT: u32 = 400;
-    let seed = repainted_list(0, &[2]);
-    let profile = RowProfile::from_rgba(&seed, WIDTH, HEIGHT);
-    let (start, end) = profile.bands[2];
-    let changed = WIDTH as usize / 8 + start..WIDTH as usize / 8 + end;
-    let mut sheet = ScrollSheet::new(WIDTH, HEIGHT, &seed, SheetLimits::default()).unwrap();
-    for top in [20, 40, 60, 40, 0] {
-        let result = sheet.push(&repainted_list(top, &[2]));
+fn textured_fixed_backdrop_does_not_stop_scrolling_cards() {
+    let mut sheet =
+        ScrollSheet::new(320, 400, &backdrop_list(160), SheetLimits::default()).unwrap();
+    let (mut minimum, mut maximum) = (160, 160);
+    for top in [180, 220, 160, 100, 40] {
+        let result = sheet.push(&backdrop_list(top));
         assert!(
-            matches!(result, Fold::GrewBottom { .. } | Fold::Shifted { .. }),
+            matches!(
+                result,
+                Fold::GrewBottom { .. } | Fold::GrewTop { .. } | Fold::Shifted { .. }
+            ),
             "top {top}: {result:?}"
         );
-        assert_eq!(sheet.viewport_span(), (top, HEIGHT));
+        minimum = minimum.min(top);
+        maximum = maximum.max(top);
+        assert_eq!(sheet.viewport_span(), (top - minimum, 400));
+        assert_eq!(sheet.dimensions(), (320, 400 + maximum - minimum));
         for y in 0..sheet.dimensions().1 {
-            for x in 0..WIDTH as usize {
-                if changed.contains(&x) {
-                    continue;
+            for x in 0..320 {
+                if let Some(expected) = backdrop_foreground(x, minimum + y) {
+                    let i = ((y * 320 + x) * 4) as usize;
+                    assert_eq!(&sheet.canvas()[i..i + 4], &expected, "{top}: {x},{y}");
                 }
-                let i = (y as usize * WIDTH as usize + x) * 4;
-                assert_eq!(
-                    &sheet.canvas()[i..i + 4],
-                    &source_row(y),
-                    "unaffected content at {x},{y}, top {top}"
-                );
             }
         }
     }
-    assert_eq!(sheet.dimensions(), (WIDTH, HEIGHT + 60));
+    assert!(sheet.fixed_backdrop);
 }
 
 #[test]
-fn two_repainted_list_bands_still_refuse_without_changing_canvas() {
-    let seed = repainted_list(0, &[2, 5]);
+fn fixed_backdrop_does_not_authorize_an_unrelated_foreground() {
+    let seed = backdrop_list(0);
     let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
-    for top in [20, 40, 60] {
-        assert!(matches!(
-            sheet.push(&repainted_list(top, &[2, 5])),
-            Fold::Refused(_)
-        ));
-        assert_eq!(sheet.viewport_span(), (0, 400));
-        assert_eq!(sheet.canvas(), seed);
-    }
-}
-
-#[test]
-fn outlier_exclusion_cannot_switch_columns_halfway_through_the_overlap() {
-    let seed = repainted_list(0, &[]);
-    let mut frame = repainted_list(20, &[2]);
-    let other = repainted_list(20, &[5]);
-    let halfway = 320 * 200 * 4;
-    frame[halfway..].copy_from_slice(&other[halfway..]);
-    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
-    assert!(matches!(sheet.push(&frame), Fold::Refused(_)));
+    assert!(matches!(
+        sheet.push(&backdrop_list(10_000)),
+        Fold::Refused(_) | Fold::Still
+    ));
     assert_eq!(sheet.canvas(), seed);
     assert_eq!(sheet.viewport_span(), (0, 400));
 }
 
 #[test]
-fn outlier_retry_keeps_periodic_content_ambiguous() {
-    let profile = RowProfile::from_rgba(&repainted_list(0, &[2]), 320, 400);
-    let (start, end) = profile.bands[2];
-    let changed = 40 + start..40 + end;
-    let periodic = |top| {
-        let mut frame = repainted_list(top, &[2]);
+fn fixed_backdrop_does_not_resolve_periodic_foreground_ambiguity() {
+    let repeated = |top| {
+        let mut frame = backdrop_list(top);
         for y in 0..400 {
             for x in 0..320 {
-                if !changed.contains(&x) {
-                    let i = (y * 320 + x) * 4;
-                    frame[i..i + 4].copy_from_slice(&source_row((top + y as u32) % 16));
+                if let Some(pixel) = backdrop_foreground(x, (top + y) % 96) {
+                    let i = ((y * 320 + x) * 4) as usize;
+                    frame[i..i + 4].copy_from_slice(&pixel);
                 }
             }
         }
         frame
     };
-    let seed = periodic(0);
+    let seed = repeated(0);
     let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
-    assert_eq!(sheet.push(&periodic(20)), Fold::Refused(Refusal::Unclear));
+    assert_eq!(sheet.push(&repeated(20)), Fold::Refused(Refusal::Unclear));
+    assert_eq!(sheet.canvas(), seed);
+}
+
+#[test]
+fn fixed_backdrop_does_not_hide_conflicting_foreground_motion() {
+    let seed = backdrop_list(0);
+    let mut frame = backdrop_list(20);
+    let other = backdrop_list(80);
+    let halfway = 320 * 200 * 4;
+    frame[halfway..].copy_from_slice(&other[halfway..]);
+    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
+    assert!(matches!(sheet.push(&frame), Fold::Refused(_) | Fold::Still));
     assert_eq!(sheet.canvas(), seed);
 }
 

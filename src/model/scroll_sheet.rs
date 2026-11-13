@@ -138,7 +138,7 @@
 //! exercise the complete pipeline through [`ScrollSheet::push`].
 
 use floating::FloatingOverlays;
-use matcher::{Placement, estimate_offset};
+use matcher::{OffsetEstimate, Placement, estimate_offset};
 use profile::{MotionMask, RowProfile};
 use sidebar::Sidebar;
 use std::io::Write as _;
@@ -420,6 +420,9 @@ pub(crate) struct ScrollSheet {
     last_dy: i32,
     /// Confirmed lateral displacement relative to the seed document.
     horizontal_offset: i32,
+    /// A textured screen-fixed backdrop has no document-row translation.
+    /// Refresh complete observed rows without local occlusion repair.
+    fixed_backdrop: bool,
     /// Diagnostics for the scroll loop's logs / progress UI.
     frames_pushed: usize,
     frames_accepted: usize,
@@ -505,6 +508,7 @@ impl ScrollSheet {
             motion: MotionMask::default(),
             last_dy: 0,
             horizontal_offset: 0,
+            fixed_backdrop: false,
             frames_pushed: 1,
             frames_accepted: 1,
             top_shifts: 0,
@@ -556,6 +560,7 @@ impl ScrollSheet {
         self.motion = MotionMask::default();
         self.last_dy = 0;
         self.horizontal_offset = 0;
+        self.fixed_backdrop = false;
         self.state = ViewportState::default();
         self.axis = axis;
         self.top_shifts = self.top_shifts.saturating_add(1);
@@ -841,7 +846,8 @@ impl ScrollSheet {
                 // A late column repaint can recover while the body is idle.
                 // Refresh that column alone and invalidate the preview cache.
                 let height = self.height();
-                if let Some(sidebar) = &mut self.sidebar
+                if !self.fixed_backdrop
+                    && let Some(sidebar) = &mut self.sidebar
                     && sidebar.is_incomplete()
                 {
                     sidebar.observe(
@@ -875,6 +881,13 @@ impl ScrollSheet {
             > self.options.max_height as u64
         {
             return Fold::Refused(Refusal::TooTall);
+        }
+
+        if self.fixed_backdrop || estimate.foreground {
+            self.fixed_backdrop = true;
+            self.sidebar = None;
+            self.place_over_backdrop(frame, next.position as usize, branch, growth);
+            return self.accept(profile, &estimate, next, branch, growth);
         }
 
         let had_floating = !self.floating.is_empty();
@@ -1015,6 +1028,36 @@ impl ScrollSheet {
         self.floating
             .frame_edge
             .composite(&mut self.canvas, frame, next.position as usize);
+        self.accept(profile, &estimate, next, branch, growth)
+    }
+
+    /// A fixed backdrop is not a collection of occluding controls. Repairing
+    /// its stationary edges in document coordinates makes a patchwork. Keep
+    /// whole observed rows instead. Refreshing the latest viewport also
+    /// replaces transient hover/status chrome once the page exposes it.
+    fn place_over_backdrop(&mut self, frame: &[u8], position: usize, branch: Branch, growth: u32) {
+        let row = self.width as usize * 4;
+        let bytes = growth as usize * self.width as usize * 4;
+        let len = self.canvas.len();
+        if bytes > 0 {
+            self.canvas.resize(len + bytes, 0);
+            if branch == Branch::Above {
+                self.canvas.copy_within(..len, bytes);
+                self.top_shifts = self.top_shifts.saturating_add(1);
+            }
+        }
+        self.canvas[position * row..position * row + frame.len()].copy_from_slice(frame);
+        self.top_shifts = self.top_shifts.saturating_add(1);
+    }
+
+    fn accept(
+        &mut self,
+        profile: &RowProfile,
+        estimate: &OffsetEstimate,
+        next: ViewportState,
+        branch: Branch,
+        growth: u32,
+    ) -> Fold {
         self.state = next;
         self.frames_accepted += 1;
         // A non-seed frame has entered the canvas; the axis can no
@@ -1024,7 +1067,7 @@ impl ScrollSheet {
         // The accepted frame is the new stable base (see `place`).
         self.stable_profile = profile.clone();
         sheet_log(&format!(
-            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} seed_top={} prefix={}",
+            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} seed_top={} prefix={} fixed_backdrop={}",
             self.frames_pushed,
             estimate.dy,
             estimate.cost,
@@ -1033,6 +1076,7 @@ impl ScrollSheet {
             self.sticky.top,
             self.sticky.seed_top,
             self.sticky.prefix,
+            self.fixed_backdrop,
         ));
         match branch {
             Branch::Below => Fold::GrewBottom {

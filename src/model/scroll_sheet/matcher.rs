@@ -20,6 +20,8 @@ pub(super) struct OffsetEstimate {
     /// right at this edge reads as "the motion was bigger than the
     /// window", not as "the content changed" (see `classify`).
     pub(super) window: i32,
+    /// Moving pixels agree while a textured backdrop stays in screen coordinates.
+    pub(super) foreground: bool,
 }
 
 /// One matcher verdict against a specific comparison base (see
@@ -119,9 +121,7 @@ fn band_cost(
 /// The exact signal that decides a match: per-row pixel MAD over the
 /// step grid, weighted by row evidence and trimmed at the expensive end
 /// (fixed edge chrome misaligns under every translation, and dropping the
-/// worst rows absorbs it). On a retry, one outlier column band can be
-/// excluded across the entire overlap, matching the ranking stage's
-/// tolerance for a localized repaint. `None` when the overlap holds too little
+/// worst rows absorbs it). `None` when the overlap holds too little
 /// evidence to judge — see [`MIN_EVIDENCE_ROWS`].
 fn row_cost(
     prev: &RowProfile,
@@ -130,19 +130,13 @@ fn row_cost(
     weights: &BandWeights,
     trim_top: i32,
     trim_bot: i32,
-    outlier_limit: Option<f32>,
 ) -> Option<f32> {
     let h = prev.height.min(cur.height) as i32;
     let (first, end) = overlap_window(h, d, trim_top, trim_bot);
     let first = first.div_ceil(cur.step) * cur.step;
     let stride = cur.stride;
-    let widths = cur.bands.map(|(start, stop)| stop - start);
-    // Keep the per-band residuals until one coherent exclusion can be
-    // chosen. Dropping a different band on every row could hide a tear
-    // spread over several columns and admit an incorrect translation.
-    let mut rows: Vec<([u32; BAND_COUNT], f32)> = Vec::with_capacity(16);
-    let mut totals = [0.0f32; BAND_COUNT];
-    let mut evidence = 0.0f32;
+    // (cost, evidence weight) per sampled row.
+    let mut row_sums: Vec<(f32, f32)> = Vec::with_capacity(16);
     let mut j = first;
     while j < end {
         let w = cur.row_weight[j].min(prev.row_weight[(j as i32 + d) as usize]);
@@ -150,7 +144,8 @@ fn row_cost(
             j += cur.step;
             continue;
         }
-        let mut sums = [0u32; BAND_COUNT];
+        let mut sum = 0u32;
+        let mut width = 0usize;
         for (band, &weight) in weights.iter().enumerate() {
             if weight <= 0.0 {
                 continue;
@@ -159,51 +154,33 @@ fn row_cost(
             let c = &cur.data[j * stride + start..j * stride + stop];
             let p = &prev.data
                 [(j as i32 + d) as usize * stride + start..(j as i32 + d) as usize * stride + stop];
-            sums[band] = c
+            sum += c
                 .iter()
                 .zip(p.iter())
                 .map(|(a, b)| u32::from(a.abs_diff(*b)))
                 .sum::<u32>();
-            totals[band] += w * sums[band] as f32 / widths[band] as f32;
+            width += stop - start;
         }
-        rows.push((sums, w));
-        evidence += w;
+        if width == 0 {
+            // Defensive: a mask that zeroed every band is meaningless;
+            // fall back to the full interior row.
+            let c = &cur.data[j * stride..(j + 1) * stride];
+            let p =
+                &prev.data[(j as i32 + d) as usize * stride..(j as i32 + d + 1) as usize * stride];
+            sum = c
+                .iter()
+                .zip(p.iter())
+                .map(|(a, b)| u32::from(a.abs_diff(*b)))
+                .sum();
+            width = stride;
+        }
+        row_sums.push((sum as f32 / width as f32, w));
         j += cur.step;
     }
-    let n = rows.len();
+    let n = row_sums.len();
     if n < MIN_EVIDENCE_ROWS {
         return None;
     }
-    let mut active: Vec<usize> = (0..BAND_COUNT)
-        .filter(|&band| weights[band] > 0.0)
-        .collect();
-    if let Some(limit) = outlier_limit {
-        if active.len() < 4 || evidence <= 0.0 {
-            return None;
-        }
-        let worst = active
-            .iter()
-            .copied()
-            .max_by(|&a, &b| totals[a].total_cmp(&totals[b]))?;
-        active.retain(|&band| band != worst);
-        // The remaining columns must independently support this offset.
-        // Averaging several damaged bands down to the threshold would
-        // turn a local-repaint fallback into broad mismatch tolerance.
-        if active.iter().any(|&band| totals[band] / evidence > limit) {
-            return None;
-        }
-    }
-    let width: usize = active.iter().map(|&band| widths[band]).sum();
-    if width == 0 {
-        return None;
-    }
-    let mut row_sums: Vec<(f32, f32)> = rows
-        .into_iter()
-        .map(|(sums, w)| {
-            let sum: u32 = active.iter().map(|&band| sums[band]).sum();
-            (sum as f32 / width as f32, w)
-        })
-        .collect();
     let keep = n - n / 7;
     row_sums.select_nth_unstable_by(keep - 1, |a, b| a.0.total_cmp(&b.0));
     row_sums.truncate(keep);
@@ -376,11 +353,11 @@ pub(super) fn estimate_offset(
     }
     let mut best: Option<(i32, f32)> = None;
     let mut evaluated: Vec<(i32, f32)> = Vec::with_capacity(shortlist.len());
-    for &d in &shortlist {
+    for d in shortlist {
         // `None` = the overlap holds too little evidence to judge this
         // offset at all (a blank seam): it is not a candidate, and it is
         // not a runner-up either.
-        let Some(cost) = row_cost(prev, cur, d, weights, trim_top, trim_bot, None) else {
+        let Some(cost) = row_cost(prev, cur, d, weights, trim_top, trim_bot) else {
             continue;
         };
         evaluated.push((d, cost));
@@ -388,44 +365,18 @@ pub(super) fn estimate_offset(
             best = Some((d, cost));
         }
     }
-    // Keep ordinary matches (including their ambiguity checks) exactly
-    // as before. Only a failed pixel verification may use the same
-    // one-band outlier tolerance as the cheap ranking stage. Inspired
-    // by Mark Shot's trimmed band score, without replacing pixel checks
-    // with row means or changing the accepted position anchor.
-    if best.is_some_and(|(_, cost)| cost > options.cost_threshold) {
-        let recovered: Vec<(i32, f32)> = shortlist
-            .iter()
-            .filter_map(|&d| {
-                row_cost(
-                    prev,
-                    cur,
-                    d,
-                    weights,
-                    trim_top,
-                    trim_bot,
-                    // Retain weaker competitors in the runner-up cost;
-                    // filtering them out would manufacture confidence.
-                    Some(f32::INFINITY),
-                )
-                .map(|cost| (d, cost))
-            })
-            .collect();
-        if let Some(candidate) = recovered.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1))
-            && row_cost(
-                prev,
-                cur,
-                candidate.0,
-                weights,
-                trim_top,
-                trim_bot,
-                Some(options.cost_threshold),
-            )
-            .is_some()
-        {
-            best = Some(candidate);
-            evaluated = recovered;
-        }
+    // A fixed backdrop can supply a deceptively confident ordinary match.
+    // Validate foreground motion independently before accepting its position.
+    if let Some(candidate) = foreground::estimate(
+        prev,
+        cur,
+        weights,
+        (trim_top, trim_bot),
+        prediction,
+        max_admissible,
+    ) && candidate.cost <= options.cost_threshold
+    {
+        return Some(candidate);
     }
     let (best_dy, best_cost) = best?;
     let runner_up = evaluated
@@ -439,5 +390,8 @@ pub(super) fn estimate_offset(
         cost: best_cost,
         runner_up,
         window: max_admissible,
+        foreground: false,
     })
 }
+
+mod foreground;
