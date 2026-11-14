@@ -25,13 +25,8 @@ gpui_kit::actions!([
     OpenSettings
 ]);
 
-/// The configurable overlay commands: `(settings id, factory
-/// keystroke)`, in display order. The settings page lists these;
-/// settings.toml `[keys]` overrides entries by id. `escape` (quit the
-/// overlay) and `enter` (secondary copy) stay fixed conventions and
-/// are deliberately not listed — the escape hatch must survive every
-/// rebinding, and the recorder refuses both anyway ([`RESERVED_KEYS`]).
-pub const CONFIGURABLE_KEYS: &[(&str, &str)] = &[
+/// Capture & exit shortcuts: `(settings id, factory keystroke)`, in display order.
+pub const CAPTURE_KEYS: &[(&str, &str)] = &[
     ("copy", "ctrl-c"),
     ("save", "ctrl-s"),
     ("pin", "ctrl-p"),
@@ -43,6 +38,63 @@ pub const CONFIGURABLE_KEYS: &[(&str, &str)] = &[
     // the conventional accelerator; the toolbar's gear button
     // dispatches the same action
     ("settings", "ctrl-,"),
+];
+
+/// Annotation tool & canvas-editing shortcuts: `(settings id, factory keystroke)`.
+pub const ANNOTATION_KEYS: &[(&str, &str)] = &[
+    ("tool_select", "v"),
+    ("tool_rectangle", "r"),
+    ("tool_ellipse", "e"),
+    ("tool_line", "l"),
+    ("tool_polyline", "p"),
+    ("tool_arrow", "a"),
+    ("tool_number", "n"),
+    ("tool_pencil", "b"),
+    ("tool_highlighter", "h"),
+    ("tool_mosaic", "m"),
+    ("tool_magnifier", "g"),
+    ("tool_spotlight", "shift-h"),
+    ("tool_eraser", "d"),
+    ("tool_text", "t"),
+    ("undo", "ctrl-z"),
+    ("redo", "ctrl-y"),
+    ("delete", "delete"),
+    ("clear", "ctrl-shift-delete"),
+];
+
+/// Every configurable overlay command: `(settings id, factory
+/// keystroke)`, in display order (`CAPTURE_KEYS` followed by
+/// `ANNOTATION_KEYS`). The settings page lists these; settings.toml
+/// `[keys]` overrides entries by id. `escape` (quit the overlay) and
+/// `enter` (secondary copy) stay fixed conventions and are deliberately
+/// not listed — the escape hatch must survive every rebinding, and the
+/// recorder refuses both anyway ([`RESERVED_KEYS`]).
+pub const CONFIGURABLE_KEYS: &[(&str, &str)] = &[
+    ("copy", "ctrl-c"),
+    ("save", "ctrl-s"),
+    ("pin", "ctrl-p"),
+    ("ocr", "ctrl-o"),
+    ("scroll", "ctrl-l"),
+    ("select_screen", "ctrl-a"),
+    ("settings", "ctrl-,"),
+    ("tool_select", "v"),
+    ("tool_rectangle", "r"),
+    ("tool_ellipse", "e"),
+    ("tool_line", "l"),
+    ("tool_polyline", "p"),
+    ("tool_arrow", "a"),
+    ("tool_number", "n"),
+    ("tool_pencil", "b"),
+    ("tool_highlighter", "h"),
+    ("tool_mosaic", "m"),
+    ("tool_magnifier", "g"),
+    ("tool_spotlight", "shift-h"),
+    ("tool_eraser", "d"),
+    ("tool_text", "t"),
+    ("undo", "ctrl-z"),
+    ("redo", "ctrl-y"),
+    ("delete", "delete"),
+    ("clear", "ctrl-shift-delete"),
 ];
 
 /// Keystrokes the shortcut editor refuses (the overlay's
@@ -138,10 +190,10 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         KeyBinding::new("escape", ClosePin, Some("ShotoriPin")),
         KeyBinding::new("enter", ClosePin, Some("ShotoriPinMenu")),
     ]);
-    // The configurable commands last: main binds these after
-    // init_annotation_keybindings, and the keymap resolves
+    bind_fixed_annotation_keys(cx);
+    // The configurable commands last: the keymap resolves
     // later-registered bindings first — a user override must be able
-    // to shadow a plain-key annotation binding.
+    // to shadow secondary convenience aliases (backspace, ctrl-shift-z).
     //
     // Resolved into a Vec first: `KeyBinding::load` takes `&App` while
     // `cx.bind_keys` holds the mutable borrow for the duration of the
@@ -176,6 +228,24 @@ fn overlay_action(id: &str) -> Option<Box<dyn Action>> {
         "scroll" => Box::new(ScrollSelection),
         "select_screen" => Box::new(SelectScreen),
         "settings" => Box::new(OpenSettings),
+        "tool_select" => Box::new(ToggleSelect),
+        "tool_rectangle" => Box::new(ToggleRectangle),
+        "tool_ellipse" => Box::new(ToggleEllipse),
+        "tool_line" => Box::new(ToggleLine),
+        "tool_polyline" => Box::new(TogglePolyline),
+        "tool_arrow" => Box::new(ToggleArrow),
+        "tool_number" => Box::new(ToggleNumber),
+        "tool_pencil" => Box::new(TogglePencil),
+        "tool_highlighter" => Box::new(ToggleHighlighter),
+        "tool_mosaic" => Box::new(ToggleMosaic),
+        "tool_magnifier" => Box::new(ToggleMagnifier),
+        "tool_spotlight" => Box::new(ToggleSpotlight),
+        "tool_eraser" => Box::new(ToggleEraser),
+        "tool_text" => Box::new(ToggleText),
+        "undo" => Box::new(UndoAnnotation),
+        "redo" => Box::new(RedoAnnotation),
+        "delete" => Box::new(DeleteAnnotation),
+        "clear" => Box::new(ClearAnnotations),
         _ => return None,
     })
 }
@@ -282,11 +352,9 @@ pub fn resolve_keys(
     errors: &mut Vec<String>,
 ) -> BTreeMap<String, String> {
     let mut keys = default_keys();
-    // keystroke → id, to keep two commands off one binding (the
-    // keymap would silently let one shadow the other)
-    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut valid: Vec<(&str, &str, &str)> = Vec::new();
     for (id, keystroke) in overrides {
-        let Some(factory) = keys.get(id) else {
+        let Some(&(static_id, factory)) = CONFIGURABLE_KEYS.iter().find(|(k, _)| *k == id) else {
             errors.push(format!(
                 "{}: unknown shortcut {id:?} (skipped; known ids: {})",
                 path.display(),
@@ -308,17 +376,73 @@ pub fn resolve_keys(
             ));
             continue;
         }
-        if let Some(other) = claimed.get(keystroke.as_str()) {
+        valid.push((static_id, keystroke.as_str(), factory));
+    }
+    // keystroke → id, to keep two commands off one binding (including
+    // clashes between a partial `[keys]` table and untouched defaults).
+    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+    for &(id, factory) in CONFIGURABLE_KEYS {
+        if !valid.iter().any(|(vid, _, _)| *vid == id) {
+            claimed.insert(factory, id);
+        }
+    }
+    for (id, keystroke, factory) in valid {
+        if let Some(&other) = claimed.get(keystroke) {
             errors.push(format!(
                 "{}: shortcuts {id} and {other} share {keystroke:?} — {id} keeps {factory:?}",
                 path.display()
             ));
+            claimed.insert(factory, id);
             continue;
         }
         claimed.insert(keystroke, id);
-        keys.insert(id.clone(), keystroke.clone());
+        keys.insert(id.to_owned(), keystroke.to_owned());
     }
     keys
+}
+
+/// Human-facing chord: `"ctrl-,"` → `"Ctrl+,"`, `"alt-escape"` →
+/// `"Alt+Esc"`. Parses first so the `-` key (`"ctrl--"`) splits right.
+pub fn pretty_keystroke(keystroke: &str) -> String {
+    let Ok(parsed) = parse_keystroke(keystroke) else {
+        return keystroke.to_owned();
+    };
+    let m = &parsed.modifiers;
+    let mut parts: Vec<String> = Vec::new();
+    if m.control {
+        parts.push("Ctrl".into());
+    }
+    if m.alt {
+        parts.push("Alt".into());
+    }
+    if m.platform {
+        parts.push("Super".into());
+    }
+    if m.shift {
+        parts.push("Shift".into());
+    }
+    if m.function {
+        parts.push("Fn".into());
+    }
+    parts.push(pretty_key(&parsed.key));
+    parts.join("+")
+}
+
+fn pretty_key(key: &str) -> String {
+    match key {
+        "escape" => "Esc".into(),
+        "space" => "Space".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        single if single.chars().count() == 1 => single.to_uppercase(),
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        }
+    }
 }
 
 /// All valid shortcut ids, comma-joined for error messages.
@@ -330,12 +454,11 @@ fn known_key_ids() -> String {
         .join(", ")
 }
 
-/// Annotation keybindings ("v" select, "r" rectangle, "e" ellipse, "l"
-/// line, "a" arrow, "m" mosaic, "h" highlighter, "b" pencil, "n"
-/// number, "p" polyline, "t" text, "d" eraser; undo/redo; Ctrl+Shift+Del
-/// clears every placed annotation; Enter finishes a polyline). Also
-/// scoped to `ShotoriOverlay`, plus the PolylineDrawing sub-context.
-pub fn init_annotation_keybindings(cx: &mut App) {
+/// Fixed non-configurable annotation bindings: arrow nudges, sub-context
+/// escape/enter, and secondary convenience aliases (`ctrl-shift-z`,
+/// `backspace`, `ctrl-shift-backspace`). Bound inside [`bind_keys`]
+/// BEFORE `CONFIGURABLE_KEYS` so user overrides shadow them cleanly.
+fn bind_fixed_annotation_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("left", Nudge { dx: -1, dy: 0 }, Some("ShotoriOverlay")),
         KeyBinding::new("right", Nudge { dx: 1, dy: 0 }, Some("ShotoriOverlay")),
@@ -357,40 +480,31 @@ pub fn init_annotation_keybindings(cx: &mut App) {
             Nudge { dx: 0, dy: 10 },
             Some("ShotoriOverlay"),
         ),
-        KeyBinding::new("v", ToggleSelect, Some("ShotoriOverlay")),
-        KeyBinding::new("r", ToggleRectangle, Some("ShotoriOverlay")),
-        KeyBinding::new("e", ToggleEllipse, Some("ShotoriOverlay")),
-        KeyBinding::new("l", ToggleLine, Some("ShotoriOverlay")),
-        KeyBinding::new("a", ToggleArrow, Some("ShotoriOverlay")),
-        KeyBinding::new("d", ToggleEraser, Some("ShotoriOverlay")),
-        KeyBinding::new("shift-h", ToggleSpotlight, Some("ShotoriOverlay")),
-        KeyBinding::new("g", ToggleMagnifier, Some("ShotoriOverlay")),
-        KeyBinding::new("m", ToggleMosaic, Some("ShotoriOverlay")),
-        KeyBinding::new("h", ToggleHighlighter, Some("ShotoriOverlay")),
-        KeyBinding::new("b", TogglePencil, Some("ShotoriOverlay")),
-        KeyBinding::new("t", ToggleText, Some("ShotoriOverlay")),
         KeyBinding::new("escape", EscapeOverlay, Some("ShotoriTextEditing")),
-        KeyBinding::new("n", ToggleNumber, Some("ShotoriOverlay")),
-        KeyBinding::new("p", TogglePolyline, Some("ShotoriOverlay")),
         KeyBinding::new("enter", FinishPolyline, Some("PolylineDrawing")),
-        KeyBinding::new("ctrl-z", UndoAnnotation, Some("ShotoriOverlay")),
-        KeyBinding::new("ctrl-y", RedoAnnotation, Some("ShotoriOverlay")),
         KeyBinding::new("ctrl-shift-z", RedoAnnotation, Some("ShotoriOverlay")),
-        KeyBinding::new("delete", DeleteAnnotation, Some("ShotoriOverlay")),
         KeyBinding::new("backspace", DeleteAnnotation, Some("ShotoriOverlay")),
         // Ctrl+Shift mirrors the Delete/Backspace pair without touching
         // the plain keys' shape-granular delete (issue #15)
-        KeyBinding::new(
-            "ctrl-shift-delete",
-            ClearAnnotations,
-            Some("ShotoriOverlay"),
-        ),
         KeyBinding::new(
             "ctrl-shift-backspace",
             ClearAnnotations,
             Some("ShotoriOverlay"),
         ),
     ]);
+}
+
+/// Factory annotation keybindings for standalone headless tests that do
+/// not call [`bind_keys`]. Production startup uses [`bind_keys`] alone so
+/// user overrides in `[keys]` replace factory tool chords rather than
+/// leaving the factory chord bound alongside the custom one.
+pub fn init_annotation_keybindings(cx: &mut App) {
+    bind_fixed_annotation_keys(cx);
+    let defaults: Vec<KeyBinding> = ANNOTATION_KEYS
+        .iter()
+        .filter_map(|(id, factory)| overlay_binding(cx, id, factory))
+        .collect();
+    cx.bind_keys(defaults);
 }
 
 #[cfg(test)]
@@ -400,8 +514,8 @@ mod tests {
     // test-support feature, and shadowing Rust's #[test] with it
     // recurses the compiler (see the AGENTS.md note).
     use super::{
-        CONFIGURABLE_KEYS, Path, RESERVED_KEYS, default_keys, keystroke_valid, overlay_action,
-        overlay_binding, resolve_keys,
+        ANNOTATION_KEYS, CAPTURE_KEYS, CONFIGURABLE_KEYS, Path, RESERVED_KEYS, default_keys,
+        keystroke_valid, overlay_action, overlay_binding, pretty_keystroke, resolve_keys,
     };
 
     #[test]
@@ -414,6 +528,19 @@ mod tests {
                 "configurable id {id:?} has no action binding"
             );
         }
+        let grouped: Vec<_> = CAPTURE_KEYS
+            .iter()
+            .chain(ANNOTATION_KEYS.iter())
+            .copied()
+            .collect();
+        assert_eq!(
+            grouped.as_slice(),
+            CONFIGURABLE_KEYS,
+            "CAPTURE_KEYS + ANNOTATION_KEYS must match CONFIGURABLE_KEYS"
+        );
+        assert_eq!(pretty_keystroke("ctrl-,"), "Ctrl+,");
+        assert_eq!(pretty_keystroke("shift-h"), "Shift+H");
+        assert_eq!(pretty_keystroke("ctrl-shift-delete"), "Ctrl+Shift+Delete");
     }
 
     #[test]
@@ -459,13 +586,13 @@ mod tests {
     #[test]
     fn resolve_applies_overrides_and_degrades_garbage() {
         let mut overrides = default_keys();
-        overrides.insert("copy".into(), "ctrl-y".into());
+        overrides.insert("copy".into(), "ctrl-b".into());
         overrides.insert("save".into(), "not a key!!".into());
         overrides.insert("legacy".into(), "ctrl-1".into()); // unknown id
         overrides.insert("ocr".into(), "escape".into()); // reserved
         let mut errors = Vec::new();
         let keys = resolve_keys(Path::new("s.toml"), &overrides, &mut errors);
-        assert_eq!(keys.get("copy").unwrap(), "ctrl-y");
+        assert_eq!(keys.get("copy").unwrap(), "ctrl-b");
         assert_eq!(keys.get("save").unwrap(), "ctrl-s", "invalid → default");
         assert_eq!(keys.get("ocr").unwrap(), "ctrl-o", "reserved → default");
         assert_eq!(keys.get("pin").unwrap(), "ctrl-p", "untouched → default");
@@ -473,13 +600,31 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_two_commands_on_one_keystroke() {
+    fn resolve_rejects_two_commands_on_one_keystroke_and_allows_swaps() {
         let mut overrides = default_keys();
         overrides.insert("save".into(), "ctrl-c".into()); // copy keeps ctrl-c
         let mut errors = Vec::new();
         let keys = resolve_keys(Path::new("s.toml"), &overrides, &mut errors);
         assert_eq!(keys.get("save").unwrap(), "ctrl-s");
         assert_eq!(errors.len(), 1);
+
+        // Partial table clashing with an untouched default also warns & degrades
+        let mut partial = std::collections::BTreeMap::new();
+        partial.insert("save".into(), "ctrl-c".into());
+        let mut errors = Vec::new();
+        let keys = resolve_keys(Path::new("s.toml"), &partial, &mut errors);
+        assert_eq!(keys.get("save").unwrap(), "ctrl-s");
+        assert_eq!(errors.len(), 1);
+
+        // Swapping two commands cleanly works without false-positive clash
+        let mut swap = std::collections::BTreeMap::new();
+        swap.insert("copy".into(), "ctrl-s".into());
+        swap.insert("save".into(), "ctrl-c".into());
+        let mut errors = Vec::new();
+        let keys = resolve_keys(Path::new("s.toml"), &swap, &mut errors);
+        assert_eq!(keys.get("copy").unwrap(), "ctrl-s");
+        assert_eq!(keys.get("save").unwrap(), "ctrl-c");
+        assert!(errors.is_empty(), "unexpected swap errors: {errors:?}");
     }
 
     #[test]

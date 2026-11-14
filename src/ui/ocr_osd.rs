@@ -58,6 +58,31 @@ fn spinner() -> impl IntoElement {
     const CENTER: f32 = BOX / 2.;
     const DOT: f32 = 4.;
 
+    let dot = div()
+        .absolute()
+        .size(px(DOT))
+        .rounded(px(DOT / 2.))
+        .bg(rgba(theme::c().accent));
+    let dot: AnyElement = if crate::model::settings::current().capture().reduce_motion {
+        dot.left(px(CENTER - DOT / 2.))
+            .top(px(CENTER - R - DOT / 2.))
+            .into_any_element()
+    } else {
+        dot.with_animation(
+            "shotori-spin",
+            Animation::new(std::time::Duration::from_millis(900))
+                .repeat()
+                .with_max_fps(15.),
+            move |dot, delta| {
+                let a = delta * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                let (dx, dy) = (a.cos() * R, a.sin() * R);
+                dot.left(px(CENTER + dx - DOT / 2.))
+                    .top(px(CENTER + dy - DOT / 2.))
+            },
+        )
+        .into_any_element()
+    };
+
     div()
         .id("shotori-spinner")
         .relative()
@@ -72,25 +97,7 @@ fn spinner() -> impl IntoElement {
                 .border_color(rgba(theme::c().pin_border)),
         )
         // the orbiting dot
-        .child(
-            div()
-                .absolute()
-                .size(px(DOT))
-                .rounded(px(DOT / 2.))
-                .bg(rgba(theme::c().accent))
-                .with_animation(
-                    "shotori-spin",
-                    Animation::new(std::time::Duration::from_millis(900))
-                        .repeat()
-                        .with_max_fps(15.),
-                    move |dot, delta| {
-                        let a = delta * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                        let (dx, dy) = (a.cos() * R, a.sin() * R);
-                        dot.left(px(CENTER + dx - DOT / 2.))
-                            .top(px(CENTER + dy - DOT / 2.))
-                    },
-                ),
-        )
+        .child(dot)
 }
 
 fn window_options(display_id: Option<DisplayId>) -> WindowOptions {

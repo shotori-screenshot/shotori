@@ -113,9 +113,11 @@ pub(super) fn scroll_copy_exit(
     .detach();
 }
 
-/// Native save dialog exit: stash pixels, unmap surfaces, flush Wayland
-/// destroys over a short timer, then quit so `save_dialog::complete_pending`
-/// opens the portal dialog cleanly without layer-shell occlusion.
+/// Save exit: when `export.auto_save` is enabled (and not running under the
+/// headless e2e save-path backdoor), write directly to `[export].save_dir`
+/// without opening a dialog (issue #42); otherwise stash pixels, unmap
+/// surfaces, flush Wayland destroys over a short timer, and quit so
+/// `save_dialog::complete_pending` opens the portal dialog cleanly.
 pub(super) fn scroll_save_exit(
     rgba: &Arc<Vec<u8>>,
     width: u32,
@@ -124,6 +126,28 @@ pub(super) fn scroll_save_exit(
     sibling: Option<AnyWindowHandle>,
     cx: &mut App,
 ) {
+    let debug_save = std::env::var_os("SHOTORI_DEBUG_SAVE_PATH").is_some();
+    if !debug_save && crate::model::settings::current().export().auto_save {
+        let rgba = rgba.clone();
+        cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+        if let Some(sibling) = sibling {
+            drop(sibling.update(cx, |_, window, _| window.remove_window()));
+        }
+        drop(host.update(cx, |_, window, _| window.remove_window()));
+        let work = cx.background_executor().spawn(async move {
+            crate::save_dialog::save_direct_and_notify(width, height, &rgba);
+        });
+        cx.spawn(async move |cx| {
+            work.await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+        return;
+    }
+
     crate::save_dialog::stash(width, height, rgba.to_vec());
     cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
     if let Some(sibling) = sibling {

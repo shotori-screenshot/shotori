@@ -17,6 +17,12 @@ save:
   png_filter:
     en: PNG image
     zh-CN: PNG 图片
+  jpeg_filter:
+    en: JPEG image
+    zh-CN: JPEG 图片
+  webp_filter:
+    en: WebP image
+    zh-CN: WebP 图片
   failed:
     title:
       en: Couldn’t save screenshot
@@ -43,8 +49,17 @@ settings:
       en: Appearance & language
       zh-CN: 外观与语言
     capture:
-      en: Capture & annotation
-      zh-CN: 截图与标注
+      en: Capture & toolbar
+      zh-CN: 截图与工具栏
+    annotation:
+      en: Annotation
+      zh-CN: 标注
+    export:
+      en: Save & export
+      zh-CN: 保存与导出
+    desktop:
+      en: Notifications & pins
+      zh-CN: 通知与贴图
     advanced:
       en: Advanced
       zh-CN: 高级
@@ -139,12 +154,6 @@ settings:
       files:
         en: Config files
         zh-CN: 配置文件
-      selection:
-        en: Selection
-        zh-CN: 选区
-      annotation:
-        en: Annotation
-        zh-CN: 标注
     file:
       open:
         en: Open
@@ -196,6 +205,67 @@ settings:
     settings:
       en: Open settings
       zh-CN: 打开设置
+    tool_select:
+      en: Select / move tool
+      zh-CN: 选择与移动工具
+    tool_rectangle:
+      en: Rectangle tool
+      zh-CN: 矩形工具
+    tool_ellipse:
+      en: Ellipse tool
+      zh-CN: 椭圆工具
+    tool_line:
+      en: Line tool
+      zh-CN: 直线工具
+    tool_polyline:
+      en: Polyline tool
+      zh-CN: 折线工具
+    tool_arrow:
+      en: Arrow tool
+      zh-CN: 箭头工具
+    tool_number:
+      en: Sequence badge tool
+      zh-CN: 序号标注工具
+    tool_pencil:
+      en: Pencil tool
+      zh-CN: 铅笔工具
+    tool_highlighter:
+      en: Highlighter tool
+      zh-CN: 荧光笔工具
+    tool_mosaic:
+      en: Mosaic / blur tool
+      zh-CN: 马赛克 / 模糊工具
+    tool_magnifier:
+      en: Magnifier tool
+      zh-CN: 放大镜工具
+    tool_spotlight:
+      en: Spotlight tool
+      zh-CN: 聚光灯工具
+    tool_eraser:
+      en: Eraser tool
+      zh-CN: 橡皮擦工具
+    tool_text:
+      en: Text tool
+      zh-CN: 文字工具
+    undo:
+      en: Undo annotation
+      zh-CN: 撤销标注
+    redo:
+      en: Redo annotation
+      zh-CN: 重做标注
+    delete:
+      en: Delete selected annotation
+      zh-CN: 删除选中标注
+    clear:
+      en: Clear all annotations
+      zh-CN: 清空全部标注
+    group:
+      capture:
+        en: Capture & exits
+        zh-CN: 截图与导出动作
+      annotation:
+        en: Annotation tools & editing
+        zh-CN: 标注工具与编辑
     record:
       en: Press shortcut
       zh-CN: 按下新的快捷键
@@ -303,6 +373,13 @@ settings:
       body:
         en: Faster for upright text; turn off for rotated text
         zh-CN: 识别更快，旋转文字请关闭
+    join_lines:
+      title:
+        en: Join recognized lines with spaces
+        zh-CN: 将多行识别结果合并为单段
+      body:
+        en: Replace line breaks with spaces before copying recognized text
+        zh-CN: 复制识别结果前将换行符替换为空格，适合粘贴段落文本
   appearance:
     shotori_light:
       en: Shotori Light
@@ -373,6 +450,389 @@ settings:
     reset_colors:
       en: Reset custom colors
       zh-CN: 重置自定义配色
+    reduce_motion:
+      title:
+        en: Reduce motion
+        zh-CN: 减少动态效果
+      body:
+        en: Skip non-essential chrome animations such as loupe fade and OSD orbit
+        zh-CN: 跳过放大镜淡入、识别动画等非必要的界面过渡效果
+  capture:
+    size_label:
+      logical:
+        en: Logical pixels (W × H)
+        zh-CN: 逻辑像素（宽 × 高）
+      physical:
+        en: Physical pixels (W × H px)
+        zh-CN: 物理像素（宽 × 高 px）
+      bounds:
+        en: Position & size (X, Y · W × H)
+        zh-CN: 坐标与尺寸（X, Y · 宽 × 高）
+      hidden:
+        en: Hidden
+        zh-CN: 隐藏
+    loupe_size:
+      small:
+        en: Small (120 px)
+        zh-CN: 小（120 px）
+      medium:
+        en: Medium (160 px)
+        zh-CN: 中（160 px）
+      large:
+        en: Large (220 px)
+        zh-CN: 大（220 px）
+    group:
+      hud:
+        en: Selection & HUD
+        zh-CN: 选区与辅助显示
+      behavior:
+        en: After action
+        zh-CN: 操作后行为
+      scroll:
+        en: Long screenshot
+        zh-CN: 长截图
+    window_snap:
+      title:
+        en: Window snapping
+        zh-CN: 窗口自动吸附
+      body:
+        en: Detect open windows on niri, sway and Hyprland for one-click region selection
+        zh-CN: 在 niri、sway 与 Hyprland 下检测窗口轮廓，支持悬停高亮与单击选中
+    crosshair:
+      title:
+        en: Alignment crosshairs
+        zh-CN: 全屏十字参考线
+      body:
+        en: Draw full-screen guide lines through the pointer before a selection is finalized
+        zh-CN: 框选完成前显示穿过指针的全屏对齐参考线
+    size_label_row:
+      title:
+        en: Size badge readout
+        zh-CN: 选区尺寸标签
+    loupe:
+      title:
+        en: Magnifier loupe
+        zh-CN: 角落放大镜
+      body:
+        en: Show a pixel-grid loupe while dragging corners or handles
+        zh-CN: 拖动选区四角或控制点时显示像素级放大镜
+    loupe_zoom:
+      title:
+        en: Loupe zoom
+        zh-CN: 放大镜倍率
+    loupe_size_row:
+      title:
+        en: Loupe size
+        zh-CN: 放大镜尺寸
+    keep_open_after_copy:
+      title:
+        en: Stay open after copying
+        zh-CN: 复制后保留截图界面
+      body:
+        en: Keep the overlay open after Copy so you can also save, pin or run OCR
+        zh-CN: 复制到剪贴板后不退出截图，方便继续保存、贴图或识别文字
+    keep_open_after_save:
+      title:
+        en: Stay open after direct save
+        zh-CN: 直接保存后保留截图界面
+      body:
+        en: Applies when saving directly to the default folder without a file dialog
+        zh-CN: 开启「直接保存到默认目录」时，保存后不关闭截图界面
+  scroll:
+    axis:
+      vertical:
+        en: Vertical
+        zh-CN: 纵向滚动
+      horizontal:
+        en: Horizontal
+        zh-CN: 横向滚动
+    default_axis:
+      title:
+        en: Default scroll direction
+        zh-CN: 默认滚动方向
+    max_length:
+      title:
+        en: Maximum stitched length
+        zh-CN: 最大拼接长度
+      body:
+        en: Logical pixel cap before long capture stops automatically
+        zh-CN: 达到该逻辑像素长度上限时自动停止长截图
+  annotation:
+    blurb:
+      en: Initial tool colors, sizes and behaviors for each new capture
+      zh-CN: 每次新建截图时的标注工具初始颜色、尺寸与行为
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
+    group:
+      behavior:
+        en: Editing behavior
+        zh-CN: 编辑行为
+      colors:
+        en: Palette & default colors
+        zh-CN: 调色板与默认颜色
+      tools:
+        en: Default tool sizes & styles
+        zh-CN: 工具默认尺寸与样式
+    number_format:
+      decimal:
+        en: Numbers (1, 2, 3)
+        zh-CN: 数字（1, 2, 3）
+      alphabetic:
+        en: Letters (A, B, C)
+        zh-CN: 字母（A, B, C）
+      roman:
+        en: Roman numerals (I, II, III)
+        zh-CN: 罗马数字（I, II, III）
+    palette:
+      title:
+        en: Swatch palette
+        zh-CN: 标注调色板
+      body:
+        en: Click any of the 7 swatches to customize the colors shown in the overlay toolbar
+        zh-CN: 点击任意色块即可自定义截图工具栏中的 7 个常用颜色
+    swatch_n:
+      en: "Swatch %{n}"
+      zh-CN: "色块 %{n}"
+    default_color:
+      title:
+        en: Default drawing color
+        zh-CN: 默认标注颜色
+    highlighter_color:
+      title:
+        en: Default highlighter color
+        zh-CN: 默认荧光笔颜色
+    smooth_pencil:
+      title:
+        en: Smooth freehand pencil strokes
+        zh-CN: 平滑铅笔笔迹
+      body:
+        en: Soften hand jitter on freehand strokes by default
+        zh-CN: 默认对自由手绘线条进行平滑去抖处理
+    stroke_width:
+      title:
+        en: Stroke width
+        zh-CN: 线条与形状粗细
+    arrow_style:
+      title:
+        en: Arrow style
+        zh-CN: 默认箭头样式
+    highlighter_width:
+      title:
+        en: Highlighter brush width
+        zh-CN: 荧光笔宽度
+    highlighter_blend:
+      title:
+        en: Highlighter blend mode
+        zh-CN: 荧光笔混合模式
+    text_size:
+      title:
+        en: Text size
+        zh-CN: 默认文字字号
+    number_size:
+      title:
+        en: Sequence badge size
+        zh-CN: 序号圆标大小
+    number_format_row:
+      title:
+        en: Sequence badge format
+        zh-CN: 序号编码格式
+    mosaic_strength:
+      title:
+        en: Mosaic & blur strength
+        zh-CN: 马赛克与模糊强度
+    eraser_size:
+      title:
+        en: Eraser diameter
+        zh-CN: 橡皮擦直径
+    spotlight_opacity:
+      title:
+        en: Spotlight backdrop opacity
+        zh-CN: 聚光灯背景暗度
+    magnifier_zoom:
+      title:
+        en: Magnifier lens zoom
+        zh-CN: 放大镜标注倍率
+  export:
+    blurb:
+      en: Default folder, direct save without a dialog, filename pattern and image encoding
+      zh-CN: 默认保存位置、免弹窗一键直存、文件名模板与图片编码格式
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
+    group:
+      location:
+        en: Destination & workflow
+        zh-CN: 保存位置与流程
+      naming:
+        en: Filename
+        zh-CN: 文件命名
+      encoding:
+        en: Format & quality
+        zh-CN: 图片格式与压缩
+    format:
+      png:
+        en: PNG (lossless)
+        zh-CN: PNG（无损）
+      jpeg:
+        en: JPEG
+        zh-CN: JPEG
+      webp:
+        en: WebP (lossless)
+        zh-CN: WebP（无损）
+    png_compression:
+      fast:
+        en: Fast
+        zh-CN: 快速
+      balanced:
+        en: Balanced
+        zh-CN: 均衡
+      best:
+        en: Smallest file
+        zh-CN: 最高压缩
+    save_dir:
+      title:
+        en: Default save folder
+        zh-CN: 默认保存目录
+      browse:
+        en: Choose folder…
+        zh-CN: 选择文件夹…
+      pick_title:
+        en: Choose default screenshot folder
+        zh-CN: 选择默认截图保存目录
+      reset:
+        en: Default
+        zh-CN: 默认
+    auto_save:
+      title:
+        en: Save directly to default folder
+        zh-CN: 点击保存时直接存入默认目录
+      body:
+        en: Skip the file dialog when clicking Save or pressing the save shortcut
+        zh-CN: 点击保存按钮或按保存快捷键时跳过文件选择弹窗，直接写入默认目录
+    remember_last_dir:
+      title:
+        en: Remember last dialog folder
+        zh-CN: 记住上次弹窗选择的目录
+      body:
+        en: When the save dialog opens, start in the folder chosen last time instead of the default folder
+        zh-CN: 使用文件保存弹窗时，默认打开上一次保存所选的目录
+    copy_on_save:
+      title:
+        en: Also copy to clipboard when saving
+        zh-CN: 保存文件时同时复制到剪贴板
+      body:
+        en: Put the saved screenshot on the clipboard automatically
+        zh-CN: 每次将截图保存为文件时，自动复制一份到剪贴板
+    filename_template:
+      title:
+        en: Filename template
+        zh-CN: 文件名模板
+      hint:
+        en: "Supports strftime tokens (%Y, %m, %d, %H, %M, %S, %3f) and {w}, {h} for image dimensions"
+        zh-CN: "支持时间占位符（%Y、%m、%d、%H、%M、%S、%3f）以及宽高变量 {w}、{h}"
+      preview:
+        en: "Preview: %{name}"
+        zh-CN: "预览：%{name}"
+      invalid:
+        en: "Invalid template: %{reason}"
+        zh-CN: "模板无效：%{reason}"
+    format_row:
+      title:
+        en: Image format
+        zh-CN: 默认图片格式
+      body:
+        en: Clipboard and stdout exports always use lossless PNG
+        zh-CN: 剪贴板与标准输出始终使用无损 PNG
+    png_compression_row:
+      title:
+        en: PNG compression
+        zh-CN: PNG 压缩级别
+    jpeg_quality:
+      title:
+        en: JPEG quality
+        zh-CN: JPEG 质量
+  desktop:
+    blurb:
+      en: Desktop toast notifications and floating pin window behavior
+      zh-CN: 桌面气泡通知与悬浮贴图窗口行为
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
+  notify:
+    group:
+      en: Notifications
+      zh-CN: 桌面通知
+    enabled:
+      title:
+        en: Enable desktop notifications
+        zh-CN: 启用桌面通知
+      body:
+        en: Show toast banners for completed actions and errors
+        zh-CN: 在操作完成或发生错误时显示系统通知横幅
+    on_copy:
+      title:
+        en: Notify after copying image
+        zh-CN: 复制截图后通知
+    on_save:
+      title:
+        en: Notify after saving file
+        zh-CN: 保存文件后通知
+    on_ocr:
+      title:
+        en: Notify after copying OCR text
+        zh-CN: OCR 复制文字后通知
+    show_thumbnail:
+      title:
+        en: Include image preview
+        zh-CN: 在通知中显示缩略图
+    timeout_secs:
+      title:
+        en: Notification timeout
+        zh-CN: 通知停留时间
+      unit:
+        en: "%{secs} s"
+        zh-CN: "%{secs} 秒"
+  pin:
+    group:
+      en: Floating pins
+      zh-CN: 悬浮贴图
+    zoom_modifier:
+      none:
+        en: Wheel directly (no modifier)
+        zh-CN: 直接滚轮缩放（无修饰键）
+      ctrl:
+        en: Hold Ctrl + wheel
+        zh-CN: 按住 Ctrl + 滚轮
+      alt:
+        en: Hold Alt + wheel
+        zh-CN: 按住 Alt + 滚轮
+      shift:
+        en: Hold Shift + wheel
+        zh-CN: 按住 Shift + 滚轮
+    zoom_modifier_row:
+      title:
+        en: Wheel zoom shortcut
+        zh-CN: 滚轮缩放触发方式
+    zoom_step:
+      title:
+        en: Zoom step per wheel notch
+        zh-CN: 每次滚轮缩放步进
+    snap_to_edge:
+      title:
+        en: Snap to screen edges
+        zh-CN: 贴近屏幕边缘自动吸附
+      body:
+        en: Magnetically align pins within 10 px of an output edge while dragging
+        zh-CN: 拖动贴图靠近屏幕边缘 10 px 内时自动对齐吸附
+    show_border:
+      title:
+        en: Show border frame
+        zh-CN: 显示贴图边框
+    shadow:
+      title:
+        en: Drop shadow
+        zh-CN: 显示贴图阴影
 pin:
   menu:
     reset_zoom:

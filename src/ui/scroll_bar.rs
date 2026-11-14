@@ -104,7 +104,10 @@ pub(crate) struct ScrollChrome {
 /// BEFORE the overlays unmap — closing every window would end the app
 /// loop with the capture half-started.
 pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> anyhow::Result<()> {
-    let options = SheetLimits::default();
+    let options = SheetLimits {
+        max_height: crate::model::settings::current().scroll().max_length,
+        ..SheetLimits::default()
+    };
     let shared_rect = spec.rect.clone();
     let rect_now = *shared_rect
         .lock()

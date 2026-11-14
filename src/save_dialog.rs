@@ -111,28 +111,41 @@ pub fn quit_after_close(window: &mut Window, cx: &mut App) {
     .detach();
 }
 
-/// Where the dialog starts: `~/Pictures/Shotori` (created on demand — the
-/// portal rejects a non-existent default folder).
+/// Where the dialog starts: last chosen folder when `remember_last_dir` is
+/// enabled, otherwise `[export].save_dir` (`~/Pictures/Shotori` by default,
+/// created on demand because portals reject a non-existent default folder).
 fn default_dir() -> PathBuf {
-    let dir = export::save_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // Best-effort: an unwritable HOME degrades to the portal's own default
-    std::fs::create_dir_all(&dir).ok();
+    let export = crate::model::settings::current().export();
+    let dir = if export.remember_last_dir
+        && let Some(last) = crate::model::settings::read_last_save_dir()
+    {
+        last
+    } else {
+        export
+            .resolved_save_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+    };
+    // Best-effort: an unwritable path degrades to the portal's own default
+    drop(std::fs::create_dir_all(&dir));
     dir
 }
 
-/// Suggested file name, e.g. `Shotori_2026-09-26_18-40-12_789.png`
-/// (milliseconds distinguish rapid consecutive saves). The dialog asks
-/// before overwriting, so no collision suffixing is needed.
-/// Also used by the `full` subcommand's directory saves.
-pub fn suggested_name() -> String {
-    format!(
-        "Shotori_{}.png",
-        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S_%3f")
-    )
+fn filter_label(format: crate::model::settings::ExportFormat) -> std::borrow::Cow<'static, str> {
+    use crate::model::settings::ExportFormat;
+    match format {
+        ExportFormat::Png => crate::i18n::t!("save.png_filter"),
+        ExportFormat::Jpeg => crate::i18n::t!("save.jpeg_filter"),
+        ExportFormat::Webp => crate::i18n::t!("save.webp_filter"),
+    }
+}
+
+/// Suggested file name from `[export]` settings (template + format extension).
+pub fn suggested_name_for(w: u32, h: u32) -> String {
+    export::suggested_filename(w, h)
 }
 
 /// Run after the app loop exits: if a selection was stashed, open the native
-/// save dialog, write the PNG, notify. Also honors the headless test bypass
+/// save dialog, write the image, notify. Also honors the headless test bypass
 /// `SHOTORI_DEBUG_SAVE_PATH=<file>` (skips the dialog entirely — the e2e
 /// harness has no way to click a portal dialog).
 pub fn complete_pending() {
@@ -146,29 +159,73 @@ pub fn complete_pending() {
         return;
     }
 
-    let picked = rfd::FileDialog::new()
+    let export_cfg = crate::model::settings::current().export();
+    let mut dialog = rfd::FileDialog::new()
         .set_title(crate::i18n::t!("save.dialog_title").as_ref())
         .set_directory(default_dir())
-        .set_file_name(suggested_name())
-        .add_filter(crate::i18n::t!("save.png_filter").as_ref(), &["png"])
-        .set_can_create_directories(true)
-        .save_file();
+        .set_file_name(suggested_name_for(w, h))
+        .add_filter(
+            filter_label(export_cfg.format).as_ref(),
+            export_cfg.format.filter_extensions(),
+        )
+        .set_can_create_directories(true);
+    for fmt in crate::model::settings::ExportFormat::ALL {
+        if fmt != export_cfg.format {
+            dialog = dialog.add_filter(filter_label(fmt).as_ref(), fmt.filter_extensions());
+        }
+    }
 
-    let Some(mut path) = picked else {
+    let Some(mut path) = dialog.save_file() else {
         println!("[shotori] save canceled");
         return;
     };
 
-    // The user may drop the extension while renaming; the content is PNG
-    // either way
+    // If the user drops the extension while renaming, append the configured format
     if path.extension().is_none() {
-        path.set_extension("png");
+        path.set_extension(export_cfg.format.extension());
+    }
+    if export_cfg.remember_last_dir
+        && let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        crate::model::settings::write_last_save_dir(parent);
     }
     write_and_notify(&path, w, h, &rgba);
 }
 
+/// Direct save to `[export].save_dir` without opening a dialog (issue #42),
+/// plus optional `copy_on_save` clipboard copy and desktop notification.
+pub fn save_direct_and_notify(w: u32, h: u32, rgba: &[u8]) {
+    let path = match export::save_to_default_dir(w, h, rgba) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[shotori] direct save failed: {e:#}");
+            crate::notify::send(
+                crate::i18n::t!("save.failed.title").as_ref(),
+                crate::i18n::t!("save.failed.body").as_ref(),
+            );
+            return;
+        }
+    };
+    println!("[shotori] saved {w}x{h} → {}", path.display());
+    maybe_copy_on_save(w, h, rgba);
+    crate::notify::saved(&path);
+}
+
+fn maybe_copy_on_save(w: u32, h: u32, rgba: &[u8]) {
+    if !crate::model::settings::current().export().copy_on_save {
+        return;
+    }
+    match export::encode_png_fast(w, h, rgba)
+        .and_then(|png| crate::clipboard::copy_image(w, h, rgba, &png))
+    {
+        Ok(()) => println!("[shotori] also copied {w}x{h} to clipboard (copy_on_save)"),
+        Err(e) => eprintln!("[shotori] copy_on_save failed: {e:#}"),
+    }
+}
+
 fn write_and_notify(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) {
-    if let Err(e) = export::save_png(path, w, h, rgba) {
+    if let Err(e) = export::save_image(path, w, h, rgba) {
         eprintln!("[shotori] save failed: {e:#}");
         crate::notify::send(
             crate::i18n::t!("save.failed.title").as_ref(),
@@ -177,6 +234,7 @@ fn write_and_notify(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) {
         return;
     }
     println!("[shotori] saved {w}x{h} → {}", path.display());
+    maybe_copy_on_save(w, h, rgba);
     // The path is the thing users actually need — stdout is lost when
     // launched from a keybinding, so the notification is the feedback.
     // The thumbnail renders inside the notify child from this very file

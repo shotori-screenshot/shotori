@@ -56,12 +56,19 @@ use crate::ui::e2e;
 use crate::ui::theme::load::ThemeFile;
 use crate::ui::theme::{self, ColorKey};
 
+use self::annotation_page::AnnotationPageState;
+use self::capture_page::CapturePageState;
+use self::desktop_page::DesktopPageState;
+use self::export_page::ExportPageState;
 use self::toolbar_editor::DragPreview;
 
 gpui_kit::actions!([
     CloseSettings,
     ShowAppearanceSettings,
     ShowCaptureSettings,
+    ShowAnnotationSettings,
+    ShowExportSettings,
+    ShowDesktopSettings,
     ShowKeySettings,
     ShowOcrSettings,
     ShowAdvancedSettings,
@@ -75,17 +82,19 @@ const WINDOW_H: f32 = 780.;
 const CONTENT_MAX: f32 = 60.;
 const SIDEBAR_W: f32 = 14.5;
 /// One page of the settings window. The sidebar switches `section`;
-/// each page owns the state it needs on [`SettingsWindow`] (today the
-/// toolbar editor and the appearance editor each have their own).
+/// each page owns the state it needs on [`SettingsWindow`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Section {
-    Advanced,
+    Appearance,
     Capture,
+    Annotation,
+    Export,
+    Desktop,
     /// The overlay's configurable shortcut commands (the key-cap
     /// recorder; see [`SettingsWindow::page_keys`]).
     Keys,
     Ocr,
-    Appearance,
+    Advanced,
     /// The identity card — a footer entry, not main navigation (the
     /// nav is for working sections; About is reference material).
     About,
@@ -97,6 +106,9 @@ impl Section {
         match page {
             P::Appearance => Self::Appearance,
             P::Capture => Self::Capture,
+            P::Annotation => Self::Annotation,
+            P::Export => Self::Export,
+            P::Desktop => Self::Desktop,
             P::Keys => Self::Keys,
             P::Ocr => Self::Ocr,
             P::Advanced => Self::Advanced,
@@ -109,11 +121,14 @@ impl Section {
     /// stale env var cannot break a normal launch.
     fn from_debug_name(name: &str) -> Option<Self> {
         Some(match name {
-            "general" | "advanced" => Self::Advanced,
-            "toolbar" | "capture" => Self::Capture,
-            "keys" => Self::Keys,
-            "ocr" => Self::Ocr,
             "appearance" => Self::Appearance,
+            "toolbar" | "capture" => Self::Capture,
+            "annotation" | "annotations" => Self::Annotation,
+            "export" | "save" => Self::Export,
+            "desktop" | "notifications" | "notify" | "pin" | "pins" => Self::Desktop,
+            "keys" | "shortcuts" => Self::Keys,
+            "ocr" => Self::Ocr,
+            "general" | "advanced" => Self::Advanced,
             "about" => Self::About,
             _ => return None,
         })
@@ -131,28 +146,6 @@ impl SearchableListItem for LanguageItem {
 
     fn title(&self) -> SharedString {
         self.0.label().into()
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.0
-    }
-}
-
-#[derive(Clone)]
-struct TextWrapItem(crate::annotation::text::TextWrap);
-
-impl SearchableListItem for TextWrapItem {
-    type Value = crate::annotation::text::TextWrap;
-
-    fn title(&self) -> SharedString {
-        use crate::annotation::text::TextWrap;
-        match self.0 {
-            TextWrap::Word => crate::i18n::t!("toolbar.wrap_word"),
-            TextWrap::Character => crate::i18n::t!("toolbar.wrap_character"),
-            TextWrap::None => crate::i18n::t!("toolbar.wrap_none"),
-        }
-        .into_owned()
-        .into()
     }
 
     fn value(&self) -> &Self::Value {
@@ -190,9 +183,12 @@ pub fn run(initial_page: Option<crate::args::SettingsPage>) {
                 KeyBinding::new("escape", CloseSettings, Some("ShotoriSettings")),
                 KeyBinding::new("ctrl-1", ShowAppearanceSettings, Some("ShotoriSettings")),
                 KeyBinding::new("ctrl-2", ShowCaptureSettings, Some("ShotoriSettings")),
-                KeyBinding::new("ctrl-3", ShowKeySettings, Some("ShotoriSettings")),
-                KeyBinding::new("ctrl-4", ShowOcrSettings, Some("ShotoriSettings")),
-                KeyBinding::new("ctrl-5", ShowAdvancedSettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-3", ShowAnnotationSettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-4", ShowExportSettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-5", ShowDesktopSettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-6", ShowKeySettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-7", ShowOcrSettings, Some("ShotoriSettings")),
+                KeyBinding::new("ctrl-8", ShowAdvancedSettings, Some("ShotoriSettings")),
                 KeyBinding::new("ctrl-f", SearchSettings, Some("ShotoriSettings")),
             ]);
             // Open the window from a spawned task: displays() is empty
@@ -297,9 +293,12 @@ struct SettingsWindow {
     /// The Appearance editor's state (theme.toml working copy + the
     /// picker/slider entities its rows render).
     appearance: AppearanceState,
+    capture_page: CapturePageState,
+    annotation_page: AnnotationPageState,
+    export_page: ExportPageState,
+    desktop_page: DesktopPageState,
     /// The language picker's Select state (Appearance page).
     language_select: gpui_kit::Entity<SelectState<SearchableVec<LanguageItem>>>,
-    text_wrap_select: Entity<SelectState<SearchableVec<TextWrapItem>>>,
     /// The OCR model picker's Select state (OCR page). Selection
     /// commits through the Confirm subscription; the detail line below
     /// renders from `settings` — the file stays the single truth.
@@ -313,7 +312,7 @@ struct SettingsWindow {
     /// [`SettingsWindow::preview_strip`]).
     preview_scroll: ScrollHandle,
     /// Each page keeps its own vertical position across navigation.
-    page_scroll: [ScrollHandle; 6],
+    page_scroll: [ScrollHandle; 9],
     /// Whether the preview bar overflows its pane right now. The rail's
     /// height is layout state, and layout only changes on a re-render —
     /// which a window resize does not trigger. The strip's prepaint
@@ -457,25 +456,10 @@ impl SettingsWindow {
                 }
             },
         ));
-        let text_wrap_select = cx.new(|cx| {
-            let current = settings.annotation_text_wrap();
-            let values = crate::annotation::text::TextWrap::ALL;
-            SelectState::new(
-                SearchableVec::new(values.map(TextWrapItem).to_vec()),
-                values
-                    .iter()
-                    .position(|mode| *mode == current)
-                    .map(IndexPath::new),
-                window,
-                cx,
-            )
-        });
-        subscriptions.push(cx.subscribe(&text_wrap_select, |this, _, event, cx| {
-            if let SelectEvent::Confirm(Some(mode)) = event {
-                this.settings.set_annotation_text_wrap(*mode);
-                this.persist(cx);
-            }
-        }));
+        let capture_page = CapturePageState::new(&settings, window, cx);
+        let annotation_page = AnnotationPageState::new(&settings, window, cx);
+        let export_page = ExportPageState::new(&settings, window, cx);
+        let desktop_page = DesktopPageState::new(&settings, window, cx);
         // OCR model picker: same shape, without the locale flip.
         let ocr_current = settings.ocr_model();
         let ocr_select = cx.new(|cx| {
@@ -515,8 +499,11 @@ impl SettingsWindow {
             config_error_expanded: false,
             drag: None,
             appearance,
+            capture_page,
+            annotation_page,
+            export_page,
+            desktop_page,
             language_select,
-            text_wrap_select,
             ocr_select,
             preview_scroll: ScrollHandle::new(),
             page_scroll: std::array::from_fn(|_| ScrollHandle::new()),
@@ -641,6 +628,15 @@ impl Render for SettingsWindow {
             .on_action(cx.listener(|this, _: &ShowCaptureSettings, _, cx| {
                 this.navigate_from_key(Section::Capture, cx)
             }))
+            .on_action(cx.listener(|this, _: &ShowAnnotationSettings, _, cx| {
+                this.navigate_from_key(Section::Annotation, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowExportSettings, _, cx| {
+                this.navigate_from_key(Section::Export, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowDesktopSettings, _, cx| {
+                this.navigate_from_key(Section::Desktop, cx)
+            }))
             .on_action(cx.listener(|this, _: &ShowKeySettings, _, cx| {
                 this.navigate_from_key(Section::Keys, cx)
             }))
@@ -763,13 +759,19 @@ use shell::resize_handles;
 
 mod about;
 mod advanced;
+mod annotation_page;
 mod appearance;
+mod capture_page;
+mod desktop_page;
+mod export_page;
 mod keys;
 mod ocr;
 mod toolbar_editor;
 
 #[cfg(test)]
 mod color_surface_tests {
+    use super::{Section, SettingsWindow};
+    use crate::model::settings::{ExportFormat, Settings};
     use gpui_kit::TestAppContext;
 
     #[gpui_kit::test]
@@ -784,5 +786,64 @@ mod color_surface_tests {
             assert_eq!(theme.background.a, 1.);
             assert_eq!(theme.popover.a, 1.);
         });
+    }
+
+    #[gpui_kit::test]
+    fn every_settings_page_renders_and_export_edits_persist_to_disk(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let config = tempfile::tempdir().expect("test config directory");
+        let path = config.path().join("settings.toml");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = SettingsWindow::new(window, cx);
+            view.settings = Settings::default();
+            view.path = Some(path.clone());
+            view.error = None;
+            view
+        });
+
+        for section in [
+            Section::Appearance,
+            Section::Capture,
+            Section::Annotation,
+            Section::Export,
+            Section::Desktop,
+            Section::Keys,
+            Section::Ocr,
+            Section::Advanced,
+            Section::About,
+        ] {
+            cx.update(|window, cx| {
+                view.update(cx, |this, cx| this.select_section(section, cx));
+                window.draw(cx).clear(cx);
+            });
+        }
+
+        // Verify direct-save (issue #42) + custom save_dir + template validation write-through.
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.select_section(Section::Export, cx);
+                this.settings
+                    .export_mut()
+                    .set_save_dir(Some("~/Pictures/Direct".into()));
+                this.settings.export_mut().auto_save = true;
+                this.settings.export_mut().format = ExportFormat::Webp;
+                this.persist(cx);
+                this.export_page
+                    .template_input
+                    .update(cx, |inp, cx| inp.set_value("bad/slash", window, cx));
+            });
+            window.draw(cx).clear(cx);
+        });
+        let (loaded, warnings) = Settings::load(Some(&path));
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert!(loaded.export().auto_save);
+        assert_eq!(
+            loaded.export().save_dir.as_deref(),
+            Some("~/Pictures/Direct")
+        );
+        assert_eq!(loaded.export().format, ExportFormat::Webp);
     }
 }
