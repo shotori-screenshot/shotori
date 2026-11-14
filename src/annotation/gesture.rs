@@ -23,25 +23,10 @@ impl Annotations {
         }
         self.pressed = true;
         if matches!(self.tool, Some(ShapeKind::Eraser | ShapeKind::EraserRect)) {
-            self.draft_generation += 1;
-            let kind = self.tool.unwrap_or(ShapeKind::Eraser);
-            self.draft = Some(Draft {
-                straight_anchor: None,
-                repeat_number: false,
-                ink: p,
-                start: p,
-                shape: Shape {
-                    kind,
-                    bounds: Bounds::new(p, size(px(0.), px(0.))),
-                    color: 0,
-                    number: None,
-                    text: None,
-                    text_style: Default::default(),
-                    parameters: super::ShapeParameters::new(kind, self.erase_radius() * 2.),
-                    points: vec![p],
-                    erasures: Vec::new(),
-                },
-            });
+            // Object eraser (issues #14, #41): whole-shape deletion, no
+            // draft shape, no pixel mask. A new gesture never merges into
+            // the previous sweep's history entry.
+            self.eraser_entry_open = false;
             if self.tool == Some(ShapeKind::EraserRect) {
                 self.eraser = Some(EraserGesture::Rect { start: p, end: p });
             } else {
@@ -135,7 +120,6 @@ impl Annotations {
                 } else {
                     Vec::new()
                 },
-                erasures: Vec::new(),
             },
         });
     }
@@ -178,10 +162,6 @@ impl Annotations {
             );
             let changed = cur != end;
             self.eraser = Some(EraserGesture::Rect { start, end });
-            self.erase_rect(Bounds::from_corners(
-                point(start.x.min(end.x), start.y.min(end.y)),
-                point(start.x.max(end.x), start.y.max(end.y)),
-            ));
             return changed;
         }
         let Some(draft) = self.draft.as_mut() else {
@@ -300,11 +280,17 @@ impl Annotations {
 
     pub(crate) fn end(&mut self) {
         let pressed = std::mem::take(&mut self.pressed);
-        if self.eraser.take().is_some() {
-            if pressed {
-                self.finish_erase();
-            } else {
-                self.draft = None;
+        // The eraser gesture closes regardless of `pressed` — an undo
+        // mid-sweep already cleared the flag, and a stale gesture must
+        // never leak into the next tool's drags.
+        if let Some(gesture) = self.eraser.take() {
+            self.eraser_entry_open = false;
+            if pressed && let EraserGesture::Rect { start, end } = gesture {
+                let area = Bounds::from_corners(
+                    point(start.x.min(end.x), start.y.min(end.y)),
+                    point(start.x.max(end.x), start.y.max(end.y)),
+                );
+                self.erase_rect(area);
             }
             return;
         }
@@ -377,6 +363,7 @@ impl Annotations {
         self.pressed = false;
         self.draft = None;
         self.eraser = None;
+        self.eraser_entry_open = false;
         self.selected.clear();
         self.tool = None;
         self.size_drag_active = false;
@@ -390,6 +377,7 @@ impl Annotations {
         let erasing = self.eraser.is_some();
         self.pressed = false;
         self.eraser = None;
+        self.eraser_entry_open = false;
         if self.draft.take().is_some() || erasing {
             return true;
         }

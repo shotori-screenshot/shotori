@@ -768,89 +768,6 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn eraser_draft_preview_matches_full_rasterization(cx: &mut gpui_kit::TestAppContext) {
-        use crate::annotation::ShapeKind;
-        use gpui_kit::AppContext;
-
-        let mut capture = Capture::for_test((0, 0), 1.);
-        capture.output_name = "left".into();
-        capture.width = 640;
-        capture.height = 480;
-        capture.rgba = [40, 80, 120, 255].repeat(640 * 480);
-        let session = cx.new(|_| ScreenshotSession::new(vec![Arc::new(capture)], Vec::new()));
-        session.update(cx, |s, _cx| {
-            s.select_all();
-            let area = s.selection.bounds().unwrap();
-            // Two committed pencil strokes the sweep will cross.
-            s.edit_annotations(|a| {
-                a.toggle(ShapeKind::Pencil);
-                a.set_tool_size(12.);
-                a.begin(point(px(60.), px(120.)), area, false);
-                for k in 1..40 {
-                    a.drag_to(
-                        point(px(60. + k as f32 * 8.), px(120. + (k % 7) as f32 * 4.)),
-                        area,
-                        false,
-                    );
-                }
-                a.end();
-                a.begin(point(px(80.), px(320.)), area, false);
-                for k in 1..30 {
-                    a.drag_to(
-                        point(px(80. + k as f32 * 10.), px(320. - (k % 5) as f32 * 6.)),
-                        area,
-                        false,
-                    );
-                }
-                a.end();
-                a.toggle(ShapeKind::Eraser);
-                a.begin(point(px(100.), px(60.)), area, false);
-            });
-            // Advance the sweep in bursts, refreshing the preview between
-            // them, so the incremental cache replays appended points across
-            // many calls exactly like pointer-move frames do.
-            for burst in 0..8_u32 {
-                s.edit_annotations(|a| {
-                    for k in 0..10_u32 {
-                        let step = burst * 10 + k;
-                        a.drag_to(
-                            point(
-                                px(100. + step as f32 * 12.),
-                                px(60. + (step % 30) as f32 * 12.),
-                            ),
-                            area,
-                            false,
-                        );
-                    }
-                });
-                s.filtered_preview("left");
-            }
-            let (_, preview) = s.filtered_preview("left").unwrap();
-            // Expected: the full non-incremental pipeline over the exact
-            // same state — the incremental preview must be pixel-identical.
-            let committed = s.annotations.committed().to_vec();
-            let draft = s.annotations.raster_draft_shape().cloned().unwrap();
-            let cache = s.filter_preview.borrow();
-            let original = cache.as_ref().unwrap();
-            let mut pixels = original.original.rgba.clone();
-            crate::annotation::Annotations::rasterize_shapes(
-                committed.iter().chain(std::iter::once(&draft)),
-                &mut pixels,
-                original.original.width,
-                original.original.height,
-                original.original.bounds.origin,
-                original.original.scale,
-            );
-            let expected = crate::render_image::rgba_to_render_image(
-                pixels,
-                original.original.width,
-                original.original.height,
-            );
-            assert_eq!(preview.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
-        });
-    }
-
-    #[gpui_kit::test]
     fn lens_option_changes_keep_the_completed_frame_until_replacement(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -2796,7 +2713,8 @@ mod tests {
         ] {
             s.edit_annotations(|a| a.toggle(kind));
             // Bypass selection so every gesture starts over earlier ink;
-            // eraser drafts must restore captured pixels at their own layer.
+            // object-eraser sweeps delete whole crossed marks and invalidate
+            // the raster preview cache accordingly.
             s.edit_annotations(|a| a.begin(point(px(-30.), px(45.)), sel, false));
             for x in [5., 15., 30.] {
                 s.pointer_move("right", point(px(x), px(60.)), false);
@@ -2970,23 +2888,30 @@ mod tests {
     }
 
     #[test]
-    fn eraser_removes_only_crossed_ink_across_outputs_and_undo_restores() {
+    fn eraser_deletes_touched_marks_across_outputs_and_undo_restores() {
         use crate::annotation::ShapeKind;
         for kind in [ShapeKind::Eraser, ShapeKind::EraserRect] {
             let mut s = session();
             s.begin("left", point(px(80.), px(20.)));
             s.end("right", point(px(40.), px(90.)));
             let selection = s.selection.bounds().unwrap();
+            let pristine = s.crop_original("left").unwrap().2;
             s.edit_annotations(|a| {
                 a.toggle(ShapeKind::Line);
                 a.set_tool_size(4.);
-                a.set_color(0x0000ffff);
+                a.set_color(0);
+                // Line 0: spans the output seam — will be touched by the sweep.
                 a.begin(point(px(-15.), px(60.)), selection, false);
                 a.drag_to(point(px(35.), px(60.)), selection, false);
                 a.end();
+                // Line 1: sits lower down (inside y=40..90) — untouched by y=50..70 sweep.
+                a.begin(point(px(-15.), px(82.)), selection, false);
+                a.drag_to(point(px(35.), px(82.)), selection, false);
+                a.end();
             });
-            let (width, _, marked) = s.crop("left").unwrap();
-            let original = s.crop_original("left").unwrap().2;
+            let both_marked = s.crop("left").unwrap().2;
+            assert_ne!(both_marked, pristine);
+
             s.edit_annotations(|a| {
                 a.toggle(kind);
                 a.set_tool_size(8.);
@@ -2994,22 +2919,20 @@ mod tests {
                 a.drag_to(point(px(5.), px(70.)), selection, false);
                 a.end();
             });
-            // The erasure edits the line in place (issue #30): no mask
-            // shape is committed alongside it.
+            // Touching the seam removes the entire crossed line, leaving only line 1.
             assert_eq!(s.annotations().committed().len(), 1);
-            let erased = s.crop("left").unwrap().2;
-            assert_eq!(s.crop("right").unwrap().2, erased);
-            // The mask restores both captures at the seam; the rest of the line survives.
-            for (x, restored) in [(-10., false), (-1., true), (1., true), (25., false)] {
-                let offset = (40 * width as usize + ((x + 20.) * 2.) as usize) * 4;
-                let expected = if restored { &original } else { &marked };
-                assert_eq!(&erased[offset..offset + 4], &expected[offset..offset + 4]);
-            }
+            let after_one = s.crop("left").unwrap().2;
+            assert_eq!(s.crop("right").unwrap().2, after_one);
+            assert_ne!(after_one, both_marked);
+            assert_ne!(after_one, pristine);
             assert_preview_matches_export(&s);
+
             s.undo();
-            assert_eq!(s.crop("left").unwrap().2, marked);
+            assert_eq!(s.annotations().committed().len(), 2);
+            assert_eq!(s.crop("left").unwrap().2, both_marked);
             s.redo();
-            assert_eq!(s.crop("right").unwrap().2, erased);
+            assert_eq!(s.annotations().committed().len(), 1);
+            assert_eq!(s.crop("right").unwrap().2, after_one);
         }
     }
 

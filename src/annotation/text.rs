@@ -454,7 +454,6 @@ mod tests {
     fn fractional_scale_clips_text_and_preserves_transparent_gaps() {
         for scale in [1_f32, 1.25, 1.73, 2.] {
             let shape = Shape {
-                erasures: Vec::new(),
                 kind: ShapeKind::Text,
                 number: None,
                 text: Some("Hello 中文\nSecond line".into()),

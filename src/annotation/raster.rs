@@ -2,9 +2,7 @@
 //!
 //! Magnifiers sample the complete ordinary mark layer without recursively sampling
 //! other lenses. Display order remains independent of that sampling pass.
-use super::{
-    Annotations, Shape, ShapeKind, eraser, filter, line, magnifier, number, spotlight, text,
-};
+use super::{Annotations, Shape, ShapeKind, filter, line, magnifier, number, spotlight, text};
 use gpui_kit::{Pixels, Point};
 
 impl Shape {
@@ -94,12 +92,7 @@ impl Annotations {
         let shapes: Vec<_> = shapes.collect();
         let original = shapes
             .iter()
-            .any(|s| {
-                matches!(
-                    s.kind,
-                    ShapeKind::Magnifier | ShapeKind::Eraser | ShapeKind::EraserRect
-                )
-            })
+            .any(|s| s.kind == ShapeKind::Magnifier)
             .then(|| rgba.to_vec());
         spotlight::rasterize(
             shapes
@@ -116,64 +109,30 @@ impl Annotations {
             // Sampling excludes lenses, but display compositing retains creation
             // order. Marks added over a lens must remain above that lens.
             let mut marked = rgba.to_vec();
-            Self::rasterize_ordinary(
-                shapes.iter().copied(),
-                &mut marked,
-                Some(&original),
-                w,
-                h,
-                origin,
-                scale,
-            );
+            Self::rasterize_ordinary(shapes.iter().copied(), &mut marked, w, h, origin, scale);
             for shape in shapes {
                 if let Some(lens) = shape.lens() {
                     let source = if lens.annotations { &marked } else { &original };
                     magnifier::rasterize(shape, rgba, source, w, h, origin, scale);
                 } else {
-                    Self::rasterize_ordinary(
-                        std::iter::once(shape),
-                        rgba,
-                        Some(&original),
-                        w,
-                        h,
-                        origin,
-                        scale,
-                    );
+                    Self::rasterize_ordinary(std::iter::once(shape), rgba, w, h, origin, scale);
                 }
             }
         } else {
-            Self::rasterize_ordinary(shapes.into_iter(), rgba, None, w, h, origin, scale);
+            Self::rasterize_ordinary(shapes.into_iter(), rgba, w, h, origin, scale);
         }
     }
 
     pub(super) fn rasterize_ordinary<'a>(
         shapes: impl Iterator<Item = &'a Shape>,
         rgba: &mut [u8],
-        original: Option<&[u8]>,
         w: u32,
         h: u32,
         origin: Point<Pixels>,
         scale: f32,
     ) {
-        // One shape at a time: a mark with erasure footprints needs a
-        // snapshot of the canvas from BEFORE its own ink, so the
-        // footprints restore the earlier layers underneath it (issue
-        // #30) instead of the raw capture.
         for shape in shapes {
-            let snapshot = (!shape.erasures.is_empty()).then(|| rgba.to_vec());
             draw_ordinary_shape(shape, rgba, w, h, origin, scale);
-            if let Some(snapshot) = snapshot {
-                shape.apply_erasures(rgba, &snapshot, w, h, origin, scale);
-                continue;
-            }
-            // The in-flight erase draft still previews as a whole-layer
-            // mask over the capture; commit swaps it for per-mark
-            // footprints (see `eraser::finish_erase`).
-            if matches!(shape.kind, ShapeKind::Eraser | ShapeKind::EraserRect)
-                && let Some(original) = original
-            {
-                eraser::rasterize(shape, rgba, original, w, h, origin, scale);
-            }
         }
     }
 }
@@ -317,7 +276,6 @@ mod tests {
     fn ellipse_raster_has_smooth_edges_and_preserves_hole_corners_and_gaps() {
         for scale in [1., 1.25, 1.5, 1.73, 2.] {
             let ellipse = super::Shape {
-                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),
@@ -358,7 +316,6 @@ mod tests {
     fn tiny_and_clipped_ellipses_render_without_invalid_geometry() {
         for (width, height) in [(0., 0.), (2., 2.), (2., 60.), (60., 2.), (60., 40.)] {
             let ellipse = super::Shape {
-                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),
@@ -381,7 +338,6 @@ mod tests {
     fn line_raster_preserves_gaps_and_has_round_caps_at_fractional_scales() {
         for scale in [1., 1.25, 1.73, 2.] {
             let shape = super::Shape {
-                erasures: Vec::new(),
                 number: None,
                 text: None,
                 text_style: Default::default(),

@@ -16,138 +16,7 @@ const FRAME_PAD: f32 = 3.;
 
 impl Shape {
     /// Visible ink bounds, including stroke caps and arrowhead wings.
-    /// Marks with erasure footprints shrink to the SURVIVING ink
-    /// (issue #30), so selection chrome, marquee, crop clamping and
-    /// export bounds reflect the erased result rather than the
-    /// original outline.
     pub(crate) fn ink_bounds(&self) -> Bounds<Pixels> {
-        let full = self.full_ink_bounds();
-        if self.erasures.is_empty() {
-            full
-        } else {
-            self.shrink_to_surviving_ink(full)
-        }
-    }
-
-    /// Compose the ink and its erasure footprints into a low-resolution
-    /// coverage bitmap and scan the surviving cells. One scanline pass
-    /// per shape/footprint replaces the old per-sample loop, which
-    /// rebuilt `shape_geometry` at EVERY one of up to 16 384 grid cells
-    /// — O(samples × points × 34) ≈ 4.6 s on a 1000-point erased
-    /// stroke, freezing every frame that touched `ink_bounds()`; the
-    /// bitmap is sub-millisecond. Precision is one bitmap cell —
-    /// comfortably below the selection frame's own padding.
-    /// Kinds the raster engine cannot draw (text, badges, lenses)
-    /// keep the conservative full box, as before.
-    fn shrink_to_surviving_ink(&self, full: Bounds<Pixels>) -> Bounds<Pixels> {
-        let (width, height) = (
-            f32::from(full.size.width).max(1.),
-            f32::from(full.size.height).max(1.),
-        );
-        const MAX_SAMPLES: f32 = 16384.;
-        let step = (width * height / MAX_SAMPLES).sqrt().max(1.).max(0.5);
-        let cols = ((width / step).ceil() as u32).max(1);
-        let rows = ((height / step).ceil() as u32).max(1);
-        // 0x01 = ink survived; 0x02 = ink seen before the footprints
-        // punched it out (mirrors the old `any_ink` distinction).
-        let mut mask = vec![0u8; (cols * rows) as usize];
-        let seen_ink = |cell: &mut u8, painted: bool| {
-            if painted {
-                *cell = 0b11;
-            }
-        };
-        super::line::coverage(self, cols, rows, full.origin, 1. / step, |offset, alpha| {
-            // coverage reports RGBA byte offsets (×4); the mask is one byte
-            // per cell.
-            seen_ink(&mut mask[offset / 4], alpha > 0.);
-        });
-        if !mask.iter().any(|&c| c & 0b10 != 0) {
-            // No ink the grid can see (a hairline under a huge box, or a
-            // kind coverage cannot draw): keep the conservative full box
-            // instead of lying.
-            return full;
-        }
-        for erasure in &self.erasures {
-            match erasure {
-                super::Erasure::Rect(bounds) => {
-                    let to_col = |v: Pixels, extent: Pixels| {
-                        ((f32::from(v - extent) / step).floor() as i64).clamp(0, cols as i64 - 1)
-                            as u32
-                    };
-                    let to_row = |v: Pixels, extent: Pixels| {
-                        ((f32::from(v - extent) / step).floor() as i64).clamp(0, rows as i64 - 1)
-                            as u32
-                    };
-                    let (c0, c1) = (
-                        to_col(bounds.left(), full.origin.x),
-                        to_col(bounds.right(), full.origin.x),
-                    );
-                    let (r0, r1) = (
-                        to_row(bounds.top(), full.origin.y),
-                        to_row(bounds.bottom(), full.origin.y),
-                    );
-                    for row in r0..=r1 {
-                        for col in c0..=c1 {
-                            mask[(row * cols + col) as usize] &= !0b01;
-                        }
-                    }
-                }
-                super::Erasure::Brush { points, diameter } => {
-                    // Same synthetic brush shape the raster pipeline uses
-                    // (`apply_erasures`), so chrome sees exactly the hole
-                    // the pixels show.
-                    let brush = Shape {
-                        kind: ShapeKind::Eraser,
-                        number: None,
-                        text: None,
-                        text_style: Default::default(),
-                        bounds: Bounds::default(),
-                        color: 0,
-                        parameters: super::ShapeParameters::new(ShapeKind::Eraser, *diameter),
-                        points: points.clone(),
-                        erasures: Vec::new(),
-                    };
-                    super::line::coverage(
-                        &brush,
-                        cols,
-                        rows,
-                        full.origin,
-                        1. / step,
-                        |offset, _| mask[offset / 4] &= !0b01,
-                    );
-                }
-            }
-        }
-        let mut survivor: Option<(u32, u32, u32, u32)> = None;
-        for row in 0..rows {
-            for col in 0..cols {
-                if mask[(row * cols + col) as usize] & 0b01 == 0 {
-                    continue;
-                }
-                survivor = Some(match survivor {
-                    Some((x0, y0, x1, y1)) => (x0.min(col), y0.min(row), x1.max(col), y1.max(row)),
-                    None => (col, row, col, row),
-                });
-            }
-        }
-        match survivor {
-            // Everything the grid could see was erased: collapse to a
-            // degenerate box at the center, like the old grid did.
-            None => Bounds::new(full.center(), size(px(0.), px(0.))),
-            // Cell OUTER bounds (not centers): a half-covered edge cell
-            // still holds ink, so the frame must reach around it.
-            Some((x0, y0, x1, y1)) => Bounds::new(
-                full.origin + point(px(x0 as f32 * step), px(y0 as f32 * step)),
-                size(
-                    px((x1 - x0 + 1) as f32 * step),
-                    px((y1 - y0 + 1) as f32 * step),
-                ),
-            )
-            .intersect(&full),
-        }
-    }
-
-    fn full_ink_bounds(&self) -> Bounds<Pixels> {
         if let Some(super::FilterArea::Brush { diameter }) = self.filter_area() {
             let mut stroke = self.clone();
             stroke.kind = ShapeKind::Pencil;
@@ -164,8 +33,7 @@ impl Shape {
             return ink_aabb(self);
         }
         match self.kind {
-            ShapeKind::Eraser
-            | ShapeKind::Pencil
+            ShapeKind::Pencil
             | ShapeKind::Highlighter
             | ShapeKind::Polyline
             | ShapeKind::Line
@@ -201,7 +69,7 @@ impl Shape {
             }
             ShapeKind::Polyline => self.points.clone(),
             ShapeKind::Rectangle | ShapeKind::Ellipse => self.geometry_handles(),
-            ShapeKind::Magnifier | ShapeKind::Spotlight | ShapeKind::EraserRect => vec![
+            ShapeKind::Magnifier | ShapeKind::Spotlight => vec![
                 point(self.bounds.left(), self.bounds.top()),
                 point(self.bounds.right(), self.bounds.top()),
                 point(self.bounds.right(), self.bounds.bottom()),
@@ -249,7 +117,7 @@ impl Shape {
                     *q = p;
                 }
             }
-            ShapeKind::Magnifier | ShapeKind::Spotlight | ShapeKind::EraserRect => {
+            ShapeKind::Magnifier | ShapeKind::Spotlight => {
                 let b = self.bounds;
                 // opposite corner stays fixed (TL, TR, BR, BL order);
                 // dragging through it must re-normalize like drawing
@@ -325,7 +193,6 @@ mod tests {
 
     fn shape(kind: ShapeKind, points: &[(f32, f32)]) -> Shape {
         Shape {
-            erasures: Vec::new(),
             kind,
             number: None,
             text: None,

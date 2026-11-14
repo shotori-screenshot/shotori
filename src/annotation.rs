@@ -3,7 +3,7 @@
 //! The core owns shape vocabulary, tool presets and annotation state. Gesture,
 //! selection and history modules own editing; per-tool modules share geometry
 //! between live previews, hit testing and export. The raster module composites
-//! capture pixels, ordinary marks, erasure, spotlights and magnifier sampling.
+//! capture pixels, ordinary marks, spotlights and magnifier sampling.
 mod chrome;
 mod filter;
 mod magnifier;
@@ -80,30 +80,11 @@ pub(crate) fn size_spec(kind: ShapeKind) -> SizeSpec {
         ShapeKind::Magnifier => SizeSpec { min: 1., max: 8. },
         ShapeKind::Highlighter => SizeSpec { min: 8., max: 60. },
         ShapeKind::Mosaic | ShapeKind::Blur => SizeSpec { min: 4., max: 48. },
-        ShapeKind::Eraser | ShapeKind::EraserRect => SizeSpec { min: 8., max: 96. },
+        ShapeKind::Eraser => SizeSpec { min: 8., max: 96. },
         ShapeKind::Number => SizeSpec { min: 16., max: 64. },
         ShapeKind::Text => SizeSpec { min: 12., max: 72. },
         _ => SizeSpec { min: 1., max: 20. },
     }
-}
-
-/// One committed erase gesture's footprint, stored ON the shapes it
-/// erased (issue #30). The old model committed an independent mask
-/// shape that restored captured pixels at its own layer, so dragging
-/// an erased stroke left the mask behind and the gap "moved" relative
-/// to the ink. Binding the footprint to each touched mark makes the
-/// erasure travel with the mark: the raster path restores the
-/// pre-mark pixels under the footprint, and picking/bounds queries
-/// treat the footprint as missing ink.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Erasure {
-    /// Brush sweep: sampled brush centers plus the brush diameter.
-    Brush {
-        points: Vec<Point<Pixels>>,
-        diameter: f32,
-    },
-    /// Area sweep: the dragged rectangle.
-    Rect(Bounds<Pixels>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,12 +97,6 @@ pub(crate) struct Shape {
     pub(crate) color: u32,
     parameters: ShapeParameters,
     pub(crate) points: Vec<Point<Pixels>>,
-    /// Erase footprints cut into this mark (issue #30). Absolute
-    /// canvas coordinates like `points`, so `translate` carries them;
-    /// in-place geometry edits (handle drags, re-wrapped text) keep
-    /// the holes where they were drawn — the footprint records where
-    /// the user erased, not what was under it.
-    pub(crate) erasures: Vec<Erasure>,
 }
 
 impl Shape {
@@ -130,16 +105,6 @@ impl Shape {
         self.bounds.origin += delta;
         for point in &mut self.points {
             *point += delta;
-        }
-        for erasure in &mut self.erasures {
-            match erasure {
-                Erasure::Brush { points, .. } => {
-                    for point in points {
-                        *point += delta;
-                    }
-                }
-                Erasure::Rect(bounds) => bounds.origin += delta,
-            }
         }
         self.set_number_tip(self.number_tip().map(|tip| tip + delta));
     }
@@ -248,7 +213,6 @@ struct ToolSizes {
     mosaic: f32,
     blur: f32,
     eraser: f32,
-    eraser_rect: f32,
     number: f32,
     text: f32,
 }
@@ -284,8 +248,12 @@ pub(crate) struct Annotations {
     draft: Option<Draft>,
     draft_generation: u64,
     pressed: bool,
-    /// Pointer state accompanying the editable erase draft.
+    /// The object-eraser gesture in flight (no draft exists while `Some`).
     eraser: Option<EraserGesture>,
+    /// The history's trailing `Remove` entry belongs to the live brush
+    /// sweep and extends with each touched mark; cleared when the
+    /// gesture ends or history unwinds.
+    eraser_entry_open: bool,
     /// Selected indices in selection order; the last mark owns parameter edits.
     /// Handles are available only for a single selection.
     selected: Vec<usize>,
@@ -334,7 +302,6 @@ impl Default for Annotations {
                 mosaic: 16.,
                 blur: 16.,
                 eraser: 32.,
-                eraser_rect: 32.,
                 number: 32.,
                 text: 24.,
             },
@@ -346,6 +313,7 @@ impl Default for Annotations {
             draft_generation: 0,
             pressed: false,
             eraser: None,
+            eraser_entry_open: false,
             selected: Vec::new(),
             auto_select: false,
             text_original: None,
@@ -411,12 +379,10 @@ impl Annotations {
             ShapeKind::Magnifier => self.lens.zoom,
             ShapeKind::Spotlight => self.spotlight_opacity,
             ShapeKind::Eraser => self.preset.eraser,
-            ShapeKind::EraserRect => self.preset.eraser_rect,
             ShapeKind::Number => self.preset.number,
             ShapeKind::Text => self.preset.text,
-            // unreachable in practice (edit_kind filters it): a mode
-            // has no size to remember
-            ShapeKind::Select => 0.,
+            // area/selection modes have no size to remember
+            ShapeKind::EraserRect | ShapeKind::Select => 0.,
         }
     }
     /// Remember a kind's size, clamped to its family's [`SizeSpec`].
@@ -436,12 +402,10 @@ impl Annotations {
             ShapeKind::Magnifier => &mut self.lens.zoom,
             ShapeKind::Spotlight => &mut self.spotlight_opacity,
             ShapeKind::Eraser => &mut self.preset.eraser,
-            ShapeKind::EraserRect => &mut self.preset.eraser_rect,
             ShapeKind::Number => &mut self.preset.number,
             ShapeKind::Text => &mut self.preset.text,
-            // unreachable in practice (edit_kind filters it): nothing
-            // to remember for a mode
-            ShapeKind::Select => return,
+            // nothing to remember for area/selection modes
+            ShapeKind::EraserRect | ShapeKind::Select => return,
         };
         *slot = v;
     }
@@ -510,7 +474,6 @@ impl Annotations {
                 color,
                 parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, width),
                 points: Vec::new(),
-                erasures: Vec::new(),
             },
         });
     }
@@ -533,7 +496,6 @@ impl Annotations {
             color: self.color().0,
             parameters: crate::annotation::ShapeParameters::new(ShapeKind::Text, self.text_size()),
             points: Vec::new(),
-            erasures: Vec::new(),
         });
     }
     pub(crate) fn number_size(&self) -> f32 {
@@ -594,6 +556,7 @@ impl Annotations {
         // must stop with it (a stale gesture would keep erasing under
         // the next tool's pointer moves)
         self.eraser = None;
+        self.eraser_entry_open = false;
         self.tool = if self.tool == Some(kind) {
             None
         } else {
@@ -672,6 +635,9 @@ impl Annotations {
         let Some(tool) = self.tool else {
             return false;
         };
+        if matches!(tool, ShapeKind::EraserRect | ShapeKind::Select) {
+            return false;
+        }
         let spec = size_spec(tool);
         let cur = self.tool_size();
         let next = if up { cur + 1. } else { cur - 1. };
@@ -691,6 +657,7 @@ impl Annotations {
         self.draft = None;
         self.pressed = false;
         self.eraser = None;
+        self.eraser_entry_open = false;
         self.tool = None;
         self.selected.clear();
     }
@@ -701,8 +668,8 @@ impl Annotations {
             .chain(self.draft.as_ref().map(|draft| &draft.shape))
     }
 
-    /// The live replacement stays at its original layer index, so raster caches,
-    /// exports and later erasers all see the same image while typing.
+    /// The live replacement stays at its original layer index, so raster caches
+    /// and exports see the same image while typing.
     pub(crate) fn begin_text_edit(&mut self, ix: usize) -> bool {
         if self.text_original.is_some() {
             return false;
@@ -790,6 +757,7 @@ impl Annotations {
         self.text_original = None;
         self.size_drag_active = false;
         self.eraser = None;
+        self.eraser_entry_open = false;
         self.history.push(HistoryEntry::RemoveAll {
             shapes: std::mem::take(&mut self.shapes),
         });
@@ -812,7 +780,7 @@ impl Annotations {
     }
 }
 
-pub(crate) mod eraser;
+mod eraser;
 mod gesture;
 mod history;
 

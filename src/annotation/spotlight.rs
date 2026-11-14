@@ -156,7 +156,7 @@ pub(super) fn rasterize_outline(
         ShapeKind::Rectangle
     };
     border.parameters = ShapeParameters::new(border.kind, width);
-    Annotations::rasterize_ordinary(std::iter::once(&border), rgba, None, w, h, origin, scale);
+    Annotations::rasterize_ordinary(std::iter::once(&border), rgba, w, h, origin, scale);
 }
 
 pub(super) fn rasterize<'a>(

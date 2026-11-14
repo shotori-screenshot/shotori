@@ -283,9 +283,7 @@ impl ScreenshotSession {
             || self.annotations.visible().any(|shape| {
                 matches!(
                     shape.kind,
-                    ShapeKind::Eraser
-                        | ShapeKind::EraserRect
-                        | ShapeKind::Pencil
+                    ShapeKind::Pencil
                         | ShapeKind::Highlighter
                         | ShapeKind::Polyline
                         | ShapeKind::Spotlight
@@ -476,15 +474,10 @@ impl ScreenshotSession {
                 // Lenses can sample the unmarked capture; a suffix-only replay
                 // would incorrectly treat already painted annotations as the source.
                 // Spotlight masks also need the entire union, without repeated dimming.
-                if committed.iter().any(|s| {
-                    matches!(
-                        s.kind,
-                        ShapeKind::Magnifier
-                            | ShapeKind::Spotlight
-                            | ShapeKind::Eraser
-                            | ShapeKind::EraserRect
-                    )
-                }) || !committed.starts_with(&cached.committed)
+                if committed
+                    .iter()
+                    .any(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
+                    || !committed.starts_with(&cached.committed)
                 {
                     cached.pixels.clone_from(&original.rgba);
                     cached.committed.clear();
@@ -521,66 +514,11 @@ impl ScreenshotSession {
                     original.bounds.origin,
                     original.scale,
                 );
-            } else if let Some(shape) = draft.filter(|s| {
-                matches!(s.kind, ShapeKind::Eraser | ShapeKind::EraserRect)
-                    && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier)
-            }) {
-                // Eraser sweep preview. The base is `cached.pixels` — the
-                // committed composite, stable for the whole gesture — and
-                // the footprint reveals the pristine crop, exactly the
-                // pixels `eraser::rasterize` blended, but INCREMENTALLY:
-                // this branch runs on every pointer move, and re-running
-                // the full pipeline (whole-frame clones in rasterize_shapes
-                // + re-rasterizing every committed shape + the ENTIRE trail)
-                // cost ~110 ms per move at 300 samples on 1080p — the
-                // preview could not keep up with the pointer at all.
-                // Magnifier lenses sample the marked layer, so a sweep
-                // under a lens must re-run the full composite instead.
-                if shape.kind == ShapeKind::EraserRect {
-                    // Rect drags reassign `bounds` per move (set semantics,
-                    // not append-only) — no incremental cache applies, but a
-                    // single rectangle punch on the cached composite stays
-                    // O(footprint).
-                    cached.stroke = None;
-                    let mut pixels = cached.pixels.clone();
-                    crate::annotation::eraser::rasterize(
-                        shape,
-                        &mut pixels,
-                        &original.rgba,
-                        original.width,
-                        original.height,
-                        original.bounds.origin,
-                        original.scale,
-                    );
-                    cached.image = crate::render_image::rgba_to_render_image(
-                        pixels,
-                        original.width,
-                        original.height,
-                    );
-                } else {
-                    let out = cached
-                        .stroke
-                        .get_or_insert_with(Default::default)
-                        .render_eraser(
-                            shape,
-                            &cached.pixels,
-                            &original.rgba,
-                            (original.width, original.height),
-                            original.bounds.origin,
-                            original.scale,
-                        );
-                    cached.image = crate::render_image::rgba_to_render_image(
-                        out.to_vec(),
-                        original.width,
-                        original.height,
-                    );
-                }
             } else {
                 cached.stroke = None;
                 let mut pixels = cached.pixels.clone();
                 // Lens and spotlight drafts re-run the whole composite (they
-                // sample/dim the marked layer); an eraser draft only lands
-                // here when a Magnifier is also committed (see its branch).
+                // sample/dim the marked layer).
                 if draft
                     .is_some_and(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
                     || (draft.is_some() && committed.iter().any(|s| s.kind == ShapeKind::Magnifier))

@@ -233,9 +233,7 @@ pub(super) fn shape_geometry(shape: &super::Shape) -> Vec<Vec<Point<Pixels>>> {
     if shape.has_custom_geometry() {
         return super::geometry::polygons(shape);
     }
-    if shape.kind == super::ShapeKind::EraserRect
-        || (shape.kind == super::ShapeKind::Highlighter && shape.highlighter_options().rectangle)
-    {
+    if shape.kind == super::ShapeKind::Highlighter && shape.highlighter_options().rectangle {
         let b = shape.bounds;
         return vec![vec![
             b.origin,
@@ -680,8 +678,6 @@ pub(crate) struct StrokePreview {
     points: Vec<Point<Pixels>>,
     rows: Vec<Vec<(f32, f32)>>,
     pixels: Vec<u8>,
-    /// Pristine capture the eraser footprint reveals (eraser mode only).
-    eraser_source: Option<Vec<u8>>,
 }
 
 #[derive(PartialEq)]
@@ -693,9 +689,6 @@ struct StrokeKey {
     color: u32,
     kind: super::ShapeKind,
     highlighter: super::highlighter::HighlighterOptions,
-    /// Eraser mode: identity (ptr, len) of the capture buffer the
-    /// footprint reveals. `None` = ink mode.
-    eraser_source: Option<(usize, usize)>,
 }
 
 impl StrokePreview {
@@ -707,45 +700,6 @@ impl StrokePreview {
         origin: Point<Pixels>,
         scale: f32,
     ) -> &[u8] {
-        self.advance(shape, base, dimensions, origin, scale, None)
-    }
-
-    /// Eraser-draft preview: like [`render`](Self::render), but covered
-    /// pixels blend toward `original` (the pristine capture) instead of
-    /// painting ink — the incremental equivalent of `eraser::rasterize`.
-    /// `original` must be the SAME buffer for the whole gesture (the
-    /// preview cache's crop); its identity joins the reset key, so a
-    /// fresh crop mid-gesture restarts cleanly instead of blending two
-    /// captures.
-    pub(crate) fn render_eraser(
-        &mut self,
-        shape: &super::Shape,
-        base: &[u8],
-        original: &[u8],
-        dimensions: (u32, u32),
-        origin: Point<Pixels>,
-        scale: f32,
-    ) -> &[u8] {
-        let ident = (original.as_ptr() as usize, original.len());
-        self.advance(
-            shape,
-            base,
-            dimensions,
-            origin,
-            scale,
-            Some((original, ident)),
-        )
-    }
-
-    fn advance(
-        &mut self,
-        shape: &super::Shape,
-        base: &[u8],
-        dimensions: (u32, u32),
-        origin: Point<Pixels>,
-        scale: f32,
-        eraser: Option<(&[u8], (usize, usize))>,
-    ) -> &[u8] {
         let (w, h) = dimensions;
         let key = StrokeKey {
             dimensions,
@@ -755,7 +709,6 @@ impl StrokePreview {
             color: shape.color,
             kind: shape.kind,
             highlighter: shape.highlighter_options(),
-            eraser_source: eraser.map(|(_, ident)| ident),
         };
         let reset = self.key.as_ref() != Some(&key)
             || !shape.points.starts_with(&self.points)
@@ -766,9 +719,6 @@ impl StrokePreview {
             self.points.clear();
             self.rows = vec![Vec::new(); h as usize * 8];
             self.pixels = base.to_vec();
-            // Loaded on reset only: one full-frame copy per gesture, not per
-            // pointer move.
-            self.eraser_source = eraser.map(|(buf, _)| buf.to_vec());
         }
         if !reset && self.points.len() == shape.points.len() {
             return &self.pixels;
@@ -856,21 +806,13 @@ impl StrokePreview {
                 let coverage = coverage.min(1.);
                 // Restore the base pixel first: a re-dirtied row re-blends
                 // the WHOLE interval union, so starting from base keeps
-                // repeated advances idempotent (same contract as ink mode).
+                // repeated advances idempotent.
                 self.pixels[offset..offset + 4].copy_from_slice(&base[offset..offset + 4]);
-                if let Some(original) = &self.eraser_source {
-                    for c in 0..4 {
-                        self.pixels[offset + c] = (self.pixels[offset + c] as f32 * (1. - coverage)
-                            + original[offset + c] as f32 * coverage)
-                            .round() as u8;
-                    }
-                } else {
-                    super::highlighter::blend_pixel(
-                        shape,
-                        &mut self.pixels[offset..offset + 4],
-                        coverage,
-                    );
-                }
+                super::highlighter::blend_pixel(
+                    shape,
+                    &mut self.pixels[offset..offset + 4],
+                    coverage,
+                );
             }
         }
         self.points.clone_from(&shape.points);
@@ -905,7 +847,6 @@ mod tests {
             let mut images = Vec::new();
             for arrow in styles {
                 let mut mark = Shape {
-                    erasures: Vec::new(),
                     kind: ShapeKind::Arrow,
                     number: None,
                     text: None,
@@ -993,7 +934,6 @@ mod tests {
                 let normal = point(-tangent.y, tangent.x);
                 let center = point(px(300.), px(300.));
                 let mut mark = Shape {
-                    erasures: Vec::new(),
                     kind,
                     number: None,
                     text: None,
@@ -1043,7 +983,6 @@ mod tests {
             LineStyle::DashDotDot,
         ] {
             let mut shape = Shape {
-                erasures: Vec::new(),
                 kind: ShapeKind::Polyline,
                 number: None,
                 text: None,
@@ -1111,7 +1050,6 @@ mod tests {
                     .flat_map(|p| [180, 120, 60, p[3]])
                     .collect();
                 let mut shape = Shape {
-                    erasures: Vec::new(),
                     kind,
                     number: None,
                     text: None,
@@ -1185,7 +1123,6 @@ mod tests {
     #[test]
     fn arrow_export_contains_a_head_without_overshooting_and_preserves_gaps() {
         let shape = super::super::Shape {
-            erasures: Vec::new(),
             kind: super::super::ShapeKind::Arrow,
             number: None,
             text: None,
