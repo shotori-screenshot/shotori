@@ -86,10 +86,35 @@ impl SnapRect {
     }
 }
 
-/// Query the running compositor once. None = no supported compositor.
+/// Visible windows + focused-output hint from one compositor IPC round.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompositorSnapshot {
+    pub rects: Vec<SnapRect>,
+    pub focused_output: Option<String>,
+}
+
+impl CompositorSnapshot {
+    /// Bounds of the focused visible window, if the compositor reported one.
+    pub fn focused_window(&self) -> Option<Bounds<Pixels>> {
+        self.rects
+            .iter()
+            .filter(|r| r.focused)
+            .max_by(|a, b| {
+                a.recency.cmp(&b.recency).then_with(|| {
+                    area(b)
+                        .partial_cmp(&area(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .map(|r| r.bounds)
+    }
+}
+
+/// Query the running compositor once for both window rects and the focused
+/// output name. None = no supported compositor.
 /// The whole IPC exchange runs on a helper thread with a hard 1s cap:
-/// a wedged socket must never freeze the overlay startup.
-pub fn query() -> Option<Vec<SnapRect>> {
+/// a wedged socket must never freeze startup.
+pub fn query_snapshot() -> Option<CompositorSnapshot> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(detect_and_query());
@@ -99,21 +124,31 @@ pub fn query() -> Option<Vec<SnapRect>> {
         .flatten()
 }
 
-fn detect_and_query() -> Option<Vec<SnapRect>> {
-    if std::env::var_os("NIRI_SOCKET").is_some()
-        && let Some(rects) = niri::query()
+/// Query the running compositor once. None = no supported compositor.
+/// The whole IPC exchange runs on a helper thread with a hard 1s cap:
+/// a wedged socket must never freeze the overlay startup.
+pub fn query() -> Option<Vec<SnapRect>> {
+    query_snapshot().map(|s| s.rects)
+}
+
+fn detect_and_query() -> Option<CompositorSnapshot> {
+    #[cfg(target_os = "linux")]
     {
-        return Some(rects);
-    }
-    if std::env::var_os("SWAYSOCK").is_some()
-        && let Some(rects) = sway::query()
-    {
-        return Some(rects);
-    }
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
-        && let Some(rects) = hyprland::query()
-    {
-        return Some(rects);
+        if std::env::var_os("NIRI_SOCKET").is_some()
+            && let Some(snap) = niri::query()
+        {
+            return Some(snap);
+        }
+        if std::env::var_os("SWAYSOCK").is_some()
+            && let Some(snap) = sway::query()
+        {
+            return Some(snap);
+        }
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+            && let Some(snap) = hyprland::query()
+        {
+            return Some(snap);
+        }
     }
     None
 }
@@ -154,7 +189,7 @@ mod tests {
     // Deliberately not `use super::*`: the parent module's `use gpui_kit::*`
     // pulls gpui's own `test` attribute macro which shadows the built-in
     // #[test] (see the comment in selection.rs)
-    use super::{SnapRect, hit_test};
+    use super::{CompositorSnapshot, SnapRect, hit_test};
     use gpui_kit::{Bounds, Pixels, Point, point, px, size};
 
     fn rect(x: f32, y: f32, w: f32, h: f32, focused: bool, recency: u64) -> SnapRect {
@@ -214,5 +249,23 @@ mod tests {
     #[test]
     fn zero_rects_or_miss_returns_none() {
         assert_eq!(hit_test(&[], at(1., 1.)), None);
+    }
+
+    #[test]
+    fn focused_window_picks_focused_entry() {
+        let snap = CompositorSnapshot {
+            rects: vec![
+                rect(0., 0., 1920., 1080., false, 900),
+                rect(100., 200., 600., 400., true, 10),
+            ],
+            focused_output: Some("DP-1".into()),
+        };
+        assert_eq!(
+            snap.focused_window(),
+            Some(Bounds::new(
+                point(px(100.), px(200.)),
+                size(px(600.), px(400.))
+            ))
+        );
     }
 }

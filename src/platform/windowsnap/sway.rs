@@ -13,12 +13,12 @@ use std::os::unix::net::UnixStream;
 
 use serde_json::Value;
 
-use super::SnapRect;
+use super::{CompositorSnapshot, SnapRect};
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 const GET_TREE: u32 = 4;
 
-pub fn query() -> Option<Vec<SnapRect>> {
+pub fn query() -> Option<CompositorSnapshot> {
     let path = std::env::var("SWAYSOCK").ok()?;
     let mut stream = UnixStream::connect(path).ok()?;
     // The query wrapper has a 1 s budget on the main thread, but a hung
@@ -29,7 +29,42 @@ pub fn query() -> Option<Vec<SnapRect>> {
     let tree: Value = serde_json::from_slice(&payload).ok()?;
     let mut rects = Vec::new();
     walk(&tree, &mut rects);
-    Some(rects)
+    Some(CompositorSnapshot {
+        rects,
+        focused_output: focused_output(&tree),
+    })
+}
+
+fn focused_output(tree: &Value) -> Option<String> {
+    fn subtree_has_focus(node: &Value) -> bool {
+        if node
+            .get("focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        for key in ["nodes", "floating_nodes"] {
+            if let Some(children) = node.get(key).and_then(Value::as_array)
+                && children.iter().any(subtree_has_focus)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    tree.get("nodes")?
+        .as_array()?
+        .iter()
+        .filter(|n| n.get("type").and_then(Value::as_str) == Some("output"))
+        .find_map(|out| {
+            let name = out.get("name").and_then(Value::as_str)?;
+            if name == "__i3" || !subtree_has_focus(out) {
+                return None;
+            }
+            Some(name.to_owned())
+        })
 }
 
 /// One i3-IPC round trip: request header → reply header + JSON payload.
@@ -127,7 +162,7 @@ fn walk(node: &Value, out: &mut Vec<SnapRect>) {
 mod tests {
     // Deliberately not `use super::*` (gpui test-macro shadowing; see
     // selection.rs)
-    use super::walk;
+    use super::{focused_output, walk};
     use serde_json::Value;
 
     /// Trimmed sway `GET_TREE` shape: root → output → workspace →
@@ -165,6 +200,7 @@ mod tests {
     #[test]
     fn collects_visible_tiled_and_floating_skips_inactive() {
         let tree: Value = serde_json::from_str(TREE).unwrap();
+        assert_eq!(focused_output(&tree).as_deref(), Some("HDMI-A-1"));
         let mut rects = Vec::new();
         walk(&tree, &mut rects);
         assert_eq!(rects.len(), 2, "hidden workspace window must be skipped");

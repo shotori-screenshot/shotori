@@ -92,6 +92,18 @@ enum Section {
 }
 
 impl Section {
+    fn from_page(page: crate::args::SettingsPage) -> Self {
+        use crate::args::SettingsPage as P;
+        match page {
+            P::Appearance => Self::Appearance,
+            P::Capture => Self::Capture,
+            P::Keys => Self::Keys,
+            P::Ocr => Self::Ocr,
+            P::Advanced => Self::Advanced,
+            P::About => Self::About,
+        }
+    }
+
     /// Sidebar name → section, for the `SHOTORI_DEBUG_SETTINGS_PAGE`
     /// backdoor (docs/headless-e2e.md). Unknown names are ignored so a
     /// stale env var cannot break a normal launch.
@@ -166,10 +178,10 @@ impl SearchableListItem for OcrModelItem {
 }
 
 /// Run the settings window; returns when the window closes.
-pub fn run() {
+pub fn run(initial_page: Option<crate::args::SettingsPage>) {
     application()
         .with_assets(crate::ui::toolbar::ToolbarSource)
-        .run(|cx| {
+        .run(move |cx| {
             cx.set_app_identity(crate::APP_ID, "Shotori");
             gpui_kit::base::init(cx);
             // the component design system (sidebar, its theme registry)
@@ -191,7 +203,7 @@ pub fn run() {
             cx.spawn(async move |cx| {
                 let opened = cx.update(|cx| {
                     cx.open_window(window_options(), |window, cx| {
-                        let view = cx.new(|cx| SettingsWindow::new(window, cx));
+                        let view = cx.new(|cx| SettingsWindow::new_on(initial_page, window, cx));
                         // Root hosts the WindowState plugin — without it
                         // managed tooltips (collapsed-sidebar item
                         // labels) never render. Layer-shell overlays
@@ -359,7 +371,16 @@ struct AppearanceState {
 }
 
 impl SettingsWindow {
+    #[cfg(test)]
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_on(None, window, cx)
+    }
+
+    fn new_on(
+        initial_page: Option<crate::args::SettingsPage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         sync_shell_theme(cx);
         if let Some(font) = e2e::debug_settings_font() {
             gpui_kit::component::Theme::global_mut(cx).font_size = px(font);
@@ -477,8 +498,11 @@ impl SettingsWindow {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
-            section: e2e::debug_settings_page()
-                .and_then(|page| Section::from_debug_name(&page))
+            section: initial_page
+                .map(Section::from_page)
+                .or_else(|| {
+                    e2e::debug_settings_page().and_then(|page| Section::from_debug_name(&page))
+                })
                 .unwrap_or(Section::Appearance),
             search,
             custom_colors: e2e::debug_settings_custom_colors()

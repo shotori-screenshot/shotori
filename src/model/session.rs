@@ -230,6 +230,8 @@ pub struct ScreenshotSession {
     /// hit-tests the PRESS position, not wherever a jittery release lands
     press: Option<Point<Pixels>>,
     annotations: crate::annotation::Annotations,
+    /// Optional CLI `--tool` armed as soon as the first finalized selection lands.
+    pending_tool: Option<crate::annotation::ShapeKind>,
     filter_preview: std::cell::RefCell<Option<FilterPreview>>,
     preview_busy: bool,
     preview_display: Option<DisplayPreview>,
@@ -276,6 +278,7 @@ impl ScreenshotSession {
             // session is rebuilt for every screenshot, there is no
             // live reload.
             annotations: crate::annotation::Annotations::from_settings(),
+            pending_tool: None,
             filter_preview: Default::default(),
             preview_busy: false,
             preview_display: None,
@@ -307,20 +310,7 @@ impl ScreenshotSession {
     /// exports at the highest participating density with transparent
     /// gaps, exactly like a user-drawn spanning selection.
     pub fn select_all(&mut self) {
-        if let Some(bounds) = self
-            .screens
-            .iter()
-            .map(|s| s.bounds())
-            .reduce(|a, b| a.union(&b))
-        {
-            let first = self
-                .screens
-                .first()
-                .map(|s| s.capture.output_name.clone())
-                .unwrap_or_default();
-            self.set_active_output(&first);
-            self.selection = Selection::Selected { bounds };
-        }
+        self.select_all_on(None);
     }
 
     /// Ctrl+A: cycle the selection between "this whole screen" and
@@ -362,6 +352,7 @@ impl ScreenshotSession {
         if let Some(before) = current {
             self.annotations.record_selection(before, next);
         }
+        self.apply_pending_tool();
         current != Some(next)
     }
 
@@ -595,6 +586,7 @@ impl ScreenshotSession {
         // edit-release does (see `follow_selection_host`).
         self.follow_selection_host();
         self.commit_selection_gesture();
+        self.apply_pending_tool();
     }
 
     /// Track the region under the cursor for the hover outline. Returns
@@ -669,6 +661,7 @@ impl ScreenshotSession {
 mod annotations;
 mod editing;
 mod export;
+mod preset;
 mod smart;
 
 mod toolbar;

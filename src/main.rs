@@ -1,6 +1,7 @@
 //! # Shotori entry point: assembly, keybindings, window creation
 //!
 //! Module layout (avoiding a god file):
+//! - `args` / `commands`: clap CLI surface and non-overlay subcommand runners
 //! - `capture`: screen freeze (wlr-screencopy; multi-output, dedicated
 //!   wayland connection)
 //! - `display`: capture ↔ gpui display matching and waiting
@@ -16,7 +17,9 @@ use gpui_kit::*;
 
 use clap::Parser as _;
 use shotori::actions::QuitOverlay;
+use shotori::args::{Command, GuiArgs};
 use shotori::clipboard;
+use shotori::commands::TargetError;
 use shotori::platform::capture;
 use shotori::platform::display;
 use shotori::ui::overlay::Overlay;
@@ -63,20 +66,19 @@ fn main() {
         return;
     }
 
-    // Command line (after the two internal child-process entry points
-    // above, which take free-form trailing arguments and must not be
-    // flag-parsed). clap handles --help/--version and bad arguments.
+    // Command line (after the internal child-process entry points above,
+    // which take free-form trailing arguments and must not be flag-parsed).
+    // clap handles --help/--version and bad arguments.
     let args = shotori::args::Cli::parse();
 
     // Locale pickup runs before EVERY later branch (tray, settings
-    // window, overlay) — they all return before `settings::init` would
-    // run, so the language gets its own early read of the file.
+    // window, CLI subcommands, overlay) — they all return before
+    // `settings::init` would run, so the language gets its own early read.
     shotori::i18n::init(args.no_config);
 
     // Tray mode: a resident launcher, not a screenshot session — bail
-    // out before theme init / capture. Returns when the user quits the
-    // tray.
-    if matches!(args.command, Some(shotori::args::Command::Tray)) {
+    // out before theme init / capture. Returns when the user quits the tray.
+    if matches!(args.command, Some(Command::Tray)) {
         shotori::tray::run();
         return;
     }
@@ -88,24 +90,38 @@ fn main() {
     // ⓪" The settings window: a regular toplevel, not a capture
     // session — nothing below (settings pickup, capture, overlays)
     // applies. The window loads and reports the file itself.
-    if matches!(args.command, Some(shotori::args::Command::Settings)) {
-        shotori::ui::settings::run();
+    if let Some(Command::Settings(settings_args)) = &args.command {
+        shotori::ui::settings::run(settings_args.page);
         return;
+    }
+
+    // Output listing (`shotori outputs`): lightweight Wayland metadata probe,
+    // no screencopy or settings needed.
+    if let Some(Command::Outputs(outputs_args)) = &args.command {
+        std::process::exit(shotori::commands::run_outputs(outputs_args));
     }
 
     // ⓪''' Settings pickup (settings.toml in the config dir; --no-config
     // skips it, like the theme). Errors are warnings, never fatal.
     shotori::model::settings::init(&args);
 
-    // ⓪' Non-interactive full capture (`shotori full`) — no overlay
-    if let Some(shotori::args::Command::Full {
-        clipboard,
-        path,
-        delay,
-    }) = &args.command
-    {
-        full_capture(*clipboard, path.clone(), *delay);
-    }
+    // ⓪' Non-overlay CLI subcommands (`full`, `ocr`, `pin`)
+    let gui_args = match &args.command {
+        Some(Command::Full(full_args)) => {
+            std::process::exit(shotori::commands::run_full(full_args));
+        }
+        Some(Command::Ocr(ocr_args)) => {
+            std::process::exit(shotori::commands::run_ocr(ocr_args));
+        }
+        Some(Command::Pin(pin_args)) => {
+            std::process::exit(shotori::commands::run_pin(pin_args));
+        }
+        Some(Command::Gui(g)) => g.clone(),
+        None => GuiArgs::default(),
+        Some(Command::Tray | Command::Settings(_) | Command::Outputs(_)) => unreachable!(),
+    };
+
+    shotori::commands::sleep_delay(gui_args.delay);
 
     // ① Freeze all screens (must complete before the overlays appear)
     let caps = match capture::capture_all_outputs() {
@@ -138,19 +154,57 @@ fn main() {
         .spawn(shotori::ocr::warmup)
         .ok();
 
-    // Window snapping: ask the compositor (niri / sway / Hyprland IPC)
-    // where every visible window is. None = compositor without a
-    // supported IPC; the feature silently turns off (see windowsnap).
-    let snaps = shotori::platform::windowsnap::query();
+    // Window snapping + focused-output hint: ask the compositor (niri / sway /
+    // Hyprland IPC) where every visible window is and which monitor holds focus.
+    // None = compositor without a supported IPC; the feature silently turns off.
+    let snapshot = shotori::platform::windowsnap::query_snapshot();
     println!(
         "[shotori] window snap: {}",
-        match &snaps {
+        match snapshot.as_ref().map(|s| &s.rects) {
             Some(s) if !s.is_empty() => format!("{} window(s)", s.len()),
             Some(_) => "no visible windows".to_owned(),
             None => "unavailable on this compositor".to_owned(),
         }
     );
+    let snapshot = snapshot.unwrap_or_default();
     shotori::boot_mark("windowsnap done");
+
+    // Pre-flight check for explicit CLI targets (`--output`, `--region`,
+    // `--window`) before initializing Vulkan/GPUI windows: invalid output
+    // names or completely off-screen regions exit 1 immediately; a missing
+    // focused window warns and degrades to normal interactive selection.
+    if let Some(target) = gui_args.target() {
+        let dry_caps = caps
+            .iter()
+            .map(|c| {
+                std::sync::Arc::new(capture::Capture {
+                    output_name: c.output_name.clone(),
+                    logical_pos: c.logical_pos,
+                    logical_size: c.logical_size,
+                    scale: c.scale,
+                    transform: c.transform,
+                    width: c.width,
+                    height: c.height,
+                    rgba: Vec::new(),
+                })
+            })
+            .collect();
+        let mut dry =
+            shotori::model::session::ScreenshotSession::new(dry_caps, snapshot.rects.clone());
+        match shotori::commands::apply_target(&mut dry, &target, &snapshot) {
+            Ok(()) => {}
+            Err(TargetError::NoFocusedWindow) => {
+                eprintln!(
+                    "[shotori] warning: {e}; opening interactive selection",
+                    e = TargetError::NoFocusedWindow
+                );
+            }
+            Err(err) => {
+                eprintln!("[shotori] {err}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // ② Overlays (one per screen)
     gpui_kit::application()
@@ -196,13 +250,14 @@ fn main() {
                 #[cfg(feature = "perf")]
                 let mut warm_reopen = None;
                 cx.update(|cx| {
-                    let targets: Vec<_> = targets.into_iter()
+                    let targets: Vec<_> = targets
+                        .into_iter()
                         .map(|(cap, did)| (std::sync::Arc::new(cap), did))
                         .collect();
                     let session = cx.new(|_| {
                         shotori::model::session::ScreenshotSession::new(
                             targets.iter().map(|(cap, _)| cap.clone()).collect(),
-                            snaps.unwrap_or_default(),
+                            snapshot.rects.clone(),
                         )
                     });
                     // Smart region detection: analyze each frozen output
@@ -286,9 +341,7 @@ fn main() {
                         let opened = cx.open_window(
                             Overlay::window_options(did, logical),
                             |window, cx| {
-                                cx.new(|cx| {
-                                    Overlay::new(cap, session.clone(), window, cx)
-                                })
+                                cx.new(|cx| Overlay::new(cap, session.clone(), window, cx))
                             },
                         );
                         // One output's surface failing (compositor
@@ -308,6 +361,22 @@ fn main() {
                         // before the file dialog takes over the screen
                         shotori::save_dialog::register_overlay(handle.into());
                     }
+
+                    // Apply CLI pre-selection (`--full`, `--screen`, `--output`,
+                    // `--region`, `--window`) and initial annotation tool (`--tool`)
+                    // after every Overlay::new has reported its window size.
+                    if gui_args.target().is_some() || gui_args.tool.is_some() {
+                        session.update(cx, |s, cx| {
+                            if let Some(target) = gui_args.target() {
+                                drop(shotori::commands::apply_target(s, &target, &snapshot));
+                            }
+                            if let Some(tool) = gui_args.tool {
+                                s.arm_initial_tool(tool);
+                            }
+                            cx.notify();
+                        });
+                    }
+
                     shotori::boot_mark("windows opened (layer-shell requested)");
                 });
 
@@ -323,9 +392,7 @@ fn main() {
                         shotori::boot_mark("warm reopen requested");
                         match cx.open_window(
                             Overlay::window_options(did, logical),
-                            |window, cx| {
-                                cx.new(|cx| Overlay::new(cap, session, window, cx))
-                            },
+                            |window, cx| cx.new(|cx| Overlay::new(cap, session, window, cx)),
                         ) {
                             Ok(handle) => {
                                 shotori::save_dialog::register_overlay(handle.into());
@@ -351,80 +418,4 @@ fn main() {
     // Startup-suite children report their peak RSS on the way out
     #[cfg(feature = "perf")]
     shotori::perf::report_child_rss();
-}
-
-/// `shotori full`: capture every screen with no overlay. The session
-/// machinery is reused as-is (`select_all` builds the union selection,
-/// `crop_original` walks the same cross-screen export path as the
-/// interactive flow), so density/gap semantics cannot drift between
-/// modes. Clipboard when no `--path` is given; a directory `--path`
-/// gets the dialog-style timestamped name.
-fn full_capture(clipboard: bool, path: Option<std::path::PathBuf>, delay: f32) -> ! {
-    use shotori::model::session::ScreenshotSession;
-
-    if delay > 0. && delay.is_finite() {
-        // from_secs_f32 panics on non-finite/negative — clap accepts both
-        // (f32 has no range validation), so gate here. Cap at an hour:
-        // --delay is for settling compositors, not a timer feature.
-        std::thread::sleep(std::time::Duration::from_secs_f32(delay.min(3600.)));
-    }
-    let caps = match capture::capture_all_outputs() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[shotori] capture failed: {e:#}");
-            shotori::notify::send(
-                "Couldn’t capture screen",
-                "Try taking the screenshot again.",
-            );
-            std::process::exit(1);
-        }
-    };
-    let first = caps[0].output_name.clone();
-    let mut session = ScreenshotSession::new(
-        caps.into_iter().map(std::sync::Arc::new).collect(),
-        Vec::new(),
-    );
-    session.select_all();
-    let Some((w, h, rgba)) = session.crop_original(&first) else {
-        eprintln!("[shotori] full capture produced nothing");
-        std::process::exit(1);
-    };
-
-    let mut ok = true;
-    // Clipboard: the default, and alongside --path when asked explicitly.
-    // Fast-tier PNG: the bytes go through the daemon's pipe, not a download
-    if clipboard || path.is_none() {
-        let png = match shotori::model::export::encode_png_fast(w, h, &rgba) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[shotori] clipboard: {e:#}");
-                ok = false;
-                Vec::new()
-            }
-        };
-        if !png.is_empty()
-            && let Err(e) = clipboard::copy_image(w, h, &rgba, &png)
-        {
-            eprintln!("[shotori] clipboard: {e:#}");
-            ok = false;
-        } else if !png.is_empty() {
-            shotori::notify::copied(&png);
-        }
-    }
-    if let Some(p) = path {
-        let file = if p.is_dir() {
-            p.join(shotori::save_dialog::suggested_name())
-        } else {
-            p
-        };
-        match shotori::model::export::save_png(&file, w, h, &rgba) {
-            // The thumbnail renders in the notify child from the saved file
-            Ok(()) => shotori::notify::saved(&file),
-            Err(e) => {
-                eprintln!("[shotori] save: {e:#}");
-                ok = false;
-            }
-        }
-    }
-    std::process::exit(i32::from(!ok));
 }
