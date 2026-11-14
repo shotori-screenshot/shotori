@@ -256,6 +256,7 @@ fn candidate_offsets(max_admissible: i32, prediction: i32) -> Vec<i32> {
 ///
 /// `weights` masks fixed sidebars (see [`MotionMask`]). `prediction` is
 /// the last accepted step; it only seeds the search order.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn estimate_offset(
     prev: &RowProfile,
     cur: &RowProfile,
@@ -263,6 +264,8 @@ pub(super) fn estimate_offset(
     sticky_trim: (u32, u32),
     weights: &BandWeights,
     prediction: i32,
+    fixed_backdrop: bool,
+    allow_foreground: bool,
 ) -> Option<OffsetEstimate> {
     let h = prev.height.min(cur.height) as i32;
     if h <= 0 || prev.stride != cur.stride {
@@ -294,6 +297,29 @@ pub(super) fn estimate_offset(
         return None;
     }
     let min_overlap = options.min_overlap as i32;
+
+    if fixed_backdrop {
+        if let Some(candidate) = foreground::estimate(
+            prev,
+            cur,
+            weights,
+            (trim_top, trim_bot),
+            min_overlap,
+            prediction,
+            max_admissible,
+            true,
+        ) {
+            return Some(candidate);
+        }
+        let cost = row_cost(prev, cur, 0, weights, trim_top, trim_bot)?;
+        return Some(OffsetEstimate {
+            dy: 0,
+            cost,
+            runner_up: f32::INFINITY,
+            window: max_admissible,
+            foreground: false,
+        });
+    }
 
     let mut candidates = candidate_offsets(max_admissible, prediction);
     let sig = |d: i32, prev: &RowProfile, cur: &RowProfile| {
@@ -366,15 +392,22 @@ pub(super) fn estimate_offset(
         }
     }
     // A fixed backdrop can supply a deceptively confident ordinary match.
-    // Validate foreground motion independently before accepting its position.
-    if let Some(candidate) = foreground::estimate(
-        prev,
-        cur,
-        weights,
-        (trim_top, trim_bot),
-        prediction,
-        max_admissible,
-    ) && candidate.cost <= options.cost_threshold
+    // Validate foreground motion independently before accepting its position,
+    // and surface rejected foreground motion rather than letting a stationary
+    // backdrop pull `d = 0` below `cost_threshold` as `Still`.
+    if allow_foreground
+        && let Some(candidate) = foreground::estimate(
+            prev,
+            cur,
+            weights,
+            (trim_top, trim_bot),
+            min_overlap,
+            prediction,
+            max_admissible,
+            false,
+        )
+        && (candidate.cost <= options.cost_threshold
+            || best.is_none_or(|(dy, cost)| dy == 0 || cost > options.cost_threshold))
     {
         return Some(candidate);
     }

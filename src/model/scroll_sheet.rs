@@ -752,6 +752,16 @@ impl ScrollSheet {
         cur: &RowProfile,
         document_motion: Option<i32>,
     ) -> Placement {
+        self.classify_with(base, cur, document_motion, document_motion.is_none())
+    }
+
+    fn classify_with(
+        &self,
+        base: &RowProfile,
+        cur: &RowProfile,
+        document_motion: Option<i32>,
+        allow_foreground: bool,
+    ) -> Placement {
         // Committed sticky bands extend the edge trim of the scan.
         let trim = (self.sticky.top, self.sticky.bot);
         let mut weights = self.motion.weights;
@@ -762,6 +772,8 @@ impl ScrollSheet {
                 }
             }
         }
+        let allow_foreground =
+            allow_foreground && !self.sidebar.as_ref().is_some_and(|s| s.is_independent());
         let Some(mut estimate) = estimate_offset(
             base,
             cur,
@@ -769,6 +781,8 @@ impl ScrollSheet {
             trim,
             &weights,
             document_motion.unwrap_or(self.last_dy),
+            self.fixed_backdrop,
+            allow_foreground,
         ) else {
             sheet_log(&format!(
                 "#{} NoOverlap (no admissible candidate)",
@@ -779,7 +793,8 @@ impl ScrollSheet {
         // A whole-frame candidate must also match the body independently.
         // Its search neighbourhood covers abrupt reversals missed by sparse
         // body signatures; a stationary sidebar cannot dictate the offset.
-        if self.sidebar.is_some()
+        if !self.fixed_backdrop
+            && self.sidebar.is_some()
             && (estimate.cost > self.options.cost_threshold
                 || estimate.runner_up - estimate.cost < self.options.ambiguity_margin)
             && let Some(full) = estimate_offset(
@@ -789,10 +804,21 @@ impl ScrollSheet {
                 trim,
                 &self.motion.weights,
                 document_motion.unwrap_or(self.last_dy),
+                false,
+                false,
             )
             && full.cost <= self.options.cost_threshold
             && full.runner_up - full.cost >= self.options.ambiguity_margin
-            && let Some(body) = estimate_offset(base, cur, &self.options, trim, &weights, full.dy)
+            && let Some(body) = estimate_offset(
+                base,
+                cur,
+                &self.options,
+                trim,
+                &weights,
+                full.dy,
+                false,
+                false,
+            )
             && body.dy == full.dy
             && body.cost <= self.options.cost_threshold
         {
@@ -904,10 +930,33 @@ impl ScrollSheet {
             return Fold::Refused(Refusal::TooTall);
         }
 
-        if self.fixed_backdrop || estimate.foreground {
+        let can_latch_backdrop =
+            estimate.foreground && !self.sidebar.as_ref().is_some_and(|s| s.is_independent());
+        if self.fixed_backdrop || can_latch_backdrop {
             self.fixed_backdrop = true;
             self.sidebar = None;
-            self.place_over_backdrop(frame, next.position as usize, branch, growth);
+            self.floating.frame_edge.observe_seed_prefix(frame);
+            self.sticky.seed_top = self
+                .sticky
+                .seed_top
+                .min(self.floating.frame_edge.seed_prefix_rows() as u32);
+            let evidence = stillness_grid(
+                &self.stable_profile,
+                profile,
+                &self.options,
+                estimate.dy,
+                true,
+            );
+            if !evidence.still.is_empty() {
+                self.sticky.update(&evidence);
+                if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
+                    self.commit_top_band(t, frame);
+                }
+                if let Some(b) = self.sticky.bot_commit(profile, self.viewport_height) {
+                    self.sticky.bot = b;
+                }
+            }
+            self.place_over_backdrop(frame, profile, next.position as usize, branch, growth);
             return self.accept(profile, &estimate, next, branch, growth);
         }
 
@@ -944,8 +993,13 @@ impl ScrollSheet {
         // is only meaningful against the base that produced it, and the
         // displacement probe needs the step that was accepted.
         {
-            let evidence =
-                stillness_grid(&self.stable_profile, profile, &self.options, estimate.dy);
+            let evidence = stillness_grid(
+                &self.stable_profile,
+                profile,
+                &self.options,
+                estimate.dy,
+                false,
+            );
             if !evidence.still.is_empty() {
                 self.sticky.update(&evidence);
                 if let Some(t) = self.sticky.top_commit(profile, self.viewport_height) {
@@ -1054,20 +1108,78 @@ impl ScrollSheet {
 
     /// A fixed backdrop is not a collection of occluding controls. Repairing
     /// its stationary edges in document coordinates makes a patchwork. Keep
-    /// whole observed rows instead. Refreshing the latest viewport also
-    /// replaces transient hover/status chrome once the page exposes it.
-    fn place_over_backdrop(&mut self, frame: &[u8], position: usize, branch: Branch, growth: u32) {
+    /// whole observed rows instead while still respecting sticky edge chrome
+    /// (`seed_top`, live top/bottom stationary prefixes, and committed `bot`)
+    /// so navbars and footers are never smeared down the sheet or stamped into
+    /// interior content on return passes.
+    fn place_over_backdrop(
+        &mut self,
+        frame: &[u8],
+        profile: &RowProfile,
+        position: usize,
+        branch: Branch,
+        growth: u32,
+    ) {
         let row = self.width as usize * 4;
-        let bytes = growth as usize * self.width as usize * 4;
-        let len = self.canvas.len();
-        if bytes > 0 {
-            self.canvas.resize(len + bytes, 0);
-            if branch == Branch::Above {
-                self.canvas.copy_within(..len, bytes);
-                self.top_shifts = self.top_shifts.saturating_add(1);
-            }
+        let vh = self.viewport_height as usize;
+        let top = self.sticky.seed_top as usize;
+        let bot = self.sticky.bot as usize;
+        let old_rows = self.canvas.len() / row;
+
+        if branch == Branch::Above && growth > 0 {
+            let shift = growth as usize * row;
+            self.canvas.resize(self.canvas.len() + shift, 0);
+            let len = self.canvas.len();
+            self.canvas
+                .copy_within(top * row..len - shift, top * row + shift);
+            let exposed_end = (top + growth as usize).min(vh);
+            self.canvas[top * row..exposed_end * row]
+                .copy_from_slice(&frame[top * row..exposed_end * row]);
+        } else if branch == Branch::Below && growth > 0 {
+            self.canvas
+                .resize(self.canvas.len() + growth as usize * row, 0);
         }
-        self.canvas[position * row..position * row + frame.len()].copy_from_slice(frame);
+
+        let live_top =
+            self.sticky
+                .live_top_rows(&self.stable_profile, profile, self.options.cost_threshold);
+        let prefix_rows = live_top.min(top);
+        if prefix_rows > 0 {
+            self.canvas[..prefix_rows * row].copy_from_slice(&frame[..prefix_rows * row]);
+        }
+
+        let already_captured_top = match branch {
+            Branch::Above => 0,
+            Branch::Below | Branch::Within => old_rows
+                .saturating_sub(bot)
+                .saturating_sub(position)
+                .min(vh),
+        };
+        let start = top.max(live_top.min(already_captured_top));
+
+        let live_bot = if branch == Branch::Below {
+            0
+        } else {
+            self.sticky
+                .live_bot_rows(&self.stable_profile, profile, self.options.cost_threshold)
+        };
+        let bot_exclude = bot.max(live_bot);
+        let content_end = vh.saturating_sub(bot_exclude);
+        let start = start.min(content_end);
+
+        if start < content_end {
+            let dst = (position + start) * row;
+            let len = (content_end - start) * row;
+            self.canvas[dst..dst + len].copy_from_slice(&frame[start * row..content_end * row]);
+        }
+
+        if bot > 0 && branch == Branch::Below {
+            let footer_src = (vh - bot) * row;
+            let footer_dst = (position + vh - bot) * row;
+            self.canvas[footer_dst..footer_dst + bot * row]
+                .copy_from_slice(&frame[footer_src..vh * row]);
+        }
+
         self.top_shifts = self.top_shifts.saturating_add(1);
     }
 
