@@ -31,6 +31,9 @@ common:
   save:
     en: Save
     zh-CN: 保存
+  pin:
+    en: Pin
+    zh-CN: 贴图
   close:
     en: Close
     zh-CN: 关闭
@@ -385,6 +388,9 @@ pin:
         zh-CN: 请重试，或改在截图界面上复制。
 scroll:
   status:
+    following:
+      en: Capturing
+      zh-CN: 捕获中
     waiting:
       en: Waiting for scroll
       zh-CN: 等待滚动
@@ -392,8 +398,8 @@ scroll:
       en: "Layout moved sideways · capture retained"
       zh-CN: "页面横向变化 · 已保留截图"
     no_overlap:
-      en: No overlap
-      zh-CN: 无重叠
+      en: "Scroll slower · lost overlap"
+      zh-CN: "滚慢一点 · 重叠丢失"
     unstable:
       en: Can’t line up
       zh-CN: 画面对不上
@@ -414,8 +420,8 @@ scroll:
       en: Scroll the page to capture
       zh-CN: 滚动页面开始捕获
     shortcuts:
-      en: Enter to copy, Ctrl+S to save
-      zh-CN: Enter 复制，Ctrl+S 保存
+      en: Enter copy · Ctrl+S save · Ctrl+P pin
+      zh-CN: Enter 复制 · Ctrl+S 保存 · Ctrl+P 贴图
   action:
     drag:
       en: Drag the capture area
@@ -423,6 +429,9 @@ scroll:
     follow:
       en: Back to live
       zh-CN: 回到实时
+    scrub:
+      en: Click or drag to inspect captured history
+      zh-CN: 点击或拖动查看已捕获历史
     axis_horizontal:
       en: Switch to horizontal
       zh-CN: 切换为横向
@@ -447,8 +456,8 @@ scroll:
         en: Long screenshot running
         zh-CN: 长截图进行中
       body:
-        en: Scroll the content to capture. Space pauses, Enter or Ctrl+C copies, Ctrl+S saves, Esc cancels.
-        zh-CN: 滚动页面以捕获内容。Space 暂停，Enter 或 Ctrl+C 复制，Ctrl+S 保存，Esc 取消。
+        en: Scroll the content to capture. Space pauses, Enter or Ctrl+C copies, Ctrl+S saves, Ctrl+P pins, Esc cancels.
+        zh-CN: 滚动页面以捕获内容。Space 暂停，Enter 或 Ctrl+C 复制，Ctrl+S 保存，Ctrl+P 贴图，Esc 取消。
     stopped_early:
       title:
         en: Long screenshot stopped early

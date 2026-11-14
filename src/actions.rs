@@ -80,7 +80,13 @@ gpui_kit::actions!([
 // here so `actions` remains a pure leaf with zero `crate::*` imports.
 gpui_kit::actions!(
     scroll,
-    [ScrollFinish, ScrollCancel, ScrollSave, ScrollPause]
+    [
+        ScrollFinish,
+        ScrollCancel,
+        ScrollSave,
+        ScrollPin,
+        ScrollPause
+    ]
 );
 
 // Floating-pin window actions (`ShotoriPin` / `ShotoriPinMenu` contexts).
@@ -119,6 +125,7 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         KeyBinding::new("ctrl-c", ScrollFinish, Some("ShotoriScroll")),
         KeyBinding::new("escape", ScrollCancel, Some("ShotoriScroll")),
         KeyBinding::new("ctrl-s", ScrollSave, Some("ShotoriScroll")),
+        KeyBinding::new("ctrl-p", ScrollPin, Some("ShotoriScroll")),
         // Space freezes sampling without ending the session (the panel
         // button dispatches the same action)
         KeyBinding::new("space", ScrollPause, Some("ShotoriScroll")),

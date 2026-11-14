@@ -1,13 +1,12 @@
-//! The preview panel: the deck window showing the growing long image
-//! (a viewfinder on the sheet), the action bar above it and the
-//! finish/cancel/save exits. The engine's camera, phase and axis all
-//! render here as chips on the strip; the wheel can peek at history
-//! and returns to the live edge by chip.
-
-use super::*;
+//! The preview panel: floating action toolbar, dedicated non-occluding
+//! status & dimensions bar, top-aligned aspect-preserving preview well,
+//! and proportional global scrollbar/minimap rail.
 
 use std::sync::Arc;
 
+use super::exits::{ExitTarget, PinContext, WARNING_AMBER, dispatch_exit, is_warning_phase};
+use super::frame::FrameView;
+use super::*;
 use crate::model::scroll_sheet::{Axis, Phase, PreviewGeometry};
 use crate::platform::scroll_capture::{ScrollControls, ScrollEvent};
 use crate::ui::image_util;
@@ -18,78 +17,104 @@ pub(crate) struct PreviewPanel {
     focus: FocusHandle,
     controls: Option<ScrollControls>,
     state: PanelState,
-    /// Ctrl+S was pressed: the finished canvas goes to the save flow
-    /// instead of the clipboard.
-    saving: bool,
+    exit: ExitTarget,
+    pin_ctx: PinContext,
     /// The region-frame window, closed on every terminal path.
     pub(super) sibling: Option<AnyWindowHandle>,
+    /// Weak handle to `FrameView` so live `Phase`/`paused` changes tint
+    /// the peripheral region outline in real time.
+    pub(super) frame_view: Option<gpui_kit::WeakEntity<FrameView>>,
     image: Option<Arc<RenderImage>>,
-    /// Every preview bitmap the window has been handed. gpui keeps a GPU
-    /// texture per `RenderImage`; a 16 fps preview would otherwise leak
-    /// one ~1 MB texture per frame (the "it freezes after a minute of
-    /// scrolling" report). Retired ones are dropped during the next
-    /// paint — `CanvasImages` is the crate's existing eviction dance.
+    /// Every preview bitmap the window has been handed; retired textures
+    /// are evicted on the next paint so long sessions never leak VRAM.
     preview_images: image_util::CanvasImages,
-    /// Textures to evict on the next paint (see above).
     retired: Vec<Arc<RenderImage>>,
-    /// Viewport highlight in PREVIEW-row coordinates (already mapped by
-    /// the engine); `None` when the panel is peeking at history, i.e.
-    /// the viewport is not on the window it shows.
+    /// Viewport highlight in preview pixels along the growth axis; `None`
+    /// when the viewport lies outside the currently shown window.
     viewport: Option<(u32, u32)>,
     preview_rows: u32,
-    /// The preview bitmap's width in px (for the aspect-derived display
-    /// height — see [`PREVIEW_IMG_W`]).
     preview_cols: u32,
-    /// Shared preview dimensions (well height + HiDPI sample width) read
-    /// by the engine's camera.
+    /// Global sheet metrics along the scroll axis (physical sheet rows)
+    /// for the proportional scrollbar/minimap rail.
+    sheet_len: u32,
+    window_top: u32,
+    window_rows: u32,
+    sheet_viewport_top: u32,
+    sheet_viewport_len: u32,
     preview_geom: PreviewGeometry,
-    /// Physical-to-logical scale of the output hosting this panel
-    /// (derived from capture dimensions, never `window.scale_factor()`).
     panel_scale: f32,
-    /// The deck window's logical height — the preview well's visible
-    /// area derives from it (the card is top-anchored, not full-height).
+    panel_w: f32,
     output_h: f32,
-    /// Physical capture size from `Started` (width, height).
     capture: Option<(u32, u32)>,
-    /// Full canvas height from `Progress` — the header's "W × H".
     total_height: u32,
-    /// The session's own reading of the last few frames (waiting /
-    /// following / no overlap / stalled) — a refusal is a state here,
-    /// never an error.
     phase: Phase,
-    /// Sampling paused by the user (Space / the pause button).
     paused: bool,
-    /// Current growth direction (confirmed by the engine).
     axis: Axis,
-    /// The engine accepted a frame: the axis can no longer be swapped.
     axis_locked: bool,
-    /// The wheel in the strip aimed the camera at history; the chip
-    /// returns it to the live edge.
     peeking: bool,
+    rail_drag: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PanelState {
-    /// Engine thread is connecting / capturing the first frame.
     Starting,
-    /// Capturing.
     Running,
-    /// Finishing on request; the canvas is on its way.
     Finishing,
-    /// A terminal event fired; the window is going away.
     Done,
 }
 
+/// Aspect-preserving strip placement `(left, top, width, height)` inside
+/// an inner preview box `(well_w, well_h)`.
+///
+/// - Vertical captures anchor at `top = 0` so newly captured rows unroll
+///   naturally downward instead of floating in the middle of an empty box;
+///   narrow-tall captures (`viewport_h > window_rows`) scale BOTH width
+///   and height uniformly instead of clamping height alone (preventing
+///   vertical squash) and center horizontally.
+/// - Horizontal captures anchor at `left = 0` (unrolling rightward) and
+///   fit uniformly within `(well_w, well_h)`, centered vertically.
+fn fit_strip_box(
+    well_w: f32,
+    well_h: f32,
+    img_cols: u32,
+    img_rows: u32,
+    axis: Axis,
+) -> (f32, f32, f32, f32) {
+    let cols = img_cols.max(1) as f32;
+    let rows = img_rows.max(1) as f32;
+    let well_w = well_w.max(1.0);
+    let well_h = well_h.max(1.0);
+    match axis {
+        Axis::Vertical => {
+            let nat_h = well_w * rows / cols;
+            if nat_h <= well_h {
+                (0.0, 0.0, well_w, nat_h.max(1.0))
+            } else {
+                let scale = well_h / nat_h;
+                let w = (well_w * scale).clamp(1.0, well_w);
+                ((well_w - w) * 0.5, 0.0, w, well_h)
+            }
+        }
+        Axis::Horizontal => {
+            let cross_cap = well_h.min(well_w);
+            let scale = (well_w / cols).min(cross_cap / rows).max(0.001);
+            let w = (cols * scale).clamp(1.0, well_w);
+            let h = (rows * scale).clamp(1.0, well_h);
+            (0.0, (well_h - h) * 0.5, w, h)
+        }
+    }
+}
+
 impl PreviewPanel {
-    /// `controls`/`events` arrive from `launch` (the engine starts
-    /// before any window so either host — panel or chrome-free frame —
-    /// can take the pair).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         controls: ScrollControls,
         events: async_channel::Receiver<ScrollEvent>,
+        panel_w: f32,
         output_h: f32,
         panel_scale: f32,
         preview_geom: PreviewGeometry,
+        pin_ctx: PinContext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -100,16 +125,24 @@ impl PreviewPanel {
             focus: focus_handle,
             controls: Some(controls),
             state: PanelState::Starting,
-            saving: false,
+            exit: ExitTarget::Copy,
+            pin_ctx,
             sibling: None,
+            frame_view: None,
             image: None,
             preview_images: image_util::CanvasImages::default(),
             retired: Vec::new(),
             viewport: None,
             preview_rows: 0,
             preview_cols: 1,
+            sheet_len: 0,
+            window_top: 0,
+            window_rows: 1,
+            sheet_viewport_top: 0,
+            sheet_viewport_len: 1,
             preview_geom,
             panel_scale: panel_scale.max(1.0),
+            panel_w,
             output_h,
             capture: None,
             total_height: 0,
@@ -118,11 +151,10 @@ impl PreviewPanel {
             axis: Axis::Vertical,
             axis_locked: false,
             peeking: false,
+            rail_drag: false,
         };
         this.publish_preview_geometry();
 
-        // The event pump: engine → entity updates; ends with the channel
-        // (the engine closes its sender on exit).
         let weak = cx.entity().downgrade();
         let handle = window.window_handle();
         cx.spawn(async move |_, cx| {
@@ -131,7 +163,7 @@ impl PreviewPanel {
                     .update(cx, |panel, cx| panel.on_event(event, &handle, cx))
                     .is_err()
                 {
-                    break; // window gone; nothing left to update
+                    break;
                 }
             }
         })
@@ -139,34 +171,29 @@ impl PreviewPanel {
         this
     }
 
-    /// The engine handle, for the frame toolbar's late binding.
     pub(crate) fn controls(&self) -> ScrollControls {
         self.controls.clone().unwrap_or_else(ScrollControls::dead)
     }
 
-    /// Finish into the SAVE flow (the frame toolbar's Save button —
-    /// no action dispatch across windows, a direct entity call).
     pub(crate) fn request_save(&mut self, cx: &mut Context<Self>) {
-        if let Some(controls) = &self.controls {
-            self.saving = true;
-            self.state = PanelState::Finishing;
-            controls.finish();
-            cx.notify();
-        }
+        self.request_exit(ExitTarget::Save, cx);
     }
 
-    /// Stop sampling and deliver the canvas (the deck's Copy button).
-    fn request_finish(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_pin(&mut self, cx: &mut Context<Self>) {
+        self.request_exit(ExitTarget::Pin, cx);
+    }
+
+    fn request_exit(&mut self, target: ExitTarget, cx: &mut Context<Self>) {
         if let Some(controls) = &self.controls
             && !matches!(self.state, PanelState::Done)
         {
+            self.exit = target;
             self.state = PanelState::Finishing;
             controls.finish();
             cx.notify();
         }
     }
 
-    /// Discard the session (the deck's Cancel button).
     fn request_cancel(&mut self, cx: &mut Context<Self>) {
         if let Some(controls) = self.controls.take() {
             controls.cancel();
@@ -174,33 +201,51 @@ impl PreviewPanel {
         }
     }
 
-    /// The preview well's visible height and the strip's rendered height,
-    /// from the same constants the renderer uses.
-    fn preview_metrics(&self) -> (f32, f32) {
-        let content_h = self.output_h.max(120.);
-        let area_h = (content_h - TOOLBAR_H - TOOLBAR_GAP - 2. * PREVIEW_BORDER).max(60.);
-        let img_h = (PREVIEW_IMG_W * self.preview_rows as f32 / self.preview_cols.max(1) as f32)
-            .clamp(1., 8000.);
-        (area_h, img_h)
+    /// Outer well height (`area_h`) and inner image box `(well_w, well_h)`
+    /// in logical px, reserving [`RAIL_SLOT_W`] on the right for the
+    /// global scrollbar rail.
+    fn well_box(&self) -> (f32, f32, f32) {
+        let content_h = self.output_h.max(160.);
+        let chrome_h = TOOLBAR_H + INFO_BAR_H + 2. * TOOLBAR_GAP + 2. * PREVIEW_BORDER;
+        let area_h = (content_h - chrome_h).max(60.);
+        let well_w =
+            (self.panel_w - 2. * PREVIEW_BORDER - 2. * PREVIEW_GUTTER - RAIL_SLOT_W).max(80.);
+        let well_h = (area_h - 2. * PREVIEW_GUTTER).max(40.);
+        (area_h, well_w, well_h)
     }
 
-    /// Publish the well's logical height and physical sample width to
-    /// the engine's camera so the slice matches HiDPI pixel density and
-    /// moves at a scale-invariant rate.
+    /// Top Y coordinate and height of the scrollbar rail track in
+    /// window-local logical pixels (same geometry source for paint and
+    /// pointer scrubbing).
+    fn rail_track_y(&self) -> (f32, f32) {
+        let (_, _, well_h) = self.well_box();
+        let well_top = TOOLBAR_H + INFO_BAR_H + 2. * TOOLBAR_GAP + PREVIEW_BORDER + PREVIEW_GUTTER;
+        (well_top, well_h)
+    }
+
+    /// Publish logical `(well_along, well_cross)` and physical
+    /// `sample_cross` so the engine's window sizing and area-box filter
+    /// match both adaptive panel widths and growth orientation.
     fn publish_preview_geometry(&self) {
-        let (area_h, _) = self.preview_metrics();
-        let well_rows = area_h.round().max(0.) as u32;
-        let sample_w = PreviewGeometry::sample_width_for_scale(self.panel_scale);
-        self.preview_geom.set(well_rows, sample_w);
+        let (_, well_w, well_h) = self.well_box();
+        let (along_f, cross_f) = match self.axis {
+            Axis::Vertical => (well_h, well_w),
+            Axis::Horizontal => (well_w, well_h.min(well_w)),
+        };
+        let along = along_f.round().max(1.) as u32;
+        let cross = cross_f.round().max(1.) as u32;
+        let sample_w = PreviewGeometry::sample_width_for(cross_f, self.panel_scale);
+        self.preview_geom.set_box(along, cross, sample_w);
     }
 
-    /// Wheel over the strip: aim the engine's camera at history instead
-    /// of the live edge. The panel never scrolls a bitmap — the strip is
-    /// a viewfinder, so a step is a new slice from the engine and the
-    /// "Back to live" chip restores following.
-    // `gpui_kit::` spelled out: this module's own `ScrollEvent` (the
-    // capture engine's event enum, imported above) shadows the wheel
-    // event the element listener delivers.
+    fn sync_frame_status(&self, cx: &mut Context<Self>) {
+        if let Some(frame) = self.frame_view.as_ref().and_then(|w| w.upgrade()) {
+            let phase = self.phase;
+            let paused = self.paused;
+            frame.update(cx, |f, cx| f.set_status(phase, paused, cx));
+        }
+    }
+
     fn scroll_preview(
         &mut self,
         event: &gpui_kit::ScrollEvent,
@@ -208,13 +253,23 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         let lines = match event.delta {
-            ScrollDelta::Lines(lines) => lines.y,
-            ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,
+            ScrollDelta::Lines(lines) => {
+                if lines.y != 0. {
+                    lines.y
+                } else {
+                    lines.x
+                }
+            }
+            ScrollDelta::Pixels(pixels) => {
+                let py = f32::from(pixels.y);
+                let px_ = f32::from(pixels.x);
+                (if py.abs() >= px_.abs() { py } else { px_ }) / 40.
+            }
         };
         if lines == 0. || self.image.is_none() {
             return;
         }
-        let step = (lines * 3.).round() as i32;
+        let step = (lines * 18.).round() as i32;
         if step == 0 {
             return;
         }
@@ -226,46 +281,59 @@ impl PreviewPanel {
         cx.notify();
     }
 
-    /// The contextual chip that appears over the preview only when the
-    /// session is NOT simply following: waiting, no overlap, stalled,
-    /// paused or wrapping up. A healthy capture needs no word — the
-    /// moving strip says it.
-    fn state_chip(&self) -> Option<String> {
-        if self.paused {
-            return Some(crate::i18n::t!("scroll.status.paused").to_string());
+    /// Scrub the global sheet window from a window-local pointer Y along
+    /// the scrollbar rail.
+    fn scrub_rail_at(&mut self, window_y: f32, cx: &mut Context<Self>) {
+        if self.sheet_len == 0 || self.window_rows >= self.sheet_len {
+            return;
         }
-        match self.state {
-            PanelState::Starting => None,
-            PanelState::Finishing | PanelState::Done => {
-                Some(crate::i18n::t!("scroll.status.finishing").to_string())
-            }
-            PanelState::Running => match self.phase {
-                Phase::Waiting => Some(crate::i18n::t!("scroll.status.waiting").to_string()),
-                Phase::NoOverlap => Some(crate::i18n::t!("scroll.status.no_overlap").to_string()),
-                Phase::Unstable => Some(crate::i18n::t!("scroll.status.unstable").to_string()),
-                Phase::Stalled => Some(crate::i18n::t!("scroll.status.stalled").to_string()),
-                Phase::MaxLength => Some(crate::i18n::t!("scroll.status.max_length").to_string()),
-                Phase::LayoutShift => {
-                    Some(crate::i18n::t!("scroll.status.layout_shift").to_string())
-                }
-                Phase::Following => None,
-            },
-        }
-    }
-
-    /// Space / the pause button: freeze sampling without ending the
-    /// session. The engine keeps the canvas; resuming re-anchors on
-    /// whatever the page shows then.
-    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        let (track_top, track_h) = self.rail_track_y();
+        let win_frac = (self.window_rows as f32 / self.sheet_len as f32).clamp(0.04, 1.0);
+        let thumb_h = (track_h * win_frac).clamp(12.0, track_h);
+        let travel = (track_h - thumb_h).max(1.0);
+        let ratio = ((window_y - track_top - thumb_h * 0.5) / travel).clamp(0.0, 1.0);
         if let Some(controls) = &self.controls {
-            self.paused = !self.paused;
-            controls.set_paused(self.paused);
+            self.peeking = true;
+            controls.peek_ratio(ratio);
             cx.notify();
         }
     }
 
-    /// Swap vertical/horizontal growth. The engine confirms with a
-    /// `ScrollEvent::Axis` (and reports `locked` once it is too late).
+    fn status_label(&self) -> (String, bool) {
+        if self.paused {
+            return (crate::i18n::t!("scroll.status.paused").to_string(), false);
+        }
+        match self.state {
+            PanelState::Starting => (crate::i18n::t!("scroll.status.waiting").to_string(), false),
+            PanelState::Finishing | PanelState::Done => (
+                crate::i18n::t!("scroll.status.finishing").to_string(),
+                false,
+            ),
+            PanelState::Running => {
+                let warn = is_warning_phase(self.phase);
+                let text = match self.phase {
+                    Phase::Following => crate::i18n::t!("scroll.status.following").to_string(),
+                    Phase::Waiting => crate::i18n::t!("scroll.status.waiting").to_string(),
+                    Phase::NoOverlap => crate::i18n::t!("scroll.status.no_overlap").to_string(),
+                    Phase::Unstable => crate::i18n::t!("scroll.status.unstable").to_string(),
+                    Phase::Stalled => crate::i18n::t!("scroll.status.stalled").to_string(),
+                    Phase::MaxLength => crate::i18n::t!("scroll.status.max_length").to_string(),
+                    Phase::LayoutShift => crate::i18n::t!("scroll.status.layout_shift").to_string(),
+                };
+                (text, warn)
+            }
+        }
+    }
+
+    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        if let Some(controls) = &self.controls {
+            self.paused = !self.paused;
+            controls.set_paused(self.paused);
+            self.sync_frame_status(cx);
+            cx.notify();
+        }
+    }
+
     fn toggle_axis(&mut self, cx: &mut Context<Self>) {
         if self.axis_locked {
             return;
@@ -293,10 +361,6 @@ impl PreviewPanel {
                 self.axis_locked = locked;
                 self.peeking = false;
                 self.publish_preview_geometry();
-                // The initial long dimension follows the axis: the
-                // region's height for vertical, its width for
-                // horizontal. Progress overwrites this on the first
-                // accepted frame (after which the axis is locked).
                 if let Some((w, h)) = self.capture {
                     self.total_height = match axis {
                         Axis::Vertical => h,
@@ -308,25 +372,35 @@ impl PreviewPanel {
             ScrollEvent::Started { width, height } => {
                 self.state = PanelState::Running;
                 self.capture = Some((width, height));
-                // Vertical is the initial direction; the Axis event
-                // that follows corrects the long dimension.
                 self.total_height = height;
                 cx.notify();
             }
             ScrollEvent::Progress { total, .. } => {
-                // The header shows the growing canvas size; `extent`
-                // stays available for a future progress bar.
                 self.total_height = self.total_height.max(total);
                 cx.notify();
             }
             ScrollEvent::Phase(phase) => {
                 self.phase = phase;
+                self.sync_frame_status(cx);
                 cx.notify();
             }
-            ScrollEvent::Viewport { top, height } => {
-                // The pixel-free twin of Preview's viewport fields: the
-                // highlight follows frame drags without image resend.
+            ScrollEvent::Viewport {
+                top,
+                height,
+                sheet_len,
+                window_top,
+                window_rows,
+                sheet_viewport_top,
+                sheet_viewport_len,
+                peeking,
+            } => {
                 self.viewport = Some((top, height));
+                self.sheet_len = sheet_len;
+                self.window_top = window_top;
+                self.window_rows = window_rows.max(1);
+                self.sheet_viewport_top = sheet_viewport_top;
+                self.sheet_viewport_len = sheet_viewport_len.max(1);
+                self.peeking = peeking;
                 cx.notify();
             }
             ScrollEvent::Preview {
@@ -335,20 +409,26 @@ impl PreviewPanel {
                 rgba,
                 viewport_top,
                 viewport_height,
+                sheet_len,
+                window_top,
+                window_rows,
+                sheet_viewport_top,
+                sheet_viewport_len,
+                peeking,
             } => {
-                // A new bitmap every frame buys a GPU texture every
-                // frame; retire the one it replaces (painted-dropped,
-                // see `retired`).
                 let image = image_util::rgba_to_render_image((*rgba).clone(), width, height);
                 self.retired
                     .extend(self.preview_images.replace(vec![image.clone()]));
                 self.image = Some(image);
-                self.preview_rows = height;
+                self.preview_rows = height.max(1);
                 self.preview_cols = width.max(1);
-                // The engine mapped the span into PREVIEW rows already;
-                // `None` = the viewport is not on the window it sent
-                // (the camera is looking at history).
                 self.viewport = viewport_top.map(|top| (top, viewport_height));
+                self.sheet_len = sheet_len;
+                self.window_top = window_top;
+                self.window_rows = window_rows.max(1);
+                self.sheet_viewport_top = sheet_viewport_top;
+                self.sheet_viewport_len = sheet_viewport_len.max(1);
+                self.peeking = peeking;
                 cx.notify();
             }
             ScrollEvent::Finished {
@@ -360,15 +440,17 @@ impl PreviewPanel {
                     return;
                 }
                 self.state = PanelState::Done;
-                cx.notify();
                 self.controls = None;
-                let rgba = rgba.clone();
+                cx.notify();
                 let sibling = self.sibling.take();
-                if self.saving {
-                    scroll_save_exit(&rgba, width, height, *window, sibling, cx);
-                } else {
-                    scroll_copy_exit(&rgba, width, height, *window, sibling, cx);
-                }
+                dispatch_exit(
+                    self.exit,
+                    (width, height, &rgba),
+                    &self.pin_ctx,
+                    *window,
+                    sibling,
+                    cx,
+                );
             }
             ScrollEvent::Failed { reason, partial } => {
                 if matches!(self.state, PanelState::Done) {
@@ -377,9 +459,6 @@ impl PreviewPanel {
                 self.state = PanelState::Done;
                 self.controls = None;
                 cx.notify();
-                // Something was captured before the failure: deliver it
-                // instead of discarding — a broken tail must not eat the
-                // good rows above it.
                 let sibling = self.sibling.take();
                 if let Some((w, h, rgba)) = partial {
                     crate::notify::send(
@@ -390,11 +469,14 @@ impl PreviewPanel {
                         )
                         .as_ref(),
                     );
-                    if self.saving {
-                        scroll_save_exit(&rgba, w, h, *window, sibling, cx);
-                    } else {
-                        scroll_copy_exit(&rgba, w, h, *window, sibling, cx);
-                    }
+                    dispatch_exit(
+                        self.exit,
+                        (w, h, &rgba),
+                        &self.pin_ctx,
+                        *window,
+                        sibling,
+                        cx,
+                    );
                 } else {
                     eprintln!("[shotori] scroll failed: {reason}");
                     crate::notify::send(
@@ -411,10 +493,6 @@ impl PreviewPanel {
         }
     }
 
-    // The default exit and the Ctrl+S exit run through the shared
-    // `scroll_copy_exit`/`scroll_save_exit` (see `on_event`) — the
-    // panel is one of two possible hosts, the chrome-free frame is
-    // the other.
     fn close(&mut self, window: &AnyWindowHandle, cx: &mut Context<Self>) {
         self.state = PanelState::Done;
         self.close_sibling(cx);
@@ -422,121 +500,262 @@ impl PreviewPanel {
         cx.notify();
     }
 
-    /// Enter / Ctrl+C / [Copy]: stop the engine now; whatever is
-    /// folded image is the deliverable.
     fn finish(&mut self, _: &ScrollFinish, _window: &mut Window, cx: &mut Context<Self>) {
-        self.request_finish(cx);
+        self.request_exit(ExitTarget::Copy, cx);
     }
 
-    /// Esc / [Cancel]: discard everything.
     fn cancel(&mut self, _: &ScrollCancel, _window: &mut Window, cx: &mut Context<Self>) {
         self.request_cancel(cx);
     }
 
-    /// Space / [Pause]: freeze or resume sampling.
     fn pause(&mut self, _: &ScrollPause, _window: &mut Window, cx: &mut Context<Self>) {
         self.toggle_pause(cx);
     }
 
-    /// Ctrl+S: finish, then hand the canvas to the save flow.
     fn save(&mut self, _: &ScrollSave, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(controls) = &self.controls {
-            self.saving = true;
-            self.state = PanelState::Finishing;
-            controls.finish();
-            cx.notify();
+        self.request_exit(ExitTarget::Save, cx);
+    }
+
+    fn pin(&mut self, _: &ScrollPin, _window: &mut Window, cx: &mut Context<Self>) {
+        self.request_exit(ExitTarget::Pin, cx);
+    }
+
+    fn render_info_bar(&self, size_label: Option<String>, cx: &mut Context<Self>) -> Div {
+        let (status_text, warn) = self.status_label();
+        let dot_color = if self.paused {
+            alpha(theme::c().hint_text, 0xCC)
+        } else if warn {
+            WARNING_AMBER
+        } else {
+            theme::c().accent
+        };
+        let border_col = if warn {
+            alpha(WARNING_AMBER, 0x70)
+        } else {
+            alpha(theme::c().toolbar_border, 0xD0)
+        };
+        let bg_col = if warn {
+            alpha(WARNING_AMBER, 0x1E)
+        } else {
+            theme::c().toolbar_bg
+        };
+        let status_fg = if warn {
+            WARNING_AMBER
+        } else if self.paused {
+            theme::c().hint_text
+        } else {
+            theme::c().toolbar_text
+        };
+
+        let mut right_cluster = div().flex().items_center().gap(px(4.)).flex_shrink_0();
+        if self.peeking {
+            right_cluster = right_cluster.child(
+                div()
+                    .id("scroll-back-to-live")
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(rgba(alpha(theme::c().accent, 0x22)))
+                    .border_1()
+                    .border_color(rgba(alpha(theme::c().accent, 0x66)))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.peeking = false;
+                        if let Some(controls) = &this.controls {
+                            controls.peek(None);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgba(theme::c().toolbar_text))
+                            .child(crate::i18n::t!("scroll.action.follow").to_string()),
+                    ),
+            );
         }
+        if let Some(size) = size_label {
+            right_cluster = right_cluster.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgba(theme::c().hint_text))
+                    .child(size),
+            );
+        }
+
+        div()
+            .w_full()
+            .h(px(INFO_BAR_H))
+            .px(px(7.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(6.))
+            .rounded(px(7.))
+            .bg(rgba(bg_col))
+            .border_1()
+            .border_color(rgba(border_col))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(rgba(dot_color)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgba(status_fg))
+                            .truncate()
+                            .child(status_text),
+                    ),
+            )
+            .child(right_cluster)
+    }
+
+    fn render_scrollbar_rail(&self, well_h: f32, cx: &mut Context<Self>) -> AnyElement {
+        let total = self.sheet_len.max(1) as f32;
+        let win_top_frac = (self.window_top as f32 / total).clamp(0.0, 0.98);
+        let win_len_frac = (self.window_rows as f32 / total).clamp(0.02, 1.0 - win_top_frac);
+        let thumb_h = (well_h * win_len_frac).clamp(12.0, well_h.max(12.0));
+        let thumb_top = if self.sheet_len > self.window_rows {
+            let max_top = (self.sheet_len - self.window_rows) as f32;
+            (self.window_top as f32 / max_top).clamp(0.0, 1.0) * (well_h - thumb_h).max(0.0)
+        } else {
+            0.0
+        };
+
+        let live_top_frac = (self.sheet_viewport_top as f32 / total).clamp(0.0, 0.99);
+        let live_len_frac =
+            (self.sheet_viewport_len as f32 / total).clamp(0.01, 1.0 - live_top_frac);
+        let live_top = well_h * live_top_frac;
+        let live_h = (well_h * live_len_frac).clamp(3.0, well_h.max(3.0));
+
+        let scrollable = self.sheet_len > self.window_rows;
+        let thumb_color = if self.peeking || self.rail_drag {
+            theme::c().accent
+        } else {
+            alpha(theme::c().accent, 0xA8)
+        };
+        let scrub_tip = crate::i18n::t!("scroll.action.scrub").to_string();
+
+        let mut rail = div()
+            .id("scroll-preview-rail")
+            .absolute()
+            .top(px(PREVIEW_GUTTER))
+            .right(px(2.))
+            .w(px(RAIL_SLOT_W - 2.))
+            .h(px(well_h))
+            .flex()
+            .justify_center()
+            .tooltip(move |_, cx| {
+                cx.new(|_| crate::ui::toolbar::ToolbarTooltip(scrub_tip.clone().into()))
+                    .into()
+            });
+
+        if scrollable {
+            rail = rail.cursor(CursorStyle::PointingHand).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    this.rail_drag = true;
+                    this.scrub_rail_at(f32::from(event.position.y), cx);
+                }),
+            );
+        }
+
+        rail.child(
+            div()
+                .relative()
+                .w(px(4.))
+                .h_full()
+                .rounded_full()
+                .bg(rgba(alpha(theme::c().toolbar_border, 0x55)))
+                .child(
+                    // Live viewport indicator along the full sheet
+                    div()
+                        .absolute()
+                        .left_0()
+                        .w_full()
+                        .top(px(live_top))
+                        .h(px(live_h))
+                        .rounded_full()
+                        .bg(rgba(alpha(theme::c().accent, 0x30))),
+                )
+                .child(
+                    // Current preview camera window thumb
+                    div()
+                        .absolute()
+                        .left_0()
+                        .w_full()
+                        .top(px(thumb_top))
+                        .h(px(thumb_h))
+                        .rounded_full()
+                        .bg(rgba(thumb_color)),
+                ),
+        )
+        .into_any_element()
     }
 }
 
-/// The copy exit, shared by every scroll-session host (panel and
-/// chrome-free frame): PNG → clipboard (background, never blocking the
-/// UI) → notification → the host window closes LAST, so the async copy
-/// always completes while the app loop still runs.
-pub(super) fn scroll_copy_exit(
-    rgba: &Arc<Vec<u8>>,
-    width: u32,
-    height: u32,
-    host: AnyWindowHandle,
-    sibling: Option<AnyWindowHandle>,
-    cx: &mut App,
-) {
-    let rgba = rgba.clone();
-    if let Some(sibling) = sibling {
-        drop(sibling.update(cx, |_, window, _| window.remove_window()));
-    }
-    cx.spawn(async move |cx| {
-        let result = cx
-            .background_executor()
-            .spawn(async move {
-                let png = crate::model::export::encode_png_fast(width, height, &rgba)?;
-                crate::clipboard::copy_image(width, height, &rgba, &png)?;
-                Ok::<Vec<u8>, anyhow::Error>(png)
-            })
-            .await;
-        match result {
-            Ok(png) => {
-                println!("[shotori] long screenshot {width}x{height} copied");
-                crate::notify::copied(&png);
-            }
-            Err(e) => {
-                eprintln!("[shotori] long screenshot copy failed: {e:#}");
-                crate::notify::send(
-                    crate::i18n::t!("scroll.notify.copy_failed.title").as_ref(),
-                    crate::i18n::t!("scroll.notify.copy_failed.body").as_ref(),
-                );
-            }
-        }
-        drop(host.update(cx, |_, window, _| window.remove_window()));
-    })
-    .detach();
-}
-
-/// The save exit, shared by every scroll-session host: stash, unmap,
-/// quit from a timer so the connection flushes; the portal dialog then
-/// opens from `save_dialog::complete_pending` in main.
-pub(super) fn scroll_save_exit(
-    rgba: &Arc<Vec<u8>>,
-    width: u32,
-    height: u32,
-    host: AnyWindowHandle,
-    sibling: Option<AnyWindowHandle>,
-    cx: &mut App,
-) {
-    crate::save_dialog::stash(width, height, rgba.to_vec());
-    cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
-    if let Some(sibling) = sibling {
-        drop(sibling.update(cx, |_, window, _| window.remove_window()));
-    }
-    drop(host.update(cx, |_, window, _| window.remove_window()));
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(150))
-            .await;
-        cx.update(|cx| cx.quit());
-    })
-    .detach();
+/// Window-level pointer sink so dragging the global scrollbar rail
+/// continues smoothly even when the pointer drifts outside the 8 px track.
+fn rail_drag_sink(weak: gpui_kit::WeakEntity<PreviewPanel>) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |_, (), window, _| {
+            let move_sink = weak.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                drop(move_sink.update(cx, |this, cx| {
+                    if this.rail_drag {
+                        this.scrub_rail_at(f32::from(event.position.y), cx);
+                    }
+                }));
+            });
+            let up_sink = weak.clone();
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                drop(up_sink.update(cx, |this, cx| {
+                    if this.rail_drag {
+                        this.rail_drag = false;
+                        cx.notify();
+                    }
+                }));
+            });
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 impl Render for PreviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Retire the previous frame's texture. gpui keeps a texture per
-        // `RenderImage` per window; at capture cadence an un-evicted
-        // preview leaks one bitmap-sized texture every ~60 ms, which is
-        // what froze (then killed) long sessions.
         for image in self.retired.drain(..) {
             if let Err(error) = window.drop_image(image) {
                 eprintln!("[shotori] preview cleanup failed: {error}");
             }
         }
-        let size = self.capture.map(|(w, h)| match self.axis {
+        let size_label = self.capture.map(|(w, h)| match self.axis {
             Axis::Vertical => format!("{w} × {}", self.total_height.max(h)),
             Axis::Horizontal => format!("{} × {h}", self.total_height.max(w)),
         });
-        let state = self.state_chip();
 
-        // ── action bar: the selection toolbar's vocabulary, floating
-        // over the capture instead of becoming a panel header. ────────
+        let compact = self.panel_w < 224.0;
+        let btn_size = if compact { 24.0 } else { 28.0 };
+        let btn_gap = if compact { 2.0 } else { 3.0 };
+        let bar_px = if compact { 4.0 } else { 6.0 };
+
         let pause_label = if self.paused {
             crate::i18n::t!("scroll.action.resume").to_string()
         } else {
@@ -558,13 +777,15 @@ impl Render for PreviewPanel {
         };
         let copy_label = crate::i18n::t!("common.copy").to_string();
         let save_label = crate::i18n::t!("common.save").to_string();
+        let pin_label = crate::i18n::t!("common.pin").to_string();
         let cancel_label = crate::i18n::t!("scroll.action.cancel").to_string();
+
         let bar = div()
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(px(btn_gap))
             .h(px(TOOLBAR_H))
-            .px(px(6.))
+            .px(px(bar_px))
             .rounded(px(10.))
             .bg(rgba(theme::c().toolbar_bg))
             .border_1()
@@ -575,6 +796,7 @@ impl Render for PreviewPanel {
                 pause_label.clone(),
                 format!("{pause_label} · Space"),
                 DeckIcon::Kit(pause_icon),
+                btn_size,
                 true,
                 cx.listener(|this, _, _, cx| this.toggle_pause(cx)),
             ))
@@ -583,13 +805,14 @@ impl Render for PreviewPanel {
                 axis_label.clone(),
                 axis_tip,
                 DeckIcon::Own("icons/axis.svg"),
+                btn_size,
                 !self.axis_locked,
                 cx.listener(|this, _, _, cx| this.toggle_axis(cx)),
             ))
             .child(
                 div()
                     .w(px(1.))
-                    .h(px(18.))
+                    .h(px(16.))
                     .bg(rgba(theme::c().toolbar_border)),
             )
             .child(deck_button(
@@ -597,29 +820,41 @@ impl Render for PreviewPanel {
                 copy_label.clone(),
                 format!("{copy_label} · Enter"),
                 DeckIcon::Kit(IconName::Copy),
+                btn_size,
                 true,
-                cx.listener(|this, _, _, cx| this.request_finish(cx)),
+                cx.listener(|this, _, _, cx| this.request_exit(ExitTarget::Copy, cx)),
             ))
             .child(deck_button(
                 "scroll-deck-save",
                 save_label.clone(),
                 format!("{save_label} · Ctrl+S"),
                 DeckIcon::Kit(IconName::Save),
+                btn_size,
                 true,
                 cx.listener(|this, _, _, cx| this.request_save(cx)),
+            ))
+            .child(deck_button(
+                "scroll-deck-pin",
+                pin_label.clone(),
+                format!("{pin_label} · Ctrl+P"),
+                DeckIcon::Kit(IconName::Pin),
+                btn_size,
+                true,
+                cx.listener(|this, _, _, cx| this.request_pin(cx)),
             ))
             .child(deck_button(
                 "scroll-deck-cancel",
                 cancel_label.clone(),
                 format!("{cancel_label} · Esc"),
                 DeckIcon::Kit(IconName::X),
+                btn_size,
                 true,
                 cx.listener(|this, _, _, cx| this.request_cancel(cx)),
             ));
         let toolbar = div().w_full().flex().justify_center().child(bar);
+        let info_bar = self.render_info_bar(size_label, cx);
 
-        // ── preview strip: the long image itself, no extra panel chrome.
-        let (area_h, _) = self.preview_metrics();
+        let (_, well_w, well_h) = self.well_box();
         let mut preview = div()
             .flex_1()
             .relative()
@@ -631,61 +866,62 @@ impl Render for PreviewPanel {
             .on_scroll(cx.listener(Self::scroll_preview));
 
         if let Some(image) = self.image.clone() {
-            let rows = self.preview_rows.max(1) as f32;
-            let (_, img_h) = self.preview_metrics();
-            // The engine cut the window to this well's height, so the
-            // strip is painted 1:1 and never scaled to fit: at most a
-            // rounding pixel of slack, centered.
-            let strip_h = img_h.min(area_h);
-            let y_off = (area_h - strip_h) / 2.;
-            // Suppress the accent wash when the viewport IS the whole
-            // strip (the first screen): tinting every pixel adds nothing
-            // but a color cast.
+            let (x_off, y_off, strip_w, strip_h) = fit_strip_box(
+                well_w,
+                well_h,
+                self.preview_cols,
+                self.preview_rows,
+                self.axis,
+            );
+            let along_px = match self.axis {
+                Axis::Vertical => self.preview_rows.max(1) as f32,
+                Axis::Horizontal => self.preview_cols.max(1) as f32,
+            };
             let (wash, marker) = match self.viewport {
-                Some((v_top, v_h)) => {
-                    // Fractions of the STRIP (not the well): the engine's
-                    // mapping is already in preview rows. Cap below 1.0 so
-                    // the height clamp's min ≤ max always holds (an
-                    // uncapped pair once panicked the render pass — the
-                    // "scrolling crashes" bug).
-                    let top_frac = (v_top as f32 / rows).min(0.99);
-                    let h_frac = (v_h as f32 / rows).clamp(0.01, 1. - top_frac);
-                    let wash = if top_frac > 0.01 || h_frac < 0.98 {
-                        alpha(theme::c().accent, 0x12)
+                Some((v_top, v_len)) => {
+                    let top_frac = (v_top as f32 / along_px).min(0.99);
+                    let len_frac = (v_len as f32 / along_px).clamp(0.01, 1. - top_frac);
+                    let wash = if top_frac > 0.01 || len_frac < 0.98 {
+                        alpha(theme::c().accent, 0x14)
                     } else {
                         0
                     };
-                    (wash, Some((top_frac, h_frac)))
+                    (wash, Some((top_frac, len_frac)))
                 }
-                // Peeking at history: no "you are here" band to draw.
-                None => (alpha(theme::c().hint_text, 0x08), None),
+                None => (0, None),
             };
             let mut strip = div()
                 .absolute()
-                .left(px(PREVIEW_GUTTER))
-                .top(px(y_off))
-                .w(px(PREVIEW_IMG_W))
-                .child(img(image).w_full().h(px(strip_h)));
-            if let Some((top_frac, h_frac)) = marker {
-                // The viewport marker: a translucent accent wash plus a
-                // crisp accent rule. The old 1px border read as a random
-                // rectangle; the wash makes "this is what the frame
-                // currently shows" legible at a glance, including at a
-                // 1–2 px band.
-                strip = strip.child(
-                    div()
+                .left(px(PREVIEW_GUTTER + x_off))
+                .top(px(PREVIEW_GUTTER + y_off))
+                .w(px(strip_w))
+                .h(px(strip_h))
+                .child(img(image).w(px(strip_w)).h(px(strip_h)));
+            if let Some((top_frac, len_frac)) = marker {
+                let band = match self.axis {
+                    Axis::Vertical => div()
                         .absolute()
                         .left_0()
                         .w_full()
                         .top(relative(top_frac))
-                        .h(relative(h_frac))
-                        .bg(rgba(wash))
+                        .h(relative(len_frac)),
+                    Axis::Horizontal => div()
+                        .absolute()
+                        .top_0()
+                        .h_full()
+                        .left(relative(top_frac))
+                        .w(relative(len_frac)),
+                };
+                strip = strip.child(
+                    band.bg(rgba(wash))
                         .border_1()
                         .border_color(rgba(theme::c().accent))
                         .rounded_sm(),
                 );
             }
-            preview = preview.child(strip);
+            preview = preview
+                .child(strip)
+                .child(self.render_scrollbar_rail(well_h, cx));
         } else {
             let hint = if self.paused {
                 crate::i18n::t!("scroll.status.paused")
@@ -695,6 +931,7 @@ impl Render for PreviewPanel {
             preview = preview.child(
                 div()
                     .size_full()
+                    .px(px(8.))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -721,109 +958,45 @@ impl Render for PreviewPanel {
             );
         }
 
-        // Chips float over the top of the strip inside one flex row so a
-        // multi-word recovery hint (`stalled`, `max_length`, `layout_shift`)
-        // wraps cleanly on the left instead of colliding with the live
-        // dimensions readout on the right.
-        if state.is_some() || size.is_some() {
-            let mut top_hud = div()
-                .absolute()
-                .top(px(8.))
-                .left(px(8.))
-                .right(px(8.))
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(6.));
-            if let Some(state) = state {
-                top_hud = top_hud.child(preview_chip(state).min_w_0());
-            } else {
-                top_hud = top_hud.child(div());
-            }
-            if let Some(size) = size {
-                top_hud = top_hud.child(preview_chip(size).flex_shrink_0());
-            }
-            preview = preview.child(top_hud);
-        }
-        if self.peeking {
-            preview = preview.child(
-                div()
-                    .id("scroll-back-to-live")
-                    .absolute()
-                    .bottom(px(8.))
-                    .right(px(8.))
-                    .px(px(6.))
-                    .py(px(2.))
-                    .rounded(px(5.))
-                    .bg(rgba(theme::c().chip_bg))
-                    .border_1()
-                    .border_color(rgba(alpha(theme::c().toolbar_border, 0xB0)))
-                    .cursor(CursorStyle::PointingHand)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.peeking = false;
-                        if let Some(controls) = &this.controls {
-                            controls.peek(None);
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgba(theme::c().hint_text))
-                            .child(crate::i18n::t!("scroll.action.follow").to_string()),
-                    ),
-            );
-        }
-
         div()
             .id("shotori-scroll-panel")
             .key_context("ShotoriScroll")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .flex()
             .flex_col()
             .on_action(cx.listener(Self::finish))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::pin))
             .on_action(cx.listener(Self::pause))
+            .child(rail_drag_sink(cx.entity().downgrade()))
             .child(toolbar)
+            .child(div().h(px(TOOLBAR_GAP)))
+            .child(info_bar)
             .child(div().h(px(TOOLBAR_GAP)))
             .child(preview)
     }
 }
 
-/// A small floating label over the preview, in the selection size-chip
-/// language (`chip_bg` + hint text). Positioned by the top HUD flex row.
-fn preview_chip(text: String) -> Div {
-    div()
-        .px(px(6.))
-        .py(px(2.))
-        .rounded(px(5.))
-        .bg(rgba(theme::c().chip_bg))
-        .border_1()
-        .border_color(rgba(alpha(theme::c().toolbar_border, 0xB0)))
-        .text_size(px(10.))
-        .text_color(rgba(theme::c().hint_text))
-        .child(text)
-}
-
-/// Neutral icon tiles for the floating toolbar. Disabled tiles fade
-/// but keep their tooltip explaining why the action is unavailable.
 fn deck_button(
     id: &'static str,
     label: String,
     tooltip: String,
     icon: DeckIcon,
+    tile_px: f32,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let icon_px = if tile_px <= 24.0 { 14.0 } else { 16.0 };
     let button = div()
         .id(id)
         .flex()
         .items_center()
         .justify_center()
-        .size(px(30.))
-        .rounded(px(7.))
+        .size(px(tile_px))
+        .rounded(px(6.))
         .aria_label(label)
         .tooltip(move |_, cx| {
             cx.new(|_| crate::ui::toolbar::ToolbarTooltip(tooltip.clone().into()))
@@ -840,14 +1013,12 @@ fn deck_button(
     button
         .child(
             icon.svg()
-                .size(px(16.))
+                .size(px(icon_px))
                 .text_color(rgba(theme::c().toolbar_text)),
         )
         .into_any_element()
 }
 
-/// Icon source for a HUD tile: a gpui-kit asset or one of Shotori's own
-/// SVGs (the axis swap glyph is ours — Lucide has no neat twin-arrow).
 #[derive(Clone, Copy)]
 enum DeckIcon {
     Kit(IconName),
@@ -860,5 +1031,44 @@ impl DeckIcon {
             Self::Kit(name) => svg().path(name.path()),
             Self::Own(path) => svg().path(path),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Axis, fit_strip_box};
+
+    #[test]
+    fn short_vertical_strip_anchors_at_top_without_rescaling() {
+        let (x, y, w, h) = fit_strip_box(240.0, 500.0, 240, 180, Axis::Vertical);
+        assert_eq!((x, y), (0.0, 0.0));
+        assert!((w - 240.0).abs() < 0.01);
+        assert!((h - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn narrow_tall_vertical_strip_scales_uniformly_instead_of_squashing() {
+        // 500 × 900 viewport in a 240 × 380 well: natural height at 240w
+        // is 432 > 380. Both dimensions must scale uniformly so w/h stays
+        // 500/900 instead of clamping height alone.
+        let (x, y, w, h) = fit_strip_box(240.0, 380.0, 500, 900, Axis::Vertical);
+        assert_eq!(y, 0.0);
+        assert!((h - 380.0).abs() < 0.01);
+        let aspect_in = 500.0 / 900.0;
+        let aspect_out = w / h;
+        assert!(
+            (aspect_out - aspect_in).abs() < 1e-4,
+            "aspect squashed: expected {aspect_in}, got {aspect_out}"
+        );
+        assert!((x - (240.0 - w) * 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn horizontal_strip_anchors_left_and_preserves_screen_aspect() {
+        let (x, y, w, h) = fit_strip_box(240.0, 500.0, 300, 100, Axis::Horizontal);
+        assert_eq!(x, 0.0);
+        assert!((w - 240.0).abs() < 0.01);
+        assert!((h - 80.0).abs() < 0.01);
+        assert!((y - (500.0 - 80.0) * 0.5).abs() < 0.01);
     }
 }

@@ -65,43 +65,36 @@ use gpui_kit::assets::IconName;
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::*;
 
-pub use crate::actions::{ScrollCancel, ScrollFinish, ScrollPause, ScrollSave};
+pub use crate::actions::{ScrollCancel, ScrollFinish, ScrollPause, ScrollPin, ScrollSave};
 use crate::model::placement::{
     SCROLL_PANEL_MARGIN, ScrollPanelDock, plan_scroll_panel, scroll_panel_margins,
+    scroll_panel_width,
 };
 use crate::model::scroll_sheet::SheetLimits;
 use crate::platform::scroll_capture::{self, ScrollControls, ScrollEvent, ScrollSpec};
 
+use exits::PinContext;
 use frame::FrameView;
 use panel::PreviewPanel;
 
-/// Preview panel width (logical px) — owned by `model::placement` (the
-/// docking planner sizes its side strips from it); the panel's layout
-/// math uses the same constant.
-use crate::model::placement::SCROLL_PANEL_W as PANEL_W;
 /// Preview well border (the only frame around the page strip).
 const PREVIEW_BORDER: f32 = 1.;
-/// Gap between the floating action bar and the preview strip.
-const TOOLBAR_GAP: f32 = 6.;
+/// Gap between the floating action bar, info bar and preview well.
+const TOOLBAR_GAP: f32 = 4.;
 /// The action bar's height — a compact version of the selection toolbar.
-const TOOLBAR_H: f32 = 36.;
+const TOOLBAR_H: f32 = 34.;
+/// Dedicated non-occluding status & live-dimensions bar height.
+const INFO_BAR_H: f32 = 24.;
 /// Gutter between the preview well's border and the page strip.
 const PREVIEW_GUTTER: f32 = 4.;
-/// The preview image's display width: window minus the well's border
-/// and the inner gutter. The img element's height is derived from this
-/// and the image's own aspect — NEVER from the element's intrinsic
-/// sizing: gpui leaks the BITMAP's pixel height into the layout as
-/// logical px, so on a 2× screen the box rendered 2× taller than
-/// width × aspect, throwing the highlight's relative() fractions
-/// (fractions of that box) off with it — the whole "preview doesn't
-/// match my frame" saga (measured: 1164 physical px of box where 590
-/// was correct).
-const PREVIEW_IMG_W: f32 = PANEL_W - 2. * PREVIEW_BORDER - 2. * PREVIEW_GUTTER;
+/// Width reserved inside the preview well for the global scrollbar rail.
+const RAIL_SLOT_W: f32 = 10.;
 
 /// Everything `launch` needs about the target output, in logical px
-/// plus its physical-to-logical ratio.
+/// plus its physical-to-logical ratio and global logical origin.
 pub(crate) struct ScrollChrome {
     pub display_id: Option<DisplayId>,
+    pub output_origin: Point<Pixels>,
     pub output_width: f32,
     pub output_height: f32,
     pub output_scale: f32,
@@ -179,9 +172,16 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
         kind: WindowKind::PopUp,
         ..Default::default()
     };
+    let pin_ctx = PinContext {
+        output_origin: chrome.output_origin,
+        output_scale: chrome.output_scale,
+        rect: shared_rect.clone(),
+    };
+
     let frame_cell: std::rc::Rc<std::cell::RefCell<Option<gpui_kit::WeakEntity<FrameView>>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let cell = frame_cell.clone();
+    let frame_pin_ctx = pin_ctx.clone();
     let frame = cx.open_window(frame_options, |window, cx| {
         let view = cx.new(|cx| {
             let view = FrameView::new(
@@ -190,6 +190,7 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
                 chrome.output_width,
                 chrome.output_height,
                 dock,
+                frame_pin_ctx,
                 cx.focus_handle(),
             );
             *cell.borrow_mut() = Some(cx.entity().downgrade());
@@ -230,39 +231,32 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
             .unwrap_or((chrome.display_id, chrome.output_height, chrome.output_scale)),
         _ => (chrome.display_id, chrome.output_height, chrome.output_scale),
     };
-    // A floating card, not a full-height sidebar: the deck reads as one
-    // object instead of a screen-wide slab, and keeps the output's
-    // vertical rhythm. Tall enough for a useful preview on a 1080p
-    // screen, capped so 4K users do not get a 1500px column.
-    let panel_h = (panel_out_h * 0.40)
-        .clamp(320., 500.)
-        .min((panel_out_h - 2. * SCROLL_PANEL_MARGIN).max(120.));
-    // The panel hangs BESIDE the capture rect (user-reported: pinned to
-    // the output edge it read as disconnected from the region it
-    // previews) — vertically centered on the rect, horizontally hugging
-    // its planned side across SCROLL_PANEL_GAP. Layer surfaces ignore
-    // `window_bounds` origins, so the position rides the TOP|LEFT
-    // margins. It is frozen for the session, and the frame's x is
-    // frozen with it (vertical-only drags), so the region can never
-    // slide under the panel.
+    let panel_w = scroll_panel_width(rect_now, chrome.output_width, dock);
+    // Tall enough to inspect a substantial window of captured content on
+    // 1080p/1440p screens (~68% of output height), capped at 720px so 4K
+    // users still get a cohesive floating HUD rather than a screen-tall slab.
+    let panel_h = (panel_out_h * 0.68)
+        .clamp(340., 720.)
+        .min((panel_out_h - 2. * SCROLL_PANEL_MARGIN).max(160.));
     let (panel_top, panel_left) = scroll_panel_margins(
         rect_now,
         chrome.output_width,
         chrome.output_height,
+        panel_w,
         panel_h,
         dock,
     );
     let panel_options = WindowOptions {
         app_id: Some(crate::APP_ID.into()),
         titlebar: None,
-        // Only the action bar and the preview strip paint — the window
-        // itself is a floating HUD, not a slab over the desktop.
+        // Only the action bar, info bar and preview strip paint — the
+        // window itself is a floating HUD, not a slab over the desktop.
         window_background: WindowBackgroundAppearance::Transparent,
         focus: true,
         display_id: panel_display,
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
-            size: size(px(PANEL_W), px(panel_h)),
+            size: size(px(panel_w), px(panel_h)),
         })),
         #[cfg(target_os = "linux")]
         kind: WindowKind::LayerShell(LayerShellOptions {
@@ -270,13 +264,7 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
             layer: Layer::Overlay,
             anchor: Anchor::TOP | Anchor::LEFT,
             exclusive_zone: Some(px(-1.)),
-            // The panel owns the keyboard so the shortcuts match the
-            // selection flow. NOTE: if the compositor routes wheel by
-            // keyboard focus (niri does for virtual pointers), scrolling
-            // degrades to frame-dragging — deliberately shipped both.
             keyboard_interactivity: KeyboardInteractivity::Exclusive,
-            // CSS order: top, right, bottom, left — (top, left) carry
-            // the beside-the-rect position.
             margin: Some((px(panel_top), px(0.), px(0.), px(panel_left))),
             ..Default::default()
         }),
@@ -292,9 +280,11 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
             let panel = PreviewPanel::new(
                 controls,
                 events,
+                panel_w,
                 panel_h,
                 panel_scale,
                 preview_geom,
+                pin_ctx,
                 window,
                 cx,
             );
@@ -303,11 +293,14 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
         })
     });
 
-    // The panel closes the frame on its terminal paths …
+    // The panel closes the frame on its terminal paths and mirrors live
+    // phase / pause state onto the frame's peripheral strokes …
     if let Ok(panel) = &panel {
         let sibling = frame.as_ref().ok().map(|f| (*f).into());
+        let weak_frame = frame_cell.borrow().clone();
         drop(panel.update(cx, |p, _, _| {
             p.sibling = sibling;
+            p.frame_view = weak_frame;
         }));
     }
     // … and the frame toolbar gets the engine + panel handles so its
@@ -322,9 +315,8 @@ pub(crate) fn launch(spec: ScrollSpec, chrome: ScrollChrome, cx: &mut App) -> an
     Ok(())
 }
 
-// ── the region frame ─────────────────────────────────────────────────
+// ── submodules ───────────────────────────────────────────────────────
 
-/// One full-output transparent surface drawing the region frame and
-/// owning its drag interaction.
+mod exits;
 mod frame;
 mod panel;
