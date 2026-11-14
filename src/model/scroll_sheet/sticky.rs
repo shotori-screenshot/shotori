@@ -64,6 +64,9 @@ pub(super) struct StickyBands {
     /// Seed chrome stays anchored to the canvas top; late overlays only
     /// exclude overlap writes.
     pub(super) prefix: usize,
+    /// Bottom-anchored mirror of `prefix`: sampled rows from the bottom edge
+    /// that remained still on the latest accepted frame (`bot_run ≥ 1`).
+    pub(super) bot_prefix: usize,
 }
 
 impl StickyBands {
@@ -77,6 +80,7 @@ impl StickyBands {
             verified: Vec::new(),
             bot_verified: Vec::new(),
             prefix: 0,
+            bot_prefix: 0,
         }
     }
 
@@ -117,6 +121,67 @@ impl StickyBands {
         }
         // The top prefix: rows [0, prefix) all still THIS frame.
         self.prefix = still.iter().take_while(|&s| *s).count();
+        self.bot_prefix = still.iter().rev().take_while(|&s| *s).count();
+    }
+
+    /// Exact pixel-row height of the live stationary top prefix, refined
+    /// within the trailing `step` grid interval and capped at
+    /// [`MAX_BAND_FRACTION`] so fixed-backdrop overlap writes never smear a
+    /// sub-grid navbar border before [`Self::top_commit`] fires.
+    pub(super) fn live_top_rows(
+        &self,
+        base: &RowProfile,
+        cur: &RowProfile,
+        cost_threshold: f32,
+    ) -> usize {
+        if self.prefix == 0 || base.stride != cur.stride || base.height != cur.height {
+            return 0;
+        }
+        let h = cur.height as usize;
+        let step = cur.step.max(1);
+        let cap = (cur.height as f32 * MAX_BAND_FRACTION) as usize;
+        let probe_start = ((self.prefix - 1) * step + 1).min(h);
+        let probe_end = (self.prefix * step).min(h);
+        let mut rows = probe_start;
+        for y in probe_start..probe_end {
+            let c = &cur.data[y * cur.stride..(y + 1) * cur.stride];
+            let b = &base.data[y * cur.stride..(y + 1) * cur.stride];
+            if row_mad(c, b) <= cost_threshold {
+                rows = y + 1;
+            } else {
+                break;
+            }
+        }
+        rows.min(cap)
+    }
+
+    /// Bottom-edge mirror of [`Self::live_top_rows`].
+    pub(super) fn live_bot_rows(
+        &self,
+        base: &RowProfile,
+        cur: &RowProfile,
+        cost_threshold: f32,
+    ) -> usize {
+        if self.bot_prefix == 0 || base.stride != cur.stride || base.height != cur.height {
+            return 0;
+        }
+        let h = cur.height as usize;
+        let step = cur.step.max(1);
+        let cap = (cur.height as f32 * MAX_BAND_FRACTION) as usize;
+        let probe_start = ((self.bot_prefix - 1) * step + 1).min(h);
+        let probe_end = (self.bot_prefix * step).min(h);
+        let mut rows = probe_start;
+        for k in probe_start..probe_end {
+            let y = h - 1 - k;
+            let c = &cur.data[y * cur.stride..(y + 1) * cur.stride];
+            let b = &base.data[y * cur.stride..(y + 1) * cur.stride];
+            if row_mad(c, b) <= cost_threshold {
+                rows = k + 1;
+            } else {
+                break;
+            }
+        }
+        rows.min(cap)
     }
 
     /// Whether the top band should commit now, and at what height (in
@@ -269,6 +334,7 @@ pub(super) fn stillness_grid(
     cur: &RowProfile,
     options: &SheetLimits,
     dy: i32,
+    fixed_backdrop: bool,
 ) -> RowStillness {
     if base.stride != cur.stride || base.height != cur.height {
         return RowStillness {
@@ -277,6 +343,8 @@ pub(super) fn stillness_grid(
         };
     }
     let h = cur.height as usize;
+    let step_abs = dy.unsigned_abs() as usize;
+    let edge_cap = (cur.height as f32 * MAX_BAND_FRACTION) as usize;
     let mut still = Vec::with_capacity(h.div_ceil(cur.step.max(1)));
     let mut verified = Vec::with_capacity(still.capacity());
     let mut j = 0usize;
@@ -286,6 +354,33 @@ pub(super) fn stillness_grid(
         let s = row_mad(c, b) <= options.cost_threshold;
         let v = if !s {
             false
+        } else if fixed_backdrop {
+            // Over a textured screen-fixed backdrop, empty backdrop gaps are
+            // both offset-0-still AND different from `base[j + dy]`. Require
+            // occlusion evidence instead: at least one row within `|dy|`
+            // rows inward of `j` changed (foreground crossed the boundary),
+            // while the outer prefix/suffix through `j` stayed still.
+            if step_abs == 0 {
+                false
+            } else if j <= edge_cap {
+                let end = (j + step_abs).min(h.saturating_sub(1));
+                (j + 1..=end).step_by(cur.step.max(1)).any(|inward| {
+                    row_mad(
+                        &cur.data[inward * cur.stride..(inward + 1) * cur.stride],
+                        &base.data[inward * cur.stride..(inward + 1) * cur.stride],
+                    ) > options.cost_threshold
+                })
+            } else if h - 1 - j <= edge_cap {
+                let start = j.saturating_sub(step_abs);
+                (start..j).step_by(cur.step.max(1)).any(|inward| {
+                    row_mad(
+                        &cur.data[inward * cur.stride..(inward + 1) * cur.stride],
+                        &base.data[inward * cur.stride..(inward + 1) * cur.stride],
+                    ) > options.cost_threshold
+                })
+            } else {
+                false
+            }
         } else {
             // Displacement verification: under the accepted step, the
             // content of viewport row j pairs with base row j + dy. The

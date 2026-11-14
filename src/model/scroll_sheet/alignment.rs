@@ -23,7 +23,7 @@ impl ScrollSheet {
         frame: &[u8],
         document_motion: Option<i32>,
     ) -> Result<Option<AlignedFrame>, Refusal> {
-        if self.axis != Axis::Vertical {
+        if self.axis != Axis::Vertical || self.fixed_backdrop {
             return Ok(None);
         }
         let mut best: Option<(f32, AlignedFrame)> = None;
@@ -37,11 +37,12 @@ impl ScrollSheet {
             // cannot be corrected without inventing pixels at its boundary.
             let pixels = shift_pixels(frame, self.width as usize, offset);
             let profile = RowProfile::from_rgba(&pixels, self.width, self.viewport_height);
-            let (dy, cost) = match self.classify(&self.stable_profile, &profile, document_motion) {
-                Placement::Match(estimate) => (estimate.dy, estimate.cost),
-                Placement::Still => (0, 0.0),
-                Placement::Reject(_) => continue,
-            };
+            let (dy, cost) =
+                match self.classify_with(&self.stable_profile, &profile, document_motion, false) {
+                    Placement::Match(estimate) => (estimate.dy, estimate.cost),
+                    Placement::Still => (0, 0.0),
+                    Placement::Reject(_) => continue,
+                };
             let support = translation_support(
                 &self.stable_profile,
                 &profile,

@@ -1047,7 +1047,7 @@ fn fixed_backdrop_does_not_authorize_an_unrelated_foreground() {
     let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
     assert!(matches!(
         sheet.push(&backdrop_list(10_000)),
-        Fold::Refused(_) | Fold::Still
+        Fold::Refused(_)
     ));
     assert_eq!(sheet.canvas(), seed);
     assert_eq!(sheet.viewport_span(), (0, 400));
@@ -1081,8 +1081,331 @@ fn fixed_backdrop_does_not_hide_conflicting_foreground_motion() {
     let halfway = 320 * 200 * 4;
     frame[halfway..].copy_from_slice(&other[halfway..]);
     let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
-    assert!(matches!(sheet.push(&frame), Fold::Refused(_) | Fold::Still));
+    assert!(matches!(sheet.push(&frame), Fold::Refused(_)));
     assert_eq!(sheet.canvas(), seed);
+}
+
+#[test]
+fn stationary_split_pane_with_narrow_scroller_never_latches_fixed_backdrop() {
+    // 80% of the width is stationary textured content; only a narrow right
+    // strip (< 3 interior bands, so MotionMask keeps ALL_BANDS) scrolls.
+    let split_frame = |strip_top: u32| {
+        let mut frame = Vec::with_capacity(320 * 400 * 4);
+        for y in 0..400u32 {
+            for x in 0..320u32 {
+                let px = if x < 244 {
+                    let l = 20 + (ink_hash(x, y) % 80) as u8;
+                    [l, l, l, 255]
+                } else {
+                    source_row((strip_top + y).wrapping_mul(131).wrapping_add(x))
+                };
+                frame.extend_from_slice(&px);
+            }
+        }
+        frame
+    };
+    let seed = split_frame(0);
+    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
+    for step in [24, 48, 72] {
+        let verdict = sheet.push(&split_frame(step));
+        assert!(
+            matches!(verdict, Fold::Still | Fold::Refused(_)),
+            "narrow inner scroller must not tile stationary pane at {step}: {verdict:?}"
+        );
+        assert!(!sheet.fixed_backdrop);
+        assert_eq!(sheet.canvas(), seed);
+    }
+}
+
+#[test]
+fn fixed_backdrop_preserves_sticky_header_and_footer_across_down_return_and_prepend() {
+    const BW: u32 = 320;
+    const BH: u32 = 400;
+    const HDR: u32 = 40;
+    const FTR: u32 = 32;
+    let header_row = |x: u32, y: u32| -> [u8; 4] {
+        let l = 210 + ((x * 7 + y * 13) % 35) as u8;
+        [l, 40, 60, 255]
+    };
+    let footer_row = |x: u32, y: u32| -> [u8; 4] {
+        let l = 180 + ((x * 11 + y * 17) % 45) as u8;
+        [40, l, 90, 255]
+    };
+    let frame = |top: u32| {
+        let mut f = backdrop_list(top);
+        for y in 0..HDR {
+            for x in 0..BW {
+                let i = ((y * BW + x) * 4) as usize;
+                f[i..i + 4].copy_from_slice(&header_row(x, y));
+            }
+        }
+        for y in BH - FTR..BH {
+            for x in 0..BW {
+                let i = ((y * BW + x) * 4) as usize;
+                f[i..i + 4].copy_from_slice(&footer_row(x, y - (BH - FTR)));
+            }
+        }
+        f
+    };
+
+    let mut sheet = ScrollSheet::new(BW, BH, &frame(160), SheetLimits::default()).unwrap();
+    for top in [184, 208, 232, 256, 280, 304] {
+        let out = sheet.push(&frame(top));
+        assert!(matches!(out, Fold::GrewBottom { .. }), "top {top}: {out:?}");
+    }
+    assert!(sheet.fixed_backdrop);
+    assert_eq!(sheet.sticky.top, HDR);
+    assert_eq!(sheet.sticky.seed_top, HDR);
+    assert_eq!(sheet.sticky.bot, FTR);
+
+    // Return pass inside captured extent must not stamp footer or header into body.
+    assert!(matches!(sheet.push(&frame(220)), Fold::Shifted { .. }));
+    assert!(matches!(sheet.push(&frame(160)), Fold::Shifted { .. }));
+    // Prepend above the original seed keeps header at 0..HDR and grows body cleanly.
+    let rev_before = sheet.top_revision();
+    assert!(matches!(sheet.push(&frame(112)), Fold::GrewTop { .. }));
+    assert_eq!(
+        sheet.top_revision(),
+        rev_before + 1,
+        "place_over_backdrop must increment top_revision once per prepend"
+    );
+
+    let (cw, ch) = sheet.dimensions();
+    assert_eq!((cw, ch), (BW, BH + (304 - 112)));
+    let canvas = sheet.canvas();
+    for y in 0..HDR {
+        for x in 0..BW {
+            let i = ((y * BW + x) * 4) as usize;
+            assert_eq!(&canvas[i..i + 4], &header_row(x, y), "header {x},{y}");
+        }
+    }
+    for y in ch - FTR..ch {
+        for x in 0..BW {
+            let i = ((y * BW + x) * 4) as usize;
+            assert_eq!(
+                &canvas[i..i + 4],
+                &footer_row(x, y - (ch - FTR)),
+                "footer {x},{y}"
+            );
+        }
+    }
+    for y in HDR..ch - FTR {
+        for x in 0..BW {
+            let i = ((y * BW + x) * 4) as usize;
+            let px = &canvas[i..i + 4];
+            if let Some(expected) = backdrop_foreground(x, 112 + y) {
+                assert_eq!(px, &expected, "foreground at {x},{y}");
+            } else {
+                // Non-foreground body pixels must remain neutral greyscale
+                // backdrop (`15..70`), never tinted header or footer chrome.
+                assert_eq!(px[0], px[1], "tainted backdrop at {x},{y}: {px:?}");
+                assert_eq!(px[1], px[2], "tainted backdrop at {x},{y}: {px:?}");
+                assert!(
+                    (15..70).contains(&px[0]),
+                    "backdrop range at {x},{y}: {px:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mid_session_backdrop_transition_respects_committed_sticky_bands() {
+    const BW: u32 = 320;
+    const BH: u32 = 400;
+    const HDR: u32 = 36;
+    const FTR: u32 = 28;
+    let header_px = |x: u32, y: u32| [200 + ((x + y) % 40) as u8, 30, 50, 255];
+    let footer_px = |x: u32, y: u32| [30, 170 + ((x + y) % 40) as u8, 80, 255];
+    // Subtle textured backdrop (`luma 20..32`, mean mismatch ~4.0): under
+    // dense foreground (`doc_y < 520`, ~76% coverage) `< 1/3` of samples are
+    // still so ordinary `row_cost` (`~0.9 <= 2.5`) drives matching and commits
+    // `StickyBands`; once sparser cards (`doc_y >= 520`, ~45% coverage) fill
+    // the view, `still >= 1/3` latches `fixed_backdrop` mid-session.
+    let hybrid_fg = |x: u32, doc_y: u32| -> Option<[u8; 4]> {
+        if doc_y < 520 {
+            let line = doc_y % 32;
+            ((24..296).contains(&x) && line < 26)
+                .then(|| source_row(doc_y.wrapping_mul(317).wrapping_add(x)))
+        } else {
+            backdrop_foreground(x, doc_y)
+        }
+    };
+    let hybrid_frame = |top: u32| {
+        let mut f = Vec::with_capacity((BW * BH * 4) as usize);
+        for y in 0..BH {
+            for x in 0..BW {
+                let px = if y < HDR {
+                    header_px(x, y)
+                } else if y >= BH - FTR {
+                    footer_px(x, y - (BH - FTR))
+                } else {
+                    let bg = 20 + (ink_hash(x, y) % 12) as u8;
+                    hybrid_fg(x, top + y).unwrap_or([bg, bg, bg, 255])
+                };
+                f.extend_from_slice(&px);
+            }
+        }
+        f
+    };
+
+    let mut sheet = ScrollSheet::new(BW, BH, &hybrid_frame(40), SheetLimits::default()).unwrap();
+    for top in [60, 80, 100, 120, 140, 160] {
+        let out = sheet.push(&hybrid_frame(top));
+        assert!(matches!(out, Fold::GrewBottom { .. }), "{top}: {out:?}");
+    }
+    assert!(!sheet.fixed_backdrop);
+    assert_eq!(sheet.sticky.seed_top, HDR);
+    assert_eq!(sheet.sticky.bot, FTR);
+
+    // Scroll into the sparser card section so `fixed_backdrop` latches mid-session.
+    for top in (200..=640).step_by(40) {
+        let out = sheet.push(&hybrid_frame(top));
+        assert!(matches!(out, Fold::GrewBottom { .. }), "{top}: {out:?}");
+    }
+    assert!(sheet.fixed_backdrop);
+
+    // Walk back to the top and prepend above the original seed (`top = 8 < 40`):
+    // `seed_top` must remain anchored at `0..HDR`, never shifted into the body.
+    for top in (40..640).step_by(60).rev() {
+        let out = sheet.push(&hybrid_frame(top));
+        assert!(matches!(out, Fold::Shifted { .. }), "{top}: {out:?}");
+    }
+    assert!(matches!(sheet.push(&hybrid_frame(8)), Fold::GrewTop { .. }));
+    assert_eq!(sheet.viewport_span(), (HDR, BH - HDR));
+    let canvas = sheet.canvas();
+    for y in 0..HDR {
+        for x in 0..BW {
+            let i = ((y * BW + x) * 4) as usize;
+            assert_eq!(&canvas[i..i + 4], &header_px(x, y));
+        }
+    }
+    for y in HDR..HDR + 32 {
+        for x in 24..296 {
+            if let Some(expected) = hybrid_fg(x, 8 + y) {
+                let i = ((y * BW + x) * 4) as usize;
+                assert_eq!(
+                    &canvas[i..i + 4],
+                    &expected,
+                    "prepended row at {x},{y} must not contain shifted header"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn fast_scroll_over_latched_backdrop_surfaces_refusal_instead_of_still() {
+    let mut sheet =
+        ScrollSheet::new(320, 400, &backdrop_list(160), SheetLimits::default()).unwrap();
+    assert!(matches!(
+        sheet.push(&backdrop_list(184)),
+        Fold::GrewBottom { dy: 24, .. }
+    ));
+    assert!(sheet.fixed_backdrop);
+
+    // Minor stationary shimmer (e.g. blinking caret) still reports `Fold::Still`.
+    let mut blinked = backdrop_list(184);
+    blinked[(120 * 320 + 90) * 4] ^= 0x7f;
+    blinked[(121 * 320 + 90) * 4] ^= 0x7f;
+    assert_eq!(sheet.push(&blinked), Fold::Still);
+
+    // Oversized jump past `max_admissible` refuses (`Mismatch` or `NoOverlap`)
+    // instead of falling back to `d = 0` `Still`.
+    assert!(matches!(
+        sheet.push(&backdrop_list(184 + 340)),
+        Fold::Refused(Refusal::NoOverlap | Refusal::Mismatch)
+    ));
+    assert!(matches!(
+        sheet.push(&backdrop_list(10_000)),
+        Fold::Refused(Refusal::NoOverlap | Refusal::Mismatch)
+    ));
+
+    // With a smooth aperiodic gradient inside foreground cards (wavelengths
+    // > 2 * window so no alias exists inside `[-window, window]`), stepping
+    // just past `max_motion_ratio` lands its lowest-cost candidate right at
+    // `window`, surfacing `Refusal::NoOverlap`.
+    let smooth_backdrop = |top: u32| {
+        let mut frame = Vec::with_capacity(320 * 400 * 4);
+        for y in 0..400u32 {
+            let doc_y = top + y;
+            let band = doc_y % 120;
+            for x in 0..320u32 {
+                let bg = 15 + (ink_hash(x, y) % 55) as u8;
+                let px = if (40..148).contains(&x) && (8..88).contains(&band)
+                    || (164..296).contains(&x) && (16..52).contains(&band)
+                {
+                    let yf = doc_y as f32;
+                    let xf = x as f32;
+                    let wave = (yf * 0.031 + xf * 0.017).sin() * 0.6
+                        + (yf * 0.019 - xf * 0.011).cos() * 0.4;
+                    let l = (45.0 + 170.0 * (0.5 + 0.5 * wave)) as u8;
+                    [l, l.saturating_add(16), 245u8.saturating_sub(l / 2), 255]
+                } else {
+                    [bg, bg, bg, 255]
+                };
+                frame.extend_from_slice(&px);
+            }
+        }
+        frame
+    };
+    let tight = SheetLimits {
+        max_motion_ratio: 0.15, // window = 60 rows
+        ..SheetLimits::default()
+    };
+    let mut tight_sheet = ScrollSheet::new(320, 400, &smooth_backdrop(100), tight).unwrap();
+    assert!(matches!(
+        tight_sheet.push(&smooth_backdrop(130)),
+        Fold::GrewBottom { dy: 30, .. }
+    ));
+    assert!(tight_sheet.fixed_backdrop);
+    assert_eq!(
+        tight_sheet.push(&smooth_backdrop(198)), // dy = 68 > window (60): basin at edge 60
+        Fold::Refused(Refusal::NoOverlap)
+    );
+}
+
+#[test]
+fn hidpi_step_grid_keeps_matching_brisk_foreground_steps() {
+    // 1600×640 interior stride = 1200 -> `step = (640 * 1200 / 120_000) = 6`.
+    // At `step = 6` and a 441px scroll step (`441 = 147 * SWEEP_STEP`,
+    // `overlap = 640 - 40 - 13 - 441 = 146`, 24 grid rows, ~17 foreground
+    // rows), `rows.len()` clears `MIN_EVIDENCE_ROWS` (16) before the 2/3 trim
+    // (`keep = 12 < 16`).
+    const HW: u32 = 1600;
+    const HH: u32 = 640;
+    let hidpi_frame = |top: u32| {
+        let mut frame = Vec::with_capacity((HW * HH * 4) as usize);
+        for y in 0..HH {
+            for x in 0..HW {
+                let bg = 15 + (ink_hash(x, y) % 55) as u8;
+                let px = backdrop_foreground(x / 5, top + y).unwrap_or([bg, bg, bg, 255]);
+                frame.extend_from_slice(&px);
+            }
+        }
+        frame
+    };
+    let seed = hidpi_frame(0);
+    let profile = RowProfile::from_rgba(&seed, HW, HH);
+    assert!(
+        profile.step >= 6,
+        "expected HiDPI step >= 6, got {}",
+        profile.step
+    );
+
+    let mut sheet = ScrollSheet::new(HW, HH, &seed, SheetLimits::default()).unwrap();
+    let out = sheet.push(&hidpi_frame(441));
+    assert!(
+        matches!(
+            out,
+            Fold::GrewBottom {
+                dy: 441,
+                growth: 441
+            }
+        ),
+        "brisk HiDPI foreground step must match instead of starving after 2/3 trim: {out:?}"
+    );
+    assert!(sheet.fixed_backdrop);
 }
 
 /// The committed footer is content-plane-excluded: the output is

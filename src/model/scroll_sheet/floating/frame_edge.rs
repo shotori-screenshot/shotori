@@ -36,6 +36,18 @@ impl FrameEdge {
         self.seed_prefix_rows
     }
 
+    /// Track how many top rows remain identical to the seed frame without
+    /// running the bottom window-perimeter flood fill (used when a fixed
+    /// textured backdrop owns the background plane).
+    pub(in super::super) fn observe_seed_prefix(&mut self, current: &[u8]) {
+        let row = self.width * 4;
+        if let Some(y) = (0..self.seed_prefix_rows)
+            .find(|&y| current[y * row..(y + 1) * row] != self.seed[y * row..(y + 1) * row])
+        {
+            self.seed_prefix_rows = y;
+        }
+    }
+
     pub(super) fn first_row(&self) -> usize {
         self.first_row
     }
