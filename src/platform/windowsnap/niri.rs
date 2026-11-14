@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use niri_ipc::{Output, Reply, Request, Response, Window, Workspace};
 
-use super::SnapRect;
+use super::{CompositorSnapshot, SnapRect};
 
-pub fn query() -> Option<Vec<SnapRect>> {
+pub fn query() -> Option<CompositorSnapshot> {
     let path = std::env::var_os(niri_ipc::socket::SOCKET_PATH_ENV)?;
     let stream = UnixStream::connect(path).ok()?;
     // The query wrapper budgets 1 s on the main thread, but a wedged
@@ -43,7 +43,17 @@ pub fn query() -> Option<Vec<SnapRect>> {
         Reply::Ok(Response::Outputs(v)) => v,
         _ => return None,
     };
-    Some(assemble(&windows, &workspaces, &outputs))
+    Some(CompositorSnapshot {
+        rects: assemble(&windows, &workspaces, &outputs),
+        focused_output: focused_output(&workspaces),
+    })
+}
+
+fn focused_output(workspaces: &[Workspace]) -> Option<String> {
+    workspaces
+        .iter()
+        .find(|w| w.is_focused)
+        .and_then(|w| w.output.clone())
 }
 
 /// One niri-IPC round trip: JSON request line → JSON reply line.
@@ -98,7 +108,7 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
-    use super::assemble;
+    use super::{assemble, focused_output};
     use niri_ipc::{Output, Window, Workspace};
 
     fn win(json: &str) -> Window {
@@ -176,6 +186,7 @@ mod tests {
         .map(|(k, v)| (k.to_owned(), v))
         .collect();
 
+        assert_eq!(focused_output(&workspaces).as_deref(), Some("HDMI-A-1"));
         let rects = assemble(&windows, &workspaces, &outputs);
         assert_eq!(rects.len(), 2, "null-view window must be dropped");
 

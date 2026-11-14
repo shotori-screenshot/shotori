@@ -32,6 +32,67 @@ pub enum Transform {
     Flipped270,
 }
 
+impl Transform {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Rot90 => "90",
+            Self::Rot180 => "180",
+            Self::Rot270 => "270",
+            Self::Flipped => "flipped",
+            Self::Flipped90 => "flipped-90",
+            Self::Flipped180 => "flipped-180",
+            Self::Flipped270 => "flipped-270",
+        }
+    }
+}
+
+/// Lightweight output metadata queried from `wl_output` + `zxdg_output_v1`
+/// without copying any framebuffers (`shotori outputs`, `shotori pin <FILE>`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputInfo {
+    pub name: String,
+    pub description: String,
+    pub make: String,
+    pub model: String,
+    pub logical_pos: (i32, i32),
+    /// Physical size AFTER applying `transform` (matches [`Capture::width`] / [`Capture::height`])
+    pub physical_size: (u32, u32),
+    /// True logical size after fractional scale and transform
+    pub logical_size: (i32, i32),
+    /// Integer `wl_output` scale factor (used by gpui display matching)
+    pub wl_scale: f32,
+    pub transform: Transform,
+    pub refresh_mhz: Option<i32>,
+}
+
+impl OutputInfo {
+    /// Effective physical-to-logical scale factor (e.g. `1.5` on a fractional HiDPI panel).
+    pub fn effective_scale(&self) -> f32 {
+        let lw = self.logical_size.0.max(1) as f32;
+        if self.physical_size.0 > 0 {
+            (self.physical_size.0 as f32 / lw).max(1.)
+        } else {
+            self.wl_scale.max(1.)
+        }
+    }
+
+    /// Geometry-only [`Capture`] shell (empty `rgba`) so [`crate::platform::display::await_display_ids`]
+    /// can pin layer surfaces without running `zwlr_screencopy_manager_v1`.
+    pub fn into_geometry_capture(self) -> Capture {
+        Capture {
+            output_name: self.name,
+            logical_pos: self.logical_pos,
+            logical_size: Some(self.logical_size),
+            scale: self.wl_scale,
+            transform: self.transform,
+            width: self.physical_size.0.max(1),
+            height: self.physical_size.1.max(1),
+            rgba: Vec::new(),
+        }
+    }
+}
+
 /// One successful capture (one output)
 pub struct Capture {
     pub output_name: String,
@@ -222,4 +283,64 @@ pub fn capture_all_outputs() -> anyhow::Result<Vec<Capture>> {
         anyhow::bail!("all output captures failed");
     }
     Ok(caps)
+}
+
+/// Probe connected Wayland outputs (`wl_output` + `zxdg_output_v1`) without
+/// copying pixels. Two Wayland roundtrips (~1–2 ms) and works even on
+/// compositors that do not expose `zwlr-screencopy`.
+pub fn probe_outputs() -> anyhow::Result<Vec<OutputInfo>> {
+    use wayland::*;
+
+    let conn = wayland_client::Connection::connect_to_env()?;
+    let mut queue = conn.new_event_queue();
+    let qh = queue.handle();
+    conn.display().get_registry(&qh, ());
+
+    let mut app = App::default();
+    queue.roundtrip(&mut app)?;
+    if app.outputs.is_empty() {
+        anyhow::bail!("no wl_output available");
+    }
+    if let Some(xdg) = app.xdg_manager.as_ref() {
+        for (i, o) in app.outputs.iter().enumerate() {
+            xdg.get_xdg_output(&o.output, &qh, i);
+        }
+    }
+    queue.roundtrip(&mut app)?;
+
+    Ok(app
+        .outputs
+        .into_iter()
+        .enumerate()
+        .map(|(idx, o)| {
+            let physical_size = o
+                .mode_size
+                .map(|(w, h)| pixels::rotated_size(w, h, o.transform))
+                .unwrap_or((0, 0));
+            let logical_size = o.logical_size.unwrap_or_else(|| {
+                let s = o.scale.max(1.);
+                (
+                    (physical_size.0 as f32 / s).round() as i32,
+                    (physical_size.1 as f32 / s).round() as i32,
+                )
+            });
+            let name = if o.name.is_empty() {
+                format!("output-{idx}")
+            } else {
+                o.name
+            };
+            OutputInfo {
+                name,
+                description: o.description,
+                make: o.make,
+                model: o.model,
+                logical_pos: o.logical_pos,
+                physical_size,
+                logical_size,
+                wl_scale: o.scale.max(1.),
+                transform: o.transform,
+                refresh_mhz: o.refresh_mhz,
+            }
+        })
+        .collect())
 }

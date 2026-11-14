@@ -3,7 +3,8 @@
 //! ## Layout
 //!
 //! ```text
-//! main.rs / actions.rs        entry point, shared action contract
+//! main.rs / commands.rs       entry point, CLI subcommand runners
+//! actions.rs / args.rs        shared action contract & clap CLI vocabulary
 //! ├─ model/                   pure logic & state (unit-tested)
 //! │  ├─ selection             Idle → Dragging → Selected lifecycle
 //! │  ├─ session               state shared by all overlays (multi-monitor
@@ -65,6 +66,7 @@ pub const APP_ID: &str = "shotori";
 pub mod actions;
 
 pub mod args;
+pub mod commands;
 
 /// In-binary microbenchmarks (`shotori --bench`); see bench.rs
 pub mod bench;

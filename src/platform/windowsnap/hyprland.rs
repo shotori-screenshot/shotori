@@ -16,9 +16,9 @@ use std::os::unix::net::UnixStream;
 
 use serde_json::Value;
 
-use super::SnapRect;
+use super::{CompositorSnapshot, SnapRect};
 
-pub fn query() -> Option<Vec<SnapRect>> {
+pub fn query() -> Option<CompositorSnapshot> {
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
 
@@ -39,7 +39,19 @@ pub fn query() -> Option<Vec<SnapRect>> {
 
     let clients: Value = serde_json::from_str(&ask("j/clients")?).ok()?;
     let monitors: Value = serde_json::from_str(&ask("j/monitors")?).ok()?;
-    Some(collect(&clients, &monitors))
+    Some(CompositorSnapshot {
+        rects: collect(&clients, &monitors),
+        focused_output: focused_monitor(&monitors),
+    })
+}
+
+fn focused_monitor(monitors: &Value) -> Option<String> {
+    monitors
+        .as_array()?
+        .iter()
+        .find(|m| m.get("focused").and_then(Value::as_bool).unwrap_or(false))
+        .and_then(|m| m.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 /// Hyprland's request socket, tolerant across the 2026 IPC restructure:
@@ -158,7 +170,7 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                false, // clients JSON carries no focus flag
+                c.get("focusHistoryID").and_then(Value::as_i64) == Some(0),
                 0,
             ))
         })
@@ -169,19 +181,20 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
 mod tests {
     // Deliberately not `use super::*` (gpui test-macro shadowing; see
     // selection.rs)
-    use super::collect;
+    use super::{collect, focused_monitor};
     use serde_json::Value;
 
     const MONITORS: &str = r#"[
-        {"id": 0, "name": "DP-1", "x": 0, "y": 0,
+        {"id": 0, "name": "DP-1", "x": 0, "y": 0, "focused": false,
          "activeWorkspace": {"id": 1, "name": "1"}},
-        {"id": 1, "name": "HDMI-A-1", "x": 1920, "y": 0,
+        {"id": 1, "name": "HDMI-A-1", "x": 1920, "y": 0, "focused": true,
          "activeWorkspace": {"id": 3, "name": "3"}}
     ]"#;
 
     #[test]
     fn keeps_only_active_workspace_windows_per_monitor() {
         let monitors: Value = serde_json::from_str(MONITORS).unwrap();
+        assert_eq!(focused_monitor(&monitors).as_deref(), Some("HDMI-A-1"));
         // monitor spelled as int id (older schema) for the first two,
         // as a name (newer schema) for the third
         let clients: Value = serde_json::from_str(

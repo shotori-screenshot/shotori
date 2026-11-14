@@ -60,10 +60,17 @@ pub(super) struct App {
 pub(super) struct OutputState {
     pub output: wl_output::WlOutput,
     pub name: String,
+    pub description: String,
+    pub make: String,
+    pub model: String,
     pub logical_pos: (i32, i32),
     /// Logical size from zxdg_output_v1 (true scale + transform); None
     /// until the event arrives (or ever, if the protocol is absent)
     pub logical_size: Option<(i32, i32)>,
+    /// Unrotated current mode size (physical pixels) from `wl_output::Event::Mode`
+    pub mode_size: Option<(u32, u32)>,
+    /// Current mode refresh rate in mHz (`wl_output::Event::Mode`)
+    pub refresh_mhz: Option<i32>,
     pub scale: f32,
     pub transform: Transform,
     pub frame: Option<FrameState>,
@@ -250,8 +257,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                     state.outputs.push(OutputState {
                         output,
                         name: String::new(),
+                        description: String::new(),
+                        make: String::new(),
+                        model: String::new(),
                         logical_pos: (0, 0),
                         logical_size: None,
+                        mode_size: None,
+                        refresh_mhz: None,
                         scale: 1.,
                         transform: Transform::Normal,
                         frame: None,
@@ -277,16 +289,42 @@ impl Dispatch<wl_output::WlOutput, usize> for App {
         };
         match event {
             wl_output::Event::Name { name } => o.name = name,
+            wl_output::Event::Description { description } => o.description = description,
             wl_output::Event::Geometry {
-                x, y, transform, ..
+                x,
+                y,
+                make,
+                model,
+                transform,
+                ..
             } => {
                 o.logical_pos = (x, y);
+                o.make = make;
+                o.model = model;
                 o.transform = transform
                     .into_result()
                     .map(Transform::from)
                     .unwrap_or(Transform::Normal);
             }
-            wl_output::Event::Scale { factor } => o.scale = factor as f32,
+            wl_output::Event::Mode {
+                flags,
+                width,
+                height,
+                refresh,
+            } => {
+                if flags
+                    .into_result()
+                    .is_ok_and(|f| f.contains(wl_output::Mode::Current))
+                    && width > 0
+                    && height > 0
+                {
+                    o.mode_size = Some((width as u32, height as u32));
+                    if refresh > 0 {
+                        o.refresh_mhz = Some(refresh);
+                    }
+                }
+            }
+            wl_output::Event::Scale { factor } => o.scale = (factor as f32).max(1.),
             _ => {}
         }
     }
@@ -305,6 +343,10 @@ impl Dispatch<ZxdgOutputV1, usize> for App {
             return;
         };
         match event {
+            zxdg_output_v1::Event::Name { name } if o.name.is_empty() => o.name = name,
+            zxdg_output_v1::Event::Description { description } if o.description.is_empty() => {
+                o.description = description;
+            }
             zxdg_output_v1::Event::LogicalPosition { x, y } => o.logical_pos = (x, y),
             zxdg_output_v1::Event::LogicalSize { width, height } => {
                 o.logical_size = Some((width, height))
