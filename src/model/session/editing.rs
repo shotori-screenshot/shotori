@@ -454,7 +454,7 @@ mod tests {
             ShapeKind::Line,
             ShapeKind::Pencil,
             ShapeKind::Polyline,
-            ShapeKind::Eraser,
+            ShapeKind::EraserRect,
             ShapeKind::Select,
         ] {
             let mut s = session();
@@ -476,6 +476,22 @@ mod tests {
             assert_eq!(s.annotations.selected_index(), None);
             assert_eq!(s.annotations.committed(), original);
         }
+        // Brush eraser deletes live on touch: Escape stops the sweep while
+        // preserving completed deletions in history for Undo.
+        let mut s = session();
+        let original = s.annotations.committed().to_vec();
+        s.edit_annotations(|a| {
+            a.finish_interaction();
+            a.toggle(ShapeKind::Eraser);
+        });
+        s.pointer_down("screen", p(80., 100.), false, false);
+        assert!(s.annotations.committed().is_empty());
+        assert!(s.escape_interaction(), "active Eraser");
+        assert_eq!(s.annotations.tool(), Some(ShapeKind::Eraser));
+        assert!(s.escape_interaction(), "second Escape leaves Eraser");
+        assert!(!s.escape_interaction(), "third Escape may close");
+        s.undo();
+        assert_eq!(s.annotations.committed(), original);
     }
 
     #[test]

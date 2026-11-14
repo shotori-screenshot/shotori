@@ -210,7 +210,6 @@ mod tests {
     use gpui_kit::{Bounds, point, px, size};
     fn shape(kind: ShapeKind) -> Shape {
         Shape {
-            erasures: Vec::new(),
             kind,
             number: None,
             text: None,

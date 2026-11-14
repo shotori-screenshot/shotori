@@ -456,99 +456,34 @@ pub fn bench_main() -> i32 {
         }
     }
 
-    // ── Eraser cost profile (the erase-jank regression gate) ─────────
+    // ── Object eraser cost profile ───────────────────────────────────
     //
-    // Three real paths, one per lifecycle stage of an erase gesture:
-    //
-    // * `erase-frame-*` — ONE frame while an eraser draft is in flight.
-    //   Mirrors `filtered_preview`'s draft branch: full-frame base copy,
-    //   then `rasterize_shapes(committed + draft)` which itself clones
-    //   `original`/`marked` whole-frame (raster.rs) and re-rasterizes
-    //   every committed shape plus the WHOLE draft trail. This runs per
-    //   pointer move, so anything above ~2 ms collapses the frame budget.
-    //
-    // * `erase-finish-*` — `end()` on a prepared gesture (finish_erase):
-    //   every draft sample tests every shape via `shape_erased`, which
-    //   rebuilds the full capsule geometry PER CALL (select.rs). One-shot,
-    //   but paid on release.
-    //
-    // * `erase-inkbounds-*` — `ink_bounds()` on an erased stroke
-    //   (shrink_to_surviving_ink grid-samples up to 16384 cells, each
-    //   rebuilding `shape_geometry` — chrome.rs). Hit by hover chrome and
-    //   the selection frame EVERY frame after any erasure exists.
+    // Whole-shape deletion paths (issues #14, #41):
+    // * `erase-sweep-20x100pt` — brush sweep interpolated across 20
+    //   committed 100-point strokes (live `shape_erased` + removal).
+    // * `erase-rect-20x100pt` — area sweep releasing over 20 committed
+    //   100-point strokes (`ink_bounds` intersection + removal).
     if matches!(requested.as_str(), "all" | "erase") {
         use crate::annotation::{Annotations, ShapeKind};
-        use gpui_kit::{Bounds, Pixels, Point, point, px, size};
+        use gpui_kit::{Bounds, point, px, size};
 
-        for (w, h, tag) in [
-            (1920u32, 1080u32, "erase-frame-1080p"),
-            (3840u32, 2160u32, "erase-frame-4k"),
-        ] {
-            let sel = Bounds::new(point(px(0.), px(0.)), size(px(w as f32), px(h as f32)));
-            let mut ann = Annotations::default();
-            // Three committed 300-point pencil strokes.
-            for s in 0..3 {
-                let pts = scribble(300, 0xa1 + s, w as f32, h as f32);
-                ann.toggle(ShapeKind::Pencil);
-                ann.begin(pts[0], sel, false);
-                for p in &pts[1..] {
-                    ann.drag_to(*p, sel, false);
-                }
-                ann.end();
-            }
-            // An in-flight eraser gesture with 300 sampled points (no end()).
-            let trail = scribble(300, 0xfeed, w as f32, h as f32);
-            ann.toggle(ShapeKind::Eraser);
-            ann.begin(trail[0], sel, false);
-            for p in &trail[1..] {
+        let (w, h) = (1920u32, 1080u32);
+        let sel = Bounds::new(point(px(0.), px(0.)), size(px(w as f32), px(h as f32)));
+        let mut ann = Annotations::default();
+        for s in 0..20 {
+            let pts = scribble(100, 0xb00 + s, w as f32, h as f32);
+            ann.toggle(ShapeKind::Pencil);
+            ann.begin(pts[0], sel, false);
+            for p in &pts[1..] {
                 ann.drag_to(*p, sel, false);
             }
-            let ann = std::sync::Arc::new(ann);
-            let base = std::sync::Arc::new(ui(w, h));
-            let ann_ref = ann.clone();
-            let base_ref = base.clone();
-            let workload: Workload = Box::new(move || {
-                let mut rgba = base_ref.as_ref().clone();
-                Annotations::rasterize_shapes(
-                    ann_ref.visible(),
-                    &mut rgba,
-                    w,
-                    h,
-                    point(px(0.), px(0.)),
-                    1.0,
-                );
-                rgba
-            });
-            run(tag, workload);
-            ran += 1;
+            ann.end();
         }
+        let primed = std::sync::Arc::new(ann.render_snapshot());
 
         {
-            // finish_erase: 20 committed 100-pt strokes, a 400-pt erase
-            // trail REUSING stroke #5's own path (same seed → guaranteed
-            // crossings, unlike an unrelated scribble).
-            let (w, h) = (1920u32, 1080u32);
-            let sel = Bounds::new(point(px(0.), px(0.)), size(px(w as f32), px(h as f32)));
-            let mut ann = Annotations::default();
-            for s in 0..20 {
-                let pts = scribble(100, 0xb00 + s, w as f32, h as f32);
-                ann.toggle(ShapeKind::Pencil);
-                ann.begin(pts[0], sel, false);
-                for p in &pts[1..] {
-                    ann.drag_to(*p, sel, false);
-                }
-                ann.end();
-            }
             let trail = scribble(400, 0xb00 + 5, w as f32, h as f32);
-            ann.toggle(ShapeKind::Eraser);
-            ann.begin(trail[0], sel, false);
-            for p in &trail[1..] {
-                ann.drag_to(*p, sel, false);
-            }
-            // Snapshot WITHOUT the in-flight gesture (render_snapshot drops
-            // the `eraser` field), so each iteration re-drags the trail then
-            // ends — end()'s finish_erase is the measured tail.
-            let primed = std::sync::Arc::new(ann.render_snapshot());
+            let primed = primed.clone();
             let workload: Workload = Box::new(move || {
                 let mut a = primed.render_snapshot();
                 a.toggle(ShapeKind::Eraser);
@@ -557,96 +492,22 @@ pub fn bench_main() -> i32 {
                     a.drag_to(*p, sel, false);
                 }
                 a.end();
-                Vec::new()
+                vec![a.committed().len() as u8]
             });
-            run("erase-finish-20x100pt", workload);
+            run("erase-sweep-20x100pt", workload);
             ran += 1;
         }
 
         {
-            // The incremental eraser preview (the per-pointer-move path in
-            // `filtered_preview`): a cached composite + StrokePreview holds
-            // the trail; each move appends ONE point and re-blends only the
-            // new capsules, then re-emits the frame. Contrast with
-            // `erase-frame-*`, the whole-pipeline cost still paid on gesture
-            // release/undo/lens moves.
-            for (w, h, tag) in [
-                (1920u32, 1080u32, "erase-draft-incr-1080p"),
-                (3840u32, 2160u32, "erase-draft-incr-4k"),
-            ] {
-                let trail = scribble(300, 0xfeed, w as f32, h as f32);
-                let sel = Bounds::new(point(px(0.), px(0.)), size(px(w as f32), px(h as f32)));
-                let mut ann = Annotations::default();
-                ann.toggle(ShapeKind::Eraser);
-                ann.begin(trail[0], sel, false);
-                for p in &trail[1..trail.len() - 1] {
-                    ann.drag_to(*p, sel, false);
-                }
-                let mut draft = ann.raster_draft_shape().cloned().unwrap();
-                let base = std::sync::Arc::new(ui(w, h));
-                let base_ref = base.clone();
-                // Stand-in for `cached.pixels`: the committed composite the
-                // gesture borrows — cloned once, not per move.
-                let composite = base.as_ref().clone();
-                let mut preview = crate::annotation::StrokePreview::default();
-                let origin = point(px(0.), px(0.));
-                // Warm the cache with the 299 already-sampled points.
-                preview.render_eraser(&draft, &composite, base_ref.as_ref(), (w, h), origin, 1.0);
-                let workload: Workload = Box::new(move || {
-                    // One pointer move: append one sample, advance the
-                    // preview, re-emit the frame (what the atlas receives).
-                    let p = draft.points[draft.points.len() % 64];
-                    draft.points.push(p);
-                    let out = preview.render_eraser(
-                        &draft,
-                        &composite,
-                        base_ref.as_ref(),
-                        (w, h),
-                        origin,
-                        1.0,
-                    );
-                    out.to_vec()
-                });
-                run(tag, workload);
-                ran += 1;
-            }
-        }
-
-        {
-            // ink_bounds on an erased long stroke: 1000-pt pencil, 3 erasures.
-            let (w, h) = (1920u32, 1080u32);
-            let sel = Bounds::new(point(px(0.), px(0.)), size(px(w as f32), px(h as f32)));
-            let mut ann = Annotations::default();
-            let pts = scribble(1000, 0xc0de, w as f32, h as f32);
-            ann.toggle(ShapeKind::Pencil);
-            ann.begin(pts[0], sel, false);
-            for p in &pts[1..] {
-                ann.drag_to(*p, sel, false);
-            }
-            ann.end();
-            for e in 0..3 {
-                let mid = pts[300 + e * 200];
-                ann.toggle(ShapeKind::Eraser);
-                ann.begin(mid, sel, false);
-                for k in 1..60 {
-                    let p: Point<Pixels> = point(
-                        px(f32::from(mid.x) + k as f32 * 3.),
-                        px(f32::from(mid.y) + k as f32),
-                    );
-                    ann.drag_to(p, sel, false);
-                }
-                ann.end();
-            }
             let workload: Workload = Box::new(move || {
-                let b = ann.committed()[0].ink_bounds();
-                let bytes = format!(
-                    "{}x{}",
-                    f32::from(b.size.width) as u32,
-                    f32::from(b.size.height) as u32
-                );
-                bytes.into_bytes()
+                let mut a = primed.render_snapshot();
+                a.toggle(ShapeKind::EraserRect);
+                a.begin(point(px(200.), px(150.)), sel, false);
+                a.drag_to(point(px(1720.), px(930.)), sel, false);
+                a.end();
+                vec![a.committed().len() as u8]
             });
-            run("erase-inkbounds-1000pt", workload);
+            run("erase-rect-20x100pt", workload);
             ran += 1;
         }
     }

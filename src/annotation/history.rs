@@ -98,7 +98,15 @@ impl Annotations {
     }
 
     /// Delete valid indices as one reversible action, including sequence renumbering.
-    pub(super) fn delete_shapes(&mut self, mut indices: Vec<usize>) -> bool {
+    pub(super) fn delete_shapes(&mut self, indices: Vec<usize>) -> bool {
+        self.remove_shapes(indices, false)
+    }
+
+    /// Delete valid indices in descending order, folding consecutive
+    /// removals into the open brush-sweep entry when `merge_eraser` and
+    /// `self.eraser_entry_open` both hold so one Undo restores the
+    /// entire sweep.
+    pub(super) fn remove_shapes(&mut self, mut indices: Vec<usize>, merge_eraser: bool) -> bool {
         indices.retain(|&ix| ix < self.shapes.len());
         indices.sort_unstable();
         indices.dedup();
@@ -134,12 +142,26 @@ impl Annotations {
                 renumbered,
             });
         }
-        self.history.push(HistoryEntry::Remove {
-            removals,
-            number_before,
-            number_after: self.number_override,
-        });
-        self.redo.clear();
+        let number_after = self.number_override;
+        match self.history.last_mut() {
+            Some(HistoryEntry::Remove {
+                removals: existing,
+                number_after: existing_after,
+                ..
+            }) if merge_eraser && self.eraser_entry_open => {
+                existing.extend(removals);
+                *existing_after = number_after;
+            }
+            _ => {
+                self.history.push(HistoryEntry::Remove {
+                    removals,
+                    number_before,
+                    number_after,
+                });
+                self.redo.clear();
+                self.eraser_entry_open = merge_eraser;
+            }
+        }
         true
     }
 
@@ -162,7 +184,16 @@ impl Annotations {
         }
         self.pressed = false;
         self.selected.clear();
+        let open_sweep = std::mem::replace(&mut self.eraser_entry_open, false);
         if self.draft.take().is_some() {
+            return effect;
+        }
+        // An uncommitted area-eraser rect or an empty brush sweep cancels
+        // without unwinding earlier history; a brush sweep that already
+        // removed marks falls through to pop that live Remove entry while
+        // keeping `self.eraser` open for continued dragging.
+        if self.eraser.is_some() && !open_sweep {
+            self.eraser = None;
             return effect;
         }
         if let Some(entry) = self.history.pop() {
@@ -222,11 +253,13 @@ impl Annotations {
         // index here is a user-reachable OOB (delete → undo →
         // re-select → redo → wheel over canvas).
         self.selected.clear();
-        // Unlike undo(), a live draft blocks redo entirely: there is
-        // nothing meaningful to redo mid-stroke, and cancelling the
+        self.eraser_entry_open = false;
+        // Unlike undo(), a live draft or eraser sweep blocks redo entirely:
+        // there is nothing meaningful to redo mid-stroke, and cancelling the
         // user's in-flight gesture as a side effect of Ctrl+Y would be
         // surprising.
         if self.draft.is_none()
+            && self.eraser.is_none()
             && let Some(entry) = self.redo.pop()
         {
             match &entry {

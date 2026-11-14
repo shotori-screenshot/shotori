@@ -543,13 +543,6 @@ fn resize_shape(shape: &mut Shape, value: f32) {
 /// its visible stroke or body; see [`line::geometry`] for the shared
 /// visual outline.
 pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
-    // A point inside one of the mark's own erasure footprints is a
-    // hole, not ink (issue #30): the mark cannot be picked through
-    // its gaps, exactly like an erased mark could not be picked
-    // through the old mask.
-    if shape.erased_at(p, HIT_TOLERANCE) {
-        return false;
-    }
     if shape.has_custom_geometry() {
         return line::shape_geometry(shape)
             .iter()
@@ -609,11 +602,9 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
             band || ring_is_closed(shape) && point_in_polygon(p, &shape.points)
         }
         // freehand families share the same visual-polygon outline
-        ShapeKind::Pencil | ShapeKind::Highlighter | ShapeKind::Eraser => {
-            line::shape_geometry(shape)
-                .iter()
-                .any(|poly| point_in_polygon(p, poly))
-        }
+        ShapeKind::Pencil | ShapeKind::Highlighter => line::shape_geometry(shape)
+            .iter()
+            .any(|poly| point_in_polygon(p, poly)),
         // the badge is a circle inscribed in its bounds
         ShapeKind::Number => {
             let r = f32::from(shape.bounds.size.width) / 2.;
@@ -642,12 +633,6 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
 /// could ever be erased individually. Hollow rectangle/ellipse
 /// outlines likewise erase only from their stroke band.
 pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool {
-    // Already-erased ink is gone: sweeping the same spot again must
-    // not re-touch the mark (a second gesture over a finished hole
-    // records nothing, like a sweep over empty canvas).
-    if shape.erased_at(p, 0.) {
-        return false;
-    }
     if shape.has_custom_geometry() {
         return line::shape_geometry(shape)
             .iter()
@@ -666,12 +651,25 @@ pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool
         | ShapeKind::Arrow
         | ShapeKind::Polyline
         | ShapeKind::Pencil
-        | ShapeKind::Highlighter
-        | ShapeKind::Eraser => line::shape_geometry(shape)
+        | ShapeKind::Highlighter => line::shape_geometry(shape)
             .iter()
             .any(|poly| polygon_touched(p, poly, radius)),
-        ShapeKind::Magnifier => super::magnifier::contains(shape, p),
-        ShapeKind::Spotlight => super::spotlight::contains(shape, p),
+        ShapeKind::Magnifier => {
+            let Some(lens) = shape.lens() else {
+                return false;
+            };
+            let Some(magnified) = shape.magnified_bounds() else {
+                return false;
+            };
+            region_touched(magnified, lens.ellipse, p, radius)
+                || region_touched(shape.bounds, lens.ellipse, p, radius)
+        }
+        ShapeKind::Spotlight => match shape.parameters {
+            super::ShapeParameters::Spotlight { ellipse, .. } => {
+                region_touched(shape.bounds, ellipse, p, radius)
+            }
+            _ => false,
+        },
         ShapeKind::Rectangle => shape
             .strokes()
             .iter()
@@ -694,6 +692,43 @@ pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool
         }
         _ => false,
     }
+}
+
+/// Whether a brush circle `(p, radius)` touches a solid rectangular or
+/// elliptical region (magnifier source/lens, spotlight mask).
+fn region_touched(bounds: Bounds<Pixels>, ellipse: bool, p: Point<Pixels>, radius: f32) -> bool {
+    if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+        return false;
+    }
+    if !ellipse {
+        let dx = f32::from(bounds.left() - p.x)
+            .max(0.)
+            .max(f32::from(p.x - bounds.right()));
+        let dy = f32::from(bounds.top() - p.y)
+            .max(0.)
+            .max(f32::from(p.y - bounds.bottom()));
+        return dx.hypot(dy) <= radius;
+    }
+    let rx = f32::from(bounds.size.width) / 2.;
+    let ry = f32::from(bounds.size.height) / 2.;
+    let cx = f32::from(bounds.origin.x) + rx;
+    let cy = f32::from(bounds.origin.y) + ry;
+    let dx = (f32::from(p.x) - cx) / rx;
+    let dy = (f32::from(p.y) - cy) / ry;
+    if dx * dx + dy * dy <= 1. {
+        return true;
+    }
+    let steps = 64;
+    let point_at = |theta: f32| point(px(cx + rx * theta.cos()), px(cy + ry * theta.sin()));
+    let mut prev = point_at(0.);
+    for i in 1..=steps {
+        let next = point_at(i as f32 * std::f32::consts::TAU / steps as f32);
+        if point_segment_distance(p, prev, next) <= radius {
+            return true;
+        }
+        prev = next;
+    }
+    false
 }
 
 /// Whether `p` lies inside the polygon or within `radius` of its
@@ -964,7 +999,6 @@ mod tests {
 
     fn polyline(points: &[(f32, f32)], width: f32) -> Shape {
         Shape {
-            erasures: Vec::new(),
             kind: ShapeKind::Polyline,
             number: None,
             text: None,

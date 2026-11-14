@@ -1922,7 +1922,7 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
     cx.simulate_resize(size(px(500.), px(500.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    // A selection, then one pencil stroke as erase fodder.
+    // A selection, then two pencil strokes: one erase target and one survivor.
     cx.simulate_mouse_down(
         point(px(20.), px(20.)),
         MouseButton::Left,
@@ -1936,22 +1936,20 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let pencil = cx.debug_bounds("tb-pencil").unwrap();
     cx.simulate_click(pencil.center(), Default::default());
-    cx.simulate_mouse_down(
-        point(px(50.), px(50.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.simulate_mouse_move(
-        point(px(180.), px(50.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.simulate_mouse_up(
-        point(px(180.), px(50.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+    for y in [50., 180.] {
+        cx.simulate_mouse_down(point(px(50.), px(y)), MouseButton::Left, Default::default());
+        cx.simulate_mouse_move(
+            point(px(180.), px(y)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(180.), px(y)),
+            MouseButton::Left,
+            Default::default(),
+        );
+    }
+    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 2));
 
     // The eraser's toolbar: no color palette; the size slider
     // drives the brush ring's radius.
@@ -1962,21 +1960,27 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(48.))));
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().width(), 48.));
 
-    let marked = cx.update(|_, cx| session.read(cx).crop("screen").unwrap());
-    // Brush preview removes local pixels immediately, preserving the source shape.
+    let both_marked = cx.update(|_, cx| session.read(cx).crop("screen").unwrap());
+    // Brush press deletes the touched stroke immediately as a whole object;
+    // the untouched lower stroke stays intact.
     cx.simulate_mouse_down(
         point(px(100.), px(50.)),
         MouseButton::Left,
         Default::default(),
     );
-    let erased = cx.update(|_, cx| {
+    let one_left = cx.update(|_, cx| {
         let s = session.read(cx);
         assert_eq!(s.annotations().committed().len(), 1);
         let image = s.crop("screen").unwrap();
-        let at = |x: usize| (30 * image.0 as usize + x - 20) * 4;
-        assert_eq!(&image.2[at(100)..at(100) + 4], &[255; 4]);
-        assert_eq!(&image.2[at(60)..at(60) + 4], &marked.2[at(60)..at(60) + 4]);
-        assert_ne!(image, marked);
+        let at = |x: usize, y: usize| ((y - 20) * image.0 as usize + x - 20) * 4;
+        // Every pixel of the erased upper stroke is back to pristine white.
+        assert_eq!(&image.2[at(60, 50)..at(60, 50) + 4], &[255; 4]);
+        assert_eq!(&image.2[at(100, 50)..at(100, 50) + 4], &[255; 4]);
+        // The lower stroke survives.
+        assert_eq!(
+            &image.2[at(100, 180)..at(100, 180) + 4],
+            &both_marked.2[at(100, 180)..at(100, 180) + 4]
+        );
         image
     });
     cx.simulate_mouse_up(
@@ -1985,20 +1989,18 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
         Default::default(),
     );
     cx.update(|_, cx| {
-        // The released gesture edits the stroke in place (issue #30):
-        // no mask shape joins the list, and the committed pixels match
-        // the preview the drag showed.
         assert_eq!(session.read(cx).annotations().committed().len(), 1);
-        assert_eq!(session.read(cx).crop("screen").unwrap(), erased);
+        assert_eq!(session.read(cx).crop("screen").unwrap(), one_left);
     });
     cx.simulate_keystrokes("ctrl-z");
-    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), marked));
+    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), both_marked));
     cx.simulate_keystrokes("ctrl-y");
-    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), erased));
+    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), one_left));
+    cx.simulate_keystrokes("ctrl-z");
+    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 2));
 
-    // Select area erasure through its actual menu. It previews while
-    // dragging and commits its footprint onto the marks it covers
-    // (issue #30).
+    // Select area erasure through its actual menu. Nothing leaves while
+    // dragging; release removes every mark whose ink bounds intersect the area.
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let trigger = cx.debug_bounds("eraser-mode").unwrap();
     cx.simulate_click(trigger.center(), Default::default());
@@ -2019,33 +2021,32 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
         Default::default(),
     );
     cx.simulate_mouse_move(
-        point(px(220.), px(110.)),
+        point(px(120.), px(90.)),
         MouseButton::Left,
         Default::default(),
     );
     cx.update(|_, cx| {
         let s = session.read(cx);
-        assert_eq!(s.annotations().committed().len(), 1);
-        assert_eq!(s.crop("screen"), s.crop_original("screen"));
+        assert_eq!(s.annotations().committed().len(), 2);
+        assert_eq!(s.crop("screen").unwrap(), both_marked);
     });
     cx.simulate_mouse_up(
-        point(px(220.), px(110.)),
+        point(px(120.), px(90.)),
         MouseButton::Left,
         Default::default(),
     );
     cx.update(|_, cx| {
         let s = session.read(cx);
-        // The rect's footprint lands on the stroke it fully covers —
-        // the list keeps its single mark, now fully erased, and no
-        // selection appears for a gesture that edits in place.
+        // Even though the dragged box only covered x=40..120 of the x=50..180
+        // stroke, the whole upper stroke is deleted; the lower stroke stays.
         assert_eq!(s.annotations().committed().len(), 1);
         assert_eq!(s.annotations().selected(), None);
-        assert_eq!(s.crop("screen"), s.crop_original("screen"));
+        assert_eq!(s.crop("screen").unwrap(), one_left);
     });
     cx.simulate_keystrokes("ctrl-z");
-    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), erased));
+    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), both_marked));
     cx.simulate_keystrokes("ctrl-y");
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 1));
+    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), one_left));
     // The shortcut exits the active rectangle eraser without altering history.
     cx.simulate_keystrokes("d");
     cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));

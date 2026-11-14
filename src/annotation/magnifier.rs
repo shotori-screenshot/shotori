@@ -403,7 +403,6 @@ mod tests {
 
     fn mark() -> Shape {
         Shape {
-            erasures: Vec::new(),
             kind: ShapeKind::Magnifier,
             number: None,
             text: None,

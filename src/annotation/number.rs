@@ -112,7 +112,6 @@ impl Shape {
             text: None,
             text_style: Default::default(),
             color: self.color,
-            erasures: Vec::new(),
         })
     }
 
@@ -390,7 +389,6 @@ mod tests {
     use super::*;
     fn badge(number: u32, diameter: f32) -> super::super::Shape {
         super::super::Shape {
-            erasures: Vec::new(),
             kind: super::super::ShapeKind::Number,
             number: Some(number),
             text: None,
