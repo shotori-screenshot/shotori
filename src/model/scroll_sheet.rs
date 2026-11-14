@@ -148,9 +148,15 @@ use sticky::{StickyBands, stillness_grid};
 
 pub(crate) use preview::phase_of;
 pub use preview::{
-    PREVIEW_DISPLAY_W, PREVIEW_SAMPLE_W, Phase, preview_fit_rows, preview_scale, preview_slice,
-    preview_window,
+    PREVIEW_DISPLAY_W, PREVIEW_SAMPLE_W, Phase, PreviewGeometry, preview_fit_rows, preview_scale,
+    preview_scale_for, preview_slice, preview_window,
 };
+
+/// Ceiling on the contiguous RGBA sheet allocation (~512 MiB) when
+/// scaling [`SheetLimits::max_height`] for HiDPI outputs: keeps a 2× or
+/// 3× display able to capture ~20 000 logical px of a normal article
+/// without letting a full-width 6K selection allocate multi-GB buffers.
+const MAX_SHEET_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Tuning knobs for [`ScrollSheet`]. Defaults are tuned for text
 /// content under manual scrolling (the step is whatever the user's
@@ -193,6 +199,21 @@ impl Default for SheetLimits {
             min_overlap: 48,
             max_height: 20_000,
         }
+    }
+}
+
+impl SheetLimits {
+    /// Express `max_height` as logical px along the growing axis by
+    /// scaling into physical sheet rows for an output at `scale`,
+    /// bounded by [`MAX_SHEET_BYTES`] against `sheet_width` (the
+    /// cross-axis physical width in the internal sheet orientation).
+    pub fn with_display_scale(mut self, scale: f32, sheet_width: u32) -> Self {
+        let scale = f64::from(scale.clamp(1.0, 4.0));
+        let scaled = (f64::from(self.max_height) * scale).round() as u64;
+        let row_bytes = u64::from(sheet_width.max(1)) * 4;
+        let byte_cap = (MAX_SHEET_BYTES / row_bytes).max(u64::from(self.max_height));
+        self.max_height = scaled.min(byte_cap).clamp(1, u64::from(u32::MAX)) as u32;
+        self
     }
 }
 

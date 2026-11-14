@@ -77,25 +77,28 @@ impl Overlay {
         // The bar lives on the output that hosts the selection (mixed-DPI
         // placement is a lottery otherwise — AGENTS "the 240Hz case").
         let (lw, lh) = self.capture.logical_size_f32();
+        let output_scale = (self.capture.width as f32 / lw.max(1.)).max(1.);
         let center = point(
             px(self.capture.logical_pos.0 as f32 + lw / 2.),
             px(self.capture.logical_pos.1 as f32 + lh / 2.),
         );
         let display_id = crate::ui::pin::display_containing(center);
         let shared_rect = std::sync::Arc::new(std::sync::Mutex::new(rect));
-        // Filled in by the preview panel once it knows its own height
-        // (0 = chrome-free: no panel, no preview pixels rendered).
-        let preview_rows = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        // Filled in by the preview panel once it knows its own well
+        // height and output scale (unset = chrome-free: no panel, no
+        // preview pixels rendered).
+        let preview = crate::model::scroll_sheet::PreviewGeometry::new();
         let spec = crate::platform::scroll_capture::ScrollSpec {
             output: self.capture.output_name.clone(),
             rect: shared_rect,
-            preview_rows,
+            preview,
             axis: crate::model::scroll_sheet::Axis::Vertical,
         };
         let chrome = crate::ui::scroll_bar::ScrollChrome {
             display_id,
             output_width: lw,
             output_height: lh,
+            output_scale,
         };
         if let Err(e) = crate::ui::scroll_bar::launch(spec, chrome, cx) {
             eprintln!("[shotori] scroll: could not open the control bar: {e:#}");

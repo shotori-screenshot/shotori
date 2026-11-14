@@ -170,6 +170,57 @@ fn the_chip_word_follows_the_refusal_reason() {
     assert_eq!(phase_of(3, Refusal::NoOverlap), Phase::NoOverlap);
     assert_eq!(phase_of(3, Refusal::Mismatch), Phase::Unstable);
     assert_eq!(phase_of(3, Refusal::Unclear), Phase::Unstable);
+    // Height-cap truncation surfaces immediately on the first refused
+    // frame instead of hiding behind the transient-tear filter.
+    assert_eq!(phase_of(1, Refusal::TooTall), Phase::MaxLength);
+}
+
+#[test]
+fn hidpi_preview_geometry_keeps_logical_window_and_sharpness_across_scales() {
+    let geom = PreviewGeometry::new();
+    assert_eq!(geom.get(), None);
+    geom.set(360, PreviewGeometry::sample_width_for_scale(2.0));
+    assert_eq!(geom.get(), Some((360, 508)));
+    geom.set(0, 508);
+    assert_eq!(geom.get(), None);
+
+    // A 1 000 logical-px selection in a 400 logical-px well must cover
+    // the same logical page height at 1×, 1.25×, 1.5×, 2× and 3× while
+    // keeping `pw` matched to physical display pixels (never upsampled).
+    let logical_w = 1_000.0_f32;
+    let well_h = 400.0_f32;
+    let base_sample = PreviewGeometry::sample_width_for_scale(1.0);
+    let (base_k, base_pw) = preview_scale_for(logical_w as u32, base_sample);
+    let base_logical_rows = (preview_fit_rows(well_h, base_pw) * base_k) as f32;
+
+    for scale in [1.25_f32, 1.5, 2.0, 3.0] {
+        let sheet_w = (logical_w * scale).round() as u32;
+        let sample_w = PreviewGeometry::sample_width_for_scale(scale);
+        let (k, pw) = preview_scale_for(sheet_w, sample_w);
+        assert_eq!(k, base_k, "downscale factor k drifted at {scale}x");
+        assert!(
+            pw >= (base_pw as f32 * scale * 0.95) as u32,
+            "preview bitmap too narrow for crisp HiDPI at {scale}x: pw={pw}"
+        );
+        let logical_rows = (preview_fit_rows(well_h, pw) * k) as f32 / scale;
+        assert!(
+            (logical_rows - base_logical_rows).abs() <= 8.0,
+            "logical window drifted at {scale}x: {logical_rows} vs {base_logical_rows}"
+        );
+    }
+}
+
+#[test]
+fn display_scaled_limits_preserve_logical_cap_with_memory_ceiling() {
+    let base = SheetLimits::default();
+    assert_eq!(base.with_display_scale(1.0, 1_200).max_height, 20_000);
+    // 2× HiDPI on a 1 200 logical-px (2 400 physical-px) selection gets
+    // the full 20 000 logical px (40 000 physical rows ≈ 384 MiB).
+    assert_eq!(base.with_display_scale(2.0, 2_400).max_height, 40_000);
+    // Wide 3× full-screen (5 760 physical px) hits the 512 MiB guard
+    // rather than allocating ~1.38 GiB.
+    let wide = base.with_display_scale(3.0, 5_760).max_height;
+    assert!(wide > 20_000 && wide < 60_000, "got {wide}");
 }
 
 #[test]

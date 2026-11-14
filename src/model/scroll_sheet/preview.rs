@@ -4,28 +4,74 @@
 //! over sheet state — the engine and the panel share them so there is
 //! one geometry source.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::Refusal;
+
 /// Logical width the preview panel paints a slice at. Part of the
 /// preview CONTRACT rather than a UI detail: the engine sizes the slice
 /// from it, so one sheet row is always the same number of screen pixels
 /// and the strip cannot rescale under the user.
 pub const PREVIEW_DISPLAY_W: f32 = 254.;
 
-/// Slice sample width before the box filter: the preview keeps ~2× the
-/// panel's logical column, which stays legible on HiDPI and keeps the
-/// filter cheap. Shared by the engine (which cuts the slice) and the
-/// panel (which sizes the hole it goes in).
-pub const PREVIEW_SAMPLE_W: u32 = 480;
+/// Default physical sample width (~2× [`PREVIEW_DISPLAY_W`]) when no
+/// display scale has been published yet. Production sessions publish
+/// [`PreviewGeometry::sample_width_for_scale`] from the panel's output
+/// scale so both sharpness and scroll-rate mapping stay scale-invariant.
+pub const PREVIEW_SAMPLE_W: u32 = 508;
 
-/// Downscale factor and slice width (preview px) for a sheet width.
-/// One function so the engine's row math and the slicer can never
-/// disagree about `k`.
-fn preview_scale_for(width: u32, target_w: u32) -> (u32, u32) {
+/// Shared `(well_rows, sample_width)` channel from the preview panel to
+/// the capture engine. Packed into a single `AtomicU64` so a panel
+/// update publishes well height (logical px) and sample width (physical
+/// px) atomically with zero lock or torn-read hazard; `(0, _)` or
+/// `(_, 0)` marks a chrome-free session where no preview is rendered.
+#[derive(Clone, Debug, Default)]
+pub struct PreviewGeometry(Arc<AtomicU64>);
+
+impl PreviewGeometry {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Physical sample width matching [`PREVIEW_DISPLAY_W`] on an
+    /// output with physical-to-logical `scale`. Keeping `sample_w =
+    /// round(PREVIEW_DISPLAY_W * scale)` makes `k = ceil(sheet_w /
+    /// sample_w)` and the logical window span invariant across 1×,
+    /// fractional, 2× and 3× displays while avoiding HiDPI upsampling.
+    pub fn sample_width_for_scale(scale: f32) -> u32 {
+        (PREVIEW_DISPLAY_W * scale.clamp(0.5, 8.0)).round().max(1.0) as u32
+    }
+
+    pub fn set(&self, well_rows: u32, sample_width: u32) {
+        let packed = if well_rows == 0 || sample_width == 0 {
+            0
+        } else {
+            (u64::from(sample_width) << 32) | u64::from(well_rows)
+        };
+        self.0.store(packed, Ordering::Relaxed);
+    }
+
+    /// Returns `(well_rows_logical, sample_width_physical)` when a
+    /// preview panel has published its metrics, or `None` for
+    /// chrome-free / uninitialized sessions.
+    pub fn get(&self) -> Option<(u32, u32)> {
+        let packed = self.0.load(Ordering::Relaxed);
+        let well_rows = packed as u32;
+        let sample_w = (packed >> 32) as u32;
+        (well_rows > 0 && sample_w > 0).then_some((well_rows, sample_w))
+    }
+}
+
+/// Downscale factor and slice width (preview px) for a sheet width and
+/// target physical sample width. One function so the engine's row math
+/// and the slicer can never disagree about `k`.
+pub fn preview_scale_for(width: u32, target_w: u32) -> (u32, u32) {
     let k = ((width as f32) / target_w.max(1) as f32).ceil().max(1.0) as u32;
     (k, width.div_ceil(k))
 }
 
-/// [`preview_scale_for`] at the production sample width.
+/// [`preview_scale_for`] at the default [`PREVIEW_SAMPLE_W`].
 pub fn preview_scale(width: u32) -> (u32, u32) {
     preview_scale_for(width, PREVIEW_SAMPLE_W)
 }
@@ -146,9 +192,14 @@ pub enum Phase {
     LayoutShift,
     /// No overlap for long enough that the region cannot advance on its
     /// own (fixed chrome taller than the matcher's trim, a video pane, a
-    /// region that does not scroll). Still not fatal: the user can keep
-    /// scrolling, move the frame, or finish with what is already there.
+    /// region that does not scroll). Still not fatal: the user can
+    /// nudge back into the overlap window, move the frame, or finish
+    /// with what is already there.
     Stalled,
+    /// The sheet reached [`super::SheetLimits::max_height`]: further
+    /// growth is refused while keeping the session open in the panel so
+    /// the truncation is visible and the user can choose Copy or Save.
+    MaxLength,
 }
 
 /// Changed-but-unplaceable frames before the HUD stops calling it a
@@ -171,16 +222,18 @@ pub(super) const STALLED_FRAMES: u32 = 40;
 /// every refusal as "no overlap" was the old bug — a region with a
 /// blinking video ad told the user to scroll slower forever.
 pub(crate) fn phase_of(refusals: u32, reason: Refusal) -> Phase {
-    if refusals >= NO_OVERLAP_FRAMES && reason == Refusal::LayoutShift {
+    if reason == Refusal::TooTall {
+        Phase::MaxLength
+    } else if refusals >= NO_OVERLAP_FRAMES && reason == Refusal::LayoutShift {
         Phase::LayoutShift
     } else if refusals >= STALLED_FRAMES {
         Phase::Stalled
     } else if refusals >= NO_OVERLAP_FRAMES {
         match reason {
             Refusal::NoOverlap => Phase::NoOverlap,
-            // `TooTall` and `TooSmall` end the session before they can
-            // reach the chip; anything else is "the pixels moved in a
-            // way a translation cannot explain".
+            // `TooSmall` ends the session before it can reach the chip;
+            // anything else is "the pixels moved in a way a translation
+            // cannot explain".
             _ => Phase::Unstable,
         }
     } else {

@@ -5,22 +5,52 @@
 # preserved by the editor, comments are not. Changes apply the next
 # time you take a screenshot.
 
+# UI language: "auto" (follows system locale), "en", or "zh-CN".
+language = "auto"
+
+# Pixel-based smart region selection (hover highlight, click snap,
+# wheel hierarchy). Window snapping via compositor IPC stays active
+# regardless of this toggle.
+smart_region = true
+
+# Automatically select a newly drawn annotation so it can be moved or
+# restyled right away.
+annotation_auto_select = true
+
+# Remember whether the settings sidebar rail is collapsed.
+sidebar_collapsed = false
+
+[annotation]
+# Default text-box wrapping mode: "word" | "character" | "none".
+text_wrap = "word"
+
+# Automatically renumber remaining sequence badges when one is deleted.
+renumber_on_delete = false
+
 [toolbar]
 # Row one of the selection toolbar, left to right. Buttons not listed
 # are hidden (their keyboard shortcuts keep working). "separator" is
 # the thin vertical group break; any number may appear.
 #
-# Known button ids (factory order):
+# Known button ids (all 22):
 #   select, rectangle, ellipse, line, polyline, arrow, number,
-#   pencil, highlighter, mosaic, eraser, text, clear,
-#   ocr, pin, scroll, save, copy, settings, cancel
+#   pencil, highlighter, mosaic, magnifier, spotlight, eraser, text,
+#   clear, ocr, pin, scroll, save, copy, settings, cancel
 #
-# The value below is the factory layout.
+# The value below is the factory layout (`select` and `spotlight` live
+# in the add-buttons palette by default).
 items = [
-  "select", "rectangle", "ellipse", "line", "polyline", "arrow",
-  "number", "pencil", "highlighter", "mosaic", "eraser", "text",
-  "clear", "separator", "ocr", "pin", "scroll", "save", "copy",
-  "separator", "settings", "cancel",
+  "rectangle", "ellipse", "line", "polyline", "arrow",
+  "number", "pencil", "highlighter", "mosaic", "magnifier",
+  "eraser", "text", "clear", "separator",
+  "ocr", "pin", "scroll", "save", "copy", "separator",
+  "settings", "cancel",
+]
+
+# The 7 opaque annotation palette swatches (#RRGGBB or #RRGGBBAA with FF alpha).
+colors = [
+  "#FF4545FF", "#FF8A32FF", "#FFD43BFF", "#40C878FF",
+  "#409CFFFF", "#222222FF", "#FFFFFFFF",
 ]
 
 [ocr]
@@ -47,3 +77,13 @@ assume_upright = false
 # directory. See docs/ocr-custom-model.md for a worked example.
 # Delete the key (or leave it empty) to go back to the bundled models.
 # custom_config = "~/models/my-ocr.toml"
+
+[keys]
+# Configurable overlay shortcuts (`escape` and `enter` stay reserved).
+copy = "ctrl-c"
+save = "ctrl-s"
+pin = "ctrl-p"
+ocr = "ctrl-o"
+scroll = "ctrl-l"
+select_screen = "ctrl-a"
+settings = "ctrl-,"

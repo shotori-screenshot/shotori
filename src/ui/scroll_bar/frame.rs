@@ -165,7 +165,7 @@ impl FrameView {
                         crate::i18n::t!("scroll.notify.failed.title").as_ref(),
                         &reason,
                     );
-                    let _ = window.update(cx, |_, window, _| window.remove_window());
+                    drop(window.update(cx, |_, window, _| window.remove_window()));
                 }
             }
             ScrollEvent::Cancelled => {
@@ -173,7 +173,7 @@ impl FrameView {
                     return;
                 }
                 self.mark_host_done();
-                let _ = window.update(cx, |_, window, _| window.remove_window());
+                drop(window.update(cx, |_, window, _| window.remove_window()));
                 cx.notify();
             }
             // Preview traffic has no preview UI in chrome-free mode;

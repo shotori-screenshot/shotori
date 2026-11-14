@@ -8,7 +8,7 @@ use super::*;
 
 use std::sync::Arc;
 
-use crate::model::scroll_sheet::{Axis, Phase};
+use crate::model::scroll_sheet::{Axis, Phase, PreviewGeometry};
 use crate::platform::scroll_capture::{ScrollControls, ScrollEvent};
 use crate::ui::image_util;
 use crate::ui::theme;
@@ -40,8 +40,12 @@ pub(crate) struct PreviewPanel {
     /// The preview bitmap's width in px (for the aspect-derived display
     /// height — see [`PREVIEW_IMG_W`]).
     preview_cols: u32,
-    /// The engine's camera writes its preview height here (0 = none).
-    preview_height: Arc<std::sync::atomic::AtomicU32>,
+    /// Shared preview dimensions (well height + HiDPI sample width) read
+    /// by the engine's camera.
+    preview_geom: PreviewGeometry,
+    /// Physical-to-logical scale of the output hosting this panel
+    /// (derived from capture dimensions, never `window.scale_factor()`).
+    panel_scale: f32,
     /// The deck window's logical height — the preview well's visible
     /// area derives from it (the card is top-anchored, not full-height).
     output_h: f32,
@@ -84,7 +88,8 @@ impl PreviewPanel {
         controls: ScrollControls,
         events: async_channel::Receiver<ScrollEvent>,
         output_h: f32,
-        preview_height: Arc<std::sync::atomic::AtomicU32>,
+        panel_scale: f32,
+        preview_geom: PreviewGeometry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -103,7 +108,8 @@ impl PreviewPanel {
             viewport: None,
             preview_rows: 0,
             preview_cols: 1,
-            preview_height,
+            preview_geom,
+            panel_scale: panel_scale.max(1.0),
             output_h,
             capture: None,
             total_height: 0,
@@ -113,7 +119,7 @@ impl PreviewPanel {
             axis_locked: false,
             peeking: false,
         };
-        this.publish_preview_height();
+        this.publish_preview_geometry();
 
         // The event pump: engine → entity updates; ends with the channel
         // (the engine closes its sender on exit).
@@ -178,16 +184,14 @@ impl PreviewPanel {
         (area_h, img_h)
     }
 
-    /// Tell the engine how tall the strip is. The engine sizes the slice
-    /// from it (same `k`, same fit), which is what keeps one sheet row a
-    /// constant number of screen pixels — the old preview resized its own
-    /// image as the sheet grew and moved at a rate nobody could predict.
-    fn publish_preview_height(&self) {
+    /// Publish the well's logical height and physical sample width to
+    /// the engine's camera so the slice matches HiDPI pixel density and
+    /// moves at a scale-invariant rate.
+    fn publish_preview_geometry(&self) {
         let (area_h, _) = self.preview_metrics();
-        self.preview_height.store(
-            area_h.round().max(0.) as u32,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        let well_rows = area_h.round().max(0.) as u32;
+        let sample_w = PreviewGeometry::sample_width_for_scale(self.panel_scale);
+        self.preview_geom.set(well_rows, sample_w);
     }
 
     /// Wheel over the strip: aim the engine's camera at history instead
@@ -240,6 +244,7 @@ impl PreviewPanel {
                 Phase::NoOverlap => Some(crate::i18n::t!("scroll.status.no_overlap").to_string()),
                 Phase::Unstable => Some(crate::i18n::t!("scroll.status.unstable").to_string()),
                 Phase::Stalled => Some(crate::i18n::t!("scroll.status.stalled").to_string()),
+                Phase::MaxLength => Some(crate::i18n::t!("scroll.status.max_length").to_string()),
                 Phase::LayoutShift => {
                     Some(crate::i18n::t!("scroll.status.layout_shift").to_string())
                 }
@@ -277,7 +282,7 @@ impl PreviewPanel {
 
     fn close_sibling(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.sibling.take() {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            drop(handle.update(cx, |_, window, _| window.remove_window()));
         }
     }
 
@@ -287,7 +292,7 @@ impl PreviewPanel {
                 self.axis = axis;
                 self.axis_locked = locked;
                 self.peeking = false;
-                self.publish_preview_height();
+                self.publish_preview_geometry();
                 // The initial long dimension follows the axis: the
                 // region's height for vertical, its width for
                 // horizontal. Progress overwrites this on the first
@@ -413,7 +418,7 @@ impl PreviewPanel {
     fn close(&mut self, window: &AnyWindowHandle, cx: &mut Context<Self>) {
         self.state = PanelState::Done;
         self.close_sibling(cx);
-        let _ = window.update(cx, |_, window, _| window.remove_window());
+        drop(window.update(cx, |_, window, _| window.remove_window()));
         cx.notify();
     }
 
@@ -458,7 +463,7 @@ pub(super) fn scroll_copy_exit(
 ) {
     let rgba = rgba.clone();
     if let Some(sibling) = sibling {
-        let _ = sibling.update(cx, |_, window, _| window.remove_window());
+        drop(sibling.update(cx, |_, window, _| window.remove_window()));
     }
     cx.spawn(async move |cx| {
         let result = cx
@@ -482,7 +487,7 @@ pub(super) fn scroll_copy_exit(
                 );
             }
         }
-        let _ = host.update(cx, |_, window, _| window.remove_window());
+        drop(host.update(cx, |_, window, _| window.remove_window()));
     })
     .detach();
 }
@@ -501,9 +506,9 @@ pub(super) fn scroll_save_exit(
     crate::save_dialog::stash(width, height, rgba.to_vec());
     cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
     if let Some(sibling) = sibling {
-        let _ = sibling.update(cx, |_, window, _| window.remove_window());
+        drop(sibling.update(cx, |_, window, _| window.remove_window()));
     }
-    let _ = host.update(cx, |_, window, _| window.remove_window());
+    drop(host.update(cx, |_, window, _| window.remove_window()));
     cx.spawn(async move |cx| {
         cx.background_executor()
             .timer(std::time::Duration::from_millis(150))
@@ -716,14 +721,29 @@ impl Render for PreviewPanel {
             );
         }
 
-        // Chips float over the image, exactly like the selection's size
-        // label: status on the left (only when not simply following the
-        // scroll), live size on the right.
-        if let Some(state) = state {
-            preview = preview.child(preview_chip(state).left(px(8.)));
-        }
-        if let Some(size) = size {
-            preview = preview.child(preview_chip(size).right(px(8.)));
+        // Chips float over the top of the strip inside one flex row so a
+        // multi-word recovery hint (`stalled`, `max_length`, `layout_shift`)
+        // wraps cleanly on the left instead of colliding with the live
+        // dimensions readout on the right.
+        if state.is_some() || size.is_some() {
+            let mut top_hud = div()
+                .absolute()
+                .top(px(8.))
+                .left(px(8.))
+                .right(px(8.))
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap(px(6.));
+            if let Some(state) = state {
+                top_hud = top_hud.child(preview_chip(state).min_w_0());
+            } else {
+                top_hud = top_hud.child(div());
+            }
+            if let Some(size) = size {
+                top_hud = top_hud.child(preview_chip(size).flex_shrink_0());
+            }
+            preview = preview.child(top_hud);
         }
         if self.peeking {
             preview = preview.child(
@@ -773,11 +793,9 @@ impl Render for PreviewPanel {
 }
 
 /// A small floating label over the preview, in the selection size-chip
-/// language (`chip_bg` + hint text). Absolute top is set by the caller.
+/// language (`chip_bg` + hint text). Positioned by the top HUD flex row.
 fn preview_chip(text: String) -> Div {
     div()
-        .absolute()
-        .top(px(8.))
         .px(px(6.))
         .py(px(2.))
         .rounded(px(5.))

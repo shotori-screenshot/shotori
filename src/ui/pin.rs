@@ -7,12 +7,8 @@ use std::sync::{Arc, OnceLock};
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::*;
 
+pub use crate::actions::{ClosePin, CopyPin, DismissPinMenu, OpenPinMenu, ResetPinZoom};
 use crate::ui::image_util;
-
-actions!(
-    pin,
-    [ClosePin, DismissPinMenu, OpenPinMenu, CopyPin, ResetPinZoom]
-);
 
 /// How far one "line" of scroll zooms.
 const ZOOM_STEP: f32 = 1.12;
@@ -29,26 +25,34 @@ const MENU_ITEM_H: f32 = 32.;
 const MENU_H: f32 = 3. * MENU_ITEM_H + 4. * 4.;
 
 /// One output the pin can live on: global logical bounds + the
-/// display the layer surface binds to.
+/// display the layer surface binds to + true physical-to-logical scale
+/// (`captured_width / logical_width`, immune to `window.scale_factor()`
+/// cross-monitor misreports).
 #[derive(Clone)]
 struct PinOutput {
     bounds: Bounds<Pixels>,
     display_id: Option<DisplayId>,
+    scale: f32,
 }
 
 /// The desktop's outputs, registered by `main` once displays resolve.
 static OUTPUTS: OnceLock<std::sync::Mutex<Vec<PinOutput>>> = OnceLock::new();
 
 /// Remember one output (bounds in GLOBAL logical px — the session's
-/// coordinate space) so pins can span outputs.
-pub fn register_output(bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+/// coordinate space) so pins can span outputs and auxiliary windows
+/// know each output's true physical scale.
+pub fn register_output(bounds: Bounds<Pixels>, display_id: Option<DisplayId>, scale: f32) {
     OUTPUTS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         // Poisoning-tolerant (same as theme::c): a panicking thread must not
         // permanently brick output registration for every later pin.
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(PinOutput { bounds, display_id });
+        .push(PinOutput {
+            bounds,
+            display_id,
+            scale: scale.max(1.0),
+        });
 }
 
 fn outputs() -> Vec<PinOutput> {
@@ -75,11 +79,13 @@ pub(crate) fn display_containing(p: Point<Pixels>) -> Option<DisplayId> {
 /// The first output that is NOT `display`: chrome that must leave its
 /// capture output entirely (the scroll preview panel when no side
 /// strip fits — wlr-screencopy would capture it over the region
-/// otherwise) docks there instead. Returns the display and its GLOBAL
-/// logical bounds.
-pub(crate) fn other_output_than(display: Option<DisplayId>) -> Option<(DisplayId, Bounds<Pixels>)> {
+/// otherwise) docks there instead. Returns the display, its GLOBAL
+/// logical bounds, and its physical-to-logical scale.
+pub(crate) fn other_output_than(
+    display: Option<DisplayId>,
+) -> Option<(DisplayId, Bounds<Pixels>, f32)> {
     outputs().into_iter().find_map(|o| match o.display_id {
-        Some(id) if Some(id) != display => Some((id, o.bounds)),
+        Some(id) if Some(id) != display => Some((id, o.bounds, o.scale)),
         _ => None,
     })
 }
@@ -602,6 +608,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -663,6 +670,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -674,6 +682,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(200.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -734,6 +743,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -745,6 +755,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(200.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -807,6 +818,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,
@@ -818,6 +830,7 @@ mod interaction_tests {
                 PinOutput {
                     bounds: Bounds::new(point(px(200.), px(0.)), size(px(200.), px(200.))),
                     display_id: None,
+                    scale: 1.0,
                 },
                 window,
                 cx,

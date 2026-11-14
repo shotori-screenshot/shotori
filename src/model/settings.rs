@@ -1192,4 +1192,18 @@ mod tests {
             assert_eq!(errors.len(), 1, "body: {body}");
         }
     }
+
+    #[test]
+    fn example_settings_file_parses_cleanly_to_factory_defaults() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/settings.example.toml"
+        ));
+        let (loaded, errors) = Settings::load(Some(path));
+        assert!(
+            errors.is_empty(),
+            "example file had load errors: {errors:?}"
+        );
+        assert_eq!(loaded, Settings::default());
+    }
 }

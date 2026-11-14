@@ -76,6 +76,19 @@ gpui_kit::actions!([
     ClearAnnotations
 ]);
 
+// Scroll-capture session actions (`ShotoriScroll` key context). Defined
+// here so `actions` remains a pure leaf with zero `crate::*` imports.
+gpui_kit::actions!(
+    scroll,
+    [ScrollFinish, ScrollCancel, ScrollSave, ScrollPause]
+);
+
+// Floating-pin window actions (`ShotoriPin` / `ShotoriPinMenu` contexts).
+gpui_kit::actions!(
+    pin,
+    [ClosePin, DismissPinMenu, OpenPinMenu, CopyPin, ResetPinZoom]
+);
+
 /// Keyboard translation in desktop logical pixels.
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
 #[action(no_json)]
@@ -102,45 +115,21 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         KeyBinding::new("enter", CopySelection, Some("ShotoriOverlay")),
         // the scroll preview panel is its own context (the overlays are
         // gone while it lives); shortcuts mirror the selection flow
-        KeyBinding::new(
-            "enter",
-            crate::ui::scroll_bar::ScrollFinish,
-            Some("ShotoriScroll"),
-        ),
-        KeyBinding::new(
-            "ctrl-c",
-            crate::ui::scroll_bar::ScrollFinish,
-            Some("ShotoriScroll"),
-        ),
-        KeyBinding::new(
-            "escape",
-            crate::ui::scroll_bar::ScrollCancel,
-            Some("ShotoriScroll"),
-        ),
-        KeyBinding::new(
-            "ctrl-s",
-            crate::ui::scroll_bar::ScrollSave,
-            Some("ShotoriScroll"),
-        ),
+        KeyBinding::new("enter", ScrollFinish, Some("ShotoriScroll")),
+        KeyBinding::new("ctrl-c", ScrollFinish, Some("ShotoriScroll")),
+        KeyBinding::new("escape", ScrollCancel, Some("ShotoriScroll")),
+        KeyBinding::new("ctrl-s", ScrollSave, Some("ShotoriScroll")),
         // Space freezes sampling without ending the session (the panel
         // button dispatches the same action)
-        KeyBinding::new(
-            "space",
-            crate::ui::scroll_bar::ScrollPause,
-            Some("ShotoriScroll"),
-        ),
+        KeyBinding::new("space", ScrollPause, Some("ShotoriScroll")),
         // pins are their own windows with their own context
-        KeyBinding::new("shift-f10", crate::ui::pin::OpenPinMenu, Some("ShotoriPin")),
+        KeyBinding::new("shift-f10", OpenPinMenu, Some("ShotoriPin")),
         // Esc in the menu only dismisses it; with no menu it closes the
         // topmost pin (the surface switches its key_context while a
         // menu is open, which is how both bindings coexist)
-        KeyBinding::new(
-            "escape",
-            crate::ui::pin::DismissPinMenu,
-            Some("ShotoriPinMenu"),
-        ),
-        KeyBinding::new("escape", crate::ui::pin::ClosePin, Some("ShotoriPin")),
-        KeyBinding::new("enter", crate::ui::pin::ClosePin, Some("ShotoriPinMenu")),
+        KeyBinding::new("escape", DismissPinMenu, Some("ShotoriPinMenu")),
+        KeyBinding::new("escape", ClosePin, Some("ShotoriPin")),
+        KeyBinding::new("enter", ClosePin, Some("ShotoriPinMenu")),
     ]);
     // The configurable commands last: main binds these after
     // init_annotation_keybindings, and the keymap resolves
@@ -499,5 +488,20 @@ mod tests {
         let keys = default_keys();
         let unique: std::collections::BTreeSet<_> = keys.values().collect();
         assert_eq!(unique.len(), keys.len());
+    }
+
+    #[test]
+    fn actions_module_remains_dependency_free_within_crate() {
+        let source = include_str!("actions.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let forbidden = concat!("crate", "::");
+        for (line_no, line) in prod.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            assert!(
+                !code.contains(forbidden),
+                "actions.rs:{}: unexpected crate dependency `{line}`",
+                line_no + 1
+            );
+        }
     }
 }
