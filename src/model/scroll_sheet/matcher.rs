@@ -20,6 +20,8 @@ pub(super) struct OffsetEstimate {
     /// right at this edge reads as "the motion was bigger than the
     /// window", not as "the content changed" (see `classify`).
     pub(super) window: i32,
+    /// Moving pixels agree while a textured backdrop stays in screen coordinates.
+    pub(super) foreground: bool,
 }
 
 /// One matcher verdict against a specific comparison base (see
@@ -363,6 +365,19 @@ pub(super) fn estimate_offset(
             best = Some((d, cost));
         }
     }
+    // A fixed backdrop can supply a deceptively confident ordinary match.
+    // Validate foreground motion independently before accepting its position.
+    if let Some(candidate) = foreground::estimate(
+        prev,
+        cur,
+        weights,
+        (trim_top, trim_bot),
+        prediction,
+        max_admissible,
+    ) && candidate.cost <= options.cost_threshold
+    {
+        return Some(candidate);
+    }
     let (best_dy, best_cost) = best?;
     let runner_up = evaluated
         .iter()
@@ -375,5 +390,8 @@ pub(super) fn estimate_offset(
         cost: best_cost,
         runner_up,
         window: max_admissible,
+        foreground: false,
     })
 }
+
+mod foreground;

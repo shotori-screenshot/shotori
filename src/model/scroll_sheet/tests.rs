@@ -979,6 +979,110 @@ fn all_moving_bands_keep_the_full_frame_in_the_score() {
     assert_eq!(s.motion.weights, ALL_BANDS);
 }
 
+/// Opaque cards/text scroll over a textured, screen-fixed backdrop, as
+/// on translucent browser pages. No real browsing data is embedded.
+fn backdrop_foreground(x: u32, y: u32) -> Option<[u8; 4]> {
+    let line = y % 96;
+    if (40..148).contains(&x) && (8..76).contains(&line) {
+        Some(source_row(y.wrapping_mul(317).wrapping_add(x)))
+    } else if (164..300).contains(&x)
+        && (16..36).contains(&line)
+        && !(x / 3 + line / 3).is_multiple_of(4)
+    {
+        Some([238, 238, 238, 255])
+    } else {
+        None
+    }
+}
+
+fn backdrop_list(top: u32) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(320 * 400 * 4);
+    for y in 0..400 {
+        for x in 0..320 {
+            let background = 15 + (ink_hash(x, y) % 55) as u8;
+            frame.extend_from_slice(
+                &backdrop_foreground(x, top + y)
+                    .unwrap_or([background, background, background, 255]),
+            );
+        }
+    }
+    frame
+}
+
+#[test]
+fn textured_fixed_backdrop_does_not_stop_scrolling_cards() {
+    let mut sheet =
+        ScrollSheet::new(320, 400, &backdrop_list(160), SheetLimits::default()).unwrap();
+    let (mut minimum, mut maximum) = (160, 160);
+    for top in [180, 220, 160, 100, 40] {
+        let result = sheet.push(&backdrop_list(top));
+        assert!(
+            matches!(
+                result,
+                Fold::GrewBottom { .. } | Fold::GrewTop { .. } | Fold::Shifted { .. }
+            ),
+            "top {top}: {result:?}"
+        );
+        minimum = minimum.min(top);
+        maximum = maximum.max(top);
+        assert_eq!(sheet.viewport_span(), (top - minimum, 400));
+        assert_eq!(sheet.dimensions(), (320, 400 + maximum - minimum));
+        for y in 0..sheet.dimensions().1 {
+            for x in 0..320 {
+                if let Some(expected) = backdrop_foreground(x, minimum + y) {
+                    let i = ((y * 320 + x) * 4) as usize;
+                    assert_eq!(&sheet.canvas()[i..i + 4], &expected, "{top}: {x},{y}");
+                }
+            }
+        }
+    }
+    assert!(sheet.fixed_backdrop);
+}
+
+#[test]
+fn fixed_backdrop_does_not_authorize_an_unrelated_foreground() {
+    let seed = backdrop_list(0);
+    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
+    assert!(matches!(
+        sheet.push(&backdrop_list(10_000)),
+        Fold::Refused(_) | Fold::Still
+    ));
+    assert_eq!(sheet.canvas(), seed);
+    assert_eq!(sheet.viewport_span(), (0, 400));
+}
+
+#[test]
+fn fixed_backdrop_does_not_resolve_periodic_foreground_ambiguity() {
+    let repeated = |top| {
+        let mut frame = backdrop_list(top);
+        for y in 0..400 {
+            for x in 0..320 {
+                if let Some(pixel) = backdrop_foreground(x, (top + y) % 96) {
+                    let i = ((y * 320 + x) * 4) as usize;
+                    frame[i..i + 4].copy_from_slice(&pixel);
+                }
+            }
+        }
+        frame
+    };
+    let seed = repeated(0);
+    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
+    assert_eq!(sheet.push(&repeated(20)), Fold::Refused(Refusal::Unclear));
+    assert_eq!(sheet.canvas(), seed);
+}
+
+#[test]
+fn fixed_backdrop_does_not_hide_conflicting_foreground_motion() {
+    let seed = backdrop_list(0);
+    let mut frame = backdrop_list(20);
+    let other = backdrop_list(80);
+    let halfway = 320 * 200 * 4;
+    frame[halfway..].copy_from_slice(&other[halfway..]);
+    let mut sheet = ScrollSheet::new(320, 400, &seed, SheetLimits::default()).unwrap();
+    assert!(matches!(sheet.push(&frame), Fold::Refused(_) | Fold::Still));
+    assert_eq!(sheet.canvas(), seed);
+}
+
 /// The committed footer is content-plane-excluded: the output is
 /// the page's content rows followed by exactly one footer band.
 #[test]
