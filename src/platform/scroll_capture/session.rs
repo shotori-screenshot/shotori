@@ -12,8 +12,8 @@ use async_channel::{Receiver, Sender};
 
 use super::{Cmd, ScrollEvent};
 use crate::model::scroll_sheet::{
-    Fold, Phase, PreviewGeometry, Refusal, ScrollSheet, phase_of, preview_fit_rows,
-    preview_scale_for, preview_slice, preview_window,
+    Axis, Fold, Phase, PreviewGeometry, Refusal, ScrollSheet, phase_of, preview_scale_for,
+    preview_window,
 };
 
 /// Polling cadence. One capture interval is the largest scroll step the
@@ -97,9 +97,10 @@ fn deliver(events: &Sender<ScrollEvent>, sheet: &mut ScrollSheet) {
 pub(super) struct Preview {
     geom: PreviewGeometry,
     /// Identity of the bitmap the panel currently holds: `(window top,
-    /// rows, sample_w, sheet top-shift revision)`. Including `sample_w`
-    /// ensures a panel geometry update immediately refreshes the slice.
-    shown: Option<(u32, u32, u32, u32)>,
+    /// rows, sample_w, sheet top-shift revision, peeking, horizontal)`.
+    /// Including `sample_w`, `peeking` and axis ensures a geometry,
+    /// axis or scrub update immediately refreshes the panel state.
+    shown: Option<(u32, u32, u32, u32, bool, bool)>,
     /// The panel stepped off the live edge: the sheet row the window
     /// should end at. `None` = follow the viewport.
     peek_end: Option<u32>,
@@ -120,35 +121,48 @@ impl Preview {
     /// True when no preview panel has published metrics (chrome-free
     /// full-screen single-monitor session).
     fn is_chrome_free(&self) -> bool {
-        self.geom.get().is_none()
+        self.geom.get_box().is_none()
     }
 
-    /// `(window_rows_in_sheet, downscale_k, sample_w)` for `width`, or
-    /// `None` when there is no panel (or it has not sized itself yet).
-    fn window(&self, width: u32) -> Option<(u32, u32, u32)> {
-        let (well_rows, sample_w) = self.geom.get()?;
+    /// `(window_rows_in_sheet, sample_w)` for `width`, or `None` when
+    /// there is no panel (or it has not sized itself yet).
+    fn window(&self, width: u32) -> Option<(u32, u32)> {
+        let (well_along, well_cross, sample_w) = self.geom.get_box()?;
         if width == 0 {
             return None;
         }
-        let (k, pw) = preview_scale_for(width, sample_w);
-        let ph = preview_fit_rows(well_rows as f32, pw);
-        Some((ph * k, k, sample_w))
+        let rows = PreviewGeometry::window_rows_for(width, well_along, well_cross);
+        Some((rows, sample_w))
+    }
+
+    /// Snap back to live-edge following when new page scroll movement folds in.
+    fn resume_follow(&mut self) {
+        self.peek_end = None;
     }
 
     /// Aim, then repaint the panel if its bitmap is out of date. `force`
     /// rebuilds even when nothing moved (axis switch, peek, first frame).
     fn push(&mut self, sheet: &ScrollSheet, events: &Sender<ScrollEvent>, force: bool) {
         let (w, h) = sheet.dimensions();
-        let Some((rows, k, sample_w)) = self.window(w) else {
+        let Some((win_rows, sample_w)) = self.window(w) else {
             return;
         };
         let (vt, vh) = sheet.viewport_span();
+        let peeking = self.peek_end.is_some();
         let aimed = match self.peek_end {
             Some(end) => end.saturating_sub(vh),
             None => vt,
         };
-        let (top, rows) = preview_window(h, aimed, vh, rows);
-        let identity = (top, rows, sample_w, sheet.top_revision());
+        let (top, rows) = preview_window(h, aimed, vh, win_rows);
+        let axis = sheet.axis();
+        let identity = (
+            top,
+            rows,
+            sample_w,
+            sheet.top_revision(),
+            peeking,
+            axis == Axis::Horizontal,
+        );
         if force || self.shown != Some(identity) {
             if !force && events.len() >= MAX_QUEUED_EVENTS {
                 // Leave `self.shown` stale so the next poll after the UI
@@ -156,60 +170,115 @@ impl Preview {
                 // of piling up multi-megabyte intermediate frames.
                 return;
             }
-            let (pw, ph, rgba) = preview_slice(sheet.canvas(), w, h, top, rows, sample_w);
-            let (v_top, v_h) = self.mapping(sheet, top, rows, k);
+            let (out_w, out_h, rgba) =
+                PreviewGeometry::slice_oriented(sheet.canvas(), w, h, top, rows, sample_w, axis);
+            let preview_along = match axis {
+                Axis::Vertical => out_h,
+                Axis::Horizontal => out_w,
+            };
+            let (v_top, v_h) = self.mapping(sheet, top, rows, preview_along);
             if events
                 .try_send(ScrollEvent::Preview {
-                    width: pw,
-                    height: ph,
+                    width: out_w,
+                    height: out_h,
                     rgba: Arc::new(rgba),
                     viewport_top: v_top,
                     viewport_height: v_h,
+                    sheet_len: h,
+                    window_top: top,
+                    window_rows: rows,
+                    sheet_viewport_top: vt,
+                    sheet_viewport_len: vh,
+                    peeking,
                 })
                 .is_ok()
             {
                 self.shown = Some(identity);
             }
-        } else if events.len() < MAX_QUEUED_EVENTS
-            && let (Some(v_top), v_h) = self.mapping(sheet, top, rows, k)
-        {
-            drop(events.try_send(ScrollEvent::Viewport {
-                top: v_top,
-                height: v_h,
-            }));
+        } else if events.len() < MAX_QUEUED_EVENTS {
+            let (_, pw) = preview_scale_for(w, sample_w);
+            let preview_along =
+                ((u64::from(rows) * u64::from(pw)).div_ceil(u64::from(w.max(1)))).max(1) as u32;
+            if let (Some(v_top), v_h) = self.mapping(sheet, top, rows, preview_along) {
+                drop(events.try_send(ScrollEvent::Viewport {
+                    top: v_top,
+                    height: v_h,
+                    sheet_len: h,
+                    window_top: top,
+                    window_rows: rows,
+                    sheet_viewport_top: vt,
+                    sheet_viewport_len: vh,
+                    peeking,
+                }));
+            }
         }
     }
 
-    /// Where the viewport sits inside `[top, top + rows)` in preview rows.
-    fn mapping(&self, sheet: &ScrollSheet, top: u32, rows: u32, k: u32) -> (Option<u32>, u32) {
-        let k = k.max(1);
+    /// Where the viewport sits inside `[top, top + rows)` in preview
+    /// along-axis pixels (`0..preview_along`).
+    fn mapping(
+        &self,
+        sheet: &ScrollSheet,
+        top: u32,
+        rows: u32,
+        preview_along: u32,
+    ) -> (Option<u32>, u32) {
+        let preview_along = preview_along.max(1);
+        let rows = rows.max(1);
         let (vt, vh) = sheet.viewport_span();
-        let ph = (rows / k).max(1);
-        let v_h = (vh / k).max(1).min(ph);
+        let v_h = ((u64::from(vh) * u64::from(preview_along)).div_ceil(u64::from(rows)))
+            .max(1)
+            .min(u64::from(preview_along)) as u32;
         if vt.saturating_add(vh) <= top || vt >= top.saturating_add(rows) {
             return (None, v_h);
         }
-        let v_top = vt.saturating_sub(top) / k;
-        (Some(v_top.min(ph - v_h)), v_h)
+        let v_top = ((u64::from(vt.saturating_sub(top)) * u64::from(preview_along))
+            / u64::from(rows)) as u32;
+        (Some(v_top.min(preview_along - v_h)), v_h)
     }
 
-    /// Wheel in the strip: move the camera by `delta` preview rows
-    /// (negative = up), or return to the live edge with `None`.
+    /// Wheel in the strip: move the camera by `delta` preview pixels
+    /// (positive = wheel up / back toward sheet start), or return to
+    /// the live edge with `None`.
     fn peek(&mut self, delta: Option<i32>, sheet: &ScrollSheet, events: &Sender<ScrollEvent>) {
         let (w, h) = sheet.dimensions();
-        let Some((rows, k, _)) = self.window(w) else {
+        let Some((win_rows, sample_w)) = self.window(w) else {
             return;
         };
+        let (_, vh) = sheet.viewport_span();
+        let rows = win_rows.max(vh.min(h)).min(h).max(1);
         match delta {
             None => self.peek_end = None,
             Some(delta) => {
                 let (vt, vh) = sheet.viewport_span();
+                let (_, pw) = preview_scale_for(w, sample_w);
                 let base = self.peek_end.unwrap_or((vt + vh).min(h)) as i64;
-                let step = i64::from(delta) * i64::from(k);
+                let step = (i64::from(delta) * i64::from(w.max(1))) / i64::from(pw.max(1));
+                let step = if step == 0 {
+                    i64::from(delta.signum())
+                } else {
+                    step
+                };
                 let lowest = rows.min(h) as i64;
                 self.peek_end = Some((base - step).clamp(lowest, i64::from(h)) as u32);
             }
         }
+        self.push(sheet, events, true);
+    }
+
+    /// Scrub the preview window along `[0.0, 1.0]` of the captured sheet.
+    fn peek_ratio(&mut self, ratio: f32, sheet: &ScrollSheet, events: &Sender<ScrollEvent>) {
+        let (w, h) = sheet.dimensions();
+        let Some((win_rows, _)) = self.window(w) else {
+            return;
+        };
+        let (_, vh) = sheet.viewport_span();
+        let rows = win_rows.max(vh.min(h)).min(h).max(1);
+        let lowest = rows.min(h);
+        let span = h.saturating_sub(lowest);
+        let end = lowest
+            + ((f64::from(span) * f64::from(ratio.clamp(0.0, 1.0))).round() as u32).min(span);
+        self.peek_end = Some(end.clamp(lowest, h));
         self.push(sheet, events, true);
     }
 
@@ -292,6 +361,10 @@ pub(super) fn run_session(
                 preview.peek(delta, sheet, events);
                 continue;
             }
+            Ok(Cmd::PeekRatio(ratio)) => {
+                preview.peek_ratio(ratio, sheet, events);
+                continue;
+            }
             Err(async_channel::TryRecvError::Empty) => {}
             Err(async_channel::TryRecvError::Closed) => {
                 // The UI dropped its command channel: deliver what we
@@ -329,6 +402,9 @@ pub(super) fn run_session(
             Fold::GrewBottom { .. } | Fold::GrewTop { .. } | Fold::Shifted { .. } => {
                 last_accept = Instant::now();
                 streak = None;
+                // Scrolling the live page immediately exits wheel-peek so
+                // the preview never stays frozen on historical rows.
+                preview.resume_follow();
                 drop(events.try_send(ScrollEvent::Progress {
                     extent: sheet.captured_extent(),
                     total: sheet.dimensions().1,
@@ -657,5 +733,80 @@ mod tests {
             }
         }
         assert!(finished);
+    }
+
+    #[test]
+    fn wheel_peek_scrubs_history_and_live_scroll_auto_resumes_following() {
+        let mut sheet =
+            ScrollSheet::new(W, H, &frame_at(0), SheetLimits::default()).expect("valid seed");
+        for step in [40, 80, 120, 160, 200] {
+            assert!(matches!(
+                sheet.push(&frame_at(step)),
+                Fold::GrewBottom { .. }
+            ));
+        }
+        let geom = PreviewGeometry::new();
+        geom.set_box(160, 160, 160);
+        let mut preview = Preview::new(geom);
+        let (ev_tx, ev_rx) = async_channel::unbounded();
+
+        // Scrub to the very top of the sheet via PeekRatio(0.0).
+        preview.peek_ratio(0.0, &sheet, &ev_tx);
+        let mut last_preview = None;
+        while let Ok(ev) = ev_rx.try_recv() {
+            if let ScrollEvent::Preview {
+                window_top,
+                peeking,
+                sheet_len,
+                ..
+            } = ev
+            {
+                last_preview = Some((window_top, peeking, sheet_len));
+            }
+        }
+        assert_eq!(last_preview, Some((0, true, H + 200)));
+
+        // Now run a live scroll step (frame_at(240)): `run_session` must
+        // clear `peek_end` automatically and emit `peeking == false`
+        // anchored back at the live bottom tail.
+        let mut src = ScriptedFrames::new([frame_at(240)]);
+        let (cmd_tx, cmd_rx) = async_channel::bounded(4);
+        let handle = std::thread::spawn(move || {
+            run_session(
+                &mut sheet,
+                &mut src,
+                &ev_tx,
+                &cmd_rx,
+                &mut preview,
+                SessionTimings {
+                    poll: Duration::from_millis(3),
+                    idle_deadline: Duration::from_secs(5),
+                    wait_hint: Duration::from_secs(1),
+                },
+            );
+            ev_rx
+        });
+        std::thread::sleep(Duration::from_millis(15));
+        cmd_tx.try_send(Cmd::Finish).expect("finish");
+        let ev_rx = handle.join().expect("session thread");
+
+        let mut resumed_tail = None;
+        while let Ok(ev) = ev_rx.try_recv() {
+            if let ScrollEvent::Preview {
+                window_top,
+                window_rows,
+                sheet_len,
+                peeking,
+                ..
+            } = ev
+            {
+                resumed_tail = Some((window_top + window_rows, sheet_len, peeking));
+            }
+        }
+        assert_eq!(
+            resumed_tail,
+            Some((H + 240, H + 240, false)),
+            "live page scroll must clear peeking and re-anchor at sheet tail"
+        );
     }
 }

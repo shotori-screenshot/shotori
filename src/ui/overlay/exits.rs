@@ -96,6 +96,10 @@ impl Overlay {
         };
         let chrome = crate::ui::scroll_bar::ScrollChrome {
             display_id,
+            output_origin: point(
+                px(self.capture.logical_pos.0 as f32),
+                px(self.capture.logical_pos.1 as f32),
+            ),
             output_width: lw,
             output_height: lh,
             output_scale,

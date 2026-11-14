@@ -62,22 +62,38 @@ pub enum ScrollEvent {
     /// Rows captured beyond the initial viewport, plus the sheet height
     /// the header can show as "W × H" (progress UI).
     Progress { extent: u32, total: u32 },
-    /// The viewport moved (preview rows, engine-mapped) — no pixels,
-    /// cheap enough to fire on every accepted frame so the highlight
-    /// tracks the frame drag in real time.
-    Viewport { top: u32, height: u32 },
+    /// The viewport moved (preview pixels along the scroll axis,
+    /// engine-mapped) — no bitmap, cheap enough to fire on every
+    /// accepted frame so the highlight and scrollbar track in real time.
+    Viewport {
+        top: u32,
+        height: u32,
+        sheet_len: u32,
+        window_top: u32,
+        window_rows: u32,
+        sheet_viewport_top: u32,
+        sheet_viewport_len: u32,
+        peeking: bool,
+    },
     /// A downscaled WINDOW of the sheet for the live preview panel:
-    /// box-filtered by [`crate::model::scroll_sheet::preview_slice`] at
-    /// the panel's published sample width, cut at the window
+    /// area-box filtered and oriented in screen coordinates by
+    /// [`PreviewGeometry::slice_oriented`], cut at the window
     /// [`preview_window`](crate::model::scroll_sheet::preview_window)
     /// picked. `viewport_*` place the capture viewport inside that
-    /// window (preview rows; `None` when peeking at history).
+    /// window (preview pixels along the growth axis; `None` when the
+    /// viewport lies outside the shown window).
     Preview {
         width: u32,
         height: u32,
         rgba: Arc<Vec<u8>>,
         viewport_top: Option<u32>,
         viewport_height: u32,
+        sheet_len: u32,
+        window_top: u32,
+        window_rows: u32,
+        sheet_viewport_top: u32,
+        sheet_viewport_len: u32,
+        peeking: bool,
     },
     /// What the session is doing right now (see [`Phase`]). Fired on
     /// change only. A refusal is a STATE, not a failure: the session
@@ -118,6 +134,9 @@ pub(super) enum Cmd {
     /// Step the preview away from the live edge (`Some(preview rows)`,
     /// negative = look further up) or return to it (`None`).
     Peek(Option<i32>),
+    /// Scrub the preview window to a normalized position `[0.0, 1.0]`
+    /// along the captured sheet (`0.0` = start, `1.0` = end).
+    PeekRatio(f32),
 }
 
 /// The UI's handle onto a running engine. Cheap to clone; dropping it
@@ -157,6 +176,11 @@ impl ScrollControls {
     /// up) or back at the live edge (`None`).
     pub fn peek(&self, delta: Option<i32>) {
         drop(self.tx.try_send(Cmd::Peek(delta)));
+    }
+
+    /// Scrub the preview window to `[0.0, 1.0]` along the captured sheet.
+    pub fn peek_ratio(&self, ratio: f32) {
+        drop(self.tx.try_send(Cmd::PeekRatio(ratio.clamp(0.0, 1.0))));
     }
 
     /// A handle to nowhere — commands vanish. For the UI when the engine

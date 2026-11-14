@@ -188,23 +188,25 @@ fn hidpi_preview_geometry_keeps_logical_window_and_sharpness_across_scales() {
     // the same logical page height at 1×, 1.25×, 1.5×, 2× and 3× while
     // keeping `pw` matched to physical display pixels (never upsampled).
     let logical_w = 1_000.0_f32;
-    let well_h = 400.0_f32;
+    let well_h = 400u32;
+    let well_w = PREVIEW_DISPLAY_W as u32;
     let base_sample = PreviewGeometry::sample_width_for_scale(1.0);
-    let (base_k, base_pw) = preview_scale_for(logical_w as u32, base_sample);
-    let base_logical_rows = (preview_fit_rows(well_h, base_pw) * base_k) as f32;
+    let (_, base_pw) = preview_scale_for(logical_w as u32, base_sample);
+    assert_eq!(base_pw, base_sample);
+    let base_logical_rows =
+        PreviewGeometry::window_rows_for(logical_w as u32, well_h, well_w) as f32;
 
     for scale in [1.25_f32, 1.5, 2.0, 3.0] {
         let sheet_w = (logical_w * scale).round() as u32;
         let sample_w = PreviewGeometry::sample_width_for_scale(scale);
-        let (k, pw) = preview_scale_for(sheet_w, sample_w);
-        assert_eq!(k, base_k, "downscale factor k drifted at {scale}x");
-        assert!(
-            pw >= (base_pw as f32 * scale * 0.95) as u32,
-            "preview bitmap too narrow for crisp HiDPI at {scale}x: pw={pw}"
+        let (_, pw) = preview_scale_for(sheet_w, sample_w);
+        assert_eq!(
+            pw, sample_w,
+            "preview bitmap must hit exact HiDPI sample width at {scale}x: pw={pw}"
         );
-        let logical_rows = (preview_fit_rows(well_h, pw) * k) as f32 / scale;
+        let logical_rows = PreviewGeometry::window_rows_for(sheet_w, well_h, well_w) as f32 / scale;
         assert!(
-            (logical_rows - base_logical_rows).abs() <= 8.0,
+            (logical_rows - base_logical_rows).abs() <= 2.0,
             "logical window drifted at {scale}x: {logical_rows} vs {base_logical_rows}"
         );
     }
