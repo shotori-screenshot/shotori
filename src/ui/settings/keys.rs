@@ -23,6 +23,24 @@ fn key_label(id: &str) -> String {
         "scroll" => crate::i18n::t!("settings.keys_page.scroll").to_string(),
         "select_screen" => crate::i18n::t!("settings.keys_page.select_screen").to_string(),
         "settings" => crate::i18n::t!("settings.keys_page.settings").to_string(),
+        "tool_select" => crate::i18n::t!("settings.keys_page.tool_select").to_string(),
+        "tool_rectangle" => crate::i18n::t!("settings.keys_page.tool_rectangle").to_string(),
+        "tool_ellipse" => crate::i18n::t!("settings.keys_page.tool_ellipse").to_string(),
+        "tool_line" => crate::i18n::t!("settings.keys_page.tool_line").to_string(),
+        "tool_polyline" => crate::i18n::t!("settings.keys_page.tool_polyline").to_string(),
+        "tool_arrow" => crate::i18n::t!("settings.keys_page.tool_arrow").to_string(),
+        "tool_number" => crate::i18n::t!("settings.keys_page.tool_number").to_string(),
+        "tool_pencil" => crate::i18n::t!("settings.keys_page.tool_pencil").to_string(),
+        "tool_highlighter" => crate::i18n::t!("settings.keys_page.tool_highlighter").to_string(),
+        "tool_mosaic" => crate::i18n::t!("settings.keys_page.tool_mosaic").to_string(),
+        "tool_magnifier" => crate::i18n::t!("settings.keys_page.tool_magnifier").to_string(),
+        "tool_spotlight" => crate::i18n::t!("settings.keys_page.tool_spotlight").to_string(),
+        "tool_eraser" => crate::i18n::t!("settings.keys_page.tool_eraser").to_string(),
+        "tool_text" => crate::i18n::t!("settings.keys_page.tool_text").to_string(),
+        "undo" => crate::i18n::t!("settings.keys_page.undo").to_string(),
+        "redo" => crate::i18n::t!("settings.keys_page.redo").to_string(),
+        "delete" => crate::i18n::t!("settings.keys_page.delete").to_string(),
+        "clear" => crate::i18n::t!("settings.keys_page.clear").to_string(),
         _ => id.to_owned(),
     }
 }
@@ -54,62 +72,21 @@ fn canonical_chord(keystroke: &gpui_kit::Keystroke) -> String {
     chord
 }
 
-/// Human-facing chord: `"ctrl-,"` → `"Ctrl+,"`, `"alt-escape"` →
-/// `"Alt+Esc"`. Parses first so the `-` key ("ctrl--") splits right.
-fn pretty_keystroke(keystroke: &str) -> String {
-    let Ok(parsed) = crate::actions::parse_keystroke(keystroke) else {
-        return keystroke.to_owned();
-    };
-    let m = &parsed.modifiers;
-    let mut parts: Vec<String> = Vec::new();
-    if m.control {
-        parts.push("Ctrl".into());
-    }
-    if m.alt {
-        parts.push("Alt".into());
-    }
-    if m.platform {
-        parts.push("Super".into());
-    }
-    if m.shift {
-        parts.push("Shift".into());
-    }
-    if m.function {
-        parts.push("Fn".into());
-    }
-    parts.push(pretty_key(&parsed.key));
-    parts.join("+")
-}
-
-/// One key's display name (mod handled by [`pretty_keystroke`]).
-fn pretty_key(key: &str) -> String {
-    match key {
-        "escape" => "Esc".into(),
-        "space" => "Space".into(),
-        "pageup" => "PageUp".into(),
-        "pagedown" => "PageDown".into(),
-        single if single.chars().count() == 1 => single.to_uppercase(),
-        other => {
-            let mut c = other.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
-        }
-    }
-}
-
 impl SettingsWindow {
-    /// Shortcut editor: one row per configurable command. Clicking a
-    /// key cap starts a recording; the next (non-modifier) keystroke
-    /// rebinds the command, escape cancels, reserved keys and
-    /// conflicts are refused inline. Writes through like every control
-    /// here — the next screenshot binds from the file (each capture is
-    /// a fresh process; there is no live rebinding to do).
+    /// Shortcut editor: one row per configurable command, grouped into
+    /// capture exits and annotation tools/editing. Clicking a key cap
+    /// starts a recording; the next (non-modifier) keystroke rebinds
+    /// the command, escape cancels, reserved keys and conflicts are
+    /// refused inline. Writes through like every control here — the
+    /// next screenshot binds from the file.
     pub(super) fn page_keys(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let mut rows = Vec::with_capacity(crate::actions::CONFIGURABLE_KEYS.len());
-        for (id, factory) in crate::actions::CONFIGURABLE_KEYS {
-            rows.push(self.key_row(id, factory, cx));
+        let mut capture_rows = Vec::with_capacity(crate::actions::CAPTURE_KEYS.len());
+        for (id, factory) in crate::actions::CAPTURE_KEYS {
+            capture_rows.push(self.key_row(id, factory, cx));
+        }
+        let mut annot_rows = Vec::with_capacity(crate::actions::ANNOTATION_KEYS.len());
+        for (id, factory) in crate::actions::ANNOTATION_KEYS {
+            annot_rows.push(self.key_row(id, factory, cx));
         }
         let body = super::layout::content_column()
             .child(
@@ -137,7 +114,16 @@ impl SettingsWindow {
                         },
                     )),
             )
-            .child(card_group(cx, None, rows));
+            .child(card_group(
+                cx,
+                Some(crate::i18n::t!("settings.keys_page.group.capture").as_ref()),
+                capture_rows,
+            ))
+            .child(card_group(
+                cx,
+                Some(crate::i18n::t!("settings.keys_page.group.annotation").as_ref()),
+                annot_rows,
+            ));
         page_body("page-keys").child(body)
     }
 
@@ -163,7 +149,7 @@ impl SettingsWindow {
                 None => crate::i18n::t!("settings.keys_page.record").to_string(),
             }
         } else {
-            pretty_keystroke(&keystroke)
+            crate::actions::pretty_keystroke(&keystroke)
         };
         let description = if recording || !customized {
             None
@@ -171,7 +157,7 @@ impl SettingsWindow {
             Some(
                 crate::i18n::t!(
                     "settings.keys_page.default",
-                    keys = pretty_keystroke(factory)
+                    keys = crate::actions::pretty_keystroke(factory)
                 )
                 .to_string(),
             )
@@ -308,10 +294,21 @@ impl SettingsWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::SettingsWindow;
+    use super::{SettingsWindow, key_label};
     use crate::model::settings::Settings;
     use crate::ui::settings::Section;
     use gpui_kit::TestAppContext;
+
+    #[test]
+    fn every_configurable_key_has_a_localized_label() {
+        for &(id, _) in crate::actions::CONFIGURABLE_KEYS {
+            assert_ne!(
+                key_label(id),
+                id,
+                "configurable shortcut '{id}' is missing a localized label in key_label()"
+            );
+        }
+    }
 
     #[gpui_kit::test]
     fn recorder_refuses_enter_and_records_space_without_button_activation(cx: &mut TestAppContext) {

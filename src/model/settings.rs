@@ -31,9 +31,25 @@ use std::sync::{OnceLock, RwLock};
 use crate::annotation::text::TextWrap;
 use serde::Deserialize;
 
+mod annotation;
+mod capture;
+mod export;
 mod ocr;
 mod toolbar;
 
+pub(crate) use annotation::{
+    ARROW_STYLES, AnnotationSettings, HIGHLIGHT_BLENDS, NUMBER_FORMATS, arrow_style_label,
+    highlight_blend_label, number_format_label,
+};
+pub use capture::{
+    CaptureSettings, LoupeSize, NotifySettings, PinSettings, PinZoomModifier, ScrollAxisSetting,
+    ScrollSettings, SizeLabelMode,
+};
+pub use export::{
+    DEFAULT_FILENAME_TEMPLATE, DEFAULT_SAVE_DIR_DISPLAY, ExportFormat, ExportSettings,
+    PngCompression, expand_tilde_path, read_last_save_dir, validate_filename_template,
+    write_last_save_dir,
+};
 pub use ocr::{DEFAULT_OCR_MODEL, OcrModel};
 pub use toolbar::{DEFAULT_ROW, ToolbarButton, ToolbarCluster, ToolbarItem};
 
@@ -107,6 +123,8 @@ pub struct Settings {
     /// classifier — screenshots almost always are, so this trades a
     /// rare rotated-line fixup for one inference stage less.
     ocr_assume_upright: bool,
+    /// Join multi-line OCR text with spaces instead of hard newlines.
+    ocr_join_lines: bool,
     /// Path to a user-written rapidocr TOML config (`[ocr]
     /// custom_config`). When set it overrides the curated model
     /// dropdown entirely — the engine is built from this file instead
@@ -120,13 +138,16 @@ pub struct Settings {
     /// Pixel-based smart region selection (hover outline, click snap,
     /// wheel hierarchy over detector candidates). Off = every selection
     /// is drawn by hand. Compositor window snapping is a different
-    /// layer and stays available either way (the detector's quality
-    /// itself is issue #27's topic).
+    /// layer and stays available via `capture.window_snap`.
     smart_region: bool,
     /// Select a new mark for immediate movement and style edits.
     annotation_auto_select: bool,
-    annotation_text_wrap: TextWrap,
-    annotation_renumber_on_delete: bool,
+    capture: CaptureSettings,
+    export: ExportSettings,
+    annotation: AnnotationSettings,
+    notify: NotifySettings,
+    pin: PinSettings,
+    scroll: ScrollSettings,
     /// The annotation swatch board (`[toolbar] colors`) — the brush
     /// colors the overlay's row two offers. See [`PALETTE`].
     annotation_colors: [u32; PALETTE],
@@ -142,13 +163,18 @@ impl Default for Settings {
             row: DEFAULT_ROW.to_vec(),
             ocr_model: DEFAULT_OCR_MODEL,
             ocr_assume_upright: false,
+            ocr_join_lines: false,
             ocr_custom_config: None,
             language: Language::Auto,
             sidebar_collapsed: false,
             smart_region: true,
             annotation_auto_select: true,
-            annotation_text_wrap: TextWrap::default(),
-            annotation_renumber_on_delete: false,
+            capture: CaptureSettings::default(),
+            export: ExportSettings::default(),
+            annotation: AnnotationSettings::default(),
+            notify: NotifySettings::default(),
+            pin: PinSettings::default(),
+            scroll: ScrollSettings::default(),
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
             keys: crate::actions::default_keys(),
         }
@@ -162,6 +188,12 @@ impl Default for Settings {
 struct File {
     toolbar: ToolbarFile,
     ocr: OcrFile,
+    capture: capture::CaptureFile,
+    export: export::ExportFile,
+    annotation: annotation::AnnotationFile,
+    notify: capture::NotifyFile,
+    pin: capture::PinFile,
+    scroll: capture::ScrollFile,
     /// Per-command keystroke overrides (`[keys]`, id → keystroke —
     /// see `crate::actions::CONFIGURABLE_KEYS`). Absent = all factory.
     keys: Option<std::collections::BTreeMap<String, String>>,
@@ -176,14 +208,6 @@ struct File {
     smart_region: Option<bool>,
     /// Auto-select an annotation on placement (absent = on).
     annotation_auto_select: Option<bool>,
-    annotation: AnnotationFile,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct AnnotationFile {
-    text_wrap: Option<String>,
-    renumber_on_delete: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -207,6 +231,8 @@ struct OcrFile {
     /// Skip the text-line orientation classifier (screenshots are
     /// upright); absent = false.
     assume_upright: Option<bool>,
+    /// Join recognized lines with spaces instead of hard newlines.
+    join_lines: Option<bool>,
     /// User-written rapidocr TOML config overriding the curated
     /// dropdown; absent or blank = off. Existence is NOT checked at
     /// load — the file may sit on a mount that is not up yet, and a
@@ -268,6 +294,15 @@ impl Settings {
         self.ocr_assume_upright = assume;
     }
 
+    /// Join multi-line OCR text with spaces instead of hard newlines.
+    pub fn ocr_join_lines(&self) -> bool {
+        self.ocr_join_lines
+    }
+
+    pub fn set_ocr_join_lines(&mut self, join: bool) {
+        self.ocr_join_lines = join;
+    }
+
     /// The user's custom rapidocr config path (`[ocr] custom_config`),
     /// when active. Raw (un-expanded `~`); the engine side resolves it
     /// — see `crate::ocr::custom_config`.
@@ -319,19 +354,81 @@ impl Settings {
     }
 
     pub(crate) fn annotation_renumber_on_delete(&self) -> bool {
-        self.annotation_renumber_on_delete
+        self.annotation.renumber_on_delete
     }
 
     pub(crate) fn set_annotation_renumber_on_delete(&mut self, enabled: bool) {
-        self.annotation_renumber_on_delete = enabled;
+        self.annotation.renumber_on_delete = enabled;
     }
 
     pub(crate) fn annotation_text_wrap(&self) -> TextWrap {
-        self.annotation_text_wrap
+        self.annotation.text_wrap
     }
 
     pub(crate) fn set_annotation_text_wrap(&mut self, mode: TextWrap) {
-        self.annotation_text_wrap = mode;
+        self.annotation.text_wrap = mode;
+    }
+
+    pub fn capture(&self) -> &CaptureSettings {
+        &self.capture
+    }
+
+    pub fn capture_mut(&mut self) -> &mut CaptureSettings {
+        &mut self.capture
+    }
+
+    pub fn export(&self) -> &ExportSettings {
+        &self.export
+    }
+
+    pub fn export_mut(&mut self) -> &mut ExportSettings {
+        &mut self.export
+    }
+
+    pub(crate) fn annotation(&self) -> &AnnotationSettings {
+        &self.annotation
+    }
+
+    pub(crate) fn annotation_mut(&mut self) -> &mut AnnotationSettings {
+        &mut self.annotation
+    }
+
+    pub fn notify(&self) -> &NotifySettings {
+        &self.notify
+    }
+
+    pub fn notify_mut(&mut self) -> &mut NotifySettings {
+        &mut self.notify
+    }
+
+    pub fn pin(&self) -> &PinSettings {
+        &self.pin
+    }
+
+    pub fn pin_mut(&mut self) -> &mut PinSettings {
+        &mut self.pin
+    }
+
+    pub fn scroll(&self) -> &ScrollSettings {
+        &self.scroll
+    }
+
+    pub fn scroll_mut(&mut self) -> &mut ScrollSettings {
+        &mut self.scroll
+    }
+
+    /// Restore all annotation preferences and palette swatches to factory defaults.
+    pub fn reset_annotation_defaults(&mut self) {
+        self.annotation_auto_select = true;
+        self.annotation = AnnotationSettings::default();
+        self.annotation_colors = DEFAULT_ANNOTATION_COLORS;
+    }
+
+    /// Update one palette swatch in memory.
+    pub fn set_swatch_color(&mut self, ix: usize, rgba: u32) {
+        if ix < PALETTE {
+            self.annotation_colors[ix] = rgba | 0xFF;
+        }
     }
 
     /// The resolved shortcut keystrokes (id → keystroke, defaults
@@ -476,6 +573,7 @@ impl Settings {
             },
         };
         let ocr_assume_upright = file.ocr.assume_upright.unwrap_or(false);
+        let ocr_join_lines = file.ocr.join_lines.unwrap_or(false);
         // [ocr] custom_config: blank means off (a hand-edited "" should
         // not wedge the engine into a missing-filename error).
         let ocr_custom_config = file
@@ -512,19 +610,12 @@ impl Settings {
                 }
             },
         };
-        let annotation_text_wrap =
-            file.annotation
-                .text_wrap
-                .as_deref()
-                .map_or(TextWrap::default(), |id| {
-                    TextWrap::from_id(id).unwrap_or_else(|| {
-                        errors.push(format!(
-                            "{}: unknown annotation.text_wrap {id:?} (using word)",
-                            path.display()
-                        ));
-                        TextWrap::default()
-                    })
-                });
+        let capture = file.capture.resolve(path, &mut errors);
+        let export = file.export.resolve(path, &mut errors);
+        let annotation = file.annotation.resolve(path, &mut errors);
+        let notify = file.notify.resolve(path, &mut errors);
+        let pin = file.pin.resolve(path, &mut errors);
+        let scroll = file.scroll.resolve(path, &mut errors);
         // [keys]: resolved against the registry — unknown ids,
         // unparseable keystrokes and duplicates degrade per entry with
         // a warning (same contract as the other fields).
@@ -536,13 +627,18 @@ impl Settings {
                 row,
                 ocr_model,
                 ocr_assume_upright,
+                ocr_join_lines,
                 ocr_custom_config,
                 language,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 smart_region: file.smart_region.unwrap_or(true),
                 annotation_auto_select: file.annotation_auto_select.unwrap_or(true),
-                annotation_text_wrap,
-                annotation_renumber_on_delete: file.annotation.renumber_on_delete.unwrap_or(false),
+                capture,
+                export,
+                annotation,
+                notify,
+                pin,
+                scroll,
                 annotation_colors,
                 keys,
             },
@@ -576,24 +672,26 @@ impl Settings {
                 path.display()
             ));
         };
-        let toolbar = table
-            .entry("toolbar")
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let Some(toolbar) = toolbar.as_table_mut() else {
-            return Err(format!(
-                "{}: [toolbar] is not a table — refusing to overwrite",
-                path.display()
-            ));
-        };
-        toolbar.remove("hidden");
-        toolbar.insert("items".into(), items);
-        let colors = toml::Value::Array(
-            self.annotation_colors
-                .iter()
-                .map(|c| toml::Value::from(format!("#{c:08X}")))
-                .collect(),
-        );
-        toolbar.insert("colors".into(), colors);
+        {
+            let toolbar = table
+                .entry("toolbar")
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            let Some(toolbar) = toolbar.as_table_mut() else {
+                return Err(format!(
+                    "{}: [toolbar] is not a table — refusing to overwrite",
+                    path.display()
+                ));
+            };
+            toolbar.remove("hidden");
+            toolbar.insert("items".into(), items);
+            let colors = toml::Value::Array(
+                self.annotation_colors
+                    .iter()
+                    .map(|c| toml::Value::from(format!("#{c:08X}")))
+                    .collect(),
+            );
+            toolbar.insert("colors".into(), colors);
+        }
         table.insert("language".into(), toml::Value::from(self.language.id()));
         table.insert(
             "sidebar_collapsed".into(),
@@ -604,61 +702,55 @@ impl Settings {
             "annotation_auto_select".into(),
             toml::Value::from(self.annotation_auto_select),
         );
-        let annotation = table
-            .entry("annotation")
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let Some(annotation) = annotation.as_table_mut() else {
-            return Err(format!(
-                "{}: [annotation] is not a table — refusing to overwrite",
-                path.display()
-            ));
-        };
-        annotation.insert(
-            "text_wrap".into(),
-            toml::Value::from(self.annotation_text_wrap.id()),
-        );
-        annotation.insert(
-            "renumber_on_delete".into(),
-            toml::Value::from(self.annotation_renumber_on_delete),
-        );
-        let ocr = table
-            .entry("ocr")
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let Some(ocr) = ocr.as_table_mut() else {
-            return Err(format!(
-                "{}: [ocr] is not a table — refusing to overwrite",
-                path.display()
-            ));
-        };
-        ocr.insert("model".into(), toml::Value::from(self.ocr_model.id()));
-        ocr.insert(
-            "assume_upright".into(),
-            toml::Value::from(self.ocr_assume_upright),
-        );
-        // custom_config: written only when active; removed when off so
-        // turning the feature off in the editor does not leave a stale
-        // path behind (the file keeps unknown keys, this one is ours).
-        match &self.ocr_custom_config {
-            Some(path) => {
-                ocr.insert("custom_config".into(), toml::Value::from(path.as_str()));
-            }
-            None => {
-                ocr.remove("custom_config");
+        self.capture.write_toml(table, path)?;
+        self.export.write_toml(table, path)?;
+        self.annotation.write_toml(table, path)?;
+        self.notify.write_toml(table, path)?;
+        self.pin.write_toml(table, path)?;
+        self.scroll.write_toml(table, path)?;
+        {
+            let ocr = table
+                .entry("ocr")
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            let Some(ocr) = ocr.as_table_mut() else {
+                return Err(format!(
+                    "{}: [ocr] is not a table — refusing to overwrite",
+                    path.display()
+                ));
+            };
+            ocr.insert("model".into(), toml::Value::from(self.ocr_model.id()));
+            ocr.insert(
+                "assume_upright".into(),
+                toml::Value::from(self.ocr_assume_upright),
+            );
+            ocr.insert("join_lines".into(), toml::Value::from(self.ocr_join_lines));
+            // custom_config: written only when active; removed when off so
+            // turning the feature off in the editor does not leave a stale
+            // path behind (the file keeps unknown keys, this one is ours).
+            match &self.ocr_custom_config {
+                Some(path) => {
+                    ocr.insert("custom_config".into(), toml::Value::from(path.as_str()));
+                }
+                None => {
+                    ocr.remove("custom_config");
+                }
             }
         }
         // [keys]: overwrite the known ids, keep unknown ones (the same
         // forward-compat contract as every other section)
-        let keys = table
-            .entry("keys")
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        let Some(keys) = keys.as_table_mut() else {
-            return Err(format!(
-                "{}: [keys] is not a table — refusing to overwrite",
-                path.display()
-            ));
-        };
-        for (id, keystroke) in &self.keys {
-            keys.insert(id.clone(), toml::Value::from(keystroke.as_str()));
+        {
+            let keys = table
+                .entry("keys")
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            let Some(keys) = keys.as_table_mut() else {
+                return Err(format!(
+                    "{}: [keys] is not a table — refusing to overwrite",
+                    path.display()
+                ));
+            };
+            for (id, keystroke) in &self.keys {
+                keys.insert(id.clone(), toml::Value::from(keystroke.as_str()));
+            }
         }
         let body = toml::to_string(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = format!(
@@ -929,12 +1021,27 @@ mod tests {
 
     #[test]
     fn save_rejects_non_table_annotation_preferences_without_writing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(FILE_NAME);
-        let original = "annotation = true\n";
-        std::fs::write(&path, original).unwrap();
-        assert!(Settings::default().save(&path).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        for section in [
+            "annotation",
+            "capture",
+            "export",
+            "notify",
+            "pin",
+            "scroll",
+            "ocr",
+            "toolbar",
+            "keys",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            let original = format!("{section} = true\n");
+            std::fs::write(&path, &original).unwrap();
+            assert!(
+                Settings::default().save(&path).is_err(),
+                "non-table {section} must be rejected"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
     }
 
     #[test]
@@ -942,7 +1049,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let mut s = Settings::default();
-        s.set_key("copy", "ctrl-y".into());
+        s.set_key("copy", "ctrl-b".into());
         s.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[keys]"));
@@ -954,11 +1061,11 @@ mod tests {
         // keystroke and the unknown id each warn and degrade.
         std::fs::write(
             &path,
-            "[keys]\ncopy = \"ctrl-y\"\nsave = \"oops\"\nlegacy = \"ctrl-1\"\n",
+            "[keys]\ncopy = \"ctrl-b\"\nsave = \"oops\"\nlegacy = \"ctrl-1\"\n",
         )
         .unwrap();
         let (back, errors) = Settings::load(Some(&path));
-        assert_eq!(back.keys().get("copy").unwrap(), "ctrl-y");
+        assert_eq!(back.keys().get("copy").unwrap(), "ctrl-b");
         assert_eq!(back.keys().get("save").unwrap(), "ctrl-s");
         assert_eq!(errors.len(), 2);
     }
@@ -1191,6 +1298,92 @@ mod tests {
             assert_eq!(loaded.annotation_colors, DEFAULT_ANNOTATION_COLORS);
             assert_eq!(errors.len(), 1, "body: {body}");
         }
+    }
+
+    #[test]
+    fn expanded_sections_round_trip_and_degrade_invalid_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+
+        let mut s = Settings::default();
+        s.capture_mut().window_snap = false;
+        s.capture_mut().crosshair = true;
+        s.capture_mut().size_label = SizeLabelMode::Bounds;
+        s.capture_mut().loupe = false;
+        s.capture_mut().loupe_zoom = 6;
+        s.capture_mut().loupe_size = LoupeSize::Large;
+        s.capture_mut().keep_open_after_copy = true;
+        s.capture_mut().keep_open_after_save = true;
+        s.capture_mut().reduce_motion = true;
+
+        s.export_mut().set_save_dir(Some("~/Desktop/Shots".into()));
+        s.export_mut().auto_save = true;
+        s.export_mut().remember_last_dir = true;
+        s.export_mut()
+            .set_filename_template("Shot_%Y%m%d_{w}x{h}")
+            .unwrap();
+        s.export_mut().format = ExportFormat::Jpeg;
+        s.export_mut().png_compression = PngCompression::Best;
+        s.export_mut().jpeg_quality = 82;
+        s.export_mut().copy_on_save = true;
+
+        s.annotation_mut().default_color_index = 4;
+        s.annotation_mut().highlighter_color_index = 1;
+        s.annotation_mut().stroke_width = 7;
+        s.annotation_mut().highlighter_width = 36;
+        s.annotation_mut().highlighter_blend = crate::annotation::HighlightBlend::Translucent;
+        s.annotation_mut().mosaic_strength = 28;
+        s.annotation_mut().eraser_size = 48;
+        s.annotation_mut().text_size = 36;
+        s.annotation_mut().number_size = 44;
+        s.annotation_mut().number_format = crate::annotation::NumberFormat::Roman;
+        s.annotation_mut().arrow_style = crate::annotation::ArrowStyle::Filled;
+        s.annotation_mut().smooth_pencil = false;
+        s.annotation_mut().spotlight_opacity = 70;
+        s.annotation_mut().magnifier_zoom = 4;
+
+        s.notify_mut().enabled = false;
+        s.notify_mut().on_copy = false;
+        s.notify_mut().on_save = true;
+        s.notify_mut().on_ocr = false;
+        s.notify_mut().show_thumbnail = false;
+        s.notify_mut().timeout_secs = 5;
+
+        s.pin_mut().zoom_modifier = PinZoomModifier::Ctrl;
+        s.pin_mut().zoom_step = 20;
+        s.pin_mut().show_border = false;
+        s.pin_mut().shadow = false;
+        s.pin_mut().snap_to_edge = true;
+
+        s.scroll_mut().default_axis = ScrollAxisSetting::Horizontal;
+        s.scroll_mut().max_length = 45_000;
+        s.set_ocr_join_lines(true);
+
+        s.save(&path).unwrap();
+        let (back, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty(), "round-trip errors: {errors:?}");
+        assert_eq!(back, s);
+
+        // Clearing optional save_dir removes the key from [export]
+        let mut reset_dir = back.clone();
+        reset_dir.export_mut().set_save_dir(None);
+        reset_dir.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("save_dir"));
+
+        // Out-of-range and unknown enum values degrade per-field with warnings
+        std::fs::write(
+            &path,
+            "[capture]\nsize_label = \"nope\"\nloupe_zoom = 99\n\
+             [export]\nformat = \"bmp\"\njpeg_quality = 0\nfilename_template = \"../bad\"\n\
+             [annotation]\nstroke_width = 99\ndefault_color_index = 20\n\
+             [notify]\ntimeout_secs = 99\n\
+             [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\n\
+             [scroll]\nmax_length = 100\ndefault_axis = \"diagonal\"\n",
+        )
+        .unwrap();
+        let (degraded, errors) = Settings::load(Some(&path));
+        assert_eq!(degraded, Settings::default());
+        assert_eq!(errors.len(), 12, "errors: {errors:?}");
     }
 
     #[test]

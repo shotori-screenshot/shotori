@@ -41,17 +41,22 @@ pub(super) fn settings_switch(
         .clone();
     let focused = focus.is_focused(window) && window.last_input_was_keyboard();
     let geometry = switch_geometry(window.rem_size(), window.scale_factor());
-    let thumb_x = spring(
-        (id.clone(), "thumb"),
-        if checked {
-            geometry.width - geometry.inset - geometry.thumb
-        } else {
-            geometry.inset
-        },
-        cx.theme().motion_tokens().spring_move,
-        window,
-        cx,
-    );
+    let target_x = if checked {
+        geometry.width - geometry.inset - geometry.thumb
+    } else {
+        geometry.inset
+    };
+    let thumb_x = if crate::model::settings::current().capture().reduce_motion {
+        target_x
+    } else {
+        spring(
+            (id.clone(), "thumb"),
+            target_x,
+            cx.theme().motion_tokens().spring_move,
+            window,
+            cx,
+        )
+    };
     Switch::new(id.clone())
         .checked(checked)
         .accessibility_label(label)
@@ -259,6 +264,58 @@ pub(super) fn page_body(id: &'static str) -> Stateful<Div> {
         .min_h_0()
         .overflow_y_scroll()
     // Inner padding belongs to the content column, not the scroll viewport.
+}
+
+/// Shared slider row control: themed horizontal rail + live formatted readout.
+pub(super) fn slider_control(
+    state: &Entity<gpui_kit::base::slider::SliderState>,
+    readout: String,
+    cx: &App,
+) -> Div {
+    use gpui_kit::component::slider::Slider as ThemedSlider;
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .child(
+            div()
+                .w(rems(9.))
+                .flex_shrink_0()
+                .child(ThemedSlider::new(state).horizontal().bg(cx.theme().primary)),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(readout),
+        )
+}
+
+/// Bordered compact action button used across file/folder/cache rows.
+pub(super) fn action_button(
+    cx: &App,
+    id: &'static str,
+    label: String,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui_kit::base::Button {
+    let theme = cx.theme();
+    gpui_kit::base::Button::new(SharedString::from(id))
+        .accessibility_label(label.clone())
+        .flex()
+        .items_center()
+        .h_8()
+        .px_3()
+        .flex_shrink_0()
+        .rounded(theme.radius)
+        .text_sm()
+        .text_color(theme.foreground)
+        .border_1()
+        .border_color(theme.border)
+        .hover(|s| s.bg(theme.secondary_hover))
+        .focus_visible(|s| s.border_color(theme.ring))
+        .child(label)
+        .on_click(on_click)
 }
 
 #[cfg(test)]

@@ -237,11 +237,11 @@ pub fn run_full(args: &FullArgs) -> i32 {
 
     if let Some(p) = file_dest {
         let file = if p.is_dir() {
-            p.join(crate::save_dialog::suggested_name())
+            p.join(crate::save_dialog::suggested_name_for(w, h))
         } else {
             p.to_path_buf()
         };
-        match crate::model::export::save_png(&file, w, h, &rgba) {
+        match crate::model::export::save_image(&file, w, h, &rgba) {
             Ok(()) => {
                 if !args.no_notify {
                     crate::notify::saved(&file);
@@ -318,7 +318,10 @@ pub fn run_ocr(args: &OcrArgs) -> i32 {
     }
 
     let text = match crate::ocr::run_ocr(&rgba, w, h) {
-        Ok(t) => t,
+        Ok(t) => crate::ocr::normalize_recognized_text(
+            t,
+            crate::model::settings::current().ocr_join_lines(),
+        ),
         Err(e) => {
             eprintln!("[shotori] OCR failed: {e:#}");
             return 1;
@@ -442,13 +445,7 @@ pub fn run_pin(args: &PinArgs) -> i32 {
             cx.set_app_identity(crate::APP_ID, "Shotori");
             gpui_kit::base::init(cx);
             gpui_kit::component::init(cx);
-            let (settings, warnings) = crate::model::settings::Settings::load(
-                crate::model::settings::config_path().as_deref(),
-            );
-            for warning in &warnings {
-                eprintln!("[shotori] settings: {warning}");
-            }
-            crate::actions::bind_keys(cx, settings.keys())
+            crate::actions::bind_keys(cx, crate::model::settings::current().keys())
                 .into_iter()
                 .for_each(|id| eprintln!("[shotori] keys: {id} could not be bound"));
 

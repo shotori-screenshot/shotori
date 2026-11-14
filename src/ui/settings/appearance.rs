@@ -17,24 +17,54 @@ use super::{
 };
 
 impl SettingsWindow {
-    pub(super) fn page_appearance(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn page_appearance(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         use gpui_kit::component::select::Select;
+
+        let reduce_motion = {
+            let entity = cx.entity();
+            super::layout::settings_switch(
+                "appearance-reduce-motion",
+                self.settings.capture().reduce_motion,
+                crate::i18n::t!("settings.appearance.reduce_motion.title").to_string(),
+                window,
+                cx,
+            )
+            .on_change(move |checked, _, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.settings.capture_mut().reduce_motion = checked;
+                    this.persist(cx);
+                });
+            })
+        };
 
         let mut body = super::layout::content_column()
             .child(page_header(cx, "settings.preferences.appearance", None))
             .child(card_group(
                 cx,
                 None,
-                vec![card_row(
-                    cx,
-                    crate::i18n::t!("settings.general.language.label").to_string(),
-                    // No hint: picking a language re-renders every
-                    // string on the spot, so "applies immediately"
-                    // tells the user what the click already proved.
-                    None,
-                    None,
-                    Select::new(&self.language_select).w_full(),
-                )],
+                vec![
+                    card_row(
+                        cx,
+                        crate::i18n::t!("settings.general.language.label").to_string(),
+                        // No hint: picking a language re-renders every
+                        // string on the spot, so "applies immediately"
+                        // tells the user what the click already proved.
+                        None,
+                        None,
+                        Select::new(&self.language_select).w_full(),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.appearance.reduce_motion.title").to_string(),
+                        Some("settings.appearance.reduce_motion.body"),
+                        None,
+                        reduce_motion,
+                    ),
+                ],
             ))
             .child(card_group(
                 cx,

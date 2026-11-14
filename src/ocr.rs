@@ -748,6 +748,19 @@ pub fn run_ocr(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<String> {
 
 // ── Result delivery (the background exit's tail) ───────────────────────
 
+/// Format recognized text according to `[ocr].join_lines`: when `true`,
+/// non-empty lines are joined with single spaces into a flowing paragraph.
+pub fn normalize_recognized_text(text: String, join_lines: bool) -> String {
+    if !join_lines {
+        return text;
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Deliver a finished OCR run: text → clipboard (resident daemon) →
 /// notification. Every outcome notifies — the overlays are gone and the
 /// OSD chip ([`crate::ui::ocr_osd`]) is non-interactive, so the
@@ -763,6 +776,7 @@ pub fn deliver_text(w: u32, h: u32, result: anyhow::Result<String>) {
             );
         }
         Ok(t) => {
+            let t = normalize_recognized_text(t, settings::current().ocr_join_lines());
             if let Err(e) = crate::clipboard::copy_text(t.clone()) {
                 eprintln!("[shotori] OCR copy failed: {e:#}");
                 crate::notify::send(
@@ -1314,6 +1328,18 @@ mod tests {
         assert_eq!(
             cfg.rec.as_ref().unwrap().model_path,
             PathBuf::from("~other/rec.onnx")
+        );
+    }
+
+    #[test]
+    fn normalize_recognized_text_joins_non_empty_lines_when_enabled() {
+        assert_eq!(
+            super::normalize_recognized_text("line one\n\n  line two \nline three".into(), true),
+            "line one line two line three"
+        );
+        assert_eq!(
+            super::normalize_recognized_text("line one\nline two".into(), false),
+            "line one\nline two"
         );
     }
 }

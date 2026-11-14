@@ -69,6 +69,9 @@ impl Render for PinSurface {
         .absolute()
         .size_full();
 
+        let pin_cfg = crate::model::settings::current().pin();
+        let show_border = pin_cfg.show_border;
+        let show_shadow = pin_cfg.shadow;
         let pins: Vec<_> = self
             .board
             .read(cx)
@@ -85,41 +88,26 @@ impl Render for PinSurface {
                 // div is grown by the 1px border width on every side, so
                 // the border box's CONTENT area is exactly the pin rect
                 // and the bitmap lands pixel-perfect over the desktop it
-                // froze. A border drawn inside the rect insets and
-                // resamples the image — visibly dimmer, softened text
-                // (border-box sizing).
-                let frame = px(1.);
-                Some(
-                    div()
-                        .id(("pin-image", id))
-                        .debug_selector(move || format!("pin-image-{id}"))
-                        .absolute()
-                        .left(local.x - frame)
-                        .top(local.y - frame)
-                        .w(pin.rect.size.width + frame * 2.)
-                        .h(pin.rect.size.height + frame * 2.)
-                        .overflow_hidden()
-                        // a thin ACCENT frame distinguishes the pin from
-                        // the desktop beneath — the same orange as the
-                        // overlay's selection border, solid because a pin
-                        // must read against ANY content (palette-specific
-                        // borders vanish on half the wallpapers). On the
-                        // div itself: an absolute overlay child never
-                        // painted (measured), the plain border box does
+                // froze. When `pin.show_border` is disabled, `frame` is 0px
+                // so the content rect remains identically aligned.
+                let frame = if show_border { px(1.) } else { px(0.) };
+                let mut container = div()
+                    .id(("pin-image", id))
+                    .debug_selector(move || format!("pin-image-{id}"))
+                    .absolute()
+                    .left(local.x - frame)
+                    .top(local.y - frame)
+                    .w(pin.rect.size.width + frame * 2.)
+                    .h(pin.rect.size.height + frame * 2.)
+                    .overflow_hidden();
+                if show_border {
+                    container = container
                         .border_1()
-                        .border_color(rgba(crate::ui::theme::c().accent))
-                        // neon halo: the accent blurred around the frame —
-                        // a tight hot ring hugging the border plus a wide
-                        // soft wash. FOCUS GATED: only while the pin surface
-                        // is active, so an idle pin sits quietly on the
-                        // desktop and the glow means "keys go here". Empty
-                        // list = no shadow (`Style::paint_drop_shadows`
-                        // just skips an empty slice). Derived from the accent
-                        // so custom themes glow in their own color. Drop
-                        // shadows are painted before the element's own
-                        // content mask (Style::paint), so the overflow_hidden
-                        // above does not clip them.
-                        .shadow(if active && focused == Some(id) {
+                        .border_color(rgba(crate::ui::theme::c().accent));
+                }
+                Some(
+                    container
+                        .shadow(if show_shadow && active && focused == Some(id) {
                             vec![
                                 BoxShadow::new(
                                     px(0.),
@@ -171,6 +159,13 @@ impl Render for PinSurface {
                             }),
                         )
                         .on_scroll(cx.listener(move |this, event: &ScrollEvent, _, cx| {
+                            if !crate::model::settings::current()
+                                .pin()
+                                .zoom_modifier
+                                .matches(&event.modifiers)
+                            {
+                                return;
+                            }
                             let lines = match event.delta {
                                 ScrollDelta::Lines(lines) => lines.y,
                                 ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / 40.,

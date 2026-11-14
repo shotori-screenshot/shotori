@@ -9,8 +9,8 @@
 language = "auto"
 
 # Pixel-based smart region selection (hover highlight, click snap,
-# wheel hierarchy). Window snapping via compositor IPC stays active
-# regardless of this toggle.
+# wheel hierarchy). Window snapping via compositor IPC is configured
+# separately under `[capture] window_snap`.
 smart_region = true
 
 # Automatically select a newly drawn annotation so it can be moved or
@@ -20,12 +20,83 @@ annotation_auto_select = true
 # Remember whether the settings sidebar rail is collapsed.
 sidebar_collapsed = false
 
+[capture]
+# Snap hover and click to compositor windows (niri, sway, Hyprland).
+window_snap = true
+
+# Full-screen alignment crosshairs while aiming or dragging a selection.
+crosshair = false
+
+# Selection dimension badge: "logical" (W × H), "physical" (W × H px),
+# "bounds" (X, Y · W × H), or "hidden".
+size_label = "logical"
+
+# Precision magnifier loupe during corner and handle drags.
+loupe = true
+loupe_zoom = 3         # 2..=8
+loupe_size = "medium"  # "small" | "medium" | "large"
+
+# Keep the capture overlay open after copying or after a direct save.
+keep_open_after_copy = false
+keep_open_after_save = false
+
+# Skip non-essential chrome animations (loupe fade, OSD orbit, sidebar slide).
+reduce_motion = false
+
+[export]
+# Default directory for saving screenshots (supports a leading `~`).
+# Unset or blank uses `~/Pictures/Shotori`.
+# save_dir = "~/Pictures/Shotori"
+
+# Save directly to `save_dir` when clicking Save / pressing Ctrl+S,
+# skipping the native file dialog (issue #42).
+auto_save = false
+
+# When the file dialog is used, start in the folder chosen on the
+# previous dialog save instead of resetting to `save_dir`.
+remember_last_dir = false
+
+# Filename stem (without extension): chrono strftime tokens plus `{w}`
+# and `{h}` for physical width and height.
+filename_template = "Shotori_%Y-%m-%d_%H-%M-%S_%3f"
+
+# Default file format for saved screenshots: "png" | "jpeg" | "webp".
+# (Clipboard and stdout always use PNG.)
+format = "png"
+
+# PNG compression effort: "fast" | "balanced" | "best".
+png_compression = "balanced"
+
+# JPEG encoding quality (1..=100) when `format = "jpeg"`.
+jpeg_quality = 90
+
+# Also copy the screenshot to the clipboard whenever saving to disk.
+copy_on_save = false
+
 [annotation]
 # Default text-box wrapping mode: "word" | "character" | "none".
 text_wrap = "word"
 
 # Automatically renumber remaining sequence badges when one is deleted.
 renumber_on_delete = false
+
+# Initial palette swatch index (0..=6) for strokes/shapes and highlighter.
+default_color_index = 0
+highlighter_color_index = 2
+
+# Initial tool sizes and styles.
+stroke_width = 3               # 1..=20
+highlighter_width = 20         # 8..=60
+highlighter_blend = "multiply" # "multiply" | "translucent"
+mosaic_strength = 16           # 4..=48
+eraser_size = 32               # 8..=96
+text_size = 24                 # 12..=72
+number_size = 32               # 16..=64
+number_format = "decimal"      # "decimal" | "alphabetic" | "roman"
+arrow_style = "open"           # "open" | "filled" | "triangle" | "outline" | "double_open" | "double_triangle" | "dimension"
+smooth_pencil = true
+spotlight_opacity = 55         # 0..=100
+magnifier_zoom = 2             # 1..=8
 
 [toolbar]
 # Row one of the selection toolbar, left to right. Buttons not listed
@@ -53,29 +124,47 @@ colors = [
   "#409CFFFF", "#222222FF", "#FFFFFFFF",
 ]
 
+[notify]
+# Desktop notifications over org.freedesktop.Notifications.
+enabled = true
+on_copy = true
+on_save = true
+on_ocr = true
+show_thumbnail = true
+timeout_secs = 10 # 2..=30
+
+[pin]
+# Modifier required to wheel-zoom a floating pin: "none" | "ctrl" | "alt" | "shift".
+zoom_modifier = "none"
+zoom_step = 12        # 5..=50 (% per wheel notch; 12 = 1.12x)
+show_border = true
+shadow = true
+snap_to_edge = false
+
+[scroll]
+# Default growth direction for long screenshots: "vertical" | "horizontal".
+default_axis = "vertical"
+
+# Maximum stitched length in logical pixels (2000..=100000).
+max_length = 20000
+
 [ocr]
 # Which bundled model set OCR uses. Missing models download on first
-# use into the cache directory (Settings → OCR → Cache → Open shows
-# it: $XDG_DATA_HOME/shotori/ocr-models, usually
-# ~/.local/share/shotori/ocr-models).
+# use into the cache directory ($XDG_DATA_HOME/shotori/ocr-models,
+# usually ~/.local/share/shotori/ocr-models).
 #
 # Known ids: ppocrv6-tiny, ppocrv6-small (default), ppocrv6-medium,
 #   ppocrv5-en-mobile, ppocrv5-ch-mobile, ppocrv5-ch-server
 model = "ppocrv6-small"
 
 # Skip the orientation classifier — faster, for upright text only.
-# Also applies to custom configs (it can only turn the classifier OFF;
-# it never re-enables one the config skipped).
 assume_upright = false
 
+# Join recognized multi-line text with spaces instead of hard newlines.
+join_lines = false
+
 # Advanced: point this at your own rapidocr config TOML to run your
-# own ONNX models — it overrides `model` entirely (the settings
-# window's dropdown disables while it is active). The OCR page can
-# also pick or create this file for you (Choose file… / New from
-# template…). Relative model paths inside the TOML resolve against
-# the TOML's own directory; a leading ~ expands to your home
-# directory. See docs/ocr-custom-model.md for a worked example.
-# Delete the key (or leave it empty) to go back to the bundled models.
+# own ONNX models — it overrides `model` entirely.
 # custom_config = "~/models/my-ocr.toml"
 
 [keys]
@@ -87,3 +176,22 @@ ocr = "ctrl-o"
 scroll = "ctrl-l"
 select_screen = "ctrl-a"
 settings = "ctrl-,"
+
+tool_select = "v"
+tool_rectangle = "r"
+tool_ellipse = "e"
+tool_line = "l"
+tool_polyline = "p"
+tool_arrow = "a"
+tool_number = "n"
+tool_pencil = "b"
+tool_highlighter = "h"
+tool_mosaic = "m"
+tool_magnifier = "g"
+tool_spotlight = "shift-h"
+tool_eraser = "d"
+tool_text = "t"
+undo = "ctrl-z"
+redo = "ctrl-y"
+delete = "delete"
+clear = "ctrl-shift-delete"

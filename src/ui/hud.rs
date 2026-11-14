@@ -185,6 +185,56 @@ pub(crate) fn selection_handles(
     .size_full()
 }
 
+/// Format the selection dimension badge according to `[capture].size_label`.
+pub(crate) fn format_size_label(
+    mode: crate::model::settings::SizeLabelMode,
+    local_size: Size<Pixels>,
+    global_origin: Point<Pixels>,
+    phys_scale: f32,
+) -> Option<String> {
+    use crate::model::settings::SizeLabelMode;
+    let lw = f32::from(local_size.width).round() as i32;
+    let lh = f32::from(local_size.height).round() as i32;
+    match mode {
+        SizeLabelMode::Logical => Some(format!("{lw} × {lh}")),
+        SizeLabelMode::Physical => {
+            let pw = (f32::from(local_size.width) * phys_scale).round() as i32;
+            let ph = (f32::from(local_size.height) * phys_scale).round() as i32;
+            Some(format!("{pw} × {ph} px"))
+        }
+        SizeLabelMode::Bounds => {
+            let gx = f32::from(global_origin.x).round() as i32;
+            let gy = f32::from(global_origin.y).round() as i32;
+            Some(format!("{gx}, {gy} · {lw} × {lh}"))
+        }
+        SizeLabelMode::Hidden => None,
+    }
+}
+
+/// Full-output alignment crosshairs intersecting at `pointer` (window-local).
+pub(crate) fn crosshair_guides(pointer: Point<Pixels>, ws: Size<Pixels>) -> impl IntoElement {
+    let color = rgba((theme::c().accent & 0xffffff00) | 0xb3);
+    canvas(
+        |_, _, _| (),
+        move |viewport, (), window, _| {
+            let px_x = viewport.origin.x + pointer.x;
+            let px_y = viewport.origin.y + pointer.y;
+            window.paint_quad(fill(
+                Bounds::new(point(viewport.origin.x, px_y), size(ws.width, px(1.))),
+                color,
+            ));
+            window.paint_quad(fill(
+                Bounds::new(point(px_x, viewport.origin.y), size(px(1.), ws.height)),
+                color,
+            ));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
 /// Selection size label. The label tries above the selection,
 /// then below, and when neither fits (a selection spanning the screen
 /// height) it is drawn INSIDE the selection box — overlaid beats
@@ -192,11 +242,7 @@ pub(crate) fn selection_handles(
 /// narrow selection would clamp the label's width to the selection's,
 /// wrapping "W × H" into a one-character-per-line tower. As a sibling
 /// anchored to the overlay root it stays content-sized.
-pub(crate) fn selection_label(
-    b: Bounds<Pixels>,
-    ws: Size<Pixels>,
-    selected_size: Size<Pixels>,
-) -> AnyElement {
+pub(crate) fn selection_label(b: Bounds<Pixels>, ws: Size<Pixels>, text: String) -> AnyElement {
     let (label_x, label_y) = label_anchor(&b, ws);
 
     div()
@@ -209,11 +255,7 @@ pub(crate) fn selection_label(
         .bg(rgba(theme::c().accent))
         .text_size(px(12.))
         .text_color(rgba(theme::c().accent_text()))
-        .child(format!(
-            "{} × {}",
-            f32::from(selected_size.width).round() as i32,
-            f32::from(selected_size.height).round() as i32
-        ))
+        .child(text)
         .into_any_element()
 }
 
@@ -382,12 +424,11 @@ pub(crate) fn eraser_chrome(chrome: EraserChrome) -> impl IntoElement {
     .size_full()
 }
 
-/// Loupe inset side and magnification (issue #19): 160 logical px at
-/// 3× shows a ~53px neighborhood of the focus — wide enough to
-/// recognize the element being aligned to, narrow enough that one
-/// magnified pixel still reads as one.
+/// Default loupe inset side (issue #19): 160 logical px at 3× shows a ~53px
+/// neighborhood of the focus — wide enough to recognize the element being
+/// aligned to, narrow enough that one magnified pixel still reads as one.
+#[cfg(test)]
 const LOUPE_SIDE: f32 = 160.;
-const LOUPE_ZOOM: f32 = 3.;
 /// Clear space between the focus point and the inset's near edge: the
 /// real pixels around the point stay visible beside their magnified
 /// view — the coarse pass (dragging without fine-tuning) keeps an
@@ -407,21 +448,20 @@ fn clamp_to(v: f32, lo: f32, hi: f32) -> f32 {
 /// room (the point is near that screen edge), that axis FLIPS to hang
 /// the inset on the inward side instead of letting the clamp drag it
 /// back over the point — inward covers the dimmed resized body, never
-/// the edge content being aligned to. The CONTENT is independent of
-/// this placement: it always centers on the focus (see
-/// `magnifier_loupe`). Pure geometry — one source for the element and
-/// any future pointer routing.
-fn loupe_frame(focus: Point<Pixels>, outward: (f32, f32), ws: Size<Pixels>) -> Bounds<Pixels> {
-    let half = LOUPE_SIDE / 2.;
+/// the edge content being aligned to.
+fn loupe_frame_sized(
+    focus: Point<Pixels>,
+    outward: (f32, f32),
+    ws: Size<Pixels>,
+    side: f32,
+) -> Bounds<Pixels> {
+    let half = side / 2.;
     let reach = half + LOUPE_GAP;
     let (fx, fy) = (f32::from(focus.x), f32::from(focus.y));
     let fits = |dir: f32, at: f32, win: f32| {
         let lo = at + dir * reach - half;
-        lo >= 0. && lo + LOUPE_SIDE <= win
+        lo >= 0. && lo + side <= win
     };
-    // flip whichever axis cannot host the outward side (per-axis, so a
-    // point at the bottom edge but mid-width keeps its horizontal
-    // placement and only flips vertically)
     let dx = if fits(outward.0, fx, f32::from(ws.width)) {
         outward.0
     } else {
@@ -436,11 +476,16 @@ fn loupe_frame(focus: Point<Pixels>, outward: (f32, f32), ws: Size<Pixels>) -> B
     let t = fy + dy * reach - half;
     Bounds::new(
         point(
-            px(clamp_to(l, 0., f32::from(ws.width) - LOUPE_SIDE)),
-            px(clamp_to(t, 0., f32::from(ws.height) - LOUPE_SIDE)),
+            px(clamp_to(l, 0., f32::from(ws.width) - side)),
+            px(clamp_to(t, 0., f32::from(ws.height) - side)),
         ),
-        size(px(LOUPE_SIDE), px(LOUPE_SIDE)),
+        size(px(side), px(side)),
     )
+}
+
+#[cfg(test)]
+fn loupe_frame(focus: Point<Pixels>, outward: (f32, f32), ws: Size<Pixels>) -> Bounds<Pixels> {
+    loupe_frame_sized(focus, outward, ws, LOUPE_SIDE)
 }
 
 /// The magnifier loupe (issue #19): a floating window onto the frozen
@@ -456,21 +501,16 @@ pub(crate) fn magnifier_loupe(
     image: std::sync::Arc<RenderImage>,
     loupe: crate::model::session::Loupe,
     ws: Size<Pixels>,
-) -> impl IntoElement {
-    let frame = loupe_frame(loupe.focus, loupe.outward, ws);
+) -> AnyElement {
+    let cap_cfg = crate::model::settings::current().capture();
+    let side = cap_cfg.loupe_size.side_px();
+    let zoom = f32::from(cap_cfg.loupe_zoom);
+    let frame = loupe_frame_sized(loupe.focus, loupe.outward, ws, side);
     let (fx, fy) = (f32::from(loupe.focus.x), f32::from(loupe.focus.y));
-    // Frame-LOCAL placement of the zoomed image: the focus pixel lands
-    // at the frame's center wherever the frame floats. Absolute
-    // children position against the loupe div's own origin, NOT the
-    // window — mixing the two spaces double-counts frame.origin and
-    // slides the content (and the crosshair) off the point being
-    // placed.
-    let img_left = LOUPE_SIDE / 2. - fx * LOUPE_ZOOM;
-    let img_top = LOUPE_SIDE / 2. - fy * LOUPE_ZOOM;
-    // The same accent the handle dot wears: the crosshair marks the
-    // dot's magnified self, so the two read as one affordance.
+    let img_left = side / 2. - fx * zoom;
+    let img_top = side / 2. - fy * zoom;
     let cross = rgba(theme::c().accent);
-    div()
+    let el = div()
         .id("shotori-loupe")
         .absolute()
         .left(frame.origin.x)
@@ -481,9 +521,6 @@ pub(crate) fn magnifier_loupe(
         .rounded(px(8.))
         .border_1()
         .border_color(rgba(theme::c().accent))
-        // Lift the inset off the content it magnifies. Accentless on
-        // purpose: the border already carries the accent, and a black
-        // shadow reads against any wallpaper.
         .shadow(vec![
             BoxShadow::new(px(0.), px(2.), rgba(0x00000059).into()).blur_radius(px(12.)),
         ])
@@ -492,38 +529,38 @@ pub(crate) fn magnifier_loupe(
                 .absolute()
                 .left(px(img_left))
                 .top(px(img_top))
-                .w(px(f32::from(ws.width) * LOUPE_ZOOM))
-                .h(px(f32::from(ws.height) * LOUPE_ZOOM))
-                // Exact geometry, never letterboxed: the inset is a
-                // crop of the window, not a fit.
+                .w(px(f32::from(ws.width) * zoom))
+                .h(px(f32::from(ws.height) * zoom))
                 .object_fit(ObjectFit::Fill),
         )
         .child(
             div()
                 .absolute()
-                .left(px(LOUPE_SIDE / 2. - 0.5))
+                .left(px(side / 2. - 0.5))
                 .top_0()
                 .w(px(1.))
-                .h(px(LOUPE_SIDE))
+                .h(px(side))
                 .bg(cross),
         )
         .child(
             div()
                 .absolute()
                 .left_0()
-                .top(px(LOUPE_SIDE / 2. - 0.5))
-                .w(px(LOUPE_SIDE))
+                .top(px(side / 2. - 0.5))
+                .w(px(side))
                 .h(px(1.))
                 .bg(cross),
-        )
-        // ~100ms fade-in, the chrome animation posture (spinner):
-        // appears with the gesture, disappears with it — release is
-        // instant by design, no chrome lingering over a finished edit.
-        .with_animation(
+        );
+    if cap_cfg.reduce_motion {
+        el.into_any_element()
+    } else {
+        el.with_animation(
             "shotori-loupe-fade",
             Animation::new(std::time::Duration::from_millis(100)).with_max_fps(30.),
             |el, delta| el.opacity(delta),
         )
+        .into_any_element()
+    }
 }
 
 #[cfg(test)]

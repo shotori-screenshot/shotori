@@ -531,18 +531,59 @@ impl Annotations {
         self.tool
     }
 
-    /// Production constructor: placement preferences come from the
+    /// Production constructor: placement and tool defaults come from the
     /// persisted settings, read once per capture (the overlay session
     /// is rebuilt for every screenshot; there is no live reload).
     /// Tests build `default()` instead — factory behavior, no global
     /// state, no cross-test races.
     pub(crate) fn from_settings() -> Self {
+        Self::from_settings_with(crate::model::settings::current())
+    }
+
+    pub(crate) fn from_settings_with(settings: &crate::model::settings::Settings) -> Self {
+        let cfg = settings.annotation();
+        let stroke = f32::from(cfg.stroke_width);
+        let mosaic = f32::from(cfg.mosaic_strength);
+        let eraser = f32::from(cfg.eraser_size);
         Self {
-            auto_select: crate::model::settings::current().annotation_auto_select(),
-            renumber_on_delete: crate::model::settings::current().annotation_renumber_on_delete(),
+            auto_select: settings.annotation_auto_select(),
+            renumber_on_delete: cfg.renumber_on_delete,
+            color_ix: cfg
+                .default_color_index
+                .min(crate::model::settings::PALETTE - 1),
+            highlighter_color_ix: cfg
+                .highlighter_color_index
+                .min(crate::model::settings::PALETTE - 1),
+            spotlight_opacity: f32::from(cfg.spotlight_opacity),
+            lens: magnifier::Lens {
+                zoom: f32::from(cfg.magnifier_zoom),
+                ..magnifier::Lens::default()
+            },
+            arrow_style: cfg.arrow_style,
+            number_arrow_style: cfg.arrow_style,
+            highlighter: highlighter::HighlighterOptions {
+                blend: cfg.highlighter_blend,
+                ..highlighter::HighlighterOptions::default()
+            },
             text_style: text::TextStyle {
-                wrap: crate::model::settings::current().annotation_text_wrap(),
+                wrap: cfg.text_wrap,
                 ..Default::default()
+            },
+            pencil_smooth: cfg.smooth_pencil,
+            number_format: cfg.number_format,
+            preset: ToolSizes {
+                rectangle: stroke,
+                ellipse: stroke,
+                line: stroke,
+                arrow: stroke,
+                polyline: stroke,
+                pencil: stroke,
+                highlighter: f32::from(cfg.highlighter_width),
+                mosaic,
+                blur: mosaic,
+                eraser,
+                number: f32::from(cfg.number_size),
+                text: f32::from(cfg.text_size),
             },
             ..Self::default()
         }
@@ -1810,5 +1851,49 @@ mod tests {
         assert_eq!(a.visible().next().unwrap().color, orig_color);
         a.redo();
         assert_eq!(a.visible().next().unwrap().color, new_color);
+    }
+
+    #[test]
+    fn from_settings_seeds_all_tool_sizes_colors_and_styles() {
+        let mut s = crate::model::settings::Settings::default();
+        s.set_annotation_auto_select(true);
+        let cfg = s.annotation_mut();
+        cfg.default_color_index = 4;
+        cfg.highlighter_color_index = 1;
+        cfg.stroke_width = 9;
+        cfg.highlighter_width = 36;
+        cfg.highlighter_blend = super::HighlightBlend::Translucent;
+        cfg.mosaic_strength = 28;
+        cfg.eraser_size = 56;
+        cfg.text_size = 40;
+        cfg.number_size = 48;
+        cfg.number_format = super::NumberFormat::Roman;
+        cfg.arrow_style = super::ArrowStyle::Filled;
+        cfg.smooth_pencil = false;
+        cfg.spotlight_opacity = 75;
+        cfg.magnifier_zoom = 5;
+
+        let mut a = Annotations::from_settings_with(&s);
+        assert_eq!(a.color_index(), 4);
+        assert_eq!(a.size_of(super::ShapeKind::Rectangle), 9.);
+        assert_eq!(a.size_of(super::ShapeKind::Arrow), 9.);
+        assert_eq!(a.size_of(super::ShapeKind::Pencil), 9.);
+        assert_eq!(a.size_of(super::ShapeKind::Highlighter), 36.);
+        assert_eq!(a.size_of(super::ShapeKind::Mosaic), 28.);
+        assert_eq!(a.size_of(super::ShapeKind::Blur), 28.);
+        assert_eq!(a.size_of(super::ShapeKind::Eraser), 56.);
+        assert_eq!(a.size_of(super::ShapeKind::Text), 40.);
+        assert_eq!(a.size_of(super::ShapeKind::Number), 48.);
+        assert_eq!(a.size_of(super::ShapeKind::Spotlight), 75.);
+        assert_eq!(a.size_of(super::ShapeKind::Magnifier), 5.);
+        assert_eq!(a.arrow_style(), super::ArrowStyle::Filled);
+        assert_eq!(a.number_format(), super::NumberFormat::Roman);
+        assert!(!a.pencil_smooth());
+        assert_eq!(
+            a.highlighter_options().blend,
+            super::HighlightBlend::Translucent
+        );
+        a.toggle(super::ShapeKind::Highlighter);
+        assert_eq!(a.color_index(), 1);
     }
 }

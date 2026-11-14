@@ -13,8 +13,9 @@ use crate::actions::{
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
-    annotation_chrome, annotation_hover_chrome, eraser_chrome, hover_outline, lens_draft_chrome,
-    magnifier_loupe, marquee_chrome, selection_backdrop, selection_handles, selection_label,
+    annotation_chrome, annotation_hover_chrome, crosshair_guides, eraser_chrome, format_size_label,
+    hover_outline, lens_draft_chrome, magnifier_loupe, marquee_chrome, selection_backdrop,
+    selection_handles, selection_label,
 };
 use crate::ui::toolbar::selection_toolbar;
 use gpui_kit::base::GlobalState;
@@ -160,6 +161,23 @@ impl Render for Overlay {
         let eraser = shared.eraser_chrome(&self.capture.output_name);
         let input_view = cx.entity().downgrade();
         let ws = window.bounds().size; // window logical size (= output logical size)
+        let capture_cfg = crate::model::settings::current().capture();
+        // Physical-to-logical crop scale derived from captured physical width ÷
+        // window logical width (`window.scale_factor()` can misreport across
+        // mixed-DPI outputs).
+        let phys_scale = (self.capture.width as f32 / f32::from(ws.width).max(1.)).max(1.);
+        let global_origin = selection.bounds().map(|b| b.origin).unwrap_or_default();
+        let crosshair_ptr = if capture_cfg.crosshair
+            && !selection.is_selected()
+            && self.ocr_setup.is_none()
+            && self.text_editing.is_none()
+        {
+            shared
+                .pointer_in(&self.capture.output_name)
+                .filter(|p| p.x >= px(0.) && p.x <= ws.width && p.y >= px(0.) && p.y <= ws.height)
+        } else {
+            None
+        };
 
         // Bind the base chain, then attach feature-gated handlers via
         // shadowing — cfg attributes are illegal in the middle of a method
@@ -695,6 +713,8 @@ impl Render for Overlay {
             // ②½ Window-snap hover outline (above the dim, below all
             // selection chrome: it is a hint, not a selection)
             .children(hover.map(hover_outline))
+            // ②⅝ Alignment crosshair guides across the active output
+            .children(crosshair_ptr.map(|p| crosshair_guides(p, ws)))
             // ②¾ Window-level pointer listeners (see `pointer_event_sink`)
             .child(pointer_event_sink(input_view))
             // ③ Size label stays independent so narrow selections cannot wrap it.
@@ -702,10 +722,10 @@ impl Render for Overlay {
             // paints (label and border cannot disagree); the old raw
             // `selection.bounds().unwrap()` here was a same-snapshot
             // unwrap with a second geometry source.
-            .children(
-                sel.filter(|_| active)
-                    .map(|b| selection_label(b, ws, b.size)),
-            )
+            .children(sel.filter(|_| active).and_then(|b| {
+                format_size_label(capture_cfg.size_label, b.size, global_origin, phys_scale)
+                    .map(|text| selection_label(b, ws, text))
+            }))
             .children(self.text_editing.as_ref().map(|editor| editor.render()))
             // ④ Toolbar: appears only after release (no flicker while dragging).
             // Its rect comes from the session — anchored, or wherever the
@@ -738,7 +758,11 @@ impl Render for Overlay {
             // chrome, topmost below the setup dialog (which blocks
             // gestures anyway, so ⑥ stays above it). Renders only on
             // the output that owns the focus point.
-            .children(loupe.map(|l| magnifier_loupe(self.frozen.clone(), l, ws).into_any_element()))
+            .children(
+                loupe
+                    .filter(|_| capture_cfg.loupe)
+                    .map(|l| magnifier_loupe(self.frozen.clone(), l, ws)),
+            )
             .children(
                 self.text_editing
                     .as_ref()

@@ -156,17 +156,36 @@ fn main() {
 
     // Window snapping + focused-output hint: ask the compositor (niri / sway /
     // Hyprland IPC) where every visible window is and which monitor holds focus.
-    // None = compositor without a supported IPC; the feature silently turns off.
-    let snapshot = shotori::platform::windowsnap::query_snapshot();
+    // Skipped completely when `capture.window_snap` is disabled unless an
+    // explicit CLI target (`--window` / `--screen`) needs compositor IPC.
+    let window_snap_enabled = shotori::model::settings::current().capture().window_snap;
+    let target_needs_ipc = gui_args
+        .target()
+        .as_ref()
+        .is_some_and(|t| t.uses_compositor_ipc());
+    let snapshot = if window_snap_enabled || target_needs_ipc {
+        shotori::platform::windowsnap::query_snapshot()
+    } else {
+        None
+    };
     println!(
         "[shotori] window snap: {}",
-        match snapshot.as_ref().map(|s| &s.rects) {
-            Some(s) if !s.is_empty() => format!("{} window(s)", s.len()),
-            Some(_) => "no visible windows".to_owned(),
-            None => "unavailable on this compositor".to_owned(),
+        if !window_snap_enabled {
+            "disabled in settings".to_owned()
+        } else {
+            match snapshot.as_ref().map(|s| &s.rects) {
+                Some(s) if !s.is_empty() => format!("{} window(s)", s.len()),
+                Some(_) => "no visible windows".to_owned(),
+                None => "unavailable on this compositor".to_owned(),
+            }
         }
     );
     let snapshot = snapshot.unwrap_or_default();
+    let interactive_snap_rects = if window_snap_enabled {
+        snapshot.rects.clone()
+    } else {
+        Vec::new()
+    };
     shotori::boot_mark("windowsnap done");
 
     // Pre-flight check for explicit CLI targets (`--output`, `--region`,
@@ -218,17 +237,11 @@ fn main() {
             // gpui-component and needs its theme registry.
             gpui_kit::component::init(cx);
             shotori::ui::ocr_setup::init(cx);
-            shotori::actions::init_annotation_keybindings(cx);
-
             // Keybindings are scoped by key_context (see actions.rs);
-            // the configurable commands honor settings.toml [keys]
-            let (settings, warnings) = shotori::model::settings::Settings::load(
-                shotori::model::settings::config_path().as_deref(),
-            );
-            for warning in &warnings {
-                eprintln!("[shotori] settings: {warning}");
-            }
-            shotori::actions::bind_keys(cx, settings.keys())
+            // `bind_keys` binds both fixed chords (nudges, text escape,
+            // polyline finish) and configurable `[keys]` from `settings::current()`
+            // (which already honors `--no-config`).
+            shotori::actions::bind_keys(cx, shotori::model::settings::current().keys())
                 .into_iter()
                 .for_each(|id| eprintln!("[shotori] keys: {id} could not be bound"));
             // Backstop for explicit close when the overlay has no focused view.
@@ -257,7 +270,7 @@ fn main() {
                     let session = cx.new(|_| {
                         shotori::model::session::ScreenshotSession::new(
                             targets.iter().map(|(cap, _)| cap.clone()).collect(),
-                            snapshot.rects.clone(),
+                            interactive_snap_rects,
                         )
                     });
                     // Smart region detection: analyze each frozen output

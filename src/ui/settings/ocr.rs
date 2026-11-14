@@ -53,6 +53,7 @@ impl SettingsWindow {
         };
         let summary = format!("{} · {} · {}", model.languages(), model.tier(), status);
         let upright = self.upright_switch(window, cx);
+        let join_lines = self.join_lines_switch(window, cx);
         // The custom row's live detail: path · ready, or the first
         // problem; None while off — the off how-to lives in the row's
         // help mark instead.
@@ -86,6 +87,13 @@ impl SettingsWindow {
                         Some("settings.ocr_page.upright.body"),
                         None,
                         upright,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.ocr_page.join_lines.title").to_string(),
+                        Some("settings.ocr_page.join_lines.body"),
+                        None,
+                        join_lines,
                     ),
                 ],
             ))
@@ -129,6 +137,23 @@ impl SettingsWindow {
         .on_change(move |checked, _, _, cx| {
             entity.update(cx, |this, cx| {
                 this.settings.set_ocr_assume_upright(checked);
+                this.persist(cx);
+            });
+        })
+    }
+
+    fn join_lines_switch(&self, window: &mut Window, cx: &mut Context<Self>) -> Switch {
+        let entity = cx.entity();
+        super::layout::settings_switch(
+            "ocr-join-lines",
+            self.settings.ocr_join_lines(),
+            crate::i18n::t!("settings.ocr_page.join_lines.title").to_string(),
+            window,
+            cx,
+        )
+        .on_change(move |checked, _, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.settings.set_ocr_join_lines(checked);
                 this.persist(cx);
             });
         })

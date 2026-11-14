@@ -426,6 +426,11 @@ pub enum SettingsPage {
     Appearance,
     #[value(alias = "toolbar")]
     Capture,
+    Annotation,
+    #[value(alias = "save")]
+    Export,
+    #[value(aliases = ["notifications", "notify", "pin", "pins"])]
+    Desktop,
     #[value(alias = "shortcuts")]
     Keys,
     Ocr,
@@ -795,6 +800,28 @@ mod tests {
                 page: Some(SettingsPage::Keys)
             }))
         ));
+        assert!(matches!(
+            cli(&["settings", "annotation"]).command,
+            Some(Command::Settings(SettingsArgs {
+                page: Some(SettingsPage::Annotation)
+            }))
+        ));
+        for alias in ["export", "save"] {
+            assert!(matches!(
+                cli(&["settings", alias]).command,
+                Some(Command::Settings(SettingsArgs {
+                    page: Some(SettingsPage::Export)
+                }))
+            ));
+        }
+        for alias in ["desktop", "notifications", "notify", "pin", "pins"] {
+            assert!(matches!(
+                cli(&["settings", alias]).command,
+                Some(Command::Settings(SettingsArgs {
+                    page: Some(SettingsPage::Desktop)
+                }))
+            ));
+        }
     }
 
     #[test]

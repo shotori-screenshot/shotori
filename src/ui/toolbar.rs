@@ -90,7 +90,9 @@ gpui_kit::assets::icon_assets!(
         ChevronDown,
         ChevronRight,
         // The settings pages' inline help mark (hover tooltip hint).
-        CircleQuestionMark
+        CircleQuestionMark,
+        Bell,
+        FolderOpen
     ]
 );
 
@@ -179,7 +181,9 @@ pub(crate) struct ButtonMeta {
     /// Translation key (`toolbar.*` in locales/ui.yml). Labels are
     /// locale-dependent; the key (and `debug_id`) stay stable.
     pub(crate) label_key: &'static str,
-    /// Shortcut hint ("" when the button has none).
+    /// Configurable keybinding id in `actions::CONFIGURABLE_KEYS` (`None` when fixed/none).
+    pub(crate) key_id: Option<&'static str>,
+    /// Factory shortcut hint ("" when the button has none).
     pub(crate) shortcut: &'static str,
     pub(crate) icon: ButtonIcon,
 }
@@ -193,6 +197,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Select,
         debug_id: "tb-select",
         label_key: "toolbar.select",
+        key_id: Some("tool_select"),
         shortcut: "V",
         icon: ButtonIcon::Own("icons/select.svg"),
     },
@@ -200,6 +205,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Rectangle,
         debug_id: "tb-rectangle",
         label_key: "toolbar.rectangle",
+        key_id: Some("tool_rectangle"),
         shortcut: "R",
         icon: ButtonIcon::Kit(IconName::Square),
     },
@@ -207,6 +213,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Ellipse,
         debug_id: "tb-ellipse",
         label_key: "toolbar.ellipse",
+        key_id: Some("tool_ellipse"),
         shortcut: "E",
         icon: ButtonIcon::Kit(IconName::Circle),
     },
@@ -214,6 +221,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Line,
         debug_id: "tb-line",
         label_key: "toolbar.line",
+        key_id: Some("tool_line"),
         shortcut: "L",
         icon: ButtonIcon::Kit(IconName::Slash),
     },
@@ -221,6 +229,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Polyline,
         debug_id: "tb-polyline",
         label_key: "toolbar.polyline",
+        key_id: Some("tool_polyline"),
         shortcut: "P",
         icon: ButtonIcon::Kit(IconName::Waypoints),
     },
@@ -228,6 +237,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Arrow,
         debug_id: "tb-arrow",
         label_key: "toolbar.arrow",
+        key_id: Some("tool_arrow"),
         shortcut: "A",
         icon: ButtonIcon::Kit(IconName::ArrowUpRight),
     },
@@ -235,6 +245,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Number,
         debug_id: "tb-number",
         label_key: "toolbar.number",
+        key_id: Some("tool_number"),
         shortcut: "N",
         icon: ButtonIcon::Kit(IconName::ListOrdered),
     },
@@ -242,6 +253,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Pencil,
         debug_id: "tb-pencil",
         label_key: "toolbar.pencil",
+        key_id: Some("tool_pencil"),
         shortcut: "B",
         icon: ButtonIcon::Kit(IconName::Pencil),
     },
@@ -249,6 +261,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Highlighter,
         debug_id: "tb-highlighter",
         label_key: "toolbar.highlighter",
+        key_id: Some("tool_highlighter"),
         shortcut: "H",
         icon: ButtonIcon::Kit(IconName::Highlighter),
     },
@@ -256,6 +269,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Mosaic,
         debug_id: "tb-mosaic",
         label_key: "toolbar.mosaic",
+        key_id: Some("tool_mosaic"),
         shortcut: "M",
         icon: ButtonIcon::Own("icons/mosaic.svg"),
     },
@@ -263,6 +277,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Magnifier,
         debug_id: "tb-magnifier",
         label_key: "toolbar.magnifier",
+        key_id: Some("tool_magnifier"),
         shortcut: "G",
         icon: ButtonIcon::Kit(IconName::Search),
     },
@@ -270,6 +285,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Spotlight,
         debug_id: "tb-spotlight",
         label_key: "toolbar.spotlight",
+        key_id: Some("tool_spotlight"),
         shortcut: "Shift+H",
         icon: ButtonIcon::Kit(IconName::Sun),
     },
@@ -277,6 +293,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Eraser,
         debug_id: "tb-eraser",
         label_key: "toolbar.eraser",
+        key_id: Some("tool_eraser"),
         shortcut: "D",
         icon: ButtonIcon::Kit(IconName::Eraser),
     },
@@ -284,6 +301,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Text,
         debug_id: "tb-text",
         label_key: "toolbar.text",
+        key_id: Some("tool_text"),
         shortcut: "T",
         icon: ButtonIcon::Kit(IconName::Type),
     },
@@ -297,6 +315,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Clear,
         debug_id: "tb-clear",
         label_key: "toolbar.clear",
+        key_id: Some("clear"),
         shortcut: "Ctrl+Shift+Del",
         icon: ButtonIcon::Kit(IconName::Trash),
     },
@@ -304,6 +323,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Ocr,
         debug_id: "tb-ocr",
         label_key: "toolbar.ocr",
+        key_id: Some("ocr"),
         shortcut: "Ctrl+O",
         icon: ButtonIcon::Kit(IconName::ScanText),
     },
@@ -314,6 +334,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Pin,
         debug_id: "tb-pin",
         label_key: "toolbar.pin",
+        key_id: Some("pin"),
         shortcut: "Ctrl+P",
         icon: ButtonIcon::Own("icons/pin.svg"),
     },
@@ -323,6 +344,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Scroll,
         debug_id: "tb-scroll",
         label_key: "toolbar.scroll",
+        key_id: Some("scroll"),
         shortcut: "Ctrl+L",
         icon: ButtonIcon::Own("icons/scroll.svg"),
     },
@@ -330,6 +352,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Save,
         debug_id: "tb-save",
         label_key: "toolbar.save",
+        key_id: Some("save"),
         shortcut: "Ctrl+S",
         icon: ButtonIcon::Kit(IconName::Save),
     },
@@ -337,6 +360,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Copy,
         debug_id: "tb-copy",
         label_key: "toolbar.copy",
+        key_id: Some("copy"),
         shortcut: "Enter / Ctrl+C",
         icon: ButtonIcon::Kit(IconName::Copy),
     },
@@ -350,6 +374,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Settings,
         debug_id: "tb-settings",
         label_key: "toolbar.settings",
+        key_id: Some("settings"),
         shortcut: "Ctrl+,",
         icon: ButtonIcon::Kit(IconName::Settings),
     },
@@ -357,6 +382,7 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         button: crate::model::settings::ToolbarButton::Cancel,
         debug_id: "tb-cancel",
         label_key: "toolbar.cancel",
+        key_id: None,
         shortcut: "",
         icon: ButtonIcon::Kit(IconName::X),
     },
@@ -438,12 +464,30 @@ impl ButtonMeta {
         crate::i18n::t!(self.label_key)
     }
 
-    /// The tooltip / accessibility label ("Name · Shortcut").
-    pub(crate) fn tooltip(&self) -> String {
-        if self.shortcut.is_empty() {
+    /// Resolve the live shortcut string from the user's configured `keys` map,
+    /// falling back to the factory `shortcut` when absent.
+    pub(crate) fn shortcut_for(&self, keys: &std::collections::BTreeMap<String, String>) -> String {
+        let Some(id) = self.key_id else {
+            return self.shortcut.to_string();
+        };
+        let Some(chord) = keys.get(id) else {
+            return self.shortcut.to_string();
+        };
+        let pretty = crate::actions::pretty_keystroke(chord);
+        if self.button == crate::model::settings::ToolbarButton::Copy {
+            format!("Enter / {pretty}")
+        } else {
+            pretty
+        }
+    }
+
+    /// The tooltip / accessibility label ("Name · Shortcut") resolved against `keys`.
+    pub(crate) fn tooltip_for(&self, keys: &std::collections::BTreeMap<String, String>) -> String {
+        let sc = self.shortcut_for(keys);
+        if sc.is_empty() {
             self.label().to_string()
         } else {
-            format!("{} · {}", self.label(), self.shortcut)
+            format!("{} · {sc}", self.label())
         }
     }
 }
@@ -472,7 +516,7 @@ fn row_one(
                 };
                 control(
                     meta.debug_id.into(),
-                    meta.tooltip(),
+                    meta.tooltip_for(settings.keys()),
                     focus.clone(),
                     move |window, cx| {
                         window.dispatch_action(action_for(button), cx);
@@ -740,12 +784,13 @@ pub(crate) fn chip_grip() -> impl IntoElement {
 /// the editor (remove), never to the action itself.
 pub(crate) fn preview_control(
     meta: &ButtonMeta,
+    keys: &std::collections::BTreeMap<String, String>,
     focus: &FocusHandle,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Button {
     control(
         meta.debug_id.into(),
-        meta.tooltip(),
+        meta.tooltip_for(keys),
         focus.clone(),
         on_click,
     )
@@ -957,6 +1002,8 @@ mod tests {
             IconName::WindowMaximize,
             IconName::WindowRestore,
             IconName::WindowClose,
+            IconName::Bell,
+            IconName::FolderOpen,
         ] {
             assert!(
                 super::ToolbarSource.load(&icon.path()).unwrap().is_some(),
@@ -964,6 +1011,19 @@ mod tests {
                 icon
             );
         }
+    }
+
+    #[test]
+    fn tooltip_reflects_custom_shortcuts() {
+        let mut keys = crate::model::settings::Settings::default().keys().clone();
+        keys.insert("tool_arrow".into(), "ctrl-shift-a".into());
+        keys.insert("copy".into(), "ctrl-shift-c".into());
+        let arrow = super::meta_for(crate::model::settings::ToolbarButton::Arrow).unwrap();
+        assert_eq!(arrow.shortcut_for(&keys), "Ctrl+Shift+A");
+        let copy = super::meta_for(crate::model::settings::ToolbarButton::Copy).unwrap();
+        assert_eq!(copy.shortcut_for(&keys), "Enter / Ctrl+Shift+C");
+        let cancel = super::meta_for(crate::model::settings::ToolbarButton::Cancel).unwrap();
+        assert_eq!(cancel.shortcut_for(&keys), "");
     }
 
     #[test]

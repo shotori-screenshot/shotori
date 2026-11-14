@@ -29,11 +29,9 @@ impl Overlay {
         .detach();
     }
 
-    /// Ctrl+S / toolbar [Save]: crop → stash pixels → quit the overlay.
-    /// The overlay is a layer-shell surface that would cover the native file
-    /// dialog, so it exits first; the dialog itself (xdg-desktop-portal
-    /// SaveFile), the write and the notification run on the main thread
-    /// afterwards — see [`crate::save_dialog`]
+    /// Ctrl+S / toolbar [Save]: either write directly to `[export].save_dir`
+    /// (`auto_save = true`, issue #42) or stash pixels and quit the overlay so
+    /// the native portal Save dialog can open without layer-shell occlusion.
     pub(super) fn save_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session.update(cx, |s, cx| {
             s.edit_annotations(|a| a.finish_polyline());
@@ -43,6 +41,34 @@ impl Overlay {
             println!("[shotori] empty selection, ignoring");
             return;
         };
+        let debug_save = std::env::var_os("SHOTORI_DEBUG_SAVE_PATH").is_some();
+        if !debug_save && crate::model::settings::current().export().auto_save {
+            if crate::model::settings::current()
+                .capture()
+                .keep_open_after_save
+            {
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::save_dialog::save_direct_and_notify(w, h, &rgba);
+                    })
+                    .detach();
+            } else {
+                cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+                crate::save_dialog::close_overlays(window, cx);
+                let work = cx.background_executor().spawn(async move {
+                    crate::save_dialog::save_direct_and_notify(w, h, &rgba);
+                });
+                cx.spawn(async move |_, cx| {
+                    work.await;
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+            return;
+        }
         println!(
             "[shotori] save: handing {w}x{h} (from {}) to the file dialog",
             self.capture.output_name
@@ -92,7 +118,10 @@ impl Overlay {
             output: self.capture.output_name.clone(),
             rect: shared_rect,
             preview,
-            axis: crate::model::scroll_sheet::Axis::Vertical,
+            axis: crate::model::settings::current()
+                .scroll()
+                .default_axis
+                .to_axis(),
         };
         let chrome = crate::ui::scroll_bar::ScrollChrome {
             display_id,
@@ -353,7 +382,12 @@ async fn copy_to_clipboard(
             // The thumbnail renders inside the detached notify child —
             // the parent does no pixel work (see notify::copied)
             crate::notify::copied(&png);
-            cx.update(|cx| cx.quit());
+            if !crate::model::settings::current()
+                .capture()
+                .keep_open_after_copy
+            {
+                cx.update(|cx| cx.quit());
+            }
         }
         Err(e) => {
             // Stay in the overlay on failure: the user can still Ctrl+S

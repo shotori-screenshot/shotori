@@ -6,7 +6,6 @@
 //! model (`Settings::apply_drop`); everything here is presentation
 //! and gesture plumbing around it.
 
-use gpui_kit::base::Switch;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 
@@ -14,7 +13,7 @@ use crate::model::settings::{Settings, ToolbarCluster, ToolbarItem};
 use crate::ui::theme;
 use crate::ui::toolbar;
 
-use super::{Button, SettingsWindow, card_group, page_body, page_header};
+use super::{Button, SettingsWindow, card_group};
 
 mod rail;
 use rail::{edge_scroll_delta, set_strip_scroll_pos, strip_scroll_pos};
@@ -68,74 +67,6 @@ impl Render for DragGhost {
 }
 
 impl SettingsWindow {
-    /// The smart-region switch. Same write-through contract as the OCR
-    /// upright toggle: the flip saves the file and the next capture reads
-    /// it — a live overlay is not rewired mid-session (its detectors, if
-    /// any, simply stay unused: the session queries the setting on every
-    /// hover/press/wheel).
-    pub(super) fn smart_region_switch(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Switch {
-        let entity = cx.entity();
-        super::layout::settings_switch(
-            "smart-region",
-            self.settings.smart_region(),
-            crate::i18n::t!("settings.general.smart_region.title").to_string(),
-            window,
-            cx,
-        )
-        .on_change(move |checked, _, _, cx| {
-            entity.update(cx, |this, cx| {
-                this.settings.set_smart_region(checked);
-                this.persist(cx);
-            });
-        })
-    }
-
-    /// The auto-select-on-placement switch. Same write-through contract
-    /// as the smart-region switch: the flip saves the file and the next
-    /// capture reads it — a live overlay keeps its behavior until it is
-    /// rebuilt (the Annotations flag is read once per session).
-    pub(super) fn annotation_auto_select_switch(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Switch {
-        let entity = cx.entity();
-        super::layout::settings_switch(
-            "annotation-auto-select",
-            self.settings.annotation_auto_select(),
-            crate::i18n::t!("settings.general.annotation_auto_select.title").to_string(),
-            window,
-            cx,
-        )
-        .on_change(move |checked, _, _, cx| {
-            entity.update(cx, |this, cx| {
-                this.settings.set_annotation_auto_select(checked);
-                this.persist(cx);
-            });
-        })
-    }
-
-    fn renumber_on_delete_switch(&self, window: &mut Window, cx: &mut Context<Self>) -> Switch {
-        let entity = cx.entity();
-        super::layout::settings_switch(
-            "annotation-renumber-on-delete",
-            self.settings.annotation_renumber_on_delete(),
-            crate::i18n::t!("settings.general.renumber_on_delete.title").to_string(),
-            window,
-            cx,
-        )
-        .on_change(move |checked, _, _, cx| {
-            entity.update(cx, |this, cx| {
-                this.settings.set_annotation_renumber_on_delete(checked);
-                this.persist(cx);
-            });
-        })
-    }
-
     /// Restore the factory toolbar layout without changing capture preferences.
     pub(super) fn reset_toolbar(&mut self, cx: &mut Context<Self>) {
         self.commit(Settings::default().row().to_vec(), cx);
@@ -338,9 +269,14 @@ impl SettingsWindow {
             ToolbarItem::Button(button) => match toolbar::meta_for(button) {
                 Some(meta) => {
                     let remove = cx.entity();
-                    toolbar::preview_control(meta, &self.focus, move |_, cx| {
-                        remove.update(cx, |this, cx| this.remove_at(i, cx));
-                    })
+                    toolbar::preview_control(
+                        meta,
+                        self.settings.keys(),
+                        &self.focus,
+                        move |_, cx| {
+                            remove.update(cx, |this, cx| this.remove_at(i, cx));
+                        },
+                    )
                     .on_drag(payload, ghost_constructor)
                     .on_drag_move(hover)
                     .on_drop(drop)
@@ -445,9 +381,11 @@ impl SettingsWindow {
             .child(item_name(item))
     }
 
-    pub(super) fn page_capture(
+    /// Attach the toolbar drag-and-drop page-level fallback and rail scrub
+    /// listeners to the Capture & Toolbar page container.
+    pub(super) fn attach_toolbar_drag_handlers(
         &self,
-        window: &mut Window,
+        page: Stateful<Div>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         // Releasing anywhere on the page confirms the PREVIEWED slot:
@@ -466,126 +404,69 @@ impl SettingsWindow {
                 }
             },
         );
-        let smart_region = self.smart_region_switch(window, cx);
-        let body = super::layout::content_column()
-            .child(page_header(cx, "settings.preferences.capture", None))
-            .child(card_group(
-                cx,
-                Some(crate::i18n::t!("settings.general.group.selection").as_ref()),
-                vec![
-                    super::layout::compact_row(
-                        cx,
-                        crate::i18n::t!("settings.general.smart_region.title").to_string(),
-                        Some("settings.general.smart_region.body"),
-                        None,
-                        smart_region,
-                    ),
-                    super::card_row(
-                        cx,
-                        crate::i18n::t!("settings.appearance.dim_opacity").to_string(),
-                        Some("settings.appearance.dim_hint"),
-                        None,
-                        self.opacity_control(cx),
-                    ),
-                ],
-            ))
-            .child({
-                let auto_select = self.annotation_auto_select_switch(window, cx);
-                let renumber = self.renumber_on_delete_switch(window, cx);
-                card_group(
-                    cx,
-                    Some(crate::i18n::t!("settings.general.group.annotation").as_ref()),
-                    vec![
-                        super::layout::compact_row(
-                            cx,
-                            crate::i18n::t!("settings.general.annotation_auto_select.title")
-                                .to_string(),
-                            Some("settings.general.annotation_auto_select.body"),
-                            None,
-                            auto_select,
-                        ),
-                        super::layout::compact_row(
-                            cx,
-                            crate::i18n::t!("settings.general.renumber_on_delete.title")
-                                .to_string(),
-                            Some("settings.general.renumber_on_delete.body"),
-                            None,
-                            renumber,
-                        ),
-                        super::layout::compact_row(
-                            cx,
-                            crate::i18n::t!("settings.general.text_wrap.title").to_string(),
-                            Some("settings.general.text_wrap.body"),
-                            None,
-                            gpui_kit::component::select::Select::new(&self.text_wrap_select)
-                                .w_full(),
-                        ),
-                    ],
-                )
-            })
-            .child(card_group(
-                cx,
-                None,
-                vec![
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_4()
-                        .p_3()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
-                        .bg(cx.theme().group_box)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_start()
-                                        .justify_between()
-                                        .gap_4()
-                                        .child(group_heading(
-                                            cx,
-                                            "settings.toolbar_page.group.current",
-                                            "settings.toolbar_page.hint",
-                                        ))
-                                        .child(super::shell::reset_button(
-                                            "settings.toolbar_page.reset",
-                                            cx,
-                                            {
-                                                let entity = cx.entity();
-                                                move |_, _, cx| {
-                                                    entity.update(cx, |this, cx| {
-                                                        this.reset_toolbar(cx)
-                                                    });
-                                                }
-                                            },
-                                        )),
-                                )
-                                .child(self.preview_strip(cx)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(group_heading(
-                                    cx,
-                                    "settings.toolbar_page.group.palette",
-                                    "settings.toolbar_page.palette_hint",
-                                ))
-                                .child(self.palette(cx)),
-                        ),
-                ],
-            ));
         let rail_scrub = cx.listener(Self::on_rail_scrub);
-        page_body("page-toolbar")
-            .child(body)
-            .on_drop(page_fallback)
-            .on_drag_move(rail_scrub)
+        page.on_drop(page_fallback).on_drag_move(rail_scrub)
+    }
+
+    /// The interactive drag-and-drop toolbar layout card (preview bar + palette).
+    pub(super) fn toolbar_editor_card(&self, cx: &mut Context<Self>) -> Div {
+        card_group(
+            cx,
+            None,
+            vec![
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().group_box)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(group_heading(
+                                        cx,
+                                        "settings.toolbar_page.group.current",
+                                        "settings.toolbar_page.hint",
+                                    ))
+                                    .child(super::shell::reset_button(
+                                        "settings.toolbar_page.reset",
+                                        cx,
+                                        {
+                                            let entity = cx.entity();
+                                            move |_, _, cx| {
+                                                entity
+                                                    .update(cx, |this, cx| this.reset_toolbar(cx));
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(self.preview_strip(cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(group_heading(
+                                cx,
+                                "settings.toolbar_page.group.palette",
+                                "settings.toolbar_page.palette_hint",
+                            ))
+                            .child(self.palette(cx)),
+                    ),
+            ],
+        )
     }
 
     /// The preview bar's scroll viewport. The bar hugs its content (the

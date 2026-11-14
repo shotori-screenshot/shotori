@@ -10,8 +10,8 @@ use gpui_kit::*;
 pub use crate::actions::{ClosePin, CopyPin, DismissPinMenu, OpenPinMenu, ResetPinZoom};
 use crate::ui::image_util;
 
-/// How far one "line" of scroll zooms.
-const ZOOM_STEP: f32 = 1.12;
+/// Magnetic snap radius (logical px) when `pin.snap_to_edge` is enabled.
+const EDGE_SNAP_PX: f32 = 10.;
 /// Zoom range: from a postage stamp to deep-pixel-peeping.
 const ZOOM_MIN: f32 = 0.05;
 const ZOOM_MAX: f32 = 24.;
@@ -92,8 +92,17 @@ pub(crate) fn other_output_than(
 
 /// Scroll lines (pixel deltas pre-normalized by the caller) → the next
 /// zoom factor, clamped to the range.
+fn next_zoom_with(zoom: f32, lines: f32, step_pct: u8) -> f32 {
+    let step = 1.0 + f32::from(step_pct.clamp(5, 50)) / 100.0;
+    (zoom * step.powf(lines)).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
 fn next_zoom(zoom: f32, lines: f32) -> f32 {
-    (zoom * ZOOM_STEP.powf(lines)).clamp(ZOOM_MIN, ZOOM_MAX)
+    next_zoom_with(
+        zoom,
+        lines,
+        crate::model::settings::current().pin().zoom_step,
+    )
 }
 
 /// The on-screen size for a zoom factor.
@@ -128,6 +137,60 @@ fn clamp_to_output(
         px(clamp_to(f32::from(origin.x), dl - (w - vw), dr - vw)),
         px(clamp_to(f32::from(origin.y), dt - (h - vh), db - vh)),
     )
+}
+
+/// Magnetically align `origin` to any output's edges within [`EDGE_SNAP_PX`].
+fn snap_origin_to_edges(
+    origin: Point<Pixels>,
+    pin: Size<Pixels>,
+    outputs: &[Bounds<Pixels>],
+) -> Point<Pixels> {
+    let mut x = f32::from(origin.x);
+    let mut y = f32::from(origin.y);
+    let (w, h) = (f32::from(pin.width), f32::from(pin.height));
+    let mut best_dx = EDGE_SNAP_PX + 1.0;
+    let mut best_dy = EDGE_SNAP_PX + 1.0;
+    let mut snapped_x = None;
+    let mut snapped_y = None;
+
+    for out in outputs {
+        if out.size.width <= px(0.) || out.size.height <= px(0.) {
+            continue;
+        }
+        let (ol, ot, or, ob) = (
+            f32::from(out.left()),
+            f32::from(out.top()),
+            f32::from(out.right()),
+            f32::from(out.bottom()),
+        );
+        let v_overlap = y + h > ot - EDGE_SNAP_PX && y < ob + EDGE_SNAP_PX;
+        let h_overlap = x + w > ol - EDGE_SNAP_PX && x < or + EDGE_SNAP_PX;
+        if v_overlap {
+            for target_x in [ol, or - w] {
+                let d = (x - target_x).abs();
+                if d <= EDGE_SNAP_PX && d < best_dx {
+                    best_dx = d;
+                    snapped_x = Some(target_x);
+                }
+            }
+        }
+        if h_overlap {
+            for target_y in [ot, ob - h] {
+                let d = (y - target_y).abs();
+                if d <= EDGE_SNAP_PX && d < best_dy {
+                    best_dy = d;
+                    snapped_y = Some(target_y);
+                }
+            }
+        }
+    }
+    if let Some(sx) = snapped_x {
+        x = sx;
+    }
+    if let Some(sy) = snapped_y {
+        y = sy;
+    }
+    point(px(x), px(y))
 }
 
 /// Choose the nearest position with a grabbable area on an actual output,
@@ -238,7 +301,11 @@ impl PinBoard {
         if let Some((id, grab)) = self.drag
             && let Some(pin) = self.pins.iter_mut().find(|pin| pin.id == id)
         {
-            pin.rect.origin = clamp_origin(position - grab, pin.rect.size, &self.outputs);
+            let mut raw = position - grab;
+            if crate::model::settings::current().pin().snap_to_edge {
+                raw = snap_origin_to_edges(raw, pin.rect.size, &self.outputs);
+            }
+            pin.rect.origin = clamp_origin(raw, pin.rect.size, &self.outputs);
         }
     }
 
@@ -473,7 +540,9 @@ mod tests {
     // blow rustc's macro-expansion recursion inside #[test] (rustc
     // 1.98, "recursion limit reached while expanding #[test]"). Import
     // exactly what the tests touch instead.
-    use super::{MIN_VISIBLE, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, clamp_origin, next_zoom, zoomed_size};
+    use super::{
+        MIN_VISIBLE, ZOOM_MAX, ZOOM_MIN, clamp_origin, next_zoom, next_zoom_with, zoomed_size,
+    };
     use gpui_kit::{Bounds, Pixels, point, px, size};
 
     fn desk() -> Bounds<Pixels> {
@@ -484,7 +553,8 @@ mod tests {
     fn zoom_tracks_the_base_size_and_clamps() {
         let base = size(px(100.), px(60.));
         let mut zoom = next_zoom(1., 3.);
-        assert!((zoom - ZOOM_STEP.powi(3)).abs() < 1e-4);
+        assert!((zoom - 1.12_f32.powi(3)).abs() < 1e-4);
+        assert!((next_zoom_with(1., 2., 25) - 1.25_f32.powi(2)).abs() < 1e-4);
         let s = zoomed_size(base, zoom);
         assert!((f32::from(s.width) - 100. * zoom).abs() < 0.01);
         assert!((f32::from(s.height) - 60. * zoom).abs() < 0.01);
@@ -950,5 +1020,24 @@ mod interaction_tests {
                 assert!(after.contains(&cursor), "cursor left the pin");
             }
         });
+    }
+
+    #[test]
+    fn edge_snap_and_custom_zoom_step_honor_geometry() {
+        let outputs = vec![Bounds::new(
+            point(px(0.), px(0.)),
+            size(px(1920.), px(1080.)),
+        )];
+        let pin = size(px(200.), px(100.));
+        assert_eq!(
+            super::snap_origin_to_edges(point(px(7.), px(975.)), pin, &outputs),
+            point(px(0.), px(980.))
+        );
+        assert_eq!(
+            super::snap_origin_to_edges(point(px(50.), px(50.)), pin, &outputs),
+            point(px(50.), px(50.))
+        );
+        assert!((super::next_zoom_with(1.0, 1.0, 25) - 1.25).abs() < 0.0001);
+        assert!((super::next_zoom_with(1.0, 1.0, 12) - 1.12).abs() < 0.0001);
     }
 }

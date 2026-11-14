@@ -41,8 +41,15 @@ const PREVIEW_MAX: u32 = 256;
 /// older than this are removed on the next copy/save/OCR run
 const PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+/// Environment variable passing the configured popup timeout (`2..=30` s)
+/// from the parent process into the detached `--notify` child.
+const TIMEOUT_ENV: &str = "SHOTORI_NOTIFY_TIMEOUT_SECS";
+
 /// Queue a plain notification and return immediately.
 pub fn send(summary: &str, body: &str) {
+    if !crate::model::settings::current().notify().enabled {
+        return;
+    }
     spawn_child(summary, body, None, None);
 }
 
@@ -52,6 +59,10 @@ pub fn send(summary: &str, body: &str) {
 /// detached child from the same file (see `STDIN_IMAGE`). Cache failures
 /// must not turn a successful clipboard copy into an error.
 pub fn copied(png: &[u8]) {
+    let cfg = crate::model::settings::current().notify();
+    if !cfg.enabled || !cfg.on_copy {
+        return;
+    }
     let path = cache_dir().and_then(|dir| match write_clipboard_image(&dir, png) {
         Ok(path) => Some(path),
         Err(error) => {
@@ -59,12 +70,15 @@ pub fn copied(png: &[u8]) {
             None
         }
     });
+    let image = cfg
+        .show_thumbnail
+        .then(|| std::path::Path::new(STDIN_IMAGE));
     // Translated in the PARENT (its locale is already resolved) — the
     // child only displays the argv strings it receives.
     spawn_child(
         crate::i18n::t!("notify.copied.title").as_ref(),
         crate::i18n::t!("notify.copied.body").as_ref(),
-        Some(std::path::Path::new(STDIN_IMAGE)),
+        image,
         path.as_deref(),
     );
 }
@@ -87,6 +101,10 @@ fn write_clipboard_image(dir: &std::path::Path, png: &[u8]) -> std::io::Result<P
 /// already on the clipboard — a cache failure only loses the click target,
 /// never the primary result.
 pub fn ocr_copied(text: &str, preview: &str) {
+    let cfg = crate::model::settings::current().notify();
+    if !cfg.enabled || !cfg.on_ocr {
+        return;
+    }
     let path = cache_dir().and_then(|dir| match write_ocr_text(&dir, text) {
         Ok(path) => Some(path),
         Err(error) => {
@@ -122,12 +140,19 @@ fn write_ocr_text(dir: &std::path::Path, text: &str) -> std::io::Result<PathBuf>
 /// The thumbnail renders in the child from the file the user just saved —
 /// the parent has nothing left to do (no pixels, no copy).
 pub fn saved(path: &std::path::Path) {
+    let cfg = crate::model::settings::current().notify();
+    if !cfg.enabled || !cfg.on_save {
+        return;
+    }
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let image = cfg
+        .show_thumbnail
+        .then(|| std::path::Path::new(STDIN_IMAGE));
     // The body is the saved file's path — literal content, not translated.
     spawn_child(
         crate::i18n::t!("notify.saved.title").as_ref(),
         &path.to_string_lossy(),
-        Some(std::path::Path::new(STDIN_IMAGE)),
+        image,
         Some(&path),
     );
 }
@@ -143,6 +168,13 @@ fn spawn_child(
         Err(_) => return,
     };
     let mut cmd = Command::new(exe);
+    cmd.env(
+        TIMEOUT_ENV,
+        crate::model::settings::current()
+            .notify()
+            .timeout_secs
+            .to_string(),
+    );
     cmd.arg(NOTIFY_ARG).arg(summary).arg(body);
     if image.is_some() || open_path.is_some() {
         cmd.arg(image.unwrap_or_else(|| std::path::Path::new("")));
@@ -221,13 +253,20 @@ fn show(
     image: Option<&std::path::Path>,
     open_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let timeout_secs = std::env::var(TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u8>().ok())
+        .map(|s| s.clamp(2, 30))
+        .unwrap_or(10);
+    let timeout_ms = u32::from(timeout_secs) * 1000;
+    let plain_timeout_ms = timeout_ms.min(3500);
     let mut n = notify_rust::Notification::new();
     n.appname("Shotori")
         .summary(summary)
         .icon(crate::APP_ID)
         .hint(notify_rust::Hint::DesktopEntry(crate::APP_ID.into()))
         .body(&escape_markup(body))
-        .timeout(notify_rust::Timeout::Milliseconds(3500));
+        .timeout(notify_rust::Timeout::Milliseconds(plain_timeout_ms));
     // An explicit app icon remains available for cargo installs too. Keep it
     // separate from image-path, which belongs to the screenshot thumbnail.
     if let Some(dir) = cache_dir() {
@@ -253,7 +292,7 @@ fn show(
             crate::i18n::t!("notify.view_image")
         };
         n.action("default", label.as_ref())
-            .timeout(notify_rust::Timeout::Milliseconds(10000));
+            .timeout(notify_rust::Timeout::Milliseconds(timeout_ms));
     }
     let handle = n.show()?;
     if let Some(path) = open_path {
@@ -262,15 +301,13 @@ fn show(
         // may never emit `NotificationClosed`, and `wait_for_action`
         // would then block forever — every screenshot would leave an
         // orphan process holding its fds and D-Bus connection (#23).
-        // The action popup times out at 10s; the 12s grace lets a
-        // last-moment click win the race, and any exit path reaps the
-        // thread with the process. Best-effort: if the thread cannot
-        // spawn, waiting on the daemon (the old behavior) is the
-        // fallback.
+        // The 2s grace past `timeout_secs` lets a last-moment click win
+        // the race, and any exit path reaps the thread with the process.
+        let watchdog_secs = u64::from(timeout_secs) + 2;
         std::thread::Builder::new()
             .name("shotori-notify-watchdog".into())
-            .spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(12));
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(watchdog_secs));
                 std::process::exit(0);
             })
             .ok();

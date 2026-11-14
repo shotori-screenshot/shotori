@@ -1,13 +1,20 @@
-//! # Export pipeline: logical selection → physical-pixel crop → PNG → disk
+//! # Export pipeline: logical selection → physical-pixel crop → image encode → disk
 //!
 //! A collection of pure functions (no Wayland/gpui window access) → unit
 //! testable with synthetic pixels. Callers (the overlay) only pass the window
 //! scale factor and handle error reporting.
 
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use gpui_kit::*;
+
+use crate::model::settings::{
+    DEFAULT_FILENAME_TEMPLATE, ExportFormat, ExportSettings, PngCompression,
+    validate_filename_template,
+};
 
 /// Logical selection → physical-pixel crop.
 /// Coordinates are scaled, rounded and clamped into the capture; an empty
@@ -101,12 +108,221 @@ pub fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Encode RGBA8 pixels into PNG, JPEG (composited over white), or lossless WebP.
+pub fn encode_image(
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    format: ExportFormat,
+    png_compression: PngCompression,
+    jpeg_quality: u8,
+) -> anyhow::Result<Vec<u8>> {
+    let expected = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    anyhow::ensure!(
+        rgba.len() == expected,
+        "RGBA buffer length {} does not match {}x{}x4",
+        rgba.len(),
+        w,
+        h
+    );
+    match format {
+        ExportFormat::Png => encode_png_with(w, h, rgba, png_compression.to_png()),
+        ExportFormat::Jpeg => {
+            let mut rgb = Vec::with_capacity((w as usize) * (h as usize) * 3);
+            for &[r, g, b, alpha] in rgba.as_chunks::<4>().0 {
+                let a = u16::from(alpha);
+                if a == 255 {
+                    rgb.extend_from_slice(&[r, g, b]);
+                } else {
+                    let blend = |c: u8| ((u16::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+                    rgb.push(blend(r));
+                    rgb.push(blend(g));
+                    rgb.push(blend(b));
+                }
+            }
+            let mut out = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut out,
+                jpeg_quality.clamp(1, 100),
+            )
+            .encode(&rgb, w, h, image::ExtendedColorType::Rgb8)
+            .context("JPEG encode")?;
+            Ok(out)
+        }
+        ExportFormat::Webp => {
+            let mut out = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+                .encode(rgba, w, h, image::ExtendedColorType::Rgba8)
+                .context("WebP encode")?;
+            Ok(out)
+        }
+    }
+}
+
+/// Infer the image format from `path`'s extension, falling back to `fallback`
+/// when unknown or missing.
+pub fn format_for_path(path: &Path, fallback: ExportFormat) -> ExportFormat {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(ExportFormat::from_id)
+        .unwrap_or(fallback)
+}
+
+/// Format a filename stem (without extension) from a template, timestamp, and
+/// physical dimensions. Never panics and never produces path separators: any
+/// invalid template or formatting failure degrades to `DEFAULT_FILENAME_TEMPLATE`.
+pub fn format_filename_stem(
+    template: &str,
+    now: chrono::DateTime<chrono::Local>,
+    w: u32,
+    h: u32,
+) -> String {
+    let try_render = |tpl: &str| -> Option<String> {
+        validate_filename_template(tpl).ok()?;
+        let sub = tpl
+            .replace("{w}", &w.to_string())
+            .replace("{h}", &h.to_string());
+        let mut out = String::new();
+        write!(&mut out, "{}", now.format(&sub)).ok()?;
+        let trimmed = out.trim();
+        if trimmed.is_empty()
+            || trimmed == "."
+            || trimmed == ".."
+            || trimmed.contains(['/', '\\', '\0'])
+        {
+            return None;
+        }
+        Some(trimmed.to_owned())
+    };
+    try_render(template)
+        .or_else(|| try_render(DEFAULT_FILENAME_TEMPLATE))
+        .unwrap_or_else(|| format!("Shotori_{w}x{h}"))
+}
+
+/// Format a suggested filename (stem + configured extension) for `export`.
+pub fn suggested_filename_for(
+    export: &ExportSettings,
+    now: chrono::DateTime<chrono::Local>,
+    w: u32,
+    h: u32,
+) -> String {
+    let stem = format_filename_stem(&export.filename_template, now, w, h);
+    format!("{stem}.{}", export.format.extension())
+}
+
+/// Format a suggested filename using the active `[export]` settings.
+pub fn suggested_filename(w: u32, h: u32) -> String {
+    suggested_filename_for(
+        crate::model::settings::current().export(),
+        chrono::Local::now(),
+        w,
+        h,
+    )
+}
+
+/// Encode and write `rgba` to `path`, choosing format from `path`'s extension
+/// (or `export.format` when extensionless/unrecognized).
+pub fn save_image_with(
+    path: &Path,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    export: &ExportSettings,
+) -> anyhow::Result<()> {
+    let format = format_for_path(path, export.format);
+    let bytes = encode_image(
+        w,
+        h,
+        rgba,
+        format,
+        export.png_compression,
+        export.jpeg_quality,
+    )?;
+    std::fs::write(path, &bytes)
+        .with_context(|| format!("writing {} ({} KB)", path.display(), bytes.len() / 1024))?;
+    Ok(())
+}
+
+/// Encode and write `rgba` to `path` using the active `[export]` settings.
+pub fn save_image(path: &Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    save_image_with(path, w, h, rgba, crate::model::settings::current().export())
+}
+
+/// Atomically create a uniquely named file inside `dir` (`{stem}.{ext}`, then
+/// `{stem}_1.{ext}`, `{stem}_2.{ext}`, …) so rapid consecutive direct saves
+/// never overwrite an existing screenshot (issue #42).
+pub fn save_to_dir_with(
+    dir: &Path,
+    stem: &str,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+    export: &ExportSettings,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating save directory {}", dir.display()))?;
+    let bytes = encode_image(
+        w,
+        h,
+        rgba,
+        export.format,
+        export.png_compression,
+        export.jpeg_quality,
+    )?;
+    let ext = export.format.extension();
+    for attempt in 0u32..10_000 {
+        let filename = if attempt == 0 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}_{attempt}.{ext}")
+        };
+        let candidate = dir.join(filename);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(err) = file.write_all(&bytes).and_then(|()| file.flush()) {
+                    drop(file);
+                    drop(std::fs::remove_file(&candidate));
+                    return Err(err).with_context(|| format!("writing {}", candidate.display()));
+                }
+                return Ok(candidate);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("creating {}", candidate.display()));
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not find an unused filename for {stem}.{ext} in {}",
+        dir.display()
+    )
+}
+
+/// Save directly into the configured default folder without opening a file
+/// dialog (issue #42).
+pub fn save_to_default_dir(w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<PathBuf> {
+    let export = crate::model::settings::current().export();
+    let dir = export.resolved_save_dir()?;
+    let stem = format_filename_stem(&export.filename_template, chrono::Local::now(), w, h);
+    save_to_dir_with(&dir, &stem, w, h, rgba, export)
+}
+
 #[cfg(test)]
 mod tests {
     // Explicit imports (same reason as selection.rs: avoid gpui's test macro
     // shadowing the built-in #[test])
-    use super::{crop, save_png};
+    use super::{
+        crop, encode_image, format_filename_stem, format_for_path, save_image_with, save_png,
+        save_to_dir_with,
+    };
+    use crate::model::settings::{ExportFormat, ExportSettings, PngCompression};
+    use chrono::TimeZone as _;
     use gpui_kit::{Bounds, Pixels, point, px, size};
+    use std::path::Path;
 
     /// 4×3 synthetic image: pixel value = (x, y, 0, 255) for easy
     /// coordinate-mapping assertions
@@ -177,5 +393,83 @@ mod tests {
         let img = image::open(&path).unwrap().to_rgba8();
         assert_eq!(img.dimensions(), (w, h));
         assert_eq!(img.get_pixel(2, 1).0, [2, 1, 0, 255]);
+    }
+
+    #[test]
+    fn jpeg_and_webp_encode_and_decode_cleanly() {
+        let (w, h, _) = gradient_4x3();
+        // Translucent red pixel (255, 0, 0, 0) composites to white in JPEG
+        // while staying lossless RGBA in WebP.
+        let mut rgba = vec![200u8; (w * h * 4) as usize];
+        rgba[..4].copy_from_slice(&[255, 0, 0, 0]);
+
+        let jpg = encode_image(w, h, &rgba, ExportFormat::Jpeg, PngCompression::Fast, 95).unwrap();
+        let decoded_jpg = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        assert_eq!(decoded_jpg.dimensions(), (w, h));
+        assert!(decoded_jpg.get_pixel(0, 0).0.iter().all(|&c| c >= 250));
+
+        let webp = encode_image(w, h, &rgba, ExportFormat::Webp, PngCompression::Best, 90).unwrap();
+        let decoded_webp = image::load_from_memory(&webp).unwrap().to_rgba8();
+        assert_eq!(decoded_webp.dimensions(), (w, h));
+        assert_eq!(decoded_webp.get_pixel(0, 0).0, [255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn format_for_path_honors_extension_and_fallback() {
+        assert_eq!(
+            format_for_path(Path::new("shot.jpg"), ExportFormat::Png),
+            ExportFormat::Jpeg
+        );
+        assert_eq!(
+            format_for_path(Path::new("shot.JPEG"), ExportFormat::Png),
+            ExportFormat::Jpeg
+        );
+        assert_eq!(
+            format_for_path(Path::new("shot.webp"), ExportFormat::Png),
+            ExportFormat::Webp
+        );
+        assert_eq!(
+            format_for_path(Path::new("shot.unknown"), ExportFormat::Webp),
+            ExportFormat::Webp
+        );
+    }
+
+    #[test]
+    fn filename_stem_substitutes_dimensions_and_falls_back_on_bad_template() {
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 14, 9, 5, 7)
+            .single()
+            .unwrap();
+        assert_eq!(
+            format_filename_stem("Clip_%Y%m%d_{w}x{h}", now, 1920, 1080),
+            "Clip_20261114_1920x1080"
+        );
+        // Invalid template (contains path separator) degrades safely to factory
+        let fallback = format_filename_stem("../escape", now, 800, 600);
+        assert!(fallback.starts_with("Shotori_2026-11-14_09-05-07"));
+    }
+
+    #[test]
+    fn save_to_dir_creates_missing_folders_and_suffixes_collisions() {
+        let (w, h, rgba) = gradient_4x3();
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("sub/shots");
+        let export = ExportSettings {
+            format: ExportFormat::Webp,
+            ..ExportSettings::default()
+        };
+
+        let p0 = save_to_dir_with(&nested, "Shot_test", w, h, &rgba, &export).unwrap();
+        let p1 = save_to_dir_with(&nested, "Shot_test", w, h, &rgba, &export).unwrap();
+        let p2 = save_to_dir_with(&nested, "Shot_test", w, h, &rgba, &export).unwrap();
+
+        assert_eq!(p0.file_name().unwrap(), "Shot_test.webp");
+        assert_eq!(p1.file_name().unwrap(), "Shot_test_1.webp");
+        assert_eq!(p2.file_name().unwrap(), "Shot_test_2.webp");
+
+        // Explicit extension override on save_image_with writes valid JPEG
+        let jpg_path = nested.join("custom.jpg");
+        save_image_with(&jpg_path, w, h, &rgba, &export).unwrap();
+        assert_eq!(image::open(&jpg_path).unwrap().width(), w);
     }
 }

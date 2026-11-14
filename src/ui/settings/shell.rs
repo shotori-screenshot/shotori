@@ -200,31 +200,49 @@ impl SettingsWindow {
                 Section::Appearance,
                 "settings.preferences.appearance",
                 IconName::Palette,
-                "theme color language 主题 配色 语言 外观",
+                "theme color language reduce motion animation 主题 配色 语言 外观 动画 过渡",
             ),
             (
                 Section::Capture,
                 "settings.preferences.capture",
                 IconName::Scan,
-                "capture toolbar annotation selection 截图 工具栏 标注 选区 遮罩",
+                "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 保留",
+            ),
+            (
+                Section::Annotation,
+                "settings.preferences.annotation",
+                IconName::Pencil,
+                "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap number spotlight magnifier pencil 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 序号 聚光灯 铅笔",
+            ),
+            (
+                Section::Export,
+                "settings.preferences.export",
+                IconName::Save,
+                "save export folder directory path auto direct dialog filename template format png jpeg jpg webp quality compression clipboard 保存 导出 目录 文件夹 路径 直存 弹窗 文件名 模板 格式 质量 压缩 剪贴板",
+            ),
+            (
+                Section::Desktop,
+                "settings.preferences.desktop",
+                IconName::Bell,
+                "notification notify toast thumbnail timeout pin zoom border shadow edge snap 通知 气泡 缩略图 超时 贴图 悬浮 缩放 边框 阴影 边缘 吸附",
             ),
             (
                 Section::Keys,
                 "settings.keys_page.title",
                 IconName::Keyboard,
-                "shortcuts keys 快捷键 按键",
+                "shortcuts keys keybindings undo redo clear delete tools 快捷键 按键 撤销 重做 清空 删除",
             ),
             (
                 Section::Ocr,
                 "settings.ocr_page.title",
                 IconName::ScanText,
-                "ocr model text 文字 识别 模型",
+                "ocr model text upright join lines cache 文字 识别 模型 方向 合并 换行 缓存",
             ),
             (
                 Section::Advanced,
                 "settings.preferences.advanced",
                 IconName::Settings2,
-                "advanced config files 高级 配置 文件",
+                "advanced config files toml 高级 配置 文件",
             ),
         ] {
             let label = crate::i18n::t!(key).to_string();
@@ -365,11 +383,14 @@ impl SettingsWindow {
 
     pub(super) fn page(&self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let page = match self.section {
-            Section::Advanced => self.page_advanced(cx),
+            Section::Appearance => self.page_appearance(window, cx),
             Section::Capture => self.page_capture(window, cx),
+            Section::Annotation => self.page_annotation(window, cx),
+            Section::Export => self.page_export(window, cx),
+            Section::Desktop => self.page_desktop(window, cx),
             Section::Keys => self.page_keys(cx),
             Section::Ocr => self.page_ocr(window, cx),
-            Section::Appearance => self.page_appearance(window, cx),
+            Section::Advanced => self.page_advanced(cx),
             Section::About => self.page_about(cx),
         };
         let scroll = &self.page_scroll[self.section as usize];
