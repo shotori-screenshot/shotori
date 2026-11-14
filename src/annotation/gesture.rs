@@ -399,10 +399,7 @@ impl Annotations {
         }
         // any lit tool button goes dark — the select tool included
         // (it is not `enabled()`, but Esc must still exit it)
-        if self.tool.take().is_some() {
-            return true;
-        }
-        false
+        self.tool.take().is_some()
     }
 }
 
