@@ -88,7 +88,9 @@ jobs:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
         run: |
           set -euo pipefail
-          pacman -Sy --noconfirm git openssh >/dev/null
+          # Full upgrade (-Syu) avoids partial-upgrade dependency conflicts
+          # when the archlinux:base-devel image lags behind the repos.
+          pacman -Syu --noconfirm git openssh
           install -dm700 /root/.ssh
           printf '%s\n' "$AUR_SSH_KEY" > /root/.ssh/aur
           chmod 600 /root/.ssh/aur
