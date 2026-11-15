@@ -105,13 +105,16 @@ fn main() {
     // skips it, like the theme). Errors are warnings, never fatal.
     shotori::model::settings::init(&args);
 
-    // ⓪' Non-overlay CLI subcommands (`full`, `ocr`, `pin`)
+    // ⓪' Non-overlay CLI subcommands (`full`, `ocr`, `qr`, `pin`)
     let gui_args = match &args.command {
         Some(Command::Full(full_args)) => {
             std::process::exit(shotori::commands::run_full(full_args));
         }
         Some(Command::Ocr(ocr_args)) => {
             std::process::exit(shotori::commands::run_ocr(ocr_args));
+        }
+        Some(Command::Qr(qr_args)) => {
+            std::process::exit(shotori::commands::run_qr(qr_args));
         }
         Some(Command::Pin(pin_args)) => {
             std::process::exit(shotori::commands::run_pin(pin_args));

@@ -206,7 +206,7 @@ impl SettingsWindow {
                 Section::Capture,
                 "settings.preferences.capture",
                 IconName::Scan,
-                "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 保留",
+                "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long qr 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 保留 二维码",
             ),
             (
                 Section::Annotation,
@@ -224,13 +224,13 @@ impl SettingsWindow {
                 Section::Desktop,
                 "settings.preferences.desktop",
                 IconName::Bell,
-                "notification notify toast thumbnail timeout pin zoom border shadow edge snap 通知 气泡 缩略图 超时 贴图 悬浮 缩放 边框 阴影 边缘 吸附",
+                "notification notify toast thumbnail timeout pin zoom border shadow edge snap qr 通知 气泡 缩略图 超时 贴图 悬浮 缩放 边框 阴影 边缘 吸附 二维码",
             ),
             (
                 Section::Keys,
                 "settings.keys_page.title",
                 IconName::Keyboard,
-                "shortcuts keys keybindings undo redo clear delete tools 快捷键 按键 撤销 重做 清空 删除",
+                "shortcuts keys keybindings undo redo clear delete tools qr 快捷键 按键 撤销 重做 清空 删除 二维码",
             ),
             (
                 Section::Ocr,

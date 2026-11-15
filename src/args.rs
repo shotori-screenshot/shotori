@@ -61,6 +61,9 @@ pub enum Command {
     /// Recognize text on-device from a screen capture or image file
     Ocr(OcrArgs),
 
+    /// Scan and decode QR codes from a screen capture or image file
+    Qr(QrArgs),
+
     /// Float an image file or screen capture as an always-on-top desktop pin
     Pin(PinArgs),
 
@@ -264,19 +267,109 @@ pub struct OcrArgs {
     pub download: bool,
 }
 
+fn resolve_screen_target(
+    screen: bool,
+    output: Option<&str>,
+    region: Option<RegionSpec>,
+    window: bool,
+) -> SelectionTarget {
+    if screen {
+        SelectionTarget::FocusedScreen
+    } else if let Some(output) = output {
+        SelectionTarget::Output(output.to_owned())
+    } else if let Some(region) = region {
+        SelectionTarget::Region(region)
+    } else if window {
+        SelectionTarget::FocusedWindow
+    } else {
+        SelectionTarget::AllScreens
+    }
+}
+
 impl OcrArgs {
     pub fn screen_target(&self) -> SelectionTarget {
-        if self.screen {
-            SelectionTarget::FocusedScreen
-        } else if let Some(output) = &self.output {
-            SelectionTarget::Output(output.clone())
-        } else if let Some(region) = self.region {
-            SelectionTarget::Region(region)
-        } else if self.window {
-            SelectionTarget::FocusedWindow
-        } else {
-            SelectionTarget::AllScreens
-        }
+        resolve_screen_target(
+            self.screen,
+            self.output.as_deref(),
+            self.region,
+            self.window,
+        )
+    }
+}
+
+/// Non-interactive QR scanner flags (`shotori qr [OPTIONS] [IMAGE]`).
+#[derive(Args, Debug, Default, Clone)]
+#[command(group(
+    ArgGroup::new("target")
+        .args(["full", "screen", "output", "region", "window"])
+        .multiple(false)
+))]
+pub struct QrArgs {
+    /// Image file to scan (`-` for stdin); omit to capture from the screen
+    #[arg(value_name = "IMAGE")]
+    pub image: Option<PathBuf>,
+
+    /// Capture every connected screen (default when IMAGE is omitted)
+    #[arg(short, long, conflicts_with = "image")]
+    pub full: bool,
+
+    /// Capture only the currently focused screen
+    #[arg(short, long, conflicts_with = "image")]
+    pub screen: bool,
+
+    /// Capture only the named output (see `shotori outputs`)
+    #[arg(short, long, value_name = "NAME", conflicts_with = "image")]
+    pub output: Option<String>,
+
+    /// Capture a desktop logical region (`x,y,w,h`, `x,y wxh`, or `wxh+x+y`)
+    #[arg(
+        short,
+        long,
+        value_name = "GEOM",
+        allow_hyphen_values = true,
+        conflicts_with = "image"
+    )]
+    pub region: Option<RegionSpec>,
+
+    /// Capture only the currently focused window (via compositor IPC)
+    #[arg(short, long, conflicts_with = "image")]
+    pub window: bool,
+
+    /// Wait SECONDS before capturing from the screen
+    #[arg(
+        short,
+        long,
+        default_value_t = 0.0,
+        value_parser = parse_delay,
+        conflicts_with = "image"
+    )]
+    pub delay: f32,
+
+    /// Copy decoded QR code text to the clipboard
+    #[arg(short, long)]
+    pub clipboard: bool,
+
+    /// Write decoded QR code text to FILE (`-` for stdout)
+    #[arg(short, long, value_name = "FILE")]
+    pub path: Option<PathBuf>,
+
+    /// Print decoded QR code text to standard output (default when neither --clipboard nor --path is given)
+    #[arg(long)]
+    pub stdout: bool,
+
+    /// Suppress desktop notifications
+    #[arg(short = 'n', long)]
+    pub no_notify: bool,
+}
+
+impl QrArgs {
+    pub fn screen_target(&self) -> SelectionTarget {
+        resolve_screen_target(
+            self.screen,
+            self.output.as_deref(),
+            self.region,
+            self.window,
+        )
     }
 }
 
@@ -736,6 +829,32 @@ mod tests {
     }
 
     #[test]
+    fn qr_supports_image_and_screen_targets() {
+        let img = cli(&["qr", "code.png", "--clipboard", "--no-notify"]);
+        match img.command {
+            Some(Command::Qr(q)) => {
+                assert_eq!(q.image.as_deref(), Some(Path::new("code.png")));
+                assert!(q.clipboard);
+                assert!(q.no_notify);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Image conflicts with screen-capture flags
+        assert!(Cli::try_parse_from(["shotori", "qr", "code.png", "--screen"]).is_err());
+        assert!(Cli::try_parse_from(["shotori", "qr", "code.png", "-d", "1"]).is_err());
+
+        let scr = cli(&["qr", "--screen", "--stdout"]);
+        match scr.command {
+            Some(Command::Qr(q)) => {
+                assert!(q.image.is_none());
+                assert_eq!(q.screen_target(), SelectionTarget::FocusedScreen);
+                assert!(q.stdout);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn pin_requires_source_and_allows_output_placement_for_image() {
         // Bare `shotori pin` must ask for an image or capture flag
         assert!(Cli::try_parse_from(["shotori", "pin"]).is_err());
@@ -860,7 +979,9 @@ mod tests {
         let help = String::from_utf8(buf).unwrap();
         assert!(help.contains("Usage: shotori"));
         assert!(help.contains("--theme"));
-        for sub in ["gui", "full", "ocr", "pin", "outputs", "tray", "settings"] {
+        for sub in [
+            "gui", "full", "ocr", "qr", "pin", "outputs", "tray", "settings",
+        ] {
             assert!(
                 help.contains(sub),
                 "missing subcommand {sub} in help:\n{help}"

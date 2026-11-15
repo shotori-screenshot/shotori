@@ -27,10 +27,10 @@ use crate::model::session::ScreenshotSession;
 use crate::ui::{color_picker::ColorPicker, theme};
 
 use crate::actions::{
-    ClearAnnotations, CopySelection, OcrSelection, PinSelection, QuitOverlay, SaveSelection,
-    ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
-    ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
-    ToggleSelect, ToggleSpotlight, ToggleText,
+    ClearAnnotations, CopySelection, OcrSelection, PinSelection, QrSelection, QuitOverlay,
+    SaveSelection, ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
+    ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline,
+    ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText,
 };
 use crate::model::placement::{GRIP_W, ROW_H};
 
@@ -56,6 +56,7 @@ gpui_kit::assets::icon_assets!(
         Plus,
         Minus,
         ScanText,
+        ScanQrCode,
         ArrowDown,
         Pause,
         Play,
@@ -328,6 +329,14 @@ pub(crate) const BUTTONS: [ButtonMeta; crate::model::settings::ToolbarButton::AL
         icon: ButtonIcon::Kit(IconName::ScanText),
     },
     ButtonMeta {
+        button: crate::model::settings::ToolbarButton::Qr,
+        debug_id: "tb-qr",
+        label_key: "toolbar.qr",
+        key_id: Some("qr"),
+        shortcut: "Ctrl+Q",
+        icon: ButtonIcon::Kit(IconName::ScanQrCode),
+    },
+    ButtonMeta {
         // own icon: the gpui-kit asset whitelist (`icon_assets!`) does
         // not bundle a pin, and IconName::Pin would render an empty
         // slot — same situation as the mosaic icon
@@ -409,6 +418,7 @@ fn action_for(button: crate::model::settings::ToolbarButton) -> Box<dyn gpui_kit
         B::Text => Box::new(ToggleText),
         B::Clear => Box::new(ClearAnnotations),
         B::Ocr => Box::new(OcrSelection),
+        B::Qr => Box::new(QrSelection),
         B::Save => Box::new(SaveSelection),
         B::Pin => Box::new(PinSelection),
         B::Scroll => Box::new(ScrollSelection),

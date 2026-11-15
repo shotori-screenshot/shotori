@@ -786,12 +786,7 @@ pub fn deliver_text(w: u32, h: u32, result: anyhow::Result<String>) {
                 return;
             }
             let lines = t.lines().count();
-            let preview: String = t
-                .replace('\n', " ")
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(60)
-                .collect();
+            let preview = crate::notify::preview_snippet(&t);
             println!(
                 "[shotori] OCR done {w}x{h} → {lines} line(s) → clipboard (preview: {preview})"
             );
@@ -806,14 +801,7 @@ pub fn deliver_text(w: u32, h: u32, result: anyhow::Result<String>) {
             // path, and the generic “try again” hid model problems
             // (corrupt cache, broken custom config) it can't fix —
             // lead with the first line of the error chain instead.
-            let chain = format!("{e:#}");
-            let first = chain.lines().next().unwrap_or(&chain);
-            let cut: String = first.chars().take(120).collect();
-            let reason = if cut.len() < first.len() {
-                format!("{cut}…")
-            } else {
-                cut
-            };
+            let reason = crate::notify::short_error_reason(&e);
             crate::notify::send(
                 crate::i18n::t!("notify.ocr.failed.title").as_ref(),
                 crate::i18n::t!("notify.ocr.failed.body", reason = reason).as_ref(),

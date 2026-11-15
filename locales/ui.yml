@@ -196,6 +196,9 @@ settings:
     ocr:
       en: OCR text
       zh-CN: OCR 识别文字
+    qr:
+      en: Scan QR code
+      zh-CN: 扫描二维码
     scroll:
       en: Long screenshot
       zh-CN: 长截图
@@ -782,6 +785,10 @@ settings:
       title:
         en: Notify after copying OCR text
         zh-CN: OCR 复制文字后通知
+    on_qr:
+      title:
+        en: Notify after scanning QR code
+        zh-CN: 扫描二维码复制后通知
     show_thumbnail:
       title:
         en: Include image preview
@@ -1277,6 +1284,9 @@ toolbar:
   ocr:
     en: Recognize text
     zh-CN: 识别文字
+  qr:
+    en: Scan QR code
+    zh-CN: 扫描二维码
   pin:
     en: Pin to screen
     zh-CN: 贴图
@@ -1483,6 +1493,39 @@ notify:
       title:
         en: Couldn’t recognize text
         zh-CN: 无法识别文字
+      body:
+        en: "%{reason} Try again or select a clearer area."
+        zh-CN: "%{reason} 请重试，或选择更清晰的区域。"
+  qr:
+    empty:
+      title:
+        en: No QR code found
+        zh-CN: 未检测到二维码
+      body:
+        en: Try selecting a clearer area containing a QR code.
+        zh-CN: 请尝试选择包含清晰二维码的区域。
+    copied:
+      title:
+        en: QR code copied
+        zh-CN: 二维码内容已复制
+    copy_failed:
+      title:
+        en: Couldn’t copy QR code
+        zh-CN: 无法复制二维码内容
+      body:
+        en: The clipboard is unavailable. Try again.
+        zh-CN: 剪贴板不可用，请重试。
+    open_failed:
+      title:
+        en: Couldn’t open text
+        zh-CN: 无法打开文本
+      body:
+        en: The decoded QR code text is still on your clipboard.
+        zh-CN: 二维码解码内容仍在剪贴板中。
+    failed:
+      title:
+        en: Couldn’t scan QR code
+        zh-CN: 无法扫描二维码
       body:
         en: "%{reason} Try again or select a clearer area."
         zh-CN: "%{reason} 请重试，或选择更清晰的区域。"

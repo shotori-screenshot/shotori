@@ -1,4 +1,4 @@
-//! # CLI subcommand runners (`full`, `ocr`, `pin`, `outputs`) and shared
+//! # CLI subcommand runners (`full`, `ocr`, `qr`, `pin`, `outputs`) and shared
 //! selection-target resolution
 //!
 //! Kept separate from `main.rs` so the binary entry point stays focused on
@@ -17,7 +17,7 @@ use anyhow::Context as _;
 use gpui_kit::*;
 
 use crate::args::{
-    FullArgs, OcrArgs, OutputsArgs, PinArgs, PointSpec, RegionSpec, SelectionTarget,
+    FullArgs, OcrArgs, OutputsArgs, PinArgs, PointSpec, QrArgs, RegionSpec, SelectionTarget,
 };
 use crate::model::session::ScreenshotSession;
 use crate::platform::capture::{self, Capture, OutputInfo};
@@ -257,49 +257,157 @@ pub fn run_full(args: &FullArgs) -> i32 {
     i32::from(!ok)
 }
 
+#[derive(Clone, Copy)]
+enum CliTextKind {
+    Ocr,
+    Qr,
+}
+
+impl CliTextKind {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Ocr => "ocr",
+            Self::Qr => "qr",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ocr => "OCR",
+            Self::Qr => "QR",
+        }
+    }
+
+    fn notify_empty(self) {
+        match self {
+            Self::Ocr => crate::notify::send(
+                crate::i18n::t!("notify.ocr.empty.title").as_ref(),
+                crate::i18n::t!("notify.ocr.empty.body").as_ref(),
+            ),
+            Self::Qr => crate::notify::send(
+                crate::i18n::t!("notify.qr.empty.title").as_ref(),
+                crate::i18n::t!("notify.qr.empty.body").as_ref(),
+            ),
+        }
+    }
+
+    fn notify_copied(self, text: &str, preview: &str) {
+        match self {
+            Self::Ocr => crate::notify::ocr_copied(text, preview),
+            Self::Qr => crate::notify::qr_copied(text, preview),
+        }
+    }
+}
+
+fn load_or_capture_rgba(
+    cmd: &str,
+    image: Option<&Path>,
+    delay: f32,
+    target: SelectionTarget,
+) -> Result<(u32, u32, Vec<u8>), i32> {
+    if let Some(path) = image {
+        return load_rgba_path(path).map_err(|e| {
+            eprintln!("[shotori] {cmd}: {e:#}");
+            1
+        });
+    }
+    sleep_delay(delay);
+    let snapshot = if target.uses_compositor_ipc() {
+        windowsnap::query_snapshot().unwrap_or_default()
+    } else {
+        CompositorSnapshot::default()
+    };
+    let caps = capture::capture_all_outputs().map_err(|e| {
+        eprintln!("[shotori] capture failed: {e:#}");
+        1
+    })?;
+    let fallback_host = caps[0].output_name.clone();
+    let mut session = ScreenshotSession::new(
+        caps.into_iter().map(Arc::new).collect(),
+        snapshot.rects.clone(),
+    );
+    if let Err(err) = apply_target(&mut session, &target, &snapshot) {
+        eprintln!("[shotori] {err}");
+        return Err(1);
+    }
+    let host = session
+        .active_output_name()
+        .unwrap_or(&fallback_host)
+        .to_owned();
+    let Some(crop) = session.crop_original(&host) else {
+        eprintln!("[shotori] {cmd}: capture produced an empty region");
+        return Err(1);
+    };
+    Ok(crop)
+}
+
+fn deliver_cli_text(
+    kind: CliTextKind,
+    text: &str,
+    clipboard: bool,
+    path: Option<&Path>,
+    stdout: bool,
+    no_notify: bool,
+) -> i32 {
+    let path_is_stdout = path == Some(Path::new("-"));
+    let file_dest = path.filter(|p| *p != Path::new("-"));
+    let to_stdout = stdout || path_is_stdout || (!clipboard && file_dest.is_none());
+
+    let mut ok = true;
+    if to_stdout {
+        let mut out = std::io::stdout().lock();
+        let res = if text.is_empty() {
+            out.flush()
+        } else {
+            out.write_all(text.as_bytes())
+                .and_then(|()| out.write_all(b"\n"))
+                .and_then(|()| out.flush())
+        };
+        if let Err(e) = res {
+            eprintln!("[shotori] stdout: {e}");
+            ok = false;
+        }
+    }
+
+    if clipboard {
+        if text.is_empty() {
+            if !no_notify {
+                kind.notify_empty();
+            }
+        } else if let Err(e) = crate::clipboard::copy_text(text.to_owned()) {
+            eprintln!("[shotori] {} clipboard copy failed: {e:#}", kind.label());
+            ok = false;
+        } else if !no_notify {
+            let preview = crate::notify::preview_snippet(text);
+            kind.notify_copied(text, &preview);
+        }
+    }
+
+    if let Some(file) = file_dest {
+        let payload = if text.is_empty() {
+            String::new()
+        } else {
+            format!("{text}\n")
+        };
+        if let Err(e) = std::fs::write(file, payload) {
+            eprintln!("[shotori] {} write {}: {e}", kind.tag(), file.display());
+            ok = false;
+        }
+    }
+
+    i32::from(!ok)
+}
+
 /// `shotori ocr`: recognize text from an image file / stdin or screen capture.
 pub fn run_ocr(args: &OcrArgs) -> i32 {
-    let (w, h, rgba) = if let Some(path) = &args.image {
-        match load_rgba_path(path) {
-            Ok(img) => img,
-            Err(e) => {
-                eprintln!("[shotori] ocr: {e:#}");
-                return 1;
-            }
-        }
-    } else {
-        sleep_delay(args.delay);
-        let target = args.screen_target();
-        let snapshot = if target.uses_compositor_ipc() {
-            windowsnap::query_snapshot().unwrap_or_default()
-        } else {
-            CompositorSnapshot::default()
-        };
-        let caps = match capture::capture_all_outputs() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[shotori] capture failed: {e:#}");
-                return 1;
-            }
-        };
-        let fallback_host = caps[0].output_name.clone();
-        let mut session = ScreenshotSession::new(
-            caps.into_iter().map(Arc::new).collect(),
-            snapshot.rects.clone(),
-        );
-        if let Err(err) = apply_target(&mut session, &target, &snapshot) {
-            eprintln!("[shotori] {err}");
-            return 1;
-        }
-        let host = session
-            .active_output_name()
-            .unwrap_or(&fallback_host)
-            .to_owned();
-        let Some(crop) = session.crop_original(&host) else {
-            eprintln!("[shotori] ocr: capture produced an empty region");
-            return 1;
-        };
-        crop
+    let (w, h, rgba) = match load_or_capture_rgba(
+        "ocr",
+        args.image.as_deref(),
+        args.delay,
+        args.screen_target(),
+    ) {
+        Ok(crop) => crop,
+        Err(code) => return code,
     };
 
     if crate::ocr::models_missing() {
@@ -328,61 +436,44 @@ pub fn run_ocr(args: &OcrArgs) -> i32 {
         }
     };
 
-    let path_is_stdout = args.path.as_deref() == Some(Path::new("-"));
-    let file_dest = args.path.as_deref().filter(|p| *p != Path::new("-"));
-    let to_stdout = args.stdout || path_is_stdout || (!args.clipboard && file_dest.is_none());
+    deliver_cli_text(
+        CliTextKind::Ocr,
+        &text,
+        args.clipboard,
+        args.path.as_deref(),
+        args.stdout,
+        args.no_notify,
+    )
+}
 
-    let mut ok = true;
-    if to_stdout {
-        let mut out = std::io::stdout().lock();
-        let res = if text.is_empty() {
-            out.flush()
-        } else {
-            out.write_all(text.as_bytes())
-                .and_then(|()| out.write_all(b"\n"))
-                .and_then(|()| out.flush())
-        };
-        if let Err(e) = res {
-            eprintln!("[shotori] stdout: {e}");
-            ok = false;
+/// `shotori qr`: scan and decode QR code(s) from an image file / stdin or screen capture.
+pub fn run_qr(args: &QrArgs) -> i32 {
+    let (w, h, rgba) = match load_or_capture_rgba(
+        "qr",
+        args.image.as_deref(),
+        args.delay,
+        args.screen_target(),
+    ) {
+        Ok(crop) => crop,
+        Err(code) => return code,
+    };
+
+    let payloads = match crate::qr::scan_qr(&rgba, w, h) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[shotori] QR scan failed: {e:#}");
+            return 1;
         }
-    }
-
-    if args.clipboard {
-        if text.is_empty() {
-            if !args.no_notify {
-                crate::notify::send(
-                    crate::i18n::t!("notify.ocr.empty.title").as_ref(),
-                    crate::i18n::t!("notify.ocr.empty.body").as_ref(),
-                );
-            }
-        } else if let Err(e) = crate::clipboard::copy_text(text.clone()) {
-            eprintln!("[shotori] OCR clipboard copy failed: {e:#}");
-            ok = false;
-        } else if !args.no_notify {
-            let preview: String = text
-                .replace('\n', " ")
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(60)
-                .collect();
-            crate::notify::ocr_copied(&text, &preview);
-        }
-    }
-
-    if let Some(file) = file_dest {
-        let payload = if text.is_empty() {
-            String::new()
-        } else {
-            format!("{text}\n")
-        };
-        if let Err(e) = std::fs::write(file, payload) {
-            eprintln!("[shotori] write {}: {e}", file.display());
-            ok = false;
-        }
-    }
-
-    i32::from(!ok)
+    };
+    let text = crate::qr::join_payloads(&payloads);
+    deliver_cli_text(
+        CliTextKind::Qr,
+        &text,
+        args.clipboard,
+        args.path.as_deref(),
+        args.stdout,
+        args.no_notify,
+    )
 }
 
 fn download_ocr_models_cli() -> anyhow::Result<()> {

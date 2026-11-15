@@ -103,10 +103,10 @@ magnifier_zoom = 2             # 1..=8
 # are hidden (their keyboard shortcuts keep working). "separator" is
 # the thin vertical group break; any number may appear.
 #
-# Known button ids (all 22):
+# Known button ids (all 23):
 #   select, rectangle, ellipse, line, polyline, arrow, number,
 #   pencil, highlighter, mosaic, magnifier, spotlight, eraser, text,
-#   clear, ocr, pin, scroll, save, copy, settings, cancel
+#   clear, ocr, qr, pin, scroll, save, copy, settings, cancel
 #
 # The value below is the factory layout (`select` and `spotlight` live
 # in the add-buttons palette by default).
@@ -114,7 +114,7 @@ items = [
   "rectangle", "ellipse", "line", "polyline", "arrow",
   "number", "pencil", "highlighter", "mosaic", "magnifier",
   "eraser", "text", "clear", "separator",
-  "ocr", "pin", "scroll", "save", "copy", "separator",
+  "ocr", "qr", "pin", "scroll", "save", "copy", "separator",
   "settings", "cancel",
 ]
 
@@ -130,6 +130,7 @@ enabled = true
 on_copy = true
 on_save = true
 on_ocr = true
+on_qr = true
 show_thumbnail = true
 timeout_secs = 10 # 2..=30
 
@@ -173,6 +174,7 @@ copy = "ctrl-c"
 save = "ctrl-s"
 pin = "ctrl-p"
 ocr = "ctrl-o"
+qr = "ctrl-q"
 scroll = "ctrl-l"
 select_screen = "ctrl-a"
 settings = "ctrl-,"

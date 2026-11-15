@@ -20,6 +20,7 @@ fn key_label(id: &str) -> String {
         "save" => crate::i18n::t!("settings.keys_page.save").to_string(),
         "pin" => crate::i18n::t!("settings.keys_page.pin").to_string(),
         "ocr" => crate::i18n::t!("settings.keys_page.ocr").to_string(),
+        "qr" => crate::i18n::t!("settings.keys_page.qr").to_string(),
         "scroll" => crate::i18n::t!("settings.keys_page.scroll").to_string(),
         "select_screen" => crate::i18n::t!("settings.keys_page.select_screen").to_string(),
         "settings" => crate::i18n::t!("settings.keys_page.settings").to_string(),

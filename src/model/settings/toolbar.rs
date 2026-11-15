@@ -26,6 +26,7 @@ pub enum ToolbarButton {
     Text,
     Clear,
     Ocr,
+    Qr,
     Save,
     Pin,
     Scroll,
@@ -48,7 +49,7 @@ impl ToolbarButton {
     /// Every button, in factory/display order. The settings palette
     /// lists and the factory row both iterate this — one order
     /// everywhere.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Select,
         Self::Rectangle,
         Self::Ellipse,
@@ -65,6 +66,7 @@ impl ToolbarButton {
         Self::Text,
         Self::Clear,
         Self::Ocr,
+        Self::Qr,
         Self::Pin,
         Self::Scroll,
         Self::Save,
@@ -92,6 +94,7 @@ impl ToolbarButton {
             Self::Text => "text",
             Self::Clear => "clear",
             Self::Ocr => "ocr",
+            Self::Qr => "qr",
             Self::Save => "save",
             Self::Pin => "pin",
             Self::Scroll => "scroll",
@@ -123,7 +126,7 @@ impl ToolbarButton {
             | Self::Eraser
             | Self::Text
             | Self::Clear => ToolbarCluster::Tools,
-            Self::Ocr | Self::Save | Self::Pin | Self::Scroll => ToolbarCluster::Actions,
+            Self::Ocr | Self::Qr | Self::Save | Self::Pin | Self::Scroll => ToolbarCluster::Actions,
             Self::Cancel | Self::Copy => ToolbarCluster::Confirm,
             // app-level, not selection-level — groups with the confirm
             // end of the bar and the palette's Actions section
@@ -175,7 +178,7 @@ impl ToolbarItem {
 /// group ending in Copy, then a group break before the gear-and-
 /// cancel pair. A fresh install, "Reset to defaults" and legacy
 /// `hidden`-format migration all land here.
-pub const DEFAULT_ROW: [ToolbarItem; 22] = [
+pub const DEFAULT_ROW: [ToolbarItem; 23] = [
     ToolbarItem::Button(ToolbarButton::Rectangle),
     ToolbarItem::Button(ToolbarButton::Ellipse),
     ToolbarItem::Button(ToolbarButton::Line),
@@ -191,6 +194,7 @@ pub const DEFAULT_ROW: [ToolbarItem; 22] = [
     ToolbarItem::Button(ToolbarButton::Clear),
     ToolbarItem::Separator,
     ToolbarItem::Button(ToolbarButton::Ocr),
+    ToolbarItem::Button(ToolbarButton::Qr),
     ToolbarItem::Button(ToolbarButton::Pin),
     ToolbarItem::Button(ToolbarButton::Scroll),
     ToolbarItem::Button(ToolbarButton::Save),
@@ -233,13 +237,13 @@ mod tests {
     #[test]
     fn factory_row_is_the_maintainer_default() {
         let row = Settings::default().row().to_vec();
-        // tools | ocr pin scroll save copy | settings cancel — two
+        // tools | ocr qr pin scroll save copy | settings cancel — two
         // group breaks, cancel (not the gear) closes the row
-        assert_eq!(row.len(), 22);
+        assert_eq!(row.len(), 23);
         assert_eq!(row[0], ToolbarItem::Button(ToolbarButton::Rectangle));
         assert_eq!(row[13], ToolbarItem::Separator);
-        assert_eq!(row[19], ToolbarItem::Separator);
-        assert_eq!(row[20], ToolbarItem::Button(ToolbarButton::Settings));
+        assert_eq!(row[20], ToolbarItem::Separator);
+        assert_eq!(row[21], ToolbarItem::Button(ToolbarButton::Settings));
         assert_eq!(
             *row.last().unwrap(),
             ToolbarItem::Button(ToolbarButton::Cancel)
@@ -251,7 +255,7 @@ mod tests {
                 !matches!(button, ToolbarButton::Select | ToolbarButton::Spotlight)
             );
         }
-        assert_eq!(Settings::default().row1_button_count(), 20);
+        assert_eq!(Settings::default().row1_button_count(), 21);
         assert_eq!(Settings::default().row1_separator_count(), 2);
     }
 

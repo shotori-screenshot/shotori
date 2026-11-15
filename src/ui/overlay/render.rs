@@ -6,10 +6,10 @@
 use super::Overlay;
 use crate::actions::{
     ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline, Nudge,
-    OcrSelection, OpenSettings, PinSelection, QuitOverlay, RedoAnnotation, SaveSelection,
-    ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
-    ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline,
-    ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText, UndoAnnotation,
+    OcrSelection, OpenSettings, PinSelection, QrSelection, QuitOverlay, RedoAnnotation,
+    SaveSelection, ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser,
+    ToggleHighlighter, ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil,
+    TogglePolyline, ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
@@ -390,6 +390,10 @@ impl Render for Overlay {
             .on_action(cx.listener(|this, _: &OcrSelection, window, cx| {
                 this.finish_text(true, window, cx);
                 this.ocr_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &QrSelection, window, cx| {
+                this.finish_text(true, window, cx);
+                this.qr_selection(window, cx);
             }))
             .on_action(cx.listener(
                 |this, _: &crate::ui::ocr_setup::OcrSetupConfirm, window, cx| {

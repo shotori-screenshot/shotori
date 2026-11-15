@@ -933,7 +933,7 @@ mod tests {
         assert!(!s.toolbar_visible(ToolbarButton::Scroll));
         assert!(s.toolbar_visible(ToolbarButton::Copy));
         // factory order otherwise, both separators intact
-        assert_eq!(s.row1_button_count(), 18);
+        assert_eq!(s.row1_button_count(), 19);
         assert_eq!(s.row1_separator_count(), 2);
         assert_eq!(errors.len(), 1, "unknown hidden id reported");
     }
@@ -1346,6 +1346,7 @@ mod tests {
         s.notify_mut().on_copy = false;
         s.notify_mut().on_save = true;
         s.notify_mut().on_ocr = false;
+        s.notify_mut().on_qr = false;
         s.notify_mut().show_thumbnail = false;
         s.notify_mut().timeout_secs = 5;
 
