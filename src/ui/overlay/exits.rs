@@ -233,6 +233,33 @@ impl Overlay {
         }
     }
 
+    /// Ctrl+Q / toolbar [QR]: scan the raw captured selection for QR codes,
+    /// copy decoded payload(s) to the clipboard, and notify.
+    pub(super) fn qr_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.read(cx).blocked() {
+            return;
+        }
+        let Some((w, h, rgba)) = self
+            .session
+            .read(cx)
+            .crop_original(&self.capture.output_name)
+        else {
+            println!("[shotori] empty selection, ignoring");
+            return;
+        };
+        self.session.update(cx, |s, cx| {
+            s.edit_annotations(|a| a.finish_polyline());
+            s.set_blocked(true);
+            cx.notify();
+        });
+        let name = self.capture.output_name.clone();
+        let entity = cx.entity();
+        cx.spawn(async move |_, cx| {
+            scan_qr_to_clipboard(w, h, rgba, name, entity, cx).await;
+        })
+        .detach();
+    }
+
     /// Setup dialog [Download]/[Retry]: switch to Downloading, spawn the
     /// download thread and start the poll loop that drives the progress bar
     /// and the completion transition. The loop holds an Arc clone of the
@@ -396,6 +423,98 @@ async fn copy_to_clipboard(
             crate::notify::send(
                 crate::i18n::t!("notify.copy.failed.title").as_ref(),
                 crate::i18n::t!("notify.copy.failed.body").as_ref(),
+            );
+        }
+    }
+}
+
+enum QrScanOutcome {
+    Empty,
+    Copied {
+        count: usize,
+        text: String,
+        preview: String,
+    },
+    CopyFailed(anyhow::Error),
+    ScanFailed(anyhow::Error),
+}
+
+async fn scan_qr_to_clipboard(
+    w: u32,
+    h: u32,
+    rgba: Vec<u8>,
+    name: String,
+    entity: gpui_kit::Entity<Overlay>,
+    cx: &mut gpui_kit::AsyncApp,
+) {
+    let outcome = cx
+        .background_executor()
+        .spawn(async move {
+            let payloads = match crate::qr::scan_qr(&rgba, w, h) {
+                Ok(p) => p,
+                Err(e) => return QrScanOutcome::ScanFailed(e),
+            };
+            if payloads.is_empty() {
+                return QrScanOutcome::Empty;
+            }
+            let count = payloads.len();
+            let text = crate::qr::join_payloads(&payloads);
+            if let Err(e) = crate::clipboard::copy_text(text.clone()) {
+                return QrScanOutcome::CopyFailed(e);
+            }
+            let preview = crate::notify::preview_snippet(&text);
+            QrScanOutcome::Copied {
+                count,
+                text,
+                preview,
+            }
+        })
+        .await;
+
+    entity.update(cx, |this, cx| {
+        this.session.update(cx, |s, cx| {
+            s.set_blocked(false);
+            cx.notify();
+        });
+    });
+
+    match outcome {
+        QrScanOutcome::Empty => {
+            println!("[shotori] QR scan {w}x{h} (from {name}): no QR code found");
+            crate::notify::send(
+                crate::i18n::t!("notify.qr.empty.title").as_ref(),
+                crate::i18n::t!("notify.qr.empty.body").as_ref(),
+            );
+        }
+        QrScanOutcome::Copied {
+            count,
+            text,
+            preview,
+        } => {
+            println!(
+                "[shotori] QR scanned {w}x{h} (from {name}) → {count} code(s) → clipboard (preview: {preview})"
+            );
+            crate::notify::qr_copied(&text, &preview);
+            if !crate::model::settings::current()
+                .capture()
+                .keep_open_after_copy
+            {
+                cx.update(|cx| cx.quit());
+            }
+        }
+        QrScanOutcome::CopyFailed(e) => {
+            eprintln!("[shotori] QR copy failed: {e:#}");
+            crate::notify::send(
+                crate::i18n::t!("notify.qr.copy_failed.title").as_ref(),
+                crate::i18n::t!("notify.qr.copy_failed.body").as_ref(),
+            );
+        }
+        QrScanOutcome::ScanFailed(e) => {
+            eprintln!("[shotori] QR scan failed: {e:#}");
+            let reason = crate::notify::short_error_reason(&e);
+            crate::notify::send(
+                crate::i18n::t!("notify.qr.failed.title").as_ref(),
+                crate::i18n::t!("notify.qr.failed.body", reason = reason).as_ref(),
             );
         }
     }

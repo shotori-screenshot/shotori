@@ -582,12 +582,12 @@ mod tests {
                 .collect(),
         );
         let (w, h) = toolbar_size(false, &s);
-        // 17 buttons (3 off the 20-button factory) + 2 separators,
+        // 18 buttons (3 off the 21-button factory) + 2 separators,
         // against the 19-button/1-separator anchor:
-        // 660 - 2 + 32*(17-19) + 11*(2-1)
+        // 660 - 2 + 32*(18-19) + 11*(2-1)
         assert_eq!(
             w,
-            TB_W_ROW1 - super::GONE_SPACER_GAP - 2. * super::BTN_PITCH + super::SEP_PITCH
+            TB_W_ROW1 - super::GONE_SPACER_GAP - super::BTN_PITCH + super::SEP_PITCH
         );
         assert_eq!(h, ROW_H);
         // Both rows contribute to the editing bounds
@@ -607,7 +607,7 @@ mod tests {
         );
         assert_eq!(
             toolbar_size(false, &s).0,
-            TB_W_ROW1 - super::GONE_SPACER_GAP + super::BTN_PITCH + 2. * super::SEP_PITCH
+            TB_W_ROW1 - super::GONE_SPACER_GAP + 2. * super::BTN_PITCH + 2. * super::SEP_PITCH
         );
 
         // empty row (hide everything): the floor keeps the basis positive

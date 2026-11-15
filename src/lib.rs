@@ -87,6 +87,7 @@ pub mod clipboard;
 pub mod i18n;
 pub mod notify;
 pub mod ocr;
+pub mod qr;
 pub mod render_image;
 pub mod save_dialog;
 pub mod tray;

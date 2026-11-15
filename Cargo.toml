@@ -46,6 +46,7 @@ gpui-tray = { version = "0.1.4", default-features = false, features = [
 # In-memory pixels → gpui display (RenderImage is built from the image
 # crate's Frames; must match gpui-pre's version, currently 0.25.10)
 image = "0.25"
+rqrr = "0.11"
 smallvec = "1"
 unicode-segmentation = "1"
 
@@ -122,6 +123,7 @@ version = "0.11"
 # default-features off here too: feature unification with the main
 # dependency would resurrect component otherwise
 gpui-kit = { version = "0.8", default-features = false, features = ["test-support"] }
+qrcode = { version = "0.14", default-features = false }
 
 # The symbol tables cost ~26 MiB of the 105 MiB binary and nothing ships
 # a debugger for it. `strip` runs once after linking (measured 0.1 s on

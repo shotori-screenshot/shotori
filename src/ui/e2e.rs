@@ -28,7 +28,8 @@
 use gpui_kit::*;
 
 use crate::actions::{
-    ClearAnnotations, CopySelection, OcrSelection, QuitOverlay, SaveSelection, parse_keystroke,
+    ClearAnnotations, CopySelection, OcrSelection, QrSelection, QuitOverlay, SaveSelection,
+    parse_keystroke,
 };
 use crate::model::selection::Selection;
 use crate::ui::overlay::Overlay;
@@ -292,6 +293,7 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
             || a == "save"
             || a == "pin"
             || a == "ocr"
+            || a == "qr"
             || a == "ocrsetup"
             || a == "clear"
             || a == "scroll"
@@ -530,6 +532,7 @@ pub(crate) fn spawn_debug_action(window: &mut Window, cx: &mut Context<Overlay>)
                 "save" => Box::new(SaveSelection),
                 "pin" => Box::new(crate::actions::PinSelection),
                 "ocr" => Box::new(OcrSelection),
+                "qr" => Box::new(QrSelection),
                 "clear" => Box::new(ClearAnnotations),
                 "scroll" => Box::new(crate::actions::ScrollSelection),
                 _ => Box::new(QuitOverlay),

@@ -196,6 +196,14 @@ impl SettingsWindow {
             cx,
             |s, v| s.notify_mut().on_ocr = v,
         );
+        let notify_qr = self.bool_desktop_switch(
+            "notify-on-qr",
+            n.on_qr,
+            "settings.notify.on_qr.title",
+            window,
+            cx,
+            |s, v| s.notify_mut().on_qr = v,
+        );
         let notify_thumb = self.bool_desktop_switch(
             "notify-show-thumbnail",
             n.show_thumbnail,
@@ -285,6 +293,13 @@ impl SettingsWindow {
                         None,
                         None,
                         notify_ocr,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.notify.on_qr.title").to_string(),
+                        None,
+                        None,
+                        notify_qr,
                     ),
                     super::layout::compact_row(
                         cx,

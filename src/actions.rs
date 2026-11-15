@@ -20,6 +20,7 @@ gpui_kit::actions!([
     SaveSelection,
     PinSelection,
     OcrSelection,
+    QrSelection,
     SelectScreen,
     ScrollSelection,
     OpenSettings
@@ -31,6 +32,7 @@ pub const CAPTURE_KEYS: &[(&str, &str)] = &[
     ("save", "ctrl-s"),
     ("pin", "ctrl-p"),
     ("ocr", "ctrl-o"),
+    ("qr", "ctrl-q"),
     // the fifth exit: fold the selection into a long screenshot as the
     // user scrolls it (plain keys are all annotation tools, hence ctrl-l)
     ("scroll", "ctrl-l"),
@@ -74,6 +76,7 @@ pub const CONFIGURABLE_KEYS: &[(&str, &str)] = &[
     ("save", "ctrl-s"),
     ("pin", "ctrl-p"),
     ("ocr", "ctrl-o"),
+    ("qr", "ctrl-q"),
     ("scroll", "ctrl-l"),
     ("select_screen", "ctrl-a"),
     ("settings", "ctrl-,"),
@@ -225,6 +228,7 @@ fn overlay_action(id: &str) -> Option<Box<dyn Action>> {
         "save" => Box::new(SaveSelection),
         "pin" => Box::new(PinSelection),
         "ocr" => Box::new(OcrSelection),
+        "qr" => Box::new(QrSelection),
         "scroll" => Box::new(ScrollSelection),
         "select_screen" => Box::new(SelectScreen),
         "settings" => Box::new(OpenSettings),

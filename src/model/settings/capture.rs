@@ -357,6 +357,7 @@ pub struct NotifySettings {
     pub on_copy: bool,
     pub on_save: bool,
     pub on_ocr: bool,
+    pub on_qr: bool,
     pub show_thumbnail: bool,
     /// Popup duration in seconds (`2..=30`, default `10`).
     pub timeout_secs: u8,
@@ -369,6 +370,7 @@ impl Default for NotifySettings {
             on_copy: true,
             on_save: true,
             on_ocr: true,
+            on_qr: true,
             show_thumbnail: true,
             timeout_secs: 10,
         }
@@ -382,6 +384,7 @@ pub(super) struct NotifyFile {
     on_copy: Option<bool>,
     on_save: Option<bool>,
     on_ocr: Option<bool>,
+    on_qr: Option<bool>,
     show_thumbnail: Option<bool>,
     timeout_secs: Option<i64>,
 }
@@ -406,6 +409,7 @@ impl NotifyFile {
             on_copy: self.on_copy.unwrap_or(d.on_copy),
             on_save: self.on_save.unwrap_or(d.on_save),
             on_ocr: self.on_ocr.unwrap_or(d.on_ocr),
+            on_qr: self.on_qr.unwrap_or(d.on_qr),
             show_thumbnail: self.show_thumbnail.unwrap_or(d.show_thumbnail),
             timeout_secs,
         }
@@ -431,6 +435,7 @@ impl NotifySettings {
         t.insert("on_copy".into(), toml::Value::from(self.on_copy));
         t.insert("on_save".into(), toml::Value::from(self.on_save));
         t.insert("on_ocr".into(), toml::Value::from(self.on_ocr));
+        t.insert("on_qr".into(), toml::Value::from(self.on_qr));
         t.insert(
             "show_thumbnail".into(),
             toml::Value::from(self.show_thumbnail),

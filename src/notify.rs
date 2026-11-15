@@ -102,33 +102,72 @@ fn write_clipboard_image(dir: &std::path::Path, png: &[u8]) -> std::io::Result<P
 /// never the primary result.
 pub fn ocr_copied(text: &str, preview: &str) {
     let cfg = crate::model::settings::current().notify();
-    if !cfg.enabled || !cfg.on_ocr {
+    text_copied(
+        cfg.enabled && cfg.on_ocr,
+        "ocr-",
+        crate::i18n::t!("notify.ocr.copied.title").as_ref(),
+        text,
+        preview,
+    );
+}
+
+/// Single-line whitespace-collapsed notification preview (up to 60 chars).
+pub fn preview_snippet(text: &str) -> String {
+    text.replace('\n', " ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect()
+}
+
+/// First line of an error chain, capped to 120 chars for notification bodies.
+pub fn short_error_reason(error: &anyhow::Error) -> String {
+    let chain = format!("{error:#}");
+    let first = chain.lines().next().unwrap_or(&chain);
+    let cut: String = first.chars().take(120).collect();
+    if cut.len() < first.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
+/// Decoded QR code text → clipboard notification: same click-to-open `.txt`
+/// contract as [`ocr_copied`], gated by `[notify].on_qr`.
+pub fn qr_copied(text: &str, preview: &str) {
+    let cfg = crate::model::settings::current().notify();
+    text_copied(
+        cfg.enabled && cfg.on_qr,
+        "qr-",
+        crate::i18n::t!("notify.qr.copied.title").as_ref(),
+        text,
+        preview,
+    );
+}
+
+fn text_copied(enabled: bool, prefix: &str, title: &str, text: &str, preview: &str) {
+    if !enabled {
         return;
     }
-    let path = cache_dir().and_then(|dir| match write_ocr_text(&dir, text) {
+    let path = cache_dir().and_then(|dir| match write_text_cache(&dir, prefix, text) {
         Ok(path) => Some(path),
         Err(error) => {
-            eprintln!("[shotori] could not cache recognized text: {error}");
+            eprintln!("[shotori] could not cache copied text: {error}");
             None
         }
     });
-    spawn_child(
-        crate::i18n::t!("notify.ocr.copied.title").as_ref(),
-        preview,
-        None,
-        path.as_deref(),
-    );
+    spawn_child(title, preview, None, path.as_deref());
 }
 
 /// The `.txt` suffix is load-bearing: `xdg-open` routes the click by the
 /// file's extension, so it lands in the default editor rather than an
 /// unknown-type dialog.
-fn write_ocr_text(dir: &std::path::Path, text: &str) -> std::io::Result<PathBuf> {
+fn write_text_cache(dir: &std::path::Path, prefix: &str, text: &str) -> std::io::Result<PathBuf> {
     use std::io::Write;
     cleanup_old_previews(dir);
-    // Exclusive creation also handles simultaneous OCR runs.
+    // Exclusive creation also handles simultaneous OCR / QR runs.
     let mut file = tempfile::Builder::new()
-        .prefix("ocr-")
+        .prefix(prefix)
         .suffix(".txt")
         .tempfile_in(dir)?;
     file.write_all(text.as_bytes())?;
@@ -316,11 +355,23 @@ fn show(
                 && let Err(error) = open_target(path)
             {
                 if is_text_target(path) {
-                    eprintln!("[shotori] could not open recognized text: {error}");
-                    send(
-                        crate::i18n::t!("notify.ocr.open_failed.title").as_ref(),
-                        crate::i18n::t!("notify.ocr.open_failed.body").as_ref(),
-                    );
+                    let is_qr = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("qr-"));
+                    let (title, body) = if is_qr {
+                        (
+                            crate::i18n::t!("notify.qr.open_failed.title"),
+                            crate::i18n::t!("notify.qr.open_failed.body"),
+                        )
+                    } else {
+                        (
+                            crate::i18n::t!("notify.ocr.open_failed.title"),
+                            crate::i18n::t!("notify.ocr.open_failed.body"),
+                        )
+                    };
+                    eprintln!("[shotori] could not open cached text: {error}");
+                    send(title.as_ref(), body.as_ref());
                 } else {
                     eprintln!("[shotori] could not open saved screenshot: {error}");
                     send(
@@ -430,7 +481,8 @@ fn cleanup_old_previews(dir: &std::path::Path) {
         let name = name.to_string_lossy();
         let is_cache_entry = name.starts_with("preview-")
             || name.starts_with("clipboard-")
-            || name.starts_with("ocr-");
+            || name.starts_with("ocr-")
+            || name.starts_with("qr-");
         if stale && is_cache_entry {
             let _ = std::fs::remove_file(&path);
         }
@@ -470,6 +522,7 @@ mod tests {
             "clipboard-old.png",
             "preview-old.png",
             "ocr-old.txt",
+            "qr-old.txt",
             "saved.png",
         ] {
             let file = std::fs::File::create(dir.path().join(name)).unwrap();
@@ -482,6 +535,7 @@ mod tests {
         assert!(!dir.path().join("clipboard-old.png").exists());
         assert!(!dir.path().join("preview-old.png").exists());
         assert!(!dir.path().join("ocr-old.txt").exists());
+        assert!(!dir.path().join("qr-old.txt").exists());
     }
 
     #[test]
@@ -502,14 +556,17 @@ mod tests {
     fn ocr_cache_retains_the_full_text_and_uses_txt_paths() {
         let dir = tempfile::tempdir().unwrap();
         let text = "第一行\nsecond line\n";
-        let first = super::write_ocr_text(dir.path(), text).unwrap();
-        let second = super::write_ocr_text(dir.path(), text).unwrap();
+        let first = super::write_text_cache(dir.path(), "ocr-", text).unwrap();
+        let second = super::write_text_cache(dir.path(), "qr-", text).unwrap();
         assert_ne!(first, second);
         // The suffix is what routes a click to the default editor; a
         // suffix-less cache file would hit the unknown-type fallback.
         assert_eq!(first.extension().unwrap(), "txt");
+        assert_eq!(second.extension().unwrap(), "txt");
         assert!(super::is_text_target(&first));
+        assert!(super::is_text_target(&second));
         assert_eq!(std::fs::read_to_string(&first).unwrap(), text);
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), text);
         assert!(!super::is_text_target(std::path::Path::new("shot.png")));
     }
 
