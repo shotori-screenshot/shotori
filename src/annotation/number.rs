@@ -150,8 +150,8 @@ impl Shape {
 fn font() -> &'static FontRef<'static> {
     static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
     FONT.get_or_init(|| {
-        FontRef::try_from_slice(include_bytes!("../../assets/DejaVuSans-Bold.ttf"))
-            .expect("bundled DejaVu Sans Bold is a valid font")
+        FontRef::try_from_slice(include_bytes!("../../assets/Rubik-SemiBold.ttf"))
+            .expect("bundled Rubik SemiBold is a valid font")
     })
 }
 
@@ -171,7 +171,7 @@ fn layout(label: &str, diameter: f32, center: ab_glyph::Point) -> Vec<Glyph> {
         let glyph = id.with_scale_and_position(1000., ab_glyph::point(advance, 0.));
         let bounds = scaled
             .outline_glyph(glyph.clone())
-            .expect("bundled font covers decimal digits")
+            .expect("bundled font covers badge glyphs")
             .px_bounds();
         min.x = min.x.min(bounds.min.x);
         min.y = min.y.min(bounds.min.y);
@@ -181,7 +181,9 @@ fn layout(label: &str, diameter: f32, center: ab_glyph::Point) -> Vec<Glyph> {
         previous = Some(id);
         glyphs.push(glyph);
     }
-    let factor = (diameter * 0.55 / (max.y - min.y)).min(diameter * 0.725 / (max.x - min.x));
+    // Leave clearance for the optional inset ring so multi-digit and wide
+    // Roman labels stay comfortably inside the filled interior.
+    let factor = (diameter * 0.54 / (max.y - min.y)).min(diameter * 0.66 / (max.x - min.x));
     for glyph in &mut glyphs {
         glyph.scale = (1000. * factor).into();
         glyph.position.x = center.x + (glyph.position.x - (min.x + max.x) / 2.) * factor;
@@ -198,6 +200,14 @@ struct Badge {
     rgba: Vec<u8>,
 }
 
+fn span_coverage(dy: f32, col: f32, center_x: f32, radius: f32) -> f32 {
+    if dy.abs() >= radius {
+        return 0.;
+    }
+    let half = (radius * radius - dy * dy).sqrt();
+    ((center_x + half).min(col + 1.) - (center_x - half).max(col)).clamp(0., 1.)
+}
+
 fn render(shape: &super::Shape, origin: Point<Pixels>, scale: f32) -> Badge {
     let x = f32::from(shape.bounds.left() - origin.x) * scale;
     let y = f32::from(shape.bounds.top() - origin.y) * scale;
@@ -210,23 +220,36 @@ fn render(shape: &super::Shape, origin: Point<Pixels>, scale: f32) -> Badge {
     let radius = diameter / 2.;
     let center = ab_glyph::point(x - left as f32 + radius, y - top as f32 + radius);
     let background = shape.color.to_be_bytes();
-    // Only the circular background needs coverage calculation; ab_glyph draws all text.
+    let ring = badge_ring(shape.color, diameter, scale);
+    // Compute outer and optional inset-ring coverage together so the outer
+    // anti-aliased edge never bleeds background pixels past the ring.
     for row in 0..height {
         for col in 0..width {
-            let mut coverage = 0.;
+            let mut outer = 0.;
+            let mut inner = 0.;
             for sample in 0..8 {
                 let dy = row as f32 + (sample as f32 + 0.5) / 8. - center.y;
-                if dy.abs() < radius {
-                    let half = (radius * radius - dy * dy).sqrt();
-                    coverage += ((center.x + half).min(col as f32 + 1.)
-                        - (center.x - half).max(col as f32))
-                    .clamp(0., 1.)
-                        / 8.;
+                outer += span_coverage(dy, col as f32, center.x, radius) / 8.;
+                if let Some((_, ring_width)) = ring {
+                    inner +=
+                        span_coverage(dy, col as f32, center.x, (radius - ring_width).max(0.)) / 8.;
                 }
             }
             let offset = ((row * width + col) * 4) as usize;
-            rgba[offset..offset + 3].copy_from_slice(&background[..3]);
-            rgba[offset + 3] = (coverage * 255.).round() as u8;
+            if let Some((ring_color, _)) = ring
+                && outer > 0.
+            {
+                let ring_share = ((outer - inner) / outer).clamp(0., 1.);
+                blend_srgb(
+                    &mut rgba[offset..offset + 3],
+                    &background[..3],
+                    &ring_color,
+                    ring_share,
+                );
+            } else {
+                rgba[offset..offset + 3].copy_from_slice(&background[..3]);
+            }
+            rgba[offset + 3] = (outer * 255.).round() as u8;
         }
     }
     let foreground = foreground(shape.color).to_be_bytes();
@@ -237,7 +260,7 @@ fn render(shape: &super::Shape, origin: Point<Pixels>, scale: f32) -> Badge {
     ) {
         let outline = font()
             .outline_glyph(glyph)
-            .expect("bundled font covers decimal digits");
+            .expect("bundled font covers badge glyphs");
         let bounds = outline.px_bounds();
         outline.draw(|x, y, coverage| {
             let x = x as i32 + bounds.min.x as i32;
@@ -247,11 +270,13 @@ fn render(shape: &super::Shape, origin: Point<Pixels>, scale: f32) -> Badge {
             }
             let offset = ((y as u32 * width + x as u32) * 4) as usize;
             let coverage = coverage.clamp(0., 1.);
-            for channel in 0..3 {
-                rgba[offset + channel] = (rgba[offset + channel] as f32 * (1. - coverage)
-                    + foreground[channel] as f32 * coverage)
-                    .round() as u8;
-            }
+            let base = [rgba[offset], rgba[offset + 1], rgba[offset + 2]];
+            blend_srgb(
+                &mut rgba[offset..offset + 3],
+                &base,
+                &foreground[..3],
+                coverage,
+            );
         });
     }
     Badge {
@@ -367,20 +392,68 @@ impl NumberCache {
         images
     }
 }
-pub(super) fn foreground(color: u32) -> u32 {
-    let rgb = color.to_be_bytes();
-    let linear = |v: u8| {
-        let v = v as f32 / 255.;
-        if v <= 0.04045 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
+fn srgb_to_linear(v: u8) -> f32 {
+    let v = v as f32 / 255.;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> u8 {
+    let v = v.clamp(0., 1.);
+    let srgb = if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1. / 2.4) - 0.055
     };
-    if 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2]) > 0.179 {
+    (srgb * 255.).round() as u8
+}
+
+fn blend_srgb(dst: &mut [u8], a: &[u8], b: &[u8], t: f32) {
+    for channel in 0..3 {
+        let la = srgb_to_linear(a[channel]);
+        let lb = srgb_to_linear(b[channel]);
+        dst[channel] = linear_to_srgb(la * (1. - t) + lb * t);
+    }
+}
+
+fn relative_luminance(color: u32) -> f32 {
+    let rgb = color.to_be_bytes();
+    0.2126 * srgb_to_linear(rgb[0])
+        + 0.7152 * srgb_to_linear(rgb[1])
+        + 0.0722 * srgb_to_linear(rgb[2])
+}
+
+/// Threshold raised above the WCAG midpoint (0.179) so vivid saturated fills
+/// like red, orange, green and blue keep crisp white numerals; only genuinely
+/// bright fills (yellow, white, pastels) flip to black.
+const LIGHT_BADGE_LUMINANCE: f32 = 0.50;
+const DARK_BADGE_LUMINANCE: f32 = 0.05;
+
+pub(super) fn foreground(color: u32) -> u32 {
+    if relative_luminance(color) > LIGHT_BADGE_LUMINANCE {
         0x000000ff
     } else {
         0xffffffff
+    }
+}
+
+/// Light badges get a dark rim so white/yellow circles stay legible on light
+/// screenshots; near-black badges get a soft light rim so they separate from
+/// dark windows while staying subtle on white ones.
+fn badge_ring(color: u32, diameter: f32, scale: f32) -> Option<([u8; 3], f32)> {
+    let luminance = relative_luminance(color);
+    if luminance > LIGHT_BADGE_LUMINANCE {
+        Some(([0, 0, 0], (diameter * 0.055).max(1.25 * scale)))
+    } else if luminance < DARK_BADGE_LUMINANCE {
+        let bg = color.to_be_bytes();
+        let mut rim = [0; 3];
+        blend_srgb(&mut rim, &bg[..3], &[255, 255, 255], 0.72);
+        Some((rim, (diameter * 0.045).max(1.0 * scale)))
+    } else {
+        None
     }
 }
 
@@ -404,12 +477,17 @@ mod tests {
     }
     #[test]
     fn font_covers_all_digits_and_multidigit_text_fits_each_size() {
-        for number in (0..=12).chain([99, 100, 1000, u32::MAX]) {
+        let samples = (0..=12)
+            .chain([99, 100, 1000, u32::MAX])
+            .map(|n| n.to_string())
+            .chain(('A'..='Z').map(|ch| ch.to_string()))
+            .chain(["IV", "VIII", "XXXVIII", "MMMDCCCLXXXVIII"].map(str::to_owned));
+        for label in samples {
             for diameter in [16., 24., 32., 40.] {
                 for scale in [1., 1.25, 1.73, 2.] {
                     let diameter = diameter * scale;
                     for glyph in layout(
-                        &number.to_string(),
+                        &label,
                         diameter,
                         ab_glyph::point(diameter / 2., diameter / 2.),
                     ) {
@@ -423,6 +501,40 @@ mod tests {
         }
         assert_eq!(foreground(0xffffffff), 0x000000ff);
         assert_eq!(foreground(0x000000ff), 0xffffffff);
+        // Default swatches: vivid colors and black take white text; yellow and white take black.
+        let defaults = crate::model::settings::DEFAULT_ANNOTATION_COLORS;
+        assert_eq!(foreground(defaults[0]), 0xffffffff); // Red
+        assert_eq!(foreground(defaults[1]), 0xffffffff); // Orange
+        assert_eq!(foreground(defaults[2]), 0x000000ff); // Yellow
+        assert_eq!(foreground(defaults[3]), 0xffffffff); // Green
+        assert_eq!(foreground(defaults[4]), 0xffffffff); // Blue
+        assert_eq!(foreground(defaults[5]), 0xffffffff); // Black
+        assert_eq!(foreground(defaults[6]), 0x000000ff); // White
+    }
+    #[test]
+    fn contrasting_rings_frame_light_and_dark_badges_without_changing_saturated_ones() {
+        let defaults = crate::model::settings::DEFAULT_ANNOTATION_COLORS;
+        assert!(badge_ring(defaults[0], 32., 1.).is_none());
+        assert!(badge_ring(defaults[4], 32., 1.).is_none());
+
+        let mut white_badge = badge(8, 32.);
+        white_badge.bounds.origin = point(px(0.), px(0.));
+        white_badge.color = defaults[6];
+        let rendered_white = render(&white_badge, point(px(0.), px(0.)), 1.);
+        let top_edge = ((rendered_white.width / 2) * 4) as usize;
+        assert_eq!(&rendered_white.rgba[top_edge..top_edge + 3], &[0, 0, 0]);
+        assert!(rendered_white.rgba[top_edge + 3] > 128);
+
+        let mut black_badge = badge(7, 32.);
+        black_badge.bounds.origin = point(px(0.), px(0.));
+        black_badge.color = defaults[5];
+        let rendered_black = render(&black_badge, point(px(0.), px(0.)), 1.);
+        let top_edge = ((rendered_black.width / 2) * 4) as usize;
+        assert!(rendered_black.rgba[top_edge] > 180);
+        assert_eq!(
+            rendered_black.rgba[top_edge],
+            rendered_black.rgba[top_edge + 1]
+        );
     }
     #[test]
     fn font_rasterization_preserves_holes_and_desktop_gaps() {
