@@ -17,15 +17,17 @@
 //!   threshold (35th percentile of the gradient histogram, clamped), and
 //!   long-run "weak line" promotion so faint 1px panel borders survive
 //!   while short text strokes do not;
-//! - **four proposal sources** (closed contours, connected components,
-//!   edge-bounded background, paired long lines) so both small controls
-//!   and large panels get nominated;
-//! - **border-support scoring** — a candidate must have edges along all
-//!   four sides — plus texture penalties that reject text blocks and
-//!   icon grids;
+//! - **five proposal sources** (closed contours, connected components,
+//!   edge-bounded background, paired long lines, and orthogonal
+//!   rounded-box completion) so hollow rounded cards, small controls,
+//!   and large panels all get nominated;
+//! - **corner-aware border-support scoring** — a candidate must have
+//!   edges along all four sides — plus texture penalties that reject
+//!   unbordered text blocks and icon grids while preserving labeled
+//!   bordered controls;
 //! - **sub-pixel-free refinement** on the ORIGINAL resolution: each side
-//!   searches ±radius px for the strongest color boundary, undoing the
-//!   downscale blur.
+//!   searches ±radius px for the crispest high-contrast boundary,
+//!   undoing downscale blur without snapping onto soft drop shadows.
 //!
 //! Analysis runs at most 1280 px on the long edge, once per capture, on
 //! a background thread (see `main.rs`); the result is a candidate list
@@ -135,7 +137,7 @@ use edges::build_edge_field;
 use image::{GrayImage, RgbaView, close_linf1, dilate_linf1, downscale};
 use proposals::{
     border_sides, component_proposals, contour_proposals, inset_support, interior_density,
-    line_proposals, merge_candidate, refine_rect, scale_rect,
+    line_proposals, merge_candidate, quad_proposals, refine_rect, scale_rect,
 };
 // ── Pipeline ─────────────────────────────────────────────────────────
 
@@ -183,6 +185,7 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     let mut proposals = contour_proposals(&closed);
     proposals.extend(component_proposals(&closed, false));
     proposals.extend(line_proposals(&field));
+    proposals.extend(quad_proposals(&field));
 
     // Background regions: everything NOT behind a dilated edge — panels
     // and split layouts bounded by edges nominate their interiors.
@@ -236,13 +239,30 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
         }
         let density = interior_density(&field.combined, rect);
         let inset = inset_support(&field, rect);
-        let compact = rect.width().min(rect.height()) as f32 * scale < 32.0;
-        // Compact + busy inside = text block or icon grid, not a panel.
-        if compact && (density > 0.30 || (density > 0.12 && inset > 0.60)) {
-            continue;
+        let min_dim_px = rect.width().min(rect.height()) as f32 * scale;
+        let compact = min_dim_px < 32.0;
+        // Distinguish an unbordered text/icon blob from a crisp 4-sided UI
+        // control (e.g. a 24..30 px `[ Save ]` button or text input whose
+        // label glyphs raise interior edge density without hugging all four
+        // outer walls like a tight-cropped word).
+        let crisp_control =
+            min_dim_px >= 20.0 && support >= 0.80 && sorted[0] >= 0.65 && inset < 0.55;
+        if compact {
+            let text_blob = if crisp_control {
+                density > 0.55
+            } else {
+                density > 0.30 || (density > 0.12 && inset > 0.60)
+            };
+            if text_blob {
+                continue;
+            }
         }
         let texture_penalty = if compact {
-            density * 0.30 + inset * 0.18
+            if crisp_control {
+                density * 0.10 + inset * 0.05
+            } else {
+                density * 0.30 + inset * 0.18
+            }
         } else {
             density * 0.08
         };
@@ -264,7 +284,7 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     candidates.truncate(MAX_REFINED);
-    let radius = ((scale.ceil() as i32) * 3).clamp(3, 16);
+    let radius = ((scale.ceil() as i32) * 3).clamp(6, 16);
     for candidate in candidates.iter_mut() {
         candidate.rect = refine_rect(&view, candidate.rect, radius, field.threshold);
     }
@@ -424,11 +444,12 @@ impl RegionDetector {
     }
 }
 
-/// Ranking for `region_at`: reliable bounds first (quality ≥ 0.80),
+/// Ranking for `region_at`: reliable bounds first (quality ≥ 0.72),
 /// then smaller rects at equal quality — the innermost solid frame
-/// under the cursor.
+/// under the cursor, so labeled compact buttons/inputs beat a 20×
+/// larger enclosing panel while weak hypotheses stay fallback-only.
 fn rank(candidate: &RegionCandidate) -> f32 {
-    let tier = if candidate.quality >= 0.80 {
+    let tier = if candidate.quality >= 0.72 {
         0.
     } else {
         10000.
@@ -460,7 +481,10 @@ impl SelectionCursor {
     /// Update the hovered candidate for a pointer position (image px).
     /// Returns the current rect.
     pub(crate) fn hover(&mut self, detector: &RegionDetector, x: i32, y: i32) -> IntRect {
-        let tolerance = if self.manual_level { 6. } else { 3. };
+        // Wheel-stepped parent selections get 12 image px (~6 logical px on
+        // 2× HiDPI) of jitter slack so click tremors do not snap back to an
+        // inner child while the pointer stays inside `current`.
+        let tolerance = if self.manual_level { 12. } else { 3. };
         if let Some(current) = self.current
             && current.contains_point(x, y)
         {
@@ -747,5 +771,222 @@ mod tests {
         assert!(detector.candidates().is_empty());
         let view = RgbaView::new(&[0u8; 16], 100, 100);
         assert!(view.is_none());
+    }
+
+    fn solid_rgba(w: i32, h: i32, rgb: [u8; 3]) -> RgbaBuf {
+        RgbaBuf {
+            width: w,
+            height: h,
+            data: [rgb[0], rgb[1], rgb[2], 255].repeat((w * h) as usize),
+        }
+    }
+
+    fn set_px(buf: &mut RgbaBuf, x: i32, y: i32, rgb: [u8; 3]) {
+        if x < 0 || y < 0 || x >= buf.width || y >= buf.height {
+            return;
+        }
+        let i = ((y * buf.width + x) * 4) as usize;
+        buf.data[i] = rgb[0];
+        buf.data[i + 1] = rgb[1];
+        buf.data[i + 2] = rgb[2];
+        buf.data[i + 3] = 255;
+    }
+
+    /// Antialiased 1px rounded-rectangle stroke along the centerline of the
+    /// outer pixel ring of `rect`, leaving rounded corners open while axis-
+    /// aligned straight spans remain crisp 1px borders.
+    fn stroke_rounded_rect(buf: &mut RgbaBuf, rect: IntRect, radius: f32, stroke: [u8; 3]) {
+        let x0 = rect.left as f32 + 0.5;
+        let y0 = rect.top as f32 + 0.5;
+        let x1 = rect.right as f32 - 0.5;
+        let y1 = rect.bottom as f32 - 0.5;
+        let r = (radius - 0.5).max(0.5);
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let hx = (x1 - x0) * 0.5 - r;
+        let hy = (y1 - y0) * 0.5 - r;
+        for y in (rect.top - 2).max(0)..=(rect.bottom + 2).min(buf.height - 1) {
+            for x in (rect.left - 2).max(0)..=(rect.right + 2).min(buf.width - 1) {
+                let dx = (x as f32 + 0.5 - cx).abs() - hx;
+                let dy = (y as f32 + 0.5 - cy).abs() - hy;
+                let sdf = dx.max(0.).hypot(dy.max(0.)) + dx.max(dy).min(0.) - r;
+                let alpha = (1.0 - sdf.abs()).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let i = ((y * buf.width + x) * 4) as usize;
+                for c in 0..3 {
+                    let base = f32::from(buf.data[i + c]);
+                    let fg = f32::from(stroke[c]);
+                    buf.data[i + c] = (base * (1.0 - alpha) + fg * alpha).round() as u8;
+                }
+            }
+        }
+    }
+
+    fn assert_rect_near(actual: IntRect, expected: IntRect, tol: i32) {
+        assert!(
+            (actual.left - expected.left).abs() <= tol
+                && (actual.top - expected.top).abs() <= tol
+                && (actual.right - expected.right).abs() <= tol
+                && (actual.bottom - expected.bottom).abs() <= tol,
+            "expected {expected:?} (±{tol} px), got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn detects_hollow_rounded_border_card_on_same_background() {
+        // #f8fafc page with a 1px #cbd5e1 rounded card (r = 12 px) and an
+        // identical #f8fafc interior; also verify a compact 32 px-tall pill
+        // input (r = 10 px) whose corner arcs consume >30% of vertical sides.
+        let bg = [0xf8, 0xfa, 0xfc];
+        let border = [0xcb, 0xd5, 0xe1];
+        let card = IntRect::new(50, 40, 310, 200);
+        let mut image = solid_rgba(360, 240, bg);
+        stroke_rounded_rect(&mut image, card, 12.0, border);
+
+        let detector = RegionDetector::analyze(&image.data, 360, 240);
+        assert!(
+            detector.candidates().iter().any(|c| {
+                (c.rect.left - card.left).abs() <= 2
+                    && (c.rect.top - card.top).abs() <= 2
+                    && (c.rect.right - card.right).abs() <= 2
+                    && (c.rect.bottom - card.bottom).abs() <= 2
+            }),
+            "card missing from candidates: {:?}",
+            detector.candidates()
+        );
+        assert_rect_near(detector.region_at(180, 120), card, 2);
+
+        let pill_input = IntRect::new(90, 96, 250, 128);
+        let mut pill_scene = solid_rgba(340, 220, bg);
+        stroke_rounded_rect(&mut pill_scene, pill_input, 10.0, border);
+        let pill_detector = RegionDetector::analyze(&pill_scene.data, 340, 220);
+        assert_rect_near(pill_detector.region_at(170, 112), pill_input, 2);
+    }
+
+    #[test]
+    fn refinement_prefers_crisp_panel_edge_over_drop_shadow() {
+        // Bright panel [60, 50, 260, 170] surrounded by an 8 px dark drop
+        // shadow whose steepest band (3..4 px outside) has per-pixel diff ≈ 52.
+        let panel = IntRect::new(60, 50, 260, 170);
+        let mut image = solid_rgba(320, 220, [214, 218, 224]);
+        let shadow_luma = [58u8, 68, 86, 138, 170, 190, 203, 210];
+        for y in 0..220 {
+            for x in 0..320 {
+                if panel.contains_point(x, y) {
+                    set_px(&mut image, x, y, [248, 250, 252]);
+                    continue;
+                }
+                let dx = (panel.left - x).max(x - (panel.right - 1)).max(0);
+                let dy = (panel.top - y).max(y - (panel.bottom - 1)).max(0);
+                let dist = dx.max(dy);
+                if (1..=8).contains(&dist) {
+                    let v = shadow_luma[(dist - 1) as usize];
+                    set_px(&mut image, x, y, [v, v, v.saturating_add(4)]);
+                }
+            }
+        }
+
+        let seeded_on_shadow = IntRect::new(57, 47, 263, 173);
+        let refined = refine_rect(&image.view(), seeded_on_shadow, 6, 8);
+        assert_rect_near(refined, panel, 1);
+
+        let detector = RegionDetector::analyze(&image.data, 320, 220);
+        assert_rect_near(detector.region_at(160, 110), panel, 1);
+        // Stepping up from the panel must go straight to the full screen
+        // rather than stopping on a leftover drop-shadow halo candidate.
+        let mut cursor = SelectionCursor::default();
+        assert_rect_near(cursor.hover(&detector, 160, 110), panel, 1);
+        assert_eq!(
+            cursor.step(&detector, 160, 110, 1),
+            IntRect::new(0, 0, 320, 220)
+        );
+    }
+
+    #[test]
+    fn hover_prefers_labeled_button_inside_panel() {
+        let full = IntRect::new(0, 0, 420, 280);
+        let panel = IntRect::new(20, 20, 400, 260);
+        let button = IntRect::new(60, 60, 156, 90);
+        let rounded_button = IntRect::new(200, 60, 296, 90);
+        let mut image = solid_rgba(420, 280, [28, 32, 40]);
+
+        for y in panel.top..panel.bottom {
+            for x in panel.left..panel.right {
+                set_px(&mut image, x, y, [246, 248, 250]);
+            }
+        }
+        for y in button.top..button.bottom {
+            for x in button.left..button.right {
+                let on_border = x == button.left
+                    || x == button.right - 1
+                    || y == button.top
+                    || y == button.bottom - 1;
+                let color = if on_border {
+                    [100, 116, 139]
+                } else {
+                    [232, 236, 242]
+                };
+                set_px(&mut image, x, y, color);
+            }
+        }
+        stroke_rounded_rect(&mut image, rounded_button, 8.0, [148, 163, 184]);
+
+        // Faux glyph strokes inside y = 70..80 (six character cells with stems
+        // and crossbars so interior texture matches a real `[ Submit ]` label).
+        let ink = [30, 41, 59];
+        for base_x in [74, 214] {
+            for glyph in 0..6 {
+                let gx = base_x + glyph * 11;
+                for y in 70..80 {
+                    set_px(&mut image, gx, y, ink);
+                    set_px(&mut image, gx + 1, y, ink);
+                    if glyph % 2 == 0 {
+                        set_px(&mut image, gx + 6, y, ink);
+                    }
+                }
+                for x in gx..gx + 7 {
+                    set_px(&mut image, x, 70, ink);
+                    set_px(&mut image, x, 75, ink);
+                    set_px(&mut image, x, 79, ink);
+                }
+            }
+        }
+
+        // Unbordered body label directly on the panel at y = 144..156: plain
+        // text words without a control frame must still be rejected so hover
+        // over body copy selects the enclosing panel, not a glyph cluster.
+        for glyph in 0..8 {
+            let gx = 74 + glyph * 10;
+            for y in 144..156 {
+                set_px(&mut image, gx, y, ink);
+                if glyph % 2 == 0 {
+                    set_px(&mut image, gx + 5, y, ink);
+                }
+            }
+            for x in gx..gx + 6 {
+                set_px(&mut image, x, 144, ink);
+                set_px(&mut image, x, 150, ink);
+                set_px(&mut image, x, 155, ink);
+            }
+        }
+
+        let detector = RegionDetector::analyze(&image.data, 420, 280);
+        assert_rect_near(detector.region_at(100, 75), button, 2);
+        assert_rect_near(detector.region_at(248, 75), rounded_button, 2);
+        assert_rect_near(detector.region_at(110, 150), panel, 2);
+        assert_rect_near(detector.region_at(250, 150), panel, 2);
+
+        let mut cursor = SelectionCursor::default();
+        assert_rect_near(cursor.hover(&detector, 100, 75), button, 2);
+        let stepped_panel = cursor.step(&detector, 100, 75, 1);
+        assert_rect_near(stepped_panel, panel, 2);
+        assert!(cursor.manual_level());
+        // HiDPI click/scroll tremor (~9 px > old 6 px cap, <= 12 px) keeps
+        // the wheel-chosen parent instead of snapping back to the button.
+        assert_eq!(cursor.hover(&detector, 108, 79), stepped_panel);
+        assert!(cursor.manual_level());
+        assert_eq!(cursor.step(&detector, 108, 79, 1), full);
     }
 }

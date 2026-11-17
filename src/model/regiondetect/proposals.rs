@@ -1,8 +1,8 @@
-//! Candidate generation and scoring: four proposal sources (closed
-//! contours, connected components, edge-bounded background, paired
-//! long lines), the four-side border-support scoring with its texture
-//! penalties, and the original-resolution side refinement that undoes
-//! the downscale blur.
+//! Candidate generation and scoring: proposal sources (closed contours,
+//! connected components, edge-bounded background, paired long lines,
+//! and orthogonal rounded-box completion), four-side border-support
+//! scoring with texture penalties, and original-resolution side
+//! refinement that undoes downscale blur without snapping to shadows.
 
 use super::edges::{EdgeField, connected_components, contour_rects};
 use super::image::{GrayImage, RgbaView, color_difference};
@@ -23,9 +23,14 @@ struct Segment {
     end: i32,
 }
 
-/// Extract sufficiently long directional segments (gaps ≤ 3 px allowed,
-/// minimum length 24 px), deduplicated and capped at 192 per direction.
-fn long_segments(edges: &GrayImage, vertical: bool) -> Vec<Segment> {
+/// Extract directional segments (gaps ≤ 3 px allowed, minimum span
+/// `min_len` px), deduplicated and capped at `max_keep` per direction.
+fn extract_segments(
+    edges: &GrayImage,
+    vertical: bool,
+    min_len: i32,
+    max_keep: usize,
+) -> Vec<Segment> {
     let across = if vertical { edges.width } else { edges.height };
     let along = if vertical { edges.height } else { edges.width };
     let mut segments: Vec<Segment> = Vec::new();
@@ -45,7 +50,7 @@ fn long_segments(edges: &GrayImage, vertical: bool) -> Vec<Segment> {
                 }
                 last = position;
             } else if start >= 0 && (position == along || position - last > 3) {
-                if last - start >= 24 {
+                if last + 1 - start >= min_len {
                     segments.push(Segment {
                         fixed,
                         start,
@@ -69,12 +74,16 @@ fn long_segments(edges: &GrayImage, vertical: bool) -> Vec<Segment> {
         });
         if !duplicate {
             unique.push(line);
-            if unique.len() >= 192 {
+            if unique.len() >= max_keep {
                 break;
             }
         }
     }
     unique
+}
+
+fn long_segments(edges: &GrayImage, vertical: bool) -> Vec<Segment> {
+    extract_segments(edges, vertical, 25, 192)
 }
 
 /// Proposals from closed contour bounding boxes.
@@ -148,8 +157,9 @@ pub(super) fn line_proposals(field: &EdgeField) -> Vec<Proposal> {
             // A few pairs only: the nearest partners plus the farthest —
             // exhaustive pairing was measured as noise, not coverage.
             let mut pairs: Vec<Segment> = aligned.iter().copied().take(2).collect();
-            let last = *aligned.last().expect("non-empty");
-            if !pairs.contains(&last) {
+            if let Some(&last) = aligned.last()
+                && !pairs.contains(&last)
+            {
                 pairs.push(last);
             }
             for second in pairs {
@@ -178,6 +188,186 @@ pub(super) fn line_proposals(field: &EdgeField) -> Vec<Proposal> {
     proposals
 }
 
+/// Complete four-sided rounded boxes from orthogonal segment pairs.
+///
+/// Hollow rounded-corner cards, inputs, and dialogs on same-color
+/// backgrounds leave ~6..28 px open corner gaps where antialiased
+/// quarter-circle arcs fall below directional thresholds: 1 px closing
+/// cannot bridge them, background components leak through the open
+/// corners, and 2-line pairing (`line_proposals`) clips `r` pixels off
+/// the perpendicular ends so `border_sides` misses the horizontal or
+/// vertical borders completely. Witnessing all four straight sides
+/// within a plausible corner-radius gap recovers the full bounding rect
+/// and qualifies as a `CONTOUR` candidate rather than a 2-line guess.
+pub(super) fn quad_proposals(field: &EdgeField) -> Vec<Proposal> {
+    const MIN_SEG_LEN: i32 = 12;
+    const MAX_SEGS_PER_AXIS: usize = 256;
+    const MAX_CORNER_GAP: i32 = 30;
+    const CORNER_OVERSHOOT: i32 = 3;
+    const MAX_PER_LEFT_SEG: usize = 8;
+    const MAX_QUADS: usize = 512;
+
+    let mut v_segs = extract_segments(&field.vertical, true, MIN_SEG_LEN, MAX_SEGS_PER_AXIS);
+    let mut h_segs = extract_segments(&field.horizontal, false, MIN_SEG_LEN, MAX_SEGS_PER_AXIS);
+    v_segs.sort_by_key(|s| s.fixed);
+    h_segs.sort_by_key(|s| s.fixed);
+
+    let mut scored: Vec<(i32, Proposal)> = Vec::new();
+    let mut per_left: Vec<(i32, Proposal)> = Vec::new();
+    let mut top_matches: Vec<(i32, Segment)> = Vec::new();
+    let mut bot_matches: Vec<(i32, Segment)> = Vec::new();
+
+    for i in 0..v_segs.len() {
+        let left_seg = v_segs[i];
+        per_left.clear();
+        for right_seg in v_segs[i + 1..].iter().copied() {
+            let left = left_seg.fixed;
+            let right = right_seg.fixed + 1;
+            let width = right - left;
+            if width < 12 {
+                continue;
+            }
+
+            let top_min = (left_seg.start - MAX_CORNER_GAP).max(right_seg.start - MAX_CORNER_GAP);
+            let top_max =
+                (left_seg.start + CORNER_OVERSHOOT).min(right_seg.start + CORNER_OVERSHOOT);
+            if top_min > top_max {
+                continue;
+            }
+            let bot_min =
+                (left_seg.end - CORNER_OVERSHOOT - 1).max(right_seg.end - CORNER_OVERSHOOT - 1);
+            let bot_max =
+                (left_seg.end + MAX_CORNER_GAP - 1).min(right_seg.end + MAX_CORNER_GAP - 1);
+            if bot_min > bot_max {
+                continue;
+            }
+
+            let top_lo = h_segs.partition_point(|s| s.fixed < top_min);
+            let top_hi = h_segs.partition_point(|s| s.fixed <= top_max);
+            top_matches.clear();
+            for &seg in &h_segs[top_lo..top_hi] {
+                let tl_x = seg.start - left;
+                let tr_x = right - seg.end;
+                if (-CORNER_OVERSHOOT..=MAX_CORNER_GAP).contains(&tl_x)
+                    && (-CORNER_OVERSHOOT..=MAX_CORNER_GAP).contains(&tr_x)
+                {
+                    let tl_y = left_seg.start - seg.fixed;
+                    let tr_y = right_seg.start - seg.fixed;
+                    let err = (tl_x - tl_y).abs() + (tr_x - tr_y).abs();
+                    top_matches.push((err, seg));
+                }
+            }
+            if top_matches.is_empty() {
+                continue;
+            }
+            top_matches.sort_by_key(|(err, _)| *err);
+            top_matches.truncate(2);
+
+            let bot_lo = h_segs.partition_point(|s| s.fixed < bot_min);
+            let bot_hi = h_segs.partition_point(|s| s.fixed <= bot_max);
+            bot_matches.clear();
+            for &seg in &h_segs[bot_lo..bot_hi] {
+                let bl_x = seg.start - left;
+                let br_x = right - seg.end;
+                if (-CORNER_OVERSHOOT..=MAX_CORNER_GAP).contains(&bl_x)
+                    && (-CORNER_OVERSHOOT..=MAX_CORNER_GAP).contains(&br_x)
+                {
+                    let bottom = seg.fixed + 1;
+                    let bl_y = bottom - left_seg.end;
+                    let br_y = bottom - right_seg.end;
+                    let err = (bl_x - bl_y).abs() + (br_x - br_y).abs();
+                    bot_matches.push((err, seg));
+                }
+            }
+            if bot_matches.is_empty() {
+                continue;
+            }
+            bot_matches.sort_by_key(|(err, _)| *err);
+            bot_matches.truncate(2);
+
+            for &(_, top_seg) in &top_matches {
+                let top = top_seg.fixed;
+                for &(_, bot_seg) in &bot_matches {
+                    let bottom = bot_seg.fixed + 1;
+                    let height = bottom - top;
+                    if height < 12 {
+                        continue;
+                    }
+                    let r_max = (width.min(height) / 2 + 1).clamp(4, MAX_CORNER_GAP);
+                    let in_gap = |gap: i32| (-CORNER_OVERSHOOT..=r_max).contains(&gap);
+                    let tl_x = top_seg.start - left;
+                    let tr_x = right - top_seg.end;
+                    let bl_x = bot_seg.start - left;
+                    let br_x = right - bot_seg.end;
+                    let tl_y = left_seg.start - top;
+                    let bl_y = bottom - left_seg.end;
+                    let tr_y = right_seg.start - top;
+                    let br_y = bottom - right_seg.end;
+                    if !(in_gap(tl_x)
+                        && in_gap(tr_x)
+                        && in_gap(bl_x)
+                        && in_gap(br_x)
+                        && in_gap(tl_y)
+                        && in_gap(bl_y)
+                        && in_gap(tr_y)
+                        && in_gap(br_y))
+                    {
+                        continue;
+                    }
+                    // Each corner's horizontal and vertical gaps come from the
+                    // same arc, so reject asymmetric accidental crossings where
+                    // one segment touches the wall and the other stops far away.
+                    let corner_balanced = |gx: i32, gy: i32| (gx.max(0) - gy.max(0)).abs() <= 14;
+                    if !(corner_balanced(tl_x, tl_y)
+                        && corner_balanced(tr_x, tr_y)
+                        && corner_balanced(bl_x, bl_y)
+                        && corner_balanced(br_x, br_y))
+                    {
+                        continue;
+                    }
+                    // Rank by corner symmetry (not raw gap size, which would
+                    // starve r=16..24 rounded dialogs behind sharp grid cells
+                    // that contours already cover).
+                    let asymmetry = (tl_x - tl_y).abs()
+                        + (tr_x - tr_y).abs()
+                        + (bl_x - bl_y).abs()
+                        + (br_x - br_y).abs()
+                        + (tl_x - tr_x).abs()
+                        + (bl_x - br_x).abs();
+                    per_left.push((
+                        asymmetry,
+                        Proposal {
+                            rect: IntRect::new(left, top, right, bottom),
+                            source: Sources::CONTOUR,
+                        },
+                    ));
+                }
+            }
+        }
+        per_left.sort_by_key(|(asymmetry, _)| *asymmetry);
+        per_left.truncate(MAX_PER_LEFT_SEG);
+        scored.extend_from_slice(&per_left);
+    }
+
+    scored.sort_by_key(|(asymmetry, _)| *asymmetry);
+    let mut proposals: Vec<Proposal> = Vec::with_capacity(scored.len().min(MAX_QUADS));
+    for (_, proposal) in scored {
+        let duplicate = proposals.iter().any(|existing| {
+            (existing.rect.left - proposal.rect.left).abs() <= 2
+                && (existing.rect.top - proposal.rect.top).abs() <= 2
+                && (existing.rect.right - proposal.rect.right).abs() <= 2
+                && (existing.rect.bottom - proposal.rect.bottom).abs() <= 2
+        });
+        if !duplicate {
+            proposals.push(proposal);
+            if proposals.len() >= MAX_QUADS {
+                break;
+            }
+        }
+    }
+    proposals
+}
+
 /// Alignment tolerance for a pair, proportional to the shorter segment
 /// (12%), clamped to [4, 16] px.
 fn pair_tolerance(a: Segment, b: Segment) -> i32 {
@@ -186,18 +376,14 @@ fn pair_tolerance(a: Segment, b: Segment) -> i32 {
 
 // ── Scoring ──────────────────────────────────────────────────────────
 
-/// Continuous support of ONE rectangle side: the fraction of sampled
-/// positions (10%-trimmed ends, stride to cap at ~160 samples) where a
-/// directional edge sits within ±2 px of the side. Sides at the image
-/// border are trusted at 0.85 — a panel touching the screenshot edge
-/// must not lose points for the edge it cannot show.
-fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: bool) -> f32 {
-    let limit = if vertical { edges.width } else { edges.height };
-    if fixed <= 1 || fixed + 2 >= limit {
-        return 0.85;
-    }
-    let margin = ((end - start) / 10).min(12);
-    let (start, end) = (start + margin, end - margin);
+fn span_support(
+    edges: &GrayImage,
+    fixed: i32,
+    limit: i32,
+    start: i32,
+    end: i32,
+    vertical: bool,
+) -> f32 {
     if end <= start {
         return 0.;
     }
@@ -220,6 +406,44 @@ fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: b
         best = best.max(supported as f32 / samples.max(1) as f32);
     }
     best
+}
+
+/// Continuous support of ONE rectangle side: the fraction of sampled
+/// positions (10%-trimmed ends, stride to cap at ~160 samples) where a
+/// directional edge sits within ±2 px of the side. Sides at the image
+/// border are trusted at 0.85 — a panel touching the screenshot edge
+/// must not lose points for the edge it cannot show.
+///
+/// Pill buttons and large-radius dialogs curve inward past the 10% trim
+/// (`min(12, len/10)`), so sides ≥ 16 px also evaluate a corner-trimmed
+/// central span (`min(24, len/4)`); only a nearly continuous straight
+/// center (≥ 0.85) earns the 0.95-discounted score so short interior
+/// dashes still cannot masquerade as full borders.
+fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: bool) -> f32 {
+    let limit = if vertical { edges.width } else { edges.height };
+    if fixed <= 1 || fixed + 2 >= limit {
+        return 0.85;
+    }
+    let len = end - start;
+    let margin = (len / 10).min(12);
+    let standard_best = span_support(edges, fixed, limit, start + margin, end - margin, vertical);
+    if len >= 16 {
+        let corner_margin = (len / 4).min(24);
+        if corner_margin > margin {
+            let central_best = span_support(
+                edges,
+                fixed,
+                limit,
+                start + corner_margin,
+                end - corner_margin,
+                vertical,
+            );
+            if central_best >= 0.85 {
+                return standard_best.max(central_best * 0.95);
+            }
+        }
+    }
+    standard_best
 }
 
 /// Support of all four sides: left, top, right, bottom.
@@ -292,10 +516,90 @@ pub(super) fn scale_rect(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn refine_side_span(
+    view: &RgbaView<'_>,
+    original: i32,
+    start: i32,
+    end: i32,
+    vertical: bool,
+    radius: i32,
+    threshold: u8,
+    min_coverage: f32,
+) -> Option<(i32, f32)> {
+    let limit = if vertical { view.width } else { view.height };
+    let along_limit = if vertical { view.height } else { view.width };
+    let start = start.max(0);
+    let end = end.min(along_limit);
+    if end <= start {
+        return None;
+    }
+    let step = ((end - start) / 128).max(1);
+    let sample_px = |normal: i32, along: i32| {
+        if vertical {
+            view.px(normal, along)
+        } else {
+            view.px(along, normal)
+        }
+    };
+    let min_diff = threshold.min(8);
+    let mut best = None;
+    let mut best_score = 0f32;
+    for position in (original - radius).max(1)..=(original + radius).min(limit - 1) {
+        let (mut count, mut strength, mut samples) = (0i32, 0f32, 0i32);
+        let mut along = start;
+        while along < end {
+            let p_m1 = sample_px(position - 1, along);
+            let p_0 = sample_px(position, along);
+            let diff = color_difference(p_m1, p_0);
+            let diff_prev = if position >= 2 {
+                color_difference(sample_px(position - 2, along), p_m1)
+            } else {
+                0
+            };
+            let diff_next = if position + 1 < limit {
+                color_difference(p_0, sample_px(position + 1, along))
+            } else {
+                0
+            };
+            count += i32::from(diff >= min_diff);
+            // Saturating contrast at 48 made a diff≈50 drop-shadow band tie a
+            // crisp diff=180 panel edge, leaving downscaled estimates stuck on
+            // the outer shadow halo. Keep headroom up to 192 and reward local
+            // normal sharpness (at least one flat flank + dominance over
+            // adjacent steps) so crisp step/1px borders beat diffuse ramps.
+            let diff_f = f32::from(diff);
+            let contrast = 0.35 * (diff_f / 48.).min(1.) + 0.65 * (diff_f / 192.).min(1.);
+            let sharpness = if diff > 0 {
+                let flank_min = f32::from(diff_prev.min(diff_next));
+                let flank_max = f32::from(diff_prev.max(diff_next));
+                let step_isolation = (1. - flank_min / diff_f).clamp(0., 1.);
+                let peak_dominance = ((diff_f - flank_max * 0.5) / diff_f).clamp(0., 1.);
+                0.6 * step_isolation + 0.4 * peak_dominance
+            } else {
+                0.
+            };
+            strength += contrast * (0.4 + 0.6 * sharpness);
+            samples += 1;
+            along += step;
+        }
+        let coverage = count as f32 / samples.max(1) as f32;
+        let avg_strength = strength / samples.max(1) as f32;
+        let score =
+            coverage * 0.72 + avg_strength * 0.28 - (position - original).abs() as f32 * 0.010;
+        if coverage >= min_coverage && score > best_score {
+            best_score = score;
+            best = Some((position, score));
+        }
+    }
+    best
+}
+
 /// Refine ONE side on the original image: search ±radius px around the
 /// downscaled estimate for the position with the best coverage of
-/// color-difference boundaries (count ≥ min(threshold, 8)), with a tiny
-/// strength term and a distance penalty so ties stay near the estimate.
+/// color-difference boundaries, contrast headroom, and normal sharpness,
+/// comparing a corner-trimmed span (`min(24, len/4)`) so rounded-corner
+/// borders do not lose to a straighter outer shadow blur.
 fn refine_side(
     view: &RgbaView<'_>,
     original: i32,
@@ -309,45 +613,37 @@ fn refine_side(
     if original <= 1 || original >= limit - 1 {
         return original;
     }
-    let margin = ((end - start) / 10).clamp(1, 24);
-    let along_limit = if vertical { view.height } else { view.width };
-    let start = (start + margin).max(0);
-    let end = (end - margin).min(along_limit);
-    if end <= start {
-        return original;
-    }
-    let step = ((end - start) / 128).max(1);
-    let mut best = original;
-    let mut best_score = 0f32;
-    for position in (original - radius).max(1)..=(original + radius).min(limit - 1) {
-        let (mut count, mut strength, mut samples) = (0i32, 0f32, 0i32);
-        let mut along = start;
-        while along < end {
-            let a = if vertical {
-                view.px(position - 1, along)
-            } else {
-                view.px(along, position - 1)
-            };
-            let b = if vertical {
-                view.px(position, along)
-            } else {
-                view.px(along, position)
-            };
-            let diff = color_difference(a, b);
-            count += i32::from(diff >= threshold.min(8));
-            strength += f32::from(diff.min(48)) / 48.;
-            samples += 1;
-            along += step;
-        }
-        let coverage = count as f32 / samples.max(1) as f32;
-        let score = coverage * 0.85 + strength / samples.max(1) as f32 * 0.15
-            - (position - original).abs() as f32 * 0.008;
-        if coverage >= 0.55 && score > best_score {
-            best_score = score;
-            best = position;
+    let len = end - start;
+    let margin = (len / 10).clamp(1, 24);
+    let standard = refine_side_span(
+        view,
+        original,
+        start + margin,
+        end - margin,
+        vertical,
+        radius,
+        threshold,
+        0.55,
+    );
+    if len >= 16 {
+        let corner_margin = (len / 4).min(24);
+        if corner_margin > margin
+            && let Some((central_pos, central_score)) = refine_side_span(
+                view,
+                original,
+                start + corner_margin,
+                end - corner_margin,
+                vertical,
+                radius,
+                threshold,
+                0.80,
+            )
+            && standard.is_none_or(|(_, std_score)| central_score * 0.95 > std_score)
+        {
+            return central_pos;
         }
     }
-    best
+    standard.map_or(original, |(pos, _)| pos)
 }
 
 /// Refine all four sides. Left/right refine first (over the full
