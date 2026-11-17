@@ -1,11 +1,14 @@
 //! Hyprland backend: `HYPRLAND_INSTANCE_SIGNATURE` → request socket
 //! (`j/clients` + `j/monitors`).
 //!
-//! `j/clients` lists every mapped window including inactive workspaces;
-//! visibility is derived by keeping only windows whose workspace is the
-//! ACTIVE workspace of their monitor (from `j/monitors`). The socket
-//! path moved from `/tmp/hypr` to `$XDG_RUNTIME_DIR/hypr` across
-//! versions — both are tried.
+//! `j/clients` lists every mapped window including inactive workspaces
+//! and inactive group tabs; visibility is derived by dropping `"hidden": true`
+//! windows and keeping only windows whose workspace matches their monitor's
+//! `activeWorkspace` or currently open `specialWorkspace` (from `j/monitors`).
+//! Stacking recency combines compositor layer (open scratchpad above
+//! pinned/floating above tiled) with `focusHistoryID` so overlapping unfocused
+//! windows hit-test in Z-order. The socket path moved from `/tmp/hypr` to
+//! `$XDG_RUNTIME_DIR/hypr` across versions — both are tried.
 //!
 //! Caveat: written from Hyprland's IPC docs, not tested on a
 //! live session; the `at`/`size` fields have had scaled-monitor
@@ -13,6 +16,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -63,13 +67,22 @@ fn focused_monitor(monitors: &Value) -> Option<String> {
 /// side: the new event loop treats the EOF as a disconnect and drops the
 /// request (also measured). Replies arrive until EOF or timeout.
 fn request(stream: &mut UnixStream, cmd: &str) -> std::io::Result<String> {
+    const MAX_PAYLOAD: usize = 256 << 20;
     let read_all = |s: &mut UnixStream| -> std::io::Result<String> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 16384];
         loop {
             match s.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    if buf.len().saturating_add(n) > MAX_PAYLOAD {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Hyprland IPC reply exceeds sanity cap",
+                        ));
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -82,34 +95,53 @@ fn request(stream: &mut UnixStream, cmd: &str) -> std::io::Result<String> {
         Ok(String::from_utf8_lossy(&buf).into_owned())
     };
 
+    stream.set_write_timeout(Some(Duration::from_millis(400)))?;
     stream.write_all(cmd.as_bytes())?;
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(400)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(400)))?;
     let reply = read_all(stream)?;
     if !reply.is_empty() {
         return Ok(reply);
     }
     // legacy line-based server: it is still waiting for the newline
     stream.write_all(b"\n")?;
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(600)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(600)))?;
     read_all(stream)
 }
 
 /// clients + monitors → visible window rects. Pure, unit-tested.
 fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
-    // active workspace id per monitor, keyed both ways the schema has
-    // spelled the client's "monitor" field (int id, then str name)
-    let mut active_by_id: Vec<(i64, i64)> = Vec::new();
-    let mut active_by_name: Vec<(String, i64)> = Vec::new();
+    #[derive(Clone, Copy)]
+    struct MonitorWorkspaces {
+        active: Option<i64>,
+        open_special: Option<i64>,
+    }
+
+    // Active and open-special workspace ids per monitor, keyed both ways
+    // the schema has spelled the client's "monitor" field (int id, str name).
+    let mut mon_by_id: Vec<(i64, MonitorWorkspaces)> = Vec::new();
+    let mut mon_by_name: Vec<(String, MonitorWorkspaces)> = Vec::new();
     if let Some(mons) = monitors.as_array() {
         for m in mons {
-            let Some(active) = m.pointer("/activeWorkspace/id").and_then(Value::as_i64) else {
+            let active = m
+                .pointer("/activeWorkspace/id")
+                .and_then(Value::as_i64)
+                .filter(|&id| id != 0);
+            let open_special = m
+                .pointer("/specialWorkspace/id")
+                .and_then(Value::as_i64)
+                .filter(|&id| id != 0);
+            if active.is_none() && open_special.is_none() {
                 continue;
+            }
+            let ws = MonitorWorkspaces {
+                active,
+                open_special,
             };
             if let Some(id) = m.get("id").and_then(Value::as_i64) {
-                active_by_id.push((id, active));
+                mon_by_id.push((id, ws));
             }
             if let Some(name) = m.get("name").and_then(Value::as_str) {
-                active_by_name.push((name.to_owned(), active));
+                mon_by_name.push((name.to_owned(), ws));
             }
         }
     }
@@ -118,6 +150,12 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
     };
     list.iter()
         .filter_map(|c| {
+            // Inactive tabs inside a window group (`dwindle`/`master` groups)
+            // report `"hidden": true` (including in older schemas that only
+            // carry `"mapped": true`).
+            if c.get("hidden").and_then(Value::as_bool).unwrap_or(false) {
+                return None;
+            }
             // `visible` (mapped && acceptsInput && alphaNonZero) is the
             // modern filter — source-verified in src/ipc/s1/Commands.cpp;
             // older versions only carry `mapped`
@@ -130,22 +168,24 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
                 return None;
             }
             let ws_id = match c.pointer("/workspace/id").and_then(Value::as_i64) {
-                Some(id) if id > 0 => id, // special workspaces are negative
+                Some(id) if id != 0 => id,
                 _ => return None,
             };
-            // only windows on the active workspace of their monitor
-            let on_active = match c.get("monitor") {
+            // Keep windows on either the monitor's active workspace or its
+            // currently open special workspace (scratchpad overlay).
+            let mon_ws = match c.get("monitor") {
                 Some(Value::Number(n)) => n
                     .as_i64()
-                    .and_then(|id| active_by_id.iter().find(|(m, _)| *m == id))
-                    .is_some_and(|(_, active)| *active == ws_id),
-                Some(Value::String(name)) => active_by_name
+                    .and_then(|id| mon_by_id.iter().find(|(m, _)| *m == id))
+                    .map(|(_, ws)| *ws),
+                Some(Value::String(name)) => mon_by_name
                     .iter()
                     .find(|(m, _)| m == name)
-                    .is_some_and(|(_, active)| *active == ws_id),
-                _ => false,
-            };
-            if !on_active {
+                    .map(|(_, ws)| *ws),
+                _ => None,
+            }?;
+            let on_open_special = mon_ws.open_special == Some(ws_id);
+            if mon_ws.active != Some(ws_id) && !on_open_special {
                 return None;
             }
             let at = c.get("at").and_then(Value::as_array)?;
@@ -161,6 +201,24 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
             if w <= 0. || h <= 0. {
                 return None;
             }
+            let focus_id = c.get("focusHistoryID").and_then(Value::as_i64);
+            let pinned_or_floating = c.get("pinned").and_then(Value::as_bool).unwrap_or(false)
+                || c.get("floating").and_then(Value::as_bool).unwrap_or(false);
+            // Encode compositor Z-layer above `focusHistoryID` MRU rank so
+            // open scratchpads (2) > pinned/floating (1) > tiled (0), and
+            // within a layer more recently focused windows beat older ones.
+            let tier: u32 = if on_open_special || ws_id < 0 {
+                2
+            } else if pinned_or_floating {
+                1
+            } else {
+                0
+            };
+            let focus_rank: u32 = match focus_id {
+                Some(id) if id >= 0 => u32::MAX - (id as u64).min(u64::from(u32::MAX - 1)) as u32,
+                _ => 0,
+            };
+            let recency = (u64::from(tier) << 32) | u64::from(focus_rank);
             Some(SnapRect::from_xywh(
                 x as f32,
                 y as f32,
@@ -170,8 +228,8 @@ fn collect(clients: &Value, monitors: &Value) -> Vec<SnapRect> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                c.get("focusHistoryID").and_then(Value::as_i64) == Some(0),
-                0,
+                focus_id == Some(0),
+                recency,
             ))
         })
         .collect()
@@ -255,5 +313,125 @@ mod tests {
         assert!(collect(&empty, &monitors).is_empty());
         let garbage: Value = serde_json::from_str("{}").unwrap();
         assert!(collect(&garbage, &monitors).is_empty());
+    }
+
+    #[test]
+    fn open_special_workspace_collected_when_open_and_dropped_when_closed() {
+        let clients: Value = serde_json::from_str(
+            r#"[
+                {"class": "tiled-base", "mapped": true, "visible": true, "monitor": 0,
+                 "workspace": {"id": 1, "name": "1"},
+                 "at": [0, 0], "size": [1920, 1080], "focusHistoryID": 1},
+                {"class": "scratchpad-open", "mapped": true, "visible": true, "monitor": "DP-1",
+                 "workspace": {"id": -99, "name": "special:magic"},
+                 "at": [300, 200], "size": [900, 600], "focusHistoryID": 0},
+                {"class": "other-scratchpad", "mapped": true, "visible": true, "monitor": 0,
+                 "workspace": {"id": -98, "name": "special:music"},
+                 "at": [400, 250], "size": [700, 500], "focusHistoryID": 2}
+            ]"#,
+        )
+        .unwrap();
+
+        let monitors_open: Value = serde_json::from_str(
+            r#"[{"id": 0, "name": "DP-1", "x": 0, "y": 0, "focused": true,
+                "activeWorkspace": {"id": 1, "name": "1"},
+                "specialWorkspace": {"id": -99, "name": "special:magic"}}]"#,
+        )
+        .unwrap();
+        let rects_open = collect(&clients, &monitors_open);
+        let ids_open: Vec<&str> = rects_open.iter().map(|r| r.app_id.as_str()).collect();
+        assert_eq!(ids_open, vec!["tiled-base", "scratchpad-open"]);
+
+        let monitors_closed: Value = serde_json::from_str(
+            r#"[{"id": 0, "name": "DP-1", "x": 0, "y": 0, "focused": true,
+                "activeWorkspace": {"id": 1, "name": "1"},
+                "specialWorkspace": {"id": 0, "name": ""}}]"#,
+        )
+        .unwrap();
+        let rects_closed = collect(&clients, &monitors_closed);
+        let ids_closed: Vec<&str> = rects_closed.iter().map(|r| r.app_id.as_str()).collect();
+        assert_eq!(ids_closed, vec!["tiled-base"]);
+    }
+
+    #[test]
+    fn hidden_group_tab_windows_are_dropped() {
+        let monitors: Value = serde_json::from_str(MONITORS).unwrap();
+        let clients: Value = serde_json::from_str(
+            r#"[
+                {"class": "active-tab", "mapped": true, "visible": true, "hidden": false,
+                 "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [10, 20], "size": [900, 1000]},
+                {"class": "inactive-tab-modern", "mapped": true, "visible": true, "hidden": true,
+                 "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [10, 20], "size": [900, 1000]},
+                {"class": "inactive-tab-legacy", "mapped": true, "hidden": true,
+                 "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [10, 20], "size": [900, 1000]}
+            ]"#,
+        )
+        .unwrap();
+
+        let rects = collect(&clients, &monitors);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].app_id, "active-tab");
+    }
+
+    #[test]
+    fn recency_orders_special_above_floating_mru_above_tiled() {
+        use super::super::hit_test;
+        use gpui_kit::{point, px};
+
+        // Focus sits on HDMI-A-1 (`focusHistoryID: 0`), so every window on DP-1
+        // is unfocused and hit-testing relies purely on stacking `recency`.
+        let monitors: Value = serde_json::from_str(
+            r#"[
+                {"id": 0, "name": "DP-1", "x": 0, "y": 0, "focused": false,
+                 "activeWorkspace": {"id": 1, "name": "1"},
+                 "specialWorkspace": {"id": -99, "name": "special:magic"}},
+                {"id": 1, "name": "HDMI-A-1", "x": 1920, "y": 0, "focused": true,
+                 "activeWorkspace": {"id": 3, "name": "3"},
+                 "specialWorkspace": {"id": 0, "name": ""}}
+            ]"#,
+        )
+        .unwrap();
+        let clients: Value = serde_json::from_str(
+            r#"[
+                {"class": "tiled-under", "mapped": true, "visible": true, "floating": false,
+                 "pinned": false, "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [0, 0], "size": [1920, 1080], "focusHistoryID": 2},
+                {"class": "float-small-buried", "mapped": true, "visible": true, "floating": true,
+                 "pinned": false, "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [200, 200], "size": [200, 150], "focusHistoryID": 3},
+                {"class": "float-large-top", "mapped": true, "visible": true, "floating": true,
+                 "pinned": false, "monitor": 0, "workspace": {"id": 1, "name": "1"},
+                 "at": [100, 100], "size": [700, 600], "focusHistoryID": 1},
+                {"class": "scratchpad-overlay", "mapped": true, "visible": true, "floating": false,
+                 "pinned": false, "monitor": 0, "workspace": {"id": -99, "name": "special:magic"},
+                 "at": [500, 400], "size": [800, 500], "focusHistoryID": 4}
+            ]"#,
+        )
+        .unwrap();
+
+        let rects = collect(&clients, &monitors);
+        assert_eq!(rects.len(), 4);
+        let tiled = &rects[0];
+        let buried_float = &rects[1];
+        let top_float = &rects[2];
+        let special = &rects[3];
+        assert!(
+            special.recency > top_float.recency
+                && top_float.recency > buried_float.recency
+                && buried_float.recency > tiled.recency
+        );
+
+        // At (250, 250): tiled, buried small float, and larger top float all
+        // overlap — the larger top float (`focusHistoryID: 1`) must win.
+        let hit_float = hit_test(&rects, point(px(250.), px(250.))).expect("hit float");
+        assert_eq!(rects[hit_float].app_id, "float-large-top");
+
+        // At (600, 500): open scratchpad also overlaps `float-large-top` and
+        // `tiled-under` — scratchpad layer wins despite older focusHistoryID.
+        let hit_special = hit_test(&rects, point(px(600.), px(500.))).expect("hit scratchpad");
+        assert_eq!(rects[hit_special].app_id, "scratchpad-overlay");
     }
 }

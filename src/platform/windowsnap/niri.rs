@@ -1,10 +1,12 @@
 //! niri backend: `NIRI_SOCKET` → typed window list with geometry.
 //!
-//! `WindowLayout::tile_pos_in_workspace_view` is null exactly when a
-//! window is scrolled out of the current view (inactive workspaces
-//! included) — it doubles as the visibility filter. Positions are
-//! output-relative; the output's own global logical position (from the
-//! same IPC) completes the chain into the session's coordinate space.
+//! `Workspace::is_active` gates workspace visibility (floating windows
+//! retain `tile_pos_in_workspace_view` even when their workspace is not
+//! active on its output), while `WindowLayout::tile_pos_in_workspace_view`
+//! gates in-view visibility within an active workspace (null when scrolled
+//! out of the current view). Positions are output-relative; the output's
+//! own global logical position (from the same IPC) completes the chain
+//! into the session's coordinate space.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -74,8 +76,12 @@ fn assemble(
     workspaces: &[Workspace],
     outputs: &HashMap<String, Output>,
 ) -> Vec<SnapRect> {
+    // Floating windows keep a non-null `tile_pos_in_workspace_view` even on
+    // unfocused workspaces, so only workspaces currently active on their
+    // output may contribute visible snap rects.
     let ws_output: HashMap<u64, Option<String>> = workspaces
         .iter()
+        .filter(|w| w.is_active)
         .map(|w| (w.id, w.output.clone()))
         .collect();
     windows
@@ -239,5 +245,67 @@ mod tests {
         )];
         let outputs = std::collections::HashMap::new();
         assert!(assemble(&windows, &workspaces, &outputs).is_empty());
+    }
+
+    #[test]
+    fn floating_window_on_inactive_workspace_is_excluded() {
+        let windows = [
+            // Active workspace on focused output → kept
+            win(
+                r#"{"id":301,"title":"active-float","app_id":"kitty","pid":1,"workspace_id":38,
+                "is_focused":true,"is_floating":true,"is_urgent":false,
+                "layout":{"pos_in_scrolling_layout":null,"tile_size":[600.0,400.0],
+                "window_size":[600,400],"tile_pos_in_workspace_view":[100.0,120.0],
+                "window_offset_in_tile":[0.0,0.0]},"focus_timestamp":{"secs":70000,"nanos":0}}"#,
+            ),
+            // Inactive workspace on the same output still reports non-null
+            // `tile_pos_in_workspace_view` for floating windows → must be dropped!
+            win(
+                r#"{"id":302,"title":"hidden-float","app_id":"phantom","pid":1,"workspace_id":39,
+                "is_focused":false,"is_floating":true,"is_urgent":false,
+                "layout":{"pos_in_scrolling_layout":null,"tile_size":[800.0,600.0],
+                "window_size":[800,600],"tile_pos_in_workspace_view":[100.0,120.0],
+                "window_offset_in_tile":[0.0,0.0]},"focus_timestamp":{"secs":80000,"nanos":0}}"#,
+            ),
+            // Active workspace on a secondary unfocused output → kept
+            win(
+                r#"{"id":303,"title":"secondary-float","app_id":"mpv","pid":1,"workspace_id":40,
+                "is_focused":false,"is_floating":true,"is_urgent":false,
+                "layout":{"pos_in_scrolling_layout":null,"tile_size":[500.0,300.0],
+                "window_size":[500,300],"tile_pos_in_workspace_view":[40.0,50.0],
+                "window_offset_in_tile":[0.0,0.0]},"focus_timestamp":{"secs":65000,"nanos":0}}"#,
+            ),
+        ];
+        let workspaces = [
+            ws(
+                r#"{"id":38,"idx":1,"name":"1","output":"HDMI-A-1","is_urgent":false,
+                "is_active":true,"is_focused":true,"active_window_id":301}"#,
+            ),
+            ws(
+                r#"{"id":39,"idx":2,"name":"2","output":"HDMI-A-1","is_urgent":false,
+                "is_active":false,"is_focused":false,"active_window_id":302}"#,
+            ),
+            ws(
+                r#"{"id":40,"idx":1,"name":"sec","output":"DP-2","is_urgent":false,
+                "is_active":true,"is_focused":false,"active_window_id":303}"#,
+            ),
+        ];
+        let outputs: std::collections::HashMap<_, _> = [
+            out(r#"{"name":"HDMI-A-1","make":"","model":"","serial":null,
+                "physical_size":[540,300],"modes":[],"current_mode":1,"is_custom_mode":false,
+                "vrr_supported":false,"vrr_enabled":false,
+                "logical":{"x":0,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":"Normal"}}"#),
+            out(r#"{"name":"DP-2","make":"","model":"","serial":null,
+                "physical_size":[350,190],"modes":[],"current_mode":1,"is_custom_mode":false,
+                "vrr_supported":false,"vrr_enabled":false,
+                "logical":{"x":1920,"y":0,"width":1920,"height":1080,"scale":1.0,"transform":"Normal"}}"#),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+
+        let rects = assemble(&windows, &workspaces, &outputs);
+        let ids: Vec<&str> = rects.iter().map(|r| r.app_id.as_str()).collect();
+        assert_eq!(ids, vec!["kitty", "mpv"]);
     }
 }
