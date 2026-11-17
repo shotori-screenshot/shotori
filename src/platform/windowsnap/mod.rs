@@ -14,7 +14,9 @@
 //!   populated only for floating windows (niri's scrolling layout leaves
 //!   it null for tiled ones — `tiles_with_ipc_layouts` never fills it;
 //!   see upstream issue #2381 / PR #4147 proposing to expose the view
-//!   offset). That field doubles as the visibility filter.
+//!   offset). Together with `Workspace::is_active` (floating windows keep
+//!   their view coordinates even on unfocused workspaces), it filters
+//!   visibility.
 //! - **Tiled windows: not available.** Their positions depend on the
 //!   workspace scroll offset, which the IPC does not expose, and column
 //!   packing cannot be reconstructed from `(column, tile)` indices
@@ -55,8 +57,8 @@ pub struct SnapRect {
     pub(crate) bounds: Bounds<Pixels>,
     pub(crate) app_id: String,
     pub(crate) focused: bool,
-    /// Millisecond recency of the last focus (a stacking tiebreaker);
-    /// backends without timestamps report 0
+    /// Stacking / focus-recency tiebreaker (millisecond focus timestamp on
+    /// niri, layer + MRU focus rank on sway and Hyprland; 0 when absent).
     pub(crate) recency: u64,
 }
 
@@ -117,7 +119,7 @@ impl CompositorSnapshot {
 pub fn query_snapshot() -> Option<CompositorSnapshot> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(detect_and_query());
+        drop(tx.send(detect_and_query()));
     });
     rx.recv_timeout(std::time::Duration::from_secs(1))
         .ok()
@@ -244,6 +246,17 @@ mod tests {
         assert_eq!(hit_test(&rects, at(500., 370.)), Some(1));
         // outside the dialog the terminal still matches
         assert_eq!(hit_test(&rects, at(50., 50.)), Some(0));
+    }
+
+    #[test]
+    fn higher_recency_beats_smaller_buried_window() {
+        // Larger unfocused floating window stacked above a smaller buried one:
+        // explicit Z-order recency must win over the smallest-area fallback.
+        let rects = [
+            rect(200., 200., 200., 150., false, (1 << 32) | 10), // smaller, buried
+            rect(100., 100., 600., 500., false, (1 << 32) | 20), // larger, on top
+        ];
+        assert_eq!(hit_test(&rects, at(250., 250.)), Some(1));
     }
 
     #[test]
