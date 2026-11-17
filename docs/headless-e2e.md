@@ -58,11 +58,12 @@ above the app's real one. Constrain `resolution` to the window's own size
 
 With `SHOTORI_DEBUG_TARGET=HEADLESS-1` and
 `SHOTORI_DEBUG_SELECTION=150,110,700,430`, set
-`SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel` to inspect the
-annotation hover outline, selection handles, crop reselection and cancellation.
-The scenes create synthetic marks inside the injected selection. `selected`
-includes a keyboard-sized translation; `cancel` restores the crop after a
-reselection drag. Use an isolated compositor and configuration directory.
+`SHOTORI_DEBUG_EDITING_SCENE=hover|selected|reselect|cancel|rectangle|ellipse|numbers|lens|multiselect|spotlight|textstyles`
+to inspect annotation hover outlines, handles, multi-selection, sequence
+badges, magnifiers, spotlights, text styles, crop reselection, and
+cancellation. Held-drag async preview transitions can also be replayed with
+`SHOTORI_DEBUG_ACTION=spotlightdraw|lensdrag`. Use an isolated compositor and
+configuration directory.
 
 ### Reviewing inline text
 
@@ -87,9 +88,13 @@ mkdir -p "$HOME" "$XDG_CONFIG_HOME/shotori"
 SHOTORI_DEBUG_SETTINGS_PAGE=appearance "$APP" settings
 ```
 
-`SHOTORI_DEBUG_SETTINGS_PAGE` takes `appearance|capture|keys|ocr|advanced|about`.
-`toolbar` and `general` are aliases for `capture` and `advanced`. A headless seat
-has no pointer, so this selects the initial page without clicking the sidebar.
+`SHOTORI_DEBUG_SETTINGS_PAGE` takes
+`appearance|capture|annotation|export|desktop|keys|ocr|advanced|about`
+(aliases: `toolbar` → `capture`, `annotations` → `annotation`, `save` →
+`export`, `notifications|notify|pin|pins` → `desktop`, `shortcuts` → `keys`,
+`general` → `advanced`). The CLI also accepts `shotori settings --page <page>`.
+A headless seat has no pointer, so these select the initial page without
+clicking the sidebar.
 
 `SHOTORI_DEBUG_SETTINGS_SCROLL=<logical pixels>` sets the page's vertical offset.
 `SHOTORI_DEBUG_SETTINGS_QUERY` seeds the navigation search. A 12–24 px base font
