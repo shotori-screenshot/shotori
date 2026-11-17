@@ -45,7 +45,7 @@ impl TextInput {
         font_size: f32,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let mut this = Self {
             editor: Editor::new(text::buffer(initial, width, limit, font_size)),
             focus: cx.focus_handle(),
             marked: None,
@@ -60,7 +60,12 @@ impl TextInput {
             bounds: Bounds::default(),
             dragging: false,
             truncated_input: false,
+        };
+        if !initial.is_empty() {
+            this.editor.set_selection(Selection::None);
+            this.editor.set_cursor(this.cursor_for(initial.len()));
         }
+        this
     }
     /// End editing without turning unfinished phonetic preedit into annotation text.
     pub(crate) fn discard_preedit(&mut self, cx: &mut Context<Self>) {
@@ -122,9 +127,15 @@ impl TextInput {
                 .join("\n")
         })
     }
-    /// Replace the whole buffer (pre-filling the number editor with the
-    /// badge's current value); the caret lands after the last glyph.
+    /// Replace the whole buffer; the caret lands after the last glyph.
+    #[cfg(test)]
     pub(crate) fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
+        if value == self.value() {
+            self.editor.set_selection(Selection::None);
+            self.editor.set_cursor(self.cursor_for(value.len()));
+            self.changed(cx);
+            return;
+        }
         self.remember(self.editor.clone());
         self.replace(0..self.value().len(), value);
         self.editor.set_selection(Selection::None);
@@ -385,7 +396,7 @@ impl TextInput {
                     window.dispatch_action(Box::new(crate::actions::EscapeOverlay), cx);
                 }
                 "backspace" | "delete" => {
-                    record = true;
+                    let before_value = self.value();
                     if command && self.editor.selection_bounds().is_none() {
                         self.editor
                             .set_selection(Selection::Normal(self.editor.cursor()));
@@ -400,6 +411,8 @@ impl TextInput {
                     } else {
                         EditAction::Delete
                     });
+                    self.editor.set_selection(Selection::None);
+                    record = self.value() != before_value;
                 }
                 "a" if command => {
                     self.editor
@@ -410,7 +423,7 @@ impl TextInput {
                     if let Some(value) = self.editor.copy_selection() {
                         cx.write_to_clipboard(ClipboardItem::new_string(value));
                     }
-                    if key == "x" {
+                    if key == "x" && self.editor.selection_bounds().is_some_and(|(s, e)| s != e) {
                         record = true;
                         self.editor.delete_selection();
                     }
@@ -514,10 +527,26 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let had_marked = self.marked.is_some();
         let range = range
             .map(|r| self.byte_range_for_utf16(r))
             .or(self.marked.clone())
             .unwrap_or_else(|| self.selection());
+        if had_marked && value.is_empty() {
+            if let Some(original) = self.composition_start.take() {
+                self.editor = original;
+            } else {
+                self.replace(range, "");
+                self.editor.set_selection(Selection::None);
+            }
+            self.marked = None;
+            self.truncated_input = false;
+            self.changed(cx);
+            return;
+        }
+        if !had_marked && range.is_empty() && value.is_empty() {
+            return;
+        }
         let before = self.editor.clone();
         if self.replace_fitting(range, value) {
             self.remember(before);
@@ -540,19 +569,34 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.byte_range_for_utf16(r))
             .or(self.marked.clone())
             .unwrap_or_else(|| self.selection());
+        if value.is_empty() {
+            if let Some(original) = self.composition_start.take() {
+                self.editor = original;
+            } else {
+                self.replace(range, "");
+                self.editor.set_selection(Selection::None);
+            }
+            self.marked = None;
+            self.changed(cx);
+            return;
+        }
         let before = self.editor.clone();
         self.replace(range.clone(), value);
         // Keep the full preedit range even when its phonetic spelling is wider
         // than the final candidate. Only committed text is fitted to the crop.
-        if self.composition_start.is_none() {
-            self.composition_start = Some(before);
-        }
-        self.marked = (!value.is_empty()).then_some(range.start..range.start + value.len());
+        self.composition_start.get_or_insert(before);
+        self.marked = Some(range.start..range.start + value.len());
         if let Some(selection) = selection {
             let start = self.cursor_for(range.start + utf16_byte(value, selection.start));
             let end = self.cursor_for(range.start + utf16_byte(value, selection.end));
-            self.editor.set_selection(Selection::Normal(start));
+            self.editor.set_selection(if start == end {
+                Selection::None
+            } else {
+                Selection::Normal(start)
+            });
             self.editor.set_cursor(end);
+        } else {
+            self.editor.set_selection(Selection::None);
         }
         self.changed(cx);
     }
@@ -605,7 +649,7 @@ impl Render for TextInput {
                     this.focus(window, cx);
                     this.dragging = true;
                     let p = event.position - this.bounds.origin;
-                    let (x, y) = (f32::from(p.x) as i32, f32::from(p.y) as i32);
+                    let (x, y) = (f32::from(p.x).round() as i32, f32::from(p.y).round() as i32);
                     this.action(match event.click_count {
                         2 => EditAction::DoubleClick { x, y },
                         3 => EditAction::TripleClick { x, y },
@@ -619,8 +663,8 @@ impl Render for TextInput {
                 if this.dragging {
                     let p = event.position - this.bounds.origin;
                     this.action(EditAction::Drag {
-                        x: f32::from(p.x) as i32,
-                        y: f32::from(p.y) as i32,
+                        x: f32::from(p.x).round() as i32,
+                        y: f32::from(p.y).round() as i32,
                     });
                     this.changed(cx);
                 }
@@ -1105,5 +1149,99 @@ mod tests {
                 assert!((f32::from(caret.origin.y) - single_h).abs() < 1e-3);
             });
         });
+    }
+
+    #[gpui_kit::test]
+    fn ime_preedit_cancel_and_collapsed_selection_keep_history_and_state_clean(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(300., 600., 24., cx));
+        cx.update(|window, cx| {
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.replace_text_in_range(None, "base", window, cx);
+                s.replace_text_in_range(None, "!", window, cx);
+                assert_eq!(s.undo.len(), 2);
+            });
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|window, cx| {
+            input.update(cx, |s, cx| {
+                assert_eq!(s.value(), "base");
+                assert_eq!(s.undo.len(), 1);
+                assert_eq!(s.redo.len(), 1);
+
+                // Collapsed IME selection must not leave Selection::Normal active.
+                s.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                assert_eq!(s.editor.selection(), cosmic_text::Selection::None);
+                assert_eq!(s.marked, Some(4..6));
+                assert!(s.composition_start.is_some());
+
+                // Non-collapsed IME selection sets Selection::Normal.
+                s.replace_and_mark_text_in_range(None, "nihao", Some(1..3), window, cx);
+                assert_ne!(s.editor.selection(), cosmic_text::Selection::None);
+
+                // Cancelling preedit via empty replace_and_mark_text_in_range clears
+                // composition_start and marked without touching undo/redo.
+                s.replace_and_mark_text_in_range(None, "", None, window, cx);
+                assert_eq!(s.value(), "base");
+                assert!(s.marked.is_none());
+                assert!(s.composition_start.is_none());
+                assert_eq!(s.undo.len(), 1);
+                assert_eq!(s.redo.len(), 1);
+
+                // Starting and cancelling preedit via replace_text_in_range(None, "")
+                // also restores the pre-composition state and preserves undo/redo.
+                s.replace_and_mark_text_in_range(None, "pin", Some(3..3), window, cx);
+                assert!(s.composition_start.is_some());
+                s.replace_text_in_range(None, "", window, cx);
+                assert_eq!(s.value(), "base");
+                assert!(s.marked.is_none());
+                assert!(s.composition_start.is_none());
+                assert_eq!(s.undo.len(), 1);
+                assert_eq!(s.redo.len(), 1);
+
+                // Moving the cursor and later calling discard_preedit must not
+                // revert to a stale composition_start snapshot.
+                s.editor.set_cursor(cosmic_text::Cursor::new(0, 0));
+                s.discard_preedit(cx);
+                assert_eq!(s.editor.cursor(), cosmic_text::Cursor::new(0, 0));
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn noop_edits_do_not_pollute_undo_or_clear_redo(cx: &mut TestAppContext) {
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new(300., 600., 24., cx));
+        cx.update(|window, cx| {
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.replace_text_in_range(None, "ab", window, cx);
+                s.replace_text_in_range(None, "c", window, cx);
+            });
+        });
+        cx.simulate_keystrokes("ctrl-z");
+        cx.update(|window, cx| {
+            input.update(cx, |s, cx| {
+                assert_eq!(s.value(), "ab");
+                assert_eq!(s.undo.len(), 1);
+                assert_eq!(s.redo.len(), 1);
+                // No-op replace_text_in_range and set_value with identical text.
+                s.replace_text_in_range(None, "", window, cx);
+                s.set_value("ab", cx);
+                assert_eq!(s.undo.len(), 1);
+                assert_eq!(s.redo.len(), 1);
+            });
+        });
+        // No-op Ctrl+X with no selection, Delete at buffer end, and Backspace at buffer start.
+        cx.simulate_keystrokes("ctrl-x delete home backspace ctrl-backspace end ctrl-delete");
+        cx.update(|_, cx| {
+            let s = input.read(cx);
+            assert_eq!(s.value(), "ab");
+            assert_eq!(s.undo.len(), 1);
+            assert_eq!(s.redo.len(), 1);
+        });
+        cx.simulate_keystrokes("ctrl-y");
+        cx.update(|_, cx| assert_eq!(input.read(cx).value(), "abc"));
     }
 }

@@ -32,6 +32,7 @@ impl TextEditor {
         click_local: Option<Point<Pixels>>,
         cx: &mut App,
     ) -> Self {
+        let style = crate::annotation::text::TextStyle::default();
         let input = cx.new(|cx| {
             let mut input = TextInput::new_with_initial(
                 initial_text,
@@ -44,8 +45,8 @@ impl TextEditor {
             // Position the cursor at the click point so the user can
             // immediately type at the exact location they tapped.
             if let Some(click) = click_local {
-                let p = click - local;
-                let (x, y) = (f32::from(p.x) as i32, f32::from(p.y) as i32);
+                let p = click - local - point(px(style.inset()), px(style.inset()));
+                let (x, y) = (f32::from(p.x).round() as i32, f32::from(p.y).round() as i32);
                 input.action(cosmic_text::Action::Click { x, y });
             }
             input
@@ -54,7 +55,7 @@ impl TextEditor {
             input,
             font_size,
             color,
-            style: Default::default(),
+            style,
             bounds,
             local,
             visible_width: 1.,
@@ -68,8 +69,8 @@ impl TextEditor {
         let p = click - self.local - point(px(self.style.inset()), px(self.style.inset()));
         self.input.update(cx, |input, cx| {
             input.action(cosmic_text::Action::Click {
-                x: f32::from(p.x) as i32,
-                y: f32::from(p.y) as i32,
+                x: f32::from(p.x).round() as i32,
+                y: f32::from(p.y).round() as i32,
             });
             cx.notify();
         });
@@ -320,5 +321,34 @@ mod tests {
                 assert!(s.editor.actual_bounds().bottom() <= selection.bottom());
             });
         }
+    }
+
+    #[gpui_kit::test]
+    fn new_with_text_places_caret_at_end_with_clean_undo_floor(cx: &mut TestAppContext) {
+        crate::annotation::text::with_test_font(|| {
+            let selection =
+                Bounds::from_corners(point(px(20.), px(20.)), point(px(300.), px(200.)));
+            let (view, cx) = cx.add_window_view(|_, cx| EditorHarness {
+                selection,
+                editor: super::TextEditor::new_with_text(
+                    Bounds::from_corners(point(px(50.), px(50.)), point(px(120.), px(120.))),
+                    point(px(50.), px(50.)),
+                    24.,
+                    0xff0000ff,
+                    "7",
+                    None,
+                    cx,
+                ),
+            });
+            cx.update(|window, cx| {
+                view.update(cx, |s, cx| s.editor.focus(window, cx));
+            });
+            cx.simulate_input("2");
+            cx.update(|_, cx| assert_eq!(view.read(cx).editor.value(cx), "72"));
+            // Undo reverts the typed digit back to the initial "7", and a second
+            // undo does not blank the editor to "".
+            cx.simulate_keystrokes("ctrl-z ctrl-z");
+            cx.update(|_, cx| assert_eq!(view.read(cx).editor.value(cx), "7"));
+        });
     }
 }

@@ -108,16 +108,15 @@ impl Overlay {
         // scale the badge itself renders at (diameter × 0.55, the
         // layout factor in annotation::number).
         let diameter = f32::from(shape.bounds.size.width);
-        let editor = crate::ui::text_editor::TextEditor::new(
+        let editor = crate::ui::text_editor::TextEditor::new_with_text(
             shape.bounds,
             badge_local,
             diameter * 0.55,
             shape.color,
+            &shape.number.unwrap_or(1).to_string(),
+            None,
             cx,
         );
-        editor.input().update(cx, |input, cx| {
-            input.set_value(&shape.number.unwrap_or(1).to_string(), cx)
-        });
         self.subscribe_text(editor.input(), window, cx);
         self.text_editing = Some(editor);
         self.number_edit = Some((ix, shape));
