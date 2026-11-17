@@ -1401,4 +1401,157 @@ mod tests {
         assert_eq!(cursor.step(&nested_detector, 180, 156, 1), workspace.rect);
         assert_eq!(cursor.step(&nested_detector, 180, 156, 1), full);
     }
+
+    fn point_in_rounded_rect(x: i32, y: i32, rect: IntRect, radius: f32) -> bool {
+        let x0 = rect.left as f32 + 0.5;
+        let y0 = rect.top as f32 + 0.5;
+        let x1 = rect.right as f32 - 0.5;
+        let y1 = rect.bottom as f32 - 0.5;
+        let r = (radius - 0.5).max(0.5);
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let hx = (x1 - x0) * 0.5 - r;
+        let hy = (y1 - y0) * 0.5 - r;
+        let dx = (x as f32 + 0.5 - cx).abs() - hx;
+        let dy = (y as f32 + 0.5 - cy).abs() - hy;
+        let sdf = dx.max(0.).hypot(dy.max(0.)) + dx.max(dy).min(0.) - r;
+        sdf <= 0.0
+    }
+
+    #[test]
+    fn detects_split_panes_inside_floating_rounded_window() {
+        // 900×580 wallpaper desktop with a floating r = 12 px rounded IDE
+        // window `[60, 840) × [40, 540)` containing:
+        // - header bar:        [60, 840) × [40, 72)
+        // - left sidebar:      [60, 260) × [72, 510)
+        // - top-left editor:   [260, 550) × [72, 370)
+        // - top-right editor:  [550, 840) × [72, 370)
+        // - bottom terminal:   [260, 840) × [370, 510)
+        // - footer statusbar:  [60, 840) × [510, 540)
+        let (w, h) = (900, 580);
+        let window = IntRect::new(60, 40, 840, 540);
+        let header = IntRect::new(60, 40, 840, 72);
+        let sidebar = IntRect::new(60, 72, 260, 510);
+        let editor_left = IntRect::new(260, 72, 550, 370);
+        let editor_right = IntRect::new(550, 72, 840, 370);
+        let terminal = IntRect::new(260, 370, 840, 510);
+        let footer = IntRect::new(60, 510, 840, 540);
+
+        let mut image = solid_rgba(w, h, [14, 18, 26]);
+        for y in window.top..window.bottom {
+            for x in window.left..window.right {
+                if !point_in_rounded_rect(x, y, window, 12.0) {
+                    continue;
+                }
+                let rgb = if y < 72 {
+                    [26, 29, 38]
+                } else if y >= 510 {
+                    [36, 70, 126]
+                } else if x < 260 {
+                    [29, 33, 44]
+                } else if y < 370 {
+                    [34, 39, 52]
+                } else {
+                    [22, 26, 35]
+                };
+                set_px(&mut image, x, y, rgb);
+            }
+        }
+
+        // Interior 1 px divider rules meeting the straight outer window walls
+        // at tight T-junctions, with a 1 px scrollbar/antialiasing break along
+        // the editor splitter to exercise `extract_rails`'s gap tolerance.
+        let rule = [74, 82, 102];
+        fill_rect(&mut image, IntRect::new(60, 72, 840, 73), rule);
+        fill_rect(&mut image, IntRect::new(60, 509, 840, 510), rule);
+        fill_rect(&mut image, IntRect::new(260, 72, 261, 510), rule);
+        fill_rect(&mut image, IntRect::new(260, 370, 840, 371), rule);
+        fill_rect(&mut image, IntRect::new(550, 72, 551, 220), rule);
+        fill_rect(&mut image, IntRect::new(550, 221, 551, 370), rule);
+        stroke_rounded_rect(&mut image, window, 12.0, [92, 102, 126]);
+
+        paint_dense_text_block(&mut image, sidebar, [182, 190, 208]);
+        paint_dense_text_block(&mut image, editor_left, [214, 222, 236]);
+        paint_dense_text_block(&mut image, editor_right, [214, 222, 236]);
+        paint_dense_text_block(&mut image, terminal, [168, 218, 186]);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(450, 56), header, 2);
+        assert_rect_near(detector.region_at(160, 260), sidebar, 2);
+        assert_rect_near(detector.region_at(400, 210), editor_left, 2);
+        assert_rect_near(detector.region_at(700, 210), editor_right, 2);
+        assert_rect_near(detector.region_at(550, 440), terminal, 2);
+        assert_rect_near(detector.region_at(450, 525), footer, 2);
+    }
+
+    #[test]
+    fn detects_subtle_compact_controls_on_high_contrast_text_page() {
+        // 1600×900 HiDPI page (downscaled to 1280×720, scale = 1.25): dense
+        // high-contrast ink pushes `field.threshold` to its upper clamp (18),
+        // while compact 28 px-tall controls (`~22` analysis px < old 24 px
+        // `weak_lines` floor) have subtle 1 px borders with contrast = 10.
+        let (w, h) = (1600, 900);
+        let subtle_button = IntRect::new(120, 80, 280, 108);
+        let subtle_input = IntRect::new(320, 80, 580, 108);
+        let bg = [246, 248, 250];
+        let subtle_border = [236, 238, 240];
+
+        let mut image = solid_rgba(w, h, bg);
+        // Subtle filled compact button (step contrast = 10) and subtle 1 logical-px
+        // (2 physical-px on HiDPI) bordered compact input (stroke contrast = 10).
+        fill_rect(&mut image, subtle_button, subtle_border);
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.top,
+                subtle_input.right,
+                subtle_input.top + 2,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.bottom - 2,
+                subtle_input.right,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.top,
+                subtle_input.left + 2,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.right - 2,
+                subtle_input.top,
+                subtle_input.right,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+
+        // High-contrast body copy elsewhere on the page drives the gradient
+        // histogram's 35th percentile to the global threshold clamp (18).
+        paint_dense_text_block(&mut image, IntRect::new(100, 180, 1500, 820), [20, 24, 32]);
+
+        let (analysis_w, analysis_h) = analysis_size(w, h);
+        let downscaled = super::image::downscale(&image.view(), analysis_w, analysis_h);
+        let field = build_edge_field(downscaled.view());
+        assert_eq!(field.threshold, 18);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(200, 94), subtle_button, 2);
+        assert_rect_near(detector.region_at(450, 94), subtle_input, 2);
+    }
 }
