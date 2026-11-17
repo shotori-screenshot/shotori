@@ -84,6 +84,12 @@ impl SettingsWindow {
             ))
             .child(super::layout::section_block(
                 cx,
+                Some(crate::i18n::t!("settings.appearance.ui_style").as_ref()),
+                None,
+                self.style_choices(window, cx),
+            ))
+            .child(super::layout::section_block(
+                cx,
                 Some(crate::i18n::t!("settings.appearance.base_palette").as_ref()),
                 palette_badge,
                 self.theme_choices(window, cx),

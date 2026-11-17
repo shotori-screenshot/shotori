@@ -23,7 +23,12 @@ use gpui_kit::{
     *,
 };
 
+use crate::model::placement::{
+    BAR_PAD, CAPSULE_BAR_PAD, CAPSULE_BTN_GAP, CAPSULE_BTN_SIZE, CAPSULE_ROW_H, GRIP_W, ROW_H,
+    row_gap_for, row_height_for,
+};
 use crate::model::session::ScreenshotSession;
+use crate::model::settings::UiStyle;
 use crate::ui::{color_picker::ColorPicker, theme};
 
 use crate::actions::{
@@ -32,7 +37,6 @@ use crate::actions::{
     ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline,
     ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText,
 };
-use crate::model::placement::{GRIP_W, ROW_H};
 
 // The default GPUI asset bundle does not include every toolbar icon.
 gpui_kit::assets::icon_assets!(
@@ -151,12 +155,21 @@ impl AssetSource for ToolbarSource {
     }
 }
 
+/// Resolve the explicit SVG paint color for a toolbar glyph: in Capsule
+/// style a selected button fills with solid `accent`, so its glyph switches
+/// to `accent_text()` for guaranteed >= 4.5:1 contrast.
+pub(super) fn icon_tint(style: UiStyle, selected: bool) -> u32 {
+    let t = theme::c();
+    if style == UiStyle::Capsule && selected {
+        t.capsule_on_accent()
+    } else {
+        t.toolbar_text
+    }
+}
+
 /// One of the app's own icons (see [`OwnIcons`]).
-fn own_icon(path: &'static str) -> Svg {
-    svg()
-        .path(path)
-        .size(px(18.))
-        .text_color(rgba(theme::c().toolbar_text))
+fn own_icon_colored(path: &'static str, color: u32) -> Svg {
+    svg().path(path).size(px(18.)).text_color(rgba(color))
 }
 
 /// The active tool's size-slider bundle. The overlay owns the
@@ -180,12 +193,20 @@ pub(crate) enum ButtonIcon {
 
 impl ButtonIcon {
     pub(crate) fn svg(self) -> Svg {
+        self.svg_colored(theme::c().toolbar_text)
+    }
+
+    pub(crate) fn svg_for(self, style: UiStyle, selected: bool) -> Svg {
+        self.svg_colored(icon_tint(style, selected))
+    }
+
+    fn svg_colored(self, color: u32) -> Svg {
         match self {
             Self::Kit(name) => svg().path(name.path()),
             Self::Own(path) => svg().path(path),
         }
         .size(px(18.))
-        .text_color(rgba(theme::c().toolbar_text))
+        .text_color(rgba(color))
     }
 }
 
@@ -526,6 +547,7 @@ impl ButtonMeta {
 /// visibility, the row's order IS the layout. The factory row
 /// reproduces the historical two-cluster look through its separators.
 fn row_one(
+    style: UiStyle,
     annotations: &crate::annotation::Annotations,
     focus: &FocusHandle,
     settings: &crate::model::settings::Settings,
@@ -543,7 +565,9 @@ fn row_one(
                     // (button_table_matches_the_settings_vocabulary)
                     return div().into_any_element();
                 };
-                control(
+                let selected = selected_state(button, annotations);
+                control_for(
+                    style,
                     meta.debug_id.into(),
                     meta.tooltip_for(settings.keys()),
                     focus.clone(),
@@ -551,16 +575,18 @@ fn row_one(
                         window.dispatch_action(action_for(button), cx);
                     },
                 )
-                .selected(selected_state(button, annotations))
-                .child(meta.icon.svg())
+                .selected(selected)
+                .child(meta.icon.svg_for(style, selected))
                 .into_any_element()
             }
-            ToolbarItem::Separator => separator().into_any_element(),
+            ToolbarItem::Separator => separator_for(style).into_any_element(),
         })
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn selection_toolbar(
+    style: UiStyle,
     rect: Bounds<Pixels>,
     output: SharedString,
     annotations: &crate::annotation::Annotations,
@@ -578,7 +604,7 @@ pub(crate) fn selection_toolbar(
     // row one below reads it, placement's width basis reads the same.
     let settings = crate::model::settings::current();
 
-    div()
+    let mut root = div()
         .id("shotori-toolbar")
         .absolute()
         .left(rect.origin.x)
@@ -587,32 +613,41 @@ pub(crate) fn selection_toolbar(
         .w(rect.size.width)
         .flex()
         .flex_col()
-        .items_start()
-        .gap(px(6.))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(row::ToolbarRow::new(
-            "toolbar-actions-scroll",
+        .gap(px(row_gap_for(style)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+    root = match style {
+        UiStyle::Classic => root.items_start(),
+        UiStyle::Capsule => root.items_center(),
+    };
+    root.child(row::ToolbarRow::new(
+        "toolbar-actions-scroll",
+        rect.size.width,
+        bar_for(style)
+            .child(grip_for(
+                style,
+                "tb-grip-left",
+                output.clone(),
+                session.clone(),
+            ))
+            .children(row_one(style, annotations, &focus, settings))
+            .child(grip_for(style, "tb-grip-right", output, session.clone())),
+    ))
+    .children(edit_kind.is_some().then(|| {
+        row::ToolbarRow::new(
+            "annotation-options-scroll",
             rect.size.width,
-            bar()
-                .child(grip("tb-grip-left", output.clone(), session.clone()))
-                .children(row_one(annotations, &focus, settings))
-                .child(grip("tb-grip-right", output, session.clone())),
-        ))
-        .children(edit_kind.is_some().then(|| {
-            row::ToolbarRow::new(
-                "annotation-options-scroll",
-                rect.size.width,
-                annot_options(
-                    edit_kind,
-                    annotations,
-                    &session,
-                    &focus,
-                    &size_slider,
-                    &swatch_picker,
-                    selected_color,
-                ),
-            )
-        }))
+            annot_options(
+                style,
+                edit_kind,
+                annotations,
+                &session,
+                &focus,
+                &size_slider,
+                &swatch_picker,
+                selected_color,
+            ),
+        )
+    }))
 }
 
 /// gpui's 0xRRGGBBAA → picker color.
@@ -640,11 +675,48 @@ pub(crate) fn hsla_to_u32(color: Hsla) -> u32 {
 /// legacy presets as clickable detents on the track. Behavior comes
 /// from the base primitives (track click-to-position, thumb drag);
 /// this is presentation only.
-fn size_control(sc: &SizeSlider, suffix: &str) -> Div {
-    /// track length; the thumb travels TRACK_W - THUMB inside it
+fn size_control_for(style: UiStyle, sc: &SizeSlider, suffix: &str) -> Div {
     const TRACK_W: f32 = 108.;
-    const THUMB: f32 = 12.;
+    let thumb_size: f32 = match style {
+        UiStyle::Classic => 12.,
+        UiStyle::Capsule => 14.,
+    };
+    let t = theme::c();
     let state = &sc.state;
+    let travel = TRACK_W - thumb_size;
+    let fill_w = (sc.percentage * travel).clamp(0., travel);
+
+    let thumb = match style {
+        UiStyle::Classic => SliderThumb::new(state)
+            .debug_selector(|| "annotation-slider-thumb".into())
+            .absolute()
+            .top(px(10. - thumb_size / 2.))
+            .left(px(fill_w))
+            .size(px(thumb_size))
+            .rounded_full()
+            .bg(rgba(t.toolbar_text))
+            .border_1()
+            .border_color(rgba(t.toolbar_bg)),
+        UiStyle::Capsule => SliderThumb::new(state)
+            .debug_selector(|| "annotation-slider-thumb".into())
+            .absolute()
+            .top(px(10. - thumb_size / 2.))
+            .left(px(fill_w))
+            .size(px(thumb_size))
+            .rounded_full()
+            .bg(rgba(0xFFFFFFFF))
+            .border_1()
+            .border_color(rgba(0x00000033))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(1.), rgba(0x00000040).into()).blur_radius(px(3.)),
+            ]),
+    };
+
+    let track_bg = match style {
+        UiStyle::Classic => rgba(t.toolbar_border),
+        UiStyle::Capsule => rgba(theme::alpha(t.toolbar_border, 0x99)),
+    };
+
     div()
         .flex()
         .items_center()
@@ -664,41 +736,45 @@ fn size_control(sc: &SizeSlider, suffix: &str) -> Div {
                         .child(
                             SliderTrack::new(state)
                                 .absolute()
-                                .left(px(THUMB / 2.))
+                                .left(px(thumb_size / 2.))
                                 .top(px(8.))
-                                .w(px(TRACK_W - THUMB))
+                                .w(px(travel))
                                 .h(px(4.))
                                 .rounded_full()
-                                .bg(rgba(theme::c().toolbar_border))
+                                .bg(track_bg)
+                                .children((style == UiStyle::Capsule).then(|| {
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top_0()
+                                        .h_full()
+                                        .w(px(fill_w))
+                                        .rounded_full()
+                                        .bg(rgba(t.accent))
+                                }))
                                 // the indicator is the bounds probe the
                                 // track's click-to-position maps through
                                 .child(SliderIndicator::new(state).size_full()),
                         ),
                 )
-                .child(
-                    SliderThumb::new(state)
-                        .debug_selector(|| "annotation-slider-thumb".into())
-                        .absolute()
-                        .top(px(10. - THUMB / 2.))
-                        .left(px(sc.percentage * (TRACK_W - THUMB)))
-                        .size(px(THUMB))
-                        .rounded_full()
-                        .bg(rgba(theme::c().toolbar_text))
-                        .border_1()
-                        .border_color(rgba(theme::c().toolbar_bg)),
-                ),
+                .child(thumb),
         )
         .child(
             div()
                 .debug_selector(|| "tb-size-readout".to_string())
                 .w(px(26.))
                 .text_size(px(12.))
-                .text_color(rgba(theme::c().toolbar_text))
+                .text_color(rgba(if style == UiStyle::Capsule {
+                    t.hint_text
+                } else {
+                    t.toolbar_text
+                }))
                 .child(format!("{:.0}{suffix}", sc.current)),
         )
 }
 
-fn grip(
+fn grip_for(
+    style: UiStyle,
     id: &'static str,
     output: SharedString,
     session: Entity<ScreenshotSession>,
@@ -707,19 +783,20 @@ fn grip(
     // on_mouse_down and the measure canvas each own a handle — both
     // outlive this function.
     let (measure_output, measure_session) = (output.clone(), session.clone());
-    div()
+    let mut el = div()
         .id(id)
         // probe visibility: the cursor-alignment tests assert this
         // element's laid-out rect equals `session::toolbar_grips`
         .debug_selector(move || id.to_string())
         // Full row height, and offset only by the bar's side padding —
         // the element's rect is then EXACTLY the strip the cursor
-        // should grab (row one only, BAR_PAD inset, ROW_H tall): every
-        // pixel that shows the hand grabs, every pixel that grabs shows
+        // should grab (row one only, `bar_pad_for` inset, `row_height_for` tall):
+        // every pixel that shows the hand grabs, every pixel that grabs shows
         // the hand.
-        .h(px(ROW_H))
+        .h(px(row_height_for(style)))
         .w(px(GRIP_W))
         .flex()
+        .items_center()
         .on_mouse_down(MouseButton::Left, move |ev, _, cx| {
             session.update(cx, |s, cx| {
                 if s.toolbar_drag_begin(&output, ev.position) {
@@ -727,8 +804,11 @@ fn grip(
                 }
             });
             cx.stop_propagation(); // the press belongs to the toolbar, not the canvas
-        })
-        .child(grip_texture())
+        });
+    if style == UiStyle::Capsule {
+        el = el.justify_center();
+    }
+    el.child(grip_visual(style))
         .child(measure_grip(measure_output, measure_session, left))
 }
 
@@ -786,38 +866,66 @@ pub(crate) fn grip_texture() -> impl IntoElement {
         }))
 }
 
-/// The move handle's grip: a compact 3×2 dot matrix.
-///
-/// Deliberately NOT [`grip_texture`]: that one is a 21 px tall 3×7
-/// matrix sized for the 30 px toolbar, and pressing it into the 16 px
-/// capture-region chip made the dots overflow the capsule and read as
-/// noise on top of the page ("这个把手样式不太对"). Two rows fit, echo
-/// the same texture language, and survive being seen at 14 px.
-pub(crate) fn chip_grip() -> impl IntoElement {
-    let grain = (theme::c().accent & 0xFFFFFF00) | 0xD0;
-    div()
-        .flex()
-        .gap(px(2.))
-        .items_center()
-        .children((0..3).map(|_| {
+/// Style-dispatched drag handle visual, reused by the settings editor's
+/// live toolbar preview.
+pub(crate) fn grip_visual(style: UiStyle) -> AnyElement {
+    match style {
+        UiStyle::Classic => grip_texture().into_any_element(),
+        UiStyle::Capsule => {
+            let pill = (theme::c().toolbar_text & 0xFFFFFF00) | 0x3D;
+            div()
+                .w(px(3.5))
+                .h(px(16.))
+                .rounded_full()
+                .bg(rgba(pill))
+                .into_any_element()
+        }
+    }
+}
+
+/// The move handle's grip: a compact 3×2 dot matrix in Classic, or a
+/// sleek horizontal grabber bar in Capsule style.
+pub(crate) fn chip_grip_for(style: UiStyle) -> AnyElement {
+    match style {
+        UiStyle::Classic => {
+            let grain = (theme::c().accent & 0xFFFFFF00) | 0xD0;
             div()
                 .flex()
-                .flex_col()
                 .gap(px(2.))
-                .children((0..2).map(|_| div().size(px(2.)).rounded_full().bg(rgba(grain))))
-        }))
+                .items_center()
+                .children((0..3).map(|_| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .children((0..2).map(|_| div().size(px(2.)).rounded_full().bg(rgba(grain))))
+                }))
+                .into_any_element()
+        }
+        UiStyle::Capsule => {
+            let pill = (theme::c().toolbar_text & 0xFFFFFF00) | 0x70;
+            div()
+                .w(px(18.))
+                .h(px(3.5))
+                .rounded_full()
+                .bg(rgba(pill))
+                .into_any_element()
+        }
+    }
 }
 
 /// A non-dispatching control for the settings editor's preview bar:
-/// the exact 30px look of the real button, but the click belongs to
-/// the editor (remove), never to the action itself.
-pub(crate) fn preview_control(
+/// matches the active [`UiStyle`]'s button geometry, while the click
+/// belongs to the editor (remove), never to the action itself.
+pub(crate) fn preview_control_for(
+    style: UiStyle,
     meta: &ButtonMeta,
     keys: &std::collections::BTreeMap<String, String>,
     focus: &FocusHandle,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Button {
-    control(
+    control_for(
+        style,
         meta.debug_id.into(),
         meta.tooltip_for(keys),
         focus.clone(),
@@ -827,34 +935,59 @@ pub(crate) fn preview_control(
 }
 
 /// The bar container — shared with the settings editor's preview.
-pub(crate) fn bar() -> Div {
-    div()
-        .text_color(rgba(theme::c().toolbar_text))
-        .flex()
-        .items_center()
-        .gap(px(2.))
-        .h(px(ROW_H))
-        .px(px(crate::model::placement::BAR_PAD))
-        .rounded(px(8.))
-        .bg(rgba(theme::c().toolbar_bg))
-        .border_1()
-        .border_color(rgba(theme::c().toolbar_border))
-        .shadow_md()
+pub(crate) fn bar_for(style: UiStyle) -> Div {
+    let t = theme::c();
+    match style {
+        UiStyle::Classic => div()
+            .text_color(rgba(t.toolbar_text))
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .h(px(ROW_H))
+            .px(px(BAR_PAD))
+            .rounded(px(8.))
+            .bg(rgba(t.toolbar_bg))
+            .border_1()
+            .border_color(rgba(t.toolbar_border))
+            .shadow_md(),
+        UiStyle::Capsule => div()
+            .text_color(rgba(t.toolbar_text))
+            .flex()
+            .items_center()
+            .gap(px(CAPSULE_BTN_GAP))
+            .h(px(CAPSULE_ROW_H))
+            .px(px(CAPSULE_BAR_PAD))
+            .rounded(px(14.))
+            .bg(rgba(t.capsule_surface()))
+            .border_1()
+            .border_color(rgba(t.capsule_border()))
+            .shadow(theme::capsule_floating_shadow()),
+    }
 }
 
 /// The 1px group break — shared with the settings editor's preview.
-pub(crate) fn separator() -> Div {
-    div()
-        .w(px(1.))
-        .h(px(18.))
-        .mx(px(4.))
-        .bg(rgba(theme::c().toolbar_border))
+pub(crate) fn separator_for(style: UiStyle) -> Div {
+    let t = theme::c();
+    match style {
+        UiStyle::Classic => div()
+            .w(px(1.))
+            .h(px(18.))
+            .mx(px(4.))
+            .bg(rgba(t.toolbar_border)),
+        UiStyle::Capsule => div()
+            .w(px(1.))
+            .h(px(20.))
+            .mx(px(5.))
+            .rounded_full()
+            .bg(rgba(t.capsule_border())),
+    }
 }
 
 /// Restore the canvas focus BEFORE changing toolbar state. A focused control
 /// may disappear on redraw (e.g. leaving rectangle mode), otherwise scoped
 /// shortcut dispatch no longer has the screenshot root in its focus path.
-fn control(
+fn control_for(
+    style: UiStyle,
     id: String,
     label: String,
     focus: FocusHandle,
@@ -862,7 +995,8 @@ fn control(
 ) -> Button {
     let selector = id.clone();
     let tooltip: SharedString = label.clone().into();
-    Button::new(SharedString::from(id))
+    let t = theme::c();
+    let base = Button::new(SharedString::from(id))
         .debug_selector(move || selector)
         .accessibility_label(label)
         .tooltip(move |_, cx| cx.new(|_| ToolbarTooltip(tooltip.clone())).into())
@@ -870,34 +1004,49 @@ fn control(
             window.focus(&focus, cx);
             on_click(window, cx);
         })
-        .size(px(30.))
         .flex_shrink_0()
-        .rounded(px(5.))
-        .text_color(rgba(theme::c().toolbar_text))
-        .hover(|s| s.bg(rgba(theme::c().toolbar_hover)))
-        .focus_visible(|s| s.border_1().border_color(rgba(theme::c().accent)))
-        .styles(|s| {
-            s.selected(|s| {
-                s.bg(rgba(theme::c().toolbar_selected))
-                    .text_color(rgba(theme::c().selected_text()))
-                    .border_1()
-                    .border_color(rgba(theme::c().accent))
-            })
-        })
+        .text_color(rgba(t.toolbar_text))
+        .focus_visible(move |s| s.border_1().border_color(rgba(t.accent)));
+
+    match style {
+        UiStyle::Classic => base
+            .size(px(30.))
+            .rounded(px(5.))
+            .hover(move |s| s.bg(rgba(t.toolbar_hover)))
+            .styles(move |s| {
+                s.selected(move |s| {
+                    s.bg(rgba(t.toolbar_selected))
+                        .text_color(rgba(t.selected_text()))
+                        .border_1()
+                        .border_color(rgba(t.accent))
+                })
+            }),
+        UiStyle::Capsule => base
+            .size(px(CAPSULE_BTN_SIZE))
+            .rounded(px(8.))
+            .hover(move |s| s.bg(rgba(t.capsule_hover())))
+            .styles(move |s| {
+                s.selected(move |s| s.bg(rgba(t.accent)).text_color(rgba(t.capsule_on_accent())))
+            }),
+    }
 }
 
-fn choice_menu<T: Copy + PartialEq + 'static, V: Copy + 'static>(
+#[allow(clippy::too_many_arguments)]
+fn choice_menu_for<T: Copy + PartialEq + 'static, V: Copy + 'static>(
+    style: UiStyle,
     id: &'static str,
     label: &'static str,
     value: T,
     choices: &'static [(T, &'static str, V)],
     focus: &FocusHandle,
-    preview: fn(V) -> Svg,
+    preview: fn(V, u32) -> Svg,
     apply: impl Fn(T, &mut App) + 'static,
 ) -> impl IntoElement {
     let selected = choices.iter().find(|(choice, _, _)| *choice == value);
     let current_label = selected.map(|(_, key, _)| *key).unwrap_or(label);
-    let trigger = control(
+    let fg = theme::c().toolbar_text;
+    let trigger = control_for(
+        style,
         id.into(),
         crate::i18n::t!(current_label).into_owned(),
         focus.clone(),
@@ -905,44 +1054,54 @@ fn choice_menu<T: Copy + PartialEq + 'static, V: Copy + 'static>(
     )
     // Popover owns focus after mouse-down; activation must not return it to the canvas.
     .on_click(|_, _, _| {})
-    .w(px(38.))
+    .w(px(if style == UiStyle::Capsule { 42. } else { 38. }))
     .p(px(0.))
     .child(
         div()
             .flex()
             .items_center()
-            .children(selected.map(|(_, _, icon)| preview(*icon)))
+            .gap(px(if style == UiStyle::Capsule { 1. } else { 0. }))
+            .children(selected.map(|(_, _, icon)| preview(*icon, fg)))
             .child(annot_options::menu_icon(IconName::ChevronDown, 10.)),
     );
     let focus = focus.clone();
     let apply = std::rc::Rc::new(apply);
-    gpui_kit::component::popover::Popover::new(id)
-        .p(px(0.))
-        .bg(rgba(theme::c().toolbar_bg))
-        .trigger(trigger)
-        .content(move |_, _, cx| {
-            let popup = cx.entity();
-            let mut panel = annotation_menu_panel().flex().flex_col().gap(px(2.));
-            for &(choice, key, path) in choices {
-                let apply = apply.clone();
-                let popup = popup.clone();
-                panel = panel.child(
-                    control(
-                        key.into(),
-                        crate::i18n::t!(key).into_owned(),
-                        focus.clone(),
-                        move |window, cx| {
-                            popup.update(cx, |state, cx| state.dismiss(window, cx));
-                            apply(choice, cx);
-                        },
-                    )
-                    .w(px(34.))
-                    .selected(choice == value)
-                    .child(preview(path)),
-                );
-            }
-            panel
-        })
+    let t = theme::c();
+    let mut pop = gpui_kit::component::popover::Popover::new(id).p(px(0.));
+    pop = match style {
+        UiStyle::Classic => pop.bg(rgba(t.toolbar_bg)),
+        UiStyle::Capsule => pop
+            .rounded(px(12.))
+            .bg(rgba(t.capsule_sheet_surface()))
+            .border_1()
+            .border_color(rgba(t.capsule_border()))
+            .shadow(theme::capsule_floating_shadow()),
+    };
+    pop.trigger(trigger).content(move |_, _, cx| {
+        let popup = cx.entity();
+        let mut panel = annotation_menu_panel().flex().flex_col().gap(px(2.));
+        for &(choice, key, path) in choices {
+            let apply = apply.clone();
+            let popup = popup.clone();
+            let is_sel = choice == value;
+            panel = panel.child(
+                control_for(
+                    style,
+                    key.into(),
+                    crate::i18n::t!(key).into_owned(),
+                    focus.clone(),
+                    move |window, cx| {
+                        popup.update(cx, |state, cx| state.dismiss(window, cx));
+                        apply(choice, cx);
+                    },
+                )
+                .w(px(if style == UiStyle::Capsule { 36. } else { 34. }))
+                .selected(is_sel)
+                .child(preview(path, icon_tint(style, is_sel))),
+            );
+        }
+        panel
+    })
 }
 
 /// Deferred menu surfaces must consume presses before the window-level canvas listener.
@@ -957,16 +1116,32 @@ fn annotation_menu_panel() -> Div {
 pub(crate) struct ToolbarTooltip(pub(crate) SharedString);
 impl Render for ToolbarTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_2()
-            .py_1()
-            .rounded(px(5.))
-            .bg(rgba(theme::c().toolbar_bg))
-            .border_1()
-            .border_color(rgba(theme::c().toolbar_border))
-            .text_size(px(12.))
-            .text_color(rgba(theme::c().toolbar_text))
-            .child(self.0.clone())
+        let t = theme::c();
+        match crate::model::settings::current().ui_style() {
+            UiStyle::Classic => div()
+                .px_2()
+                .py_1()
+                .rounded(px(5.))
+                .bg(rgba(t.toolbar_bg))
+                .border_1()
+                .border_color(rgba(t.toolbar_border))
+                .text_size(px(12.))
+                .text_color(rgba(t.toolbar_text))
+                .child(self.0.clone()),
+            UiStyle::Capsule => div()
+                .px(px(9.))
+                .py(px(4.))
+                .rounded(px(7.))
+                .bg(rgba(t.capsule_sheet_surface()))
+                .border_1()
+                .border_color(rgba(t.capsule_border()))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(3.), rgba(0x00000038).into()).blur_radius(px(10.)),
+                ])
+                .text_size(px(11.5))
+                .text_color(rgba(t.toolbar_text))
+                .child(self.0.clone()),
+        }
     }
 }
 

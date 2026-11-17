@@ -14,13 +14,19 @@ use gpui_kit::{
 
 #[derive(IntoElement)]
 pub(super) struct TextOptions {
+    style: UiStyle,
     session: Entity<ScreenshotSession>,
     focus: FocusHandle,
 }
 
 impl TextOptions {
-    pub(super) fn new(session: &Entity<ScreenshotSession>, focus: &FocusHandle) -> Self {
+    pub(super) fn new(
+        style: UiStyle,
+        session: &Entity<ScreenshotSession>,
+        focus: &FocusHandle,
+    ) -> Self {
         Self {
+            style,
             session: session.clone(),
             focus: focus.clone(),
         }
@@ -231,6 +237,7 @@ fn rgba_value(value: Hsla) -> u32 {
 
 impl RenderOnce for TextOptions {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let ui_style = self.style;
         let session = self.session.clone();
         let return_focus = self.focus.clone();
         let state = window.use_keyed_state("annotation-text-controls", cx, |window, cx| {
@@ -239,7 +246,10 @@ impl RenderOnce for TextOptions {
         state.update(cx, |controls, _| controls.return_focus = self.focus.clone());
         let controls = state.read(cx);
         let style = self.session.read(cx).annotations().text_style().clone();
-        let mut row = div().flex().items_center().gap(px(2.));
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(px(if ui_style == UiStyle::Capsule { 3. } else { 2. }));
         for (id, active, icon, change) in [
             (
                 "toolbar.text_bold",
@@ -277,14 +287,19 @@ impl RenderOnce for TextOptions {
         ] {
             let session = self.session.clone();
             row = row.child(
-                control(
+                control_for(
+                    ui_style,
                     id.trim_start_matches("toolbar.").into(),
                     crate::i18n::t!(id).into_owned(),
                     self.focus.clone(),
                     move |_, cx| edit(&session, cx, change),
                 )
                 .selected(active)
-                .child(annot_options::menu_icon(icon, 18.)),
+                .child(annot_options::menu_icon_colored(
+                    icon,
+                    18.,
+                    icon_tint(ui_style, active),
+                )),
             );
             // Keep each enabled color next to its toggle. Nesting a picker inside
             // another popover lets the parent dismiss before a palette click finishes.
@@ -303,71 +318,83 @@ impl RenderOnce for TextOptions {
                     _ => None,
                 };
                 if let Some((picker, selector, label)) = color {
-                    row = row.child(div().debug_selector(move || selector.into()).child(
-                        ColorPicker::new(picker, crate::i18n::t!(label).into_owned()),
-                    ));
+                    row = row.child(
+                        div().debug_selector(move || selector.into()).child(
+                            ColorPicker::new(picker, crate::i18n::t!(label).into_owned())
+                                .capsule_ring(ui_style == UiStyle::Capsule),
+                        ),
+                    );
                 }
             }
         }
         if style.background.is_some() {
             let padding = controls.padding.clone();
             let radius = controls.radius.clone();
+            let t = theme::c();
+            let mut pop = Popover::new("text-background-options").p(px(0.));
+            pop = match ui_style {
+                UiStyle::Classic => pop.bg(rgba(t.toolbar_bg)),
+                UiStyle::Capsule => pop
+                    .rounded(px(12.))
+                    .bg(rgba(t.capsule_sheet_surface()))
+                    .border_1()
+                    .border_color(rgba(t.capsule_border()))
+                    .shadow(theme::capsule_floating_shadow()),
+            };
             row = row.child(
-                Popover::new("text-background-options")
-                    .p(px(0.))
-                    .bg(rgba(theme::c().toolbar_bg))
-                    .on_open_change({
-                        let session = self.session.clone();
-                        let focus = self.focus.clone();
-                        move |open, window, cx| {
-                            if !open {
-                                window.focus(&focus, cx);
-                            }
-                            session.update(cx, |s, _| {
-                                s.edit_annotation_settings(|a| a.end_size_drag());
-                            });
+                pop.on_open_change({
+                    let session = self.session.clone();
+                    let focus = self.focus.clone();
+                    move |open, window, cx| {
+                        if !open {
+                            window.focus(&focus, cx);
                         }
-                    })
-                    .trigger(
-                        control(
-                            "text-background-options".into(),
-                            crate::i18n::t!("toolbar.text_background_settings").into_owned(),
-                            self.focus.clone(),
-                            |_, _| {},
-                        )
-                        .on_click(|_, _, _| {})
-                        .child(annot_options::menu_icon(IconName::Settings2, 18.)),
+                        session.update(cx, |s, _| {
+                            s.edit_annotation_settings(|a| a.end_size_drag());
+                        });
+                    }
+                })
+                .trigger(
+                    control_for(
+                        ui_style,
+                        "text-background-options".into(),
+                        crate::i18n::t!("toolbar.text_background_settings").into_owned(),
+                        self.focus.clone(),
+                        |_, _| {},
                     )
-                    .content(move |_, _, cx| {
-                        annotation_menu_panel().flex().flex_col().gap_2().children(
-                            [
-                                (&padding, "toolbar.text_padding"),
-                                (&radius, "toolbar.corner_radius"),
-                            ]
-                            .into_iter()
-                            .map(|(state, key)| {
-                                let sc = SizeSlider {
-                                    state: state.clone(),
-                                    current: state.read(cx).value().start(),
-                                    percentage: state.read(cx).percentage().end,
-                                };
-                                div()
-                                    .debug_selector(move || key.to_owned())
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .w(rems(7.))
-                                            .flex_shrink_0()
-                                            .whitespace_nowrap()
-                                            .child(crate::i18n::t!(key).into_owned()),
-                                    )
-                                    .child(size_control(&sc, ""))
-                            }),
-                        )
-                    }),
+                    .on_click(|_, _, _| {})
+                    .child(annot_options::menu_icon(IconName::Settings2, 18.)),
+                )
+                .content(move |_, _, cx| {
+                    annotation_menu_panel().flex().flex_col().gap_2().children(
+                        [
+                            (&padding, "toolbar.text_padding"),
+                            (&radius, "toolbar.corner_radius"),
+                        ]
+                        .into_iter()
+                        .map(|(state, key)| {
+                            let sc = SizeSlider {
+                                state: state.clone(),
+                                current: state.read(cx).value().start(),
+                                percentage: state.read(cx).percentage().end,
+                            };
+                            div()
+                                .debug_selector(move || key.to_owned())
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .w(rems(7.))
+                                        .flex_shrink_0()
+                                        .whitespace_nowrap()
+                                        .child(crate::i18n::t!(key).into_owned()),
+                                )
+                                .child(size_control_for(ui_style, &sc, ""))
+                        }),
+                    )
+                }),
             );
         }
         let font = controls.font.clone();

@@ -177,7 +177,10 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(crate::ui::hud::selection_backdrop(Some(self.selection)))
+                .child(crate::ui::hud::selection_backdrop(
+                    crate::model::settings::UiStyle::Classic,
+                    Some(self.selection),
+                ))
                 .child(self.editor.render())
         }
     }

@@ -214,6 +214,13 @@ pub(crate) fn debug_editing_scene(
         });
         return;
     }
+    if scene == "loupe" {
+        let origin = session.to_global(output, point(px(0.), px(0.)));
+        let br = bounds.bottom_right() - origin;
+        session.pointer_down(output, br, false, false);
+        session.pointer_move(output, br + point(px(14.), px(14.)), false);
+        return;
+    }
     if !matches!(scene.as_str(), "hover" | "selected" | "reselect" | "cancel") {
         return;
     }
@@ -244,6 +251,13 @@ pub(crate) fn debug_editing_scene(
             session.cancel_annotation();
         }
     }
+}
+
+/// Optional override for headless UI style reviews (`SHOTORI_DEBUG_UI_STYLE=classic|capsule`).
+pub(crate) fn debug_ui_style() -> Option<crate::model::settings::UiStyle> {
+    std::env::var("SHOTORI_DEBUG_UI_STYLE")
+        .ok()
+        .and_then(|value| crate::model::settings::UiStyle::from_id(value.trim()))
 }
 
 /// Which settings page to open on. `None` (unset or unknown name) keeps

@@ -928,6 +928,87 @@ fn toolbar_hugs_its_content(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn capsule_toolbar_centers_and_grips_align_with_render(cx: &mut TestAppContext) {
+    use crate::model::settings::UiStyle;
+    cx.update(|cx| {
+        gpui_kit::base::init(cx);
+        gpui_kit::component::init(cx);
+        crate::actions::init_annotation_keybindings(cx);
+    });
+    let mut capture = Capture::for_test((0, 0), 1.);
+    capture.output_name = "main".into();
+    capture.width = 1400;
+    capture.height = 900;
+    capture.rgba = vec![255; 1400 * 900 * 4];
+    let capture = Arc::new(capture);
+    let session = cx.new(|_| {
+        let mut s = ScreenshotSession::new(vec![capture.clone()], Vec::new());
+        s.set_ui_style(UiStyle::Capsule);
+        s
+    });
+    let (_overlay, vcx) =
+        cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+    vcx.simulate_resize(size(px(1400.), px(900.)));
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    vcx.run_until_parked();
+
+    // Selection centered at x = 700 (500..900), y = 200..500
+    vcx.simulate_mouse_down(
+        point(px(500.), px(200.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    vcx.simulate_mouse_move(
+        point(px(900.), px(500.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    vcx.simulate_mouse_up(
+        point(px(900.), px(500.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // Verify centered placement & exact Capsule basis width
+    let expected_w = crate::model::placement::row1_basis_for(
+        UiStyle::Capsule,
+        crate::model::settings::current(),
+    );
+    vcx.update(|_, cx| {
+        let b = session.read(cx).toolbar_bounds("main").unwrap();
+        assert_eq!(b.size.width, px(expected_w));
+        assert_eq!(b.size.height, px(crate::model::placement::CAPSULE_ROW_H));
+        assert_eq!(b.origin.x, px(700. - expected_w * 0.5));
+    });
+
+    // Verify rendered grips match session's cursor grab strips pixel-for-pixel
+    let (gl, gr) = (
+        vcx.debug_bounds("tb-grip-left").unwrap(),
+        vcx.debug_bounds("tb-grip-right").unwrap(),
+    );
+    vcx.update(|_, cx| {
+        let (l, r) = session.read(cx).toolbar_grips("main").unwrap();
+        assert_eq!(gl, l);
+        assert_eq!(gr, r);
+    });
+
+    // Open Row 2 (Rectangle options): verify centered inspector pill & circular swatches
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    let options = vcx.debug_bounds("tb-options").unwrap();
+    let options_mid = f32::from(options.left() + options.size.width * 0.5);
+    assert!(
+        (options_mid - 700.).abs() <= 1.5,
+        "Capsule inspector row should center at x=700, got midpoint {options_mid}"
+    );
+    let swatch = vcx.debug_bounds("tb-color-5").unwrap();
+    assert_eq!(swatch.size, size(px(28.), px(28.)));
+}
+
+#[gpui_kit::test]
 fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::base::init(cx);

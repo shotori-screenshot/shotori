@@ -9,7 +9,7 @@ pub(super) const SECTION_SEARCH_ITEMS: [(Section, &str, IconName, &str); 8] = [
         Section::Appearance,
         "settings.preferences.appearance",
         IconName::Palette,
-        "theme color language reduce motion animation palette catppuccin dracula gruvbox nord rose pine tokyo night solarized github 主题 配色 语言 外观 动画 过渡",
+        "theme color style capsule classic frosted language reduce motion animation palette catppuccin dracula gruvbox nord rose pine tokyo night solarized github 主题 配色 风格 经典 胶囊 毛玻璃 语言 外观 动画 过渡",
     ),
     (
         Section::Capture,

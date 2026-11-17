@@ -14,12 +14,14 @@ const BORDER: &str = "<path d='M5 5V19M5 12H29'/>";
 const NONE: &str = "<path d='M11 6L23 18M23 6L11 18'/>";
 
 pub(super) fn geometry_fill_menu(
+    style: UiStyle,
     value: GeometryFill,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "geometry-fill",
         "toolbar.geometry_fill",
         value,
@@ -52,12 +54,14 @@ pub(super) fn geometry_fill_menu(
 }
 
 pub(super) fn connector_menu(
+    style: UiStyle,
     value: LensConnector,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "lens-connector",
         "toolbar.lens_connector",
         value,
@@ -83,12 +87,14 @@ pub(super) fn connector_menu(
 }
 
 pub(super) fn line_menu(
+    style: UiStyle,
     value: LineStyle,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "line-style",
         "toolbar.line_style",
         value,
@@ -114,23 +120,25 @@ pub(super) fn line_menu(
     )
 }
 
-pub(super) fn preview(path: &str) -> Svg {
+pub(super) fn preview(path: &str, color: u32) -> Svg {
     let data = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='24' viewBox='0 0 36 24'><g fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>{path}</g></svg>"
     );
     svg()
         .data(data.as_bytes())
         .size(px(20.))
-        .text_color(rgba(theme::c().toolbar_text))
+        .text_color(rgba(color))
 }
 
 pub(super) fn arrow_menu(
+    style: UiStyle,
     value: ArrowStyle,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "arrow-style",
         "toolbar.arrow_style",
         value,
@@ -178,7 +186,7 @@ pub(super) fn arrow_menu(
     )
 }
 
-fn arrow_preview(style: ArrowStyle) -> Svg {
+fn arrow_preview(style: ArrowStyle, color: u32) -> Svg {
     let polygons = crate::annotation::arrow_preview_geometry(style);
     let mut data = String::from(
         "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='24' viewBox='0 0 36 24'>",
@@ -194,18 +202,20 @@ fn arrow_preview(style: ArrowStyle) -> Svg {
     svg()
         .data(data.as_bytes())
         .size(px(20.))
-        .text_color(rgba(theme::c().toolbar_text))
+        .text_color(rgba(color))
 }
 
 /// Numeral previews use paths so they do not depend on an SVG font resolver.
 pub(super) fn number_menu(
+    style: UiStyle,
     value: crate::annotation::NumberFormat,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     use crate::annotation::NumberFormat;
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "number-format",
         "toolbar.number_format",
         value,
@@ -238,12 +248,14 @@ pub(super) fn number_menu(
 }
 
 pub(super) fn pencil_angle_menu(
+    style: UiStyle,
     value: u16,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         "pencil-angle",
         "toolbar.pencil_angle",
         value,
@@ -256,14 +268,17 @@ pub(super) fn pencil_angle_menu(
             (5, "toolbar.angle_5", 5),
         ],
         focus,
-        |angle: u16| {
+        |angle: u16, color: u32| {
             let angle = if angle == 0 { 23. } else { angle as f32 };
             let (sin, cos) = angle.to_radians().sin_cos();
-            preview(&format!(
-                "<path d='M5 19H31M5 19L{} {}'/>",
-                5. + 25. * cos,
-                19. - 18. * sin
-            ))
+            preview(
+                &format!(
+                    "<path d='M5 19H31M5 19L{} {}'/>",
+                    5. + 25. * cos,
+                    19. - 18. * sin
+                ),
+                color,
+            )
         },
         move |value, cx| {
             session.update(cx, |s, cx| {
@@ -276,6 +291,7 @@ pub(super) fn pencil_angle_menu(
 
 /// Highlighter area and blend are independent choices in the reference toolbar.
 pub(super) fn highlighter_menus(
+    style: UiStyle,
     annotations: &crate::annotation::Annotations,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
@@ -284,31 +300,79 @@ pub(super) fn highlighter_menus(
     let options = annotations.highlighter_options();
     let area_session = session.clone();
     let blend_session = session.clone();
-    div().flex().items_center().gap(px(2.))
-        .child(choice_menu("highlighter-area", "toolbar.highlighter_area", options.rectangle,
-            &[(false, "toolbar.highlighter_brush", "<path d='M5 18L30 6' stroke-width='6'/>"),
-              (true, "toolbar.highlighter_rectangle", "<rect x='5' y='7' width='26' height='10' fill='black' stroke='none'/>")],
-            focus, preview, move |value, cx| {
-                area_session.update(cx, |s, cx| { s.edit_annotations(|a| a.set_highlighter_rectangle(value)); cx.notify(); });
-            }))
-        .child(choice_menu("highlighter-blend", "toolbar.highlighter_blend", options.blend,
-            &[(HighlightBlend::Multiply, "toolbar.highlighter_multiply", "<path d='M9 6L21 18M9 18L21 6'/><path d='M27 5V19'/>"),
-              (HighlightBlend::Translucent, "toolbar.highlighter_translucent", "<rect x='6' y='5' width='14' height='12'/><rect x='16' y='10' width='14' height='10'/>")],
-            focus, preview, move |value, cx| {
-                blend_session.update(cx, |s, cx| { s.edit_annotations(|a| a.set_highlighter_blend(value)); cx.notify(); });
-            }))
+    div()
+        .flex()
+        .items_center()
+        .gap(px(if style == UiStyle::Capsule { 3. } else { 2. }))
+        .child(choice_menu_for(
+            style,
+            "highlighter-area",
+            "toolbar.highlighter_area",
+            options.rectangle,
+            &[
+                (
+                    false,
+                    "toolbar.highlighter_brush",
+                    "<path d='M5 18L30 6' stroke-width='6'/>",
+                ),
+                (
+                    true,
+                    "toolbar.highlighter_rectangle",
+                    "<rect x='5' y='7' width='26' height='10' fill='black' stroke='none'/>",
+                ),
+            ],
+            focus,
+            preview,
+            move |value, cx| {
+                area_session.update(cx, |s, cx| {
+                    s.edit_annotations(|a| a.set_highlighter_rectangle(value));
+                    cx.notify();
+                });
+            },
+        ))
+        .child(choice_menu_for(
+            style,
+            "highlighter-blend",
+            "toolbar.highlighter_blend",
+            options.blend,
+            &[
+                (
+                    HighlightBlend::Multiply,
+                    "toolbar.highlighter_multiply",
+                    "<path d='M9 6L21 18M9 18L21 6'/><path d='M27 5V19'/>",
+                ),
+                (
+                    HighlightBlend::Translucent,
+                    "toolbar.highlighter_translucent",
+                    "<rect x='6' y='5' width='14' height='12'/><rect x='16' y='10' width='14' height='10'/>",
+                ),
+            ],
+            focus,
+            preview,
+            move |value, cx| {
+                blend_session.update(cx, |s, cx| {
+                    s.edit_annotations(|a| a.set_highlighter_blend(value));
+                    cx.notify();
+                });
+            },
+        ))
 }
 
 pub(super) fn line_end_menus(
+    style: UiStyle,
     ends: crate::annotation::LineEnds,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     use crate::annotation::EndMarker;
-    let mut row = div().flex().items_center().gap(px(2.));
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(if style == UiStyle::Capsule { 3. } else { 2. }));
     for start in [true, false] {
         let session = session.clone();
-        row = row.child(choice_menu(
+        row = row.child(choice_menu_for(
+            style,
             if start { "line-start" } else { "line-end" },
             if start {
                 "toolbar.line_start"
@@ -363,7 +427,8 @@ pub(super) fn line_end_menus(
     }
     let cap_session = session.clone();
     let join_session = session.clone();
-    row.child(choice_menu(
+    row.child(choice_menu_for(
+        style,
         "line-caps",
         "toolbar.line_caps",
         ends.square_caps,
@@ -392,7 +457,8 @@ pub(super) fn line_end_menus(
             });
         },
     ))
-    .child(choice_menu(
+    .child(choice_menu_for(
+        style,
         "line-joins",
         "toolbar.line_joins",
         ends.sharp_joins,
@@ -423,8 +489,9 @@ pub(super) fn line_end_menus(
     ))
 }
 
-fn start_preview(path: &str) -> Svg {
-    preview(&format!(
-        "<g transform='translate(36 0) scale(-1 1)'>{path}</g>"
-    ))
+fn start_preview(path: &str, color: u32) -> Svg {
+    preview(
+        &format!("<g transform='translate(36 0) scale(-1 1)'>{path}</g>"),
+        color,
+    )
 }

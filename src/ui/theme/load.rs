@@ -145,6 +145,16 @@ pub struct BuiltIn {
 /// and [`ThemeFile::palettes`]) for old theme files.
 pub const BUILT_INS: &[BuiltIn] = &[
     BuiltIn {
+        name: "capsule-light",
+        display: "Capsule Light",
+        palette: Theme::capsule_light,
+    },
+    BuiltIn {
+        name: "capsule-dark",
+        display: "Capsule Dark",
+        palette: Theme::capsule_dark,
+    },
+    BuiltIn {
         name: "catppuccin-frappe",
         display: "Catppuccin Frappé",
         palette: Theme::catppuccin_frappe,

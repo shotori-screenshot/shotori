@@ -225,6 +225,9 @@ pub struct ScreenshotSession {
     /// grabbed an endpoint/vertex/corner of the selected shape.
     handle_drag: Option<HandleDrag>,
     blocked: bool,
+    /// Visual & layout chrome preset for this session (seeded from settings,
+    /// overridable per-session in debug/test runs without mutating globals).
+    pub(super) ui_style: crate::model::settings::UiStyle,
     /// The user-dragged toolbar position (window-local to the ACTIVE
     /// output); None → the placement anchor decides. Reset by a NEW
     /// selection or a change of host window — moving/resizing the
@@ -296,6 +299,7 @@ impl ScreenshotSession {
             moving: None,
             handle_drag: None,
             blocked: false,
+            ui_style: crate::model::settings::current().ui_style(),
             toolbar_pos: None,
             toolbar_drag: None,
             toolbar_grips_reported: None,

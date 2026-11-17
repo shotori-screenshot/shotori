@@ -141,6 +141,46 @@ impl Theme {
     // (opaque hex only), which is why these are code palettes, not
     // embedded TOML files.
 
+    /// Capsule Dark — dark frosted HUD surfaces with vivid blue (`#0A84FF`).
+    pub fn capsule_dark() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.42,
+            accent: 0x0A84FFFF,
+            pin_border: 0x0A84FF99,
+            chip_bg: 0x1C1C1EE6,
+            hint_text: 0x98989DFF,
+            btn_text: 0xF5F5F7FF,
+            btn_hover_bg: 0xFFFFFF1F,
+            toolbar_bg: 0x242426FF,
+            toolbar_text: 0xF5F5F7FF,
+            toolbar_border: 0x48484AFF,
+            toolbar_hover: 0x363638FF,
+            toolbar_selected: 0x202F40FF,
+            swatch_border: 0xFFFFFF33,
+        }
+    }
+
+    /// Capsule Light — light frosted elevated surfaces with vivid blue (`#007AFF`).
+    pub fn capsule_light() -> Self {
+        Self {
+            dim_color: 0x000000FF,
+            dim_opacity: 0.38,
+            accent: 0x007AFFFF,
+            pin_border: 0x007AFF99,
+            chip_bg: 0xF5F5F7E6,
+            hint_text: 0x6E6E73FF,
+            btn_text: 0x1D1D1FFF,
+            btn_hover_bg: 0x00000012,
+            toolbar_bg: 0xF5F5F7FF,
+            toolbar_text: 0x1D1D1FFF,
+            toolbar_border: 0xD2D2D7FF,
+            toolbar_hover: 0xE8E8EDFF,
+            toolbar_selected: 0xD7E6F7FF,
+            swatch_border: 0x00000024,
+        }
+    }
+
     /// Catppuccin Frappé — the lightest of Catppuccin's dark flavors.
     pub fn catppuccin_frappe() -> Self {
         Self {
@@ -472,6 +512,53 @@ impl Theme {
     pub fn is_dark(&self) -> bool {
         luminance(self.toolbar_bg) < 0.5
     }
+
+    /// Translucent frosted surface fill for [`crate::model::settings::UiStyle::Capsule`]
+    /// floating capsules (toolbar, dimension pill, scroll deck).
+    pub(crate) fn capsule_surface(&self) -> u32 {
+        alpha(self.toolbar_bg, if self.is_dark() { 0xE6 } else { 0xEB })
+    }
+
+    /// Slightly denser frosted material for modal sheets, popovers and menus.
+    pub(crate) fn capsule_sheet_surface(&self) -> u32 {
+        alpha(self.toolbar_bg, if self.is_dark() { 0xF2 } else { 0xF5 })
+    }
+
+    /// Hairline rim border for Capsule-style frosted surfaces.
+    pub(crate) fn capsule_border(&self) -> u32 {
+        alpha(
+            self.toolbar_border,
+            if self.is_dark() { 0x8C } else { 0xA8 },
+        )
+    }
+
+    /// Soft pill hover state for Capsule-style controls.
+    pub(crate) fn capsule_hover(&self) -> u32 {
+        alpha(self.toolbar_hover, 0xD8)
+    }
+
+    /// Foreground ink over solid `accent` fills in Capsule style: uses crisp
+    /// white across saturated dark/mid accents (including `#0A84FF` /
+    /// `#007AFF` blue where APCA favors white even though WCAG 2.1 ratio is
+    /// ~3.8–4.4), switching to near-black only on genuinely bright pastels.
+    pub(crate) fn capsule_on_accent(&self) -> u32 {
+        if luminance(self.accent) < 0.36 {
+            0xFFFFFFFF
+        } else {
+            0x1D1D1FFF
+        }
+    }
+}
+
+/// Two-layer contact + ambient drop shadow shared by Capsule-style floating pills.
+pub(crate) fn capsule_floating_shadow() -> Vec<gpui_kit::BoxShadow> {
+    use gpui_kit::{BoxShadow, px, rgba};
+    vec![
+        BoxShadow::new(px(0.), px(2.), rgba(0x0000002E).into()).blur_radius(px(6.)),
+        BoxShadow::new(px(0.), px(10.), rgba(0x00000045).into())
+            .blur_radius(px(26.))
+            .spread_radius(px(-2.)),
+    ]
 }
 
 /// `..dark()` spelled for const fn (struct-update syntax is not const).
@@ -657,6 +744,7 @@ mod tests {
         // dark chrome from a dark system.
         let darks = [
             Theme::dark(),
+            Theme::capsule_dark(),
             Theme::catppuccin_frappe(),
             Theme::catppuccin_macchiato(),
             Theme::catppuccin_mocha(),
@@ -668,6 +756,7 @@ mod tests {
         ];
         let lights = [
             Theme::light(),
+            Theme::capsule_light(),
             Theme::high_contrast(),
             Theme::catppuccin_latte(),
             Theme::gruvbox_light(),

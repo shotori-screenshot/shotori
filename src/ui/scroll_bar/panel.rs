@@ -520,31 +520,41 @@ impl PreviewPanel {
         self.request_exit(ExitTarget::Pin, cx);
     }
 
-    fn render_info_bar(&self, size_label: Option<String>, cx: &mut Context<Self>) -> Div {
+    fn render_info_bar(
+        &self,
+        capsule: bool,
+        size_label: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme::c();
         let (status_text, warn) = self.status_label();
         let dot_color = if self.paused {
-            alpha(theme::c().hint_text, 0xCC)
+            alpha(t.hint_text, 0xCC)
         } else if warn {
             WARNING_AMBER
         } else {
-            theme::c().accent
+            t.accent
         };
         let border_col = if warn {
             alpha(WARNING_AMBER, 0x70)
+        } else if capsule {
+            t.capsule_border()
         } else {
-            alpha(theme::c().toolbar_border, 0xD0)
+            alpha(t.toolbar_border, 0xD0)
         };
         let bg_col = if warn {
             alpha(WARNING_AMBER, 0x1E)
+        } else if capsule {
+            t.capsule_surface()
         } else {
-            theme::c().toolbar_bg
+            t.toolbar_bg
         };
         let status_fg = if warn {
             WARNING_AMBER
         } else if self.paused {
-            theme::c().hint_text
+            t.hint_text
         } else {
-            theme::c().toolbar_text
+            t.toolbar_text
         };
 
         let mut right_cluster = div().flex().items_center().gap(px(4.)).flex_shrink_0();
@@ -552,12 +562,12 @@ impl PreviewPanel {
             right_cluster = right_cluster.child(
                 div()
                     .id("scroll-back-to-live")
-                    .px(px(5.))
+                    .px(px(6.))
                     .py(px(1.))
-                    .rounded(px(4.))
-                    .bg(rgba(alpha(theme::c().accent, 0x22)))
+                    .rounded(if capsule { px(999.) } else { px(4.) })
+                    .bg(rgba(alpha(t.accent, 0x22)))
                     .border_1()
-                    .border_color(rgba(alpha(theme::c().accent, 0x66)))
+                    .border_color(rgba(alpha(t.accent, 0x66)))
                     .cursor(CursorStyle::PointingHand)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.peeking = false;
@@ -569,7 +579,7 @@ impl PreviewPanel {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgba(theme::c().toolbar_text))
+                            .text_color(rgba(t.toolbar_text))
                             .child(crate::i18n::t!("scroll.action.follow").to_string()),
                     ),
             );
@@ -578,7 +588,7 @@ impl PreviewPanel {
             right_cluster = right_cluster.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgba(theme::c().hint_text))
+                    .text_color(rgba(t.hint_text))
                     .child(size),
             );
         }
@@ -586,12 +596,12 @@ impl PreviewPanel {
         div()
             .w_full()
             .h(px(INFO_BAR_H))
-            .px(px(7.))
+            .px(px(if capsule { 9. } else { 7. }))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(6.))
-            .rounded(px(7.))
+            .rounded(if capsule { px(999.) } else { px(7.) })
             .bg(rgba(bg_col))
             .border_1()
             .border_color(rgba(border_col))
@@ -780,18 +790,32 @@ impl Render for PreviewPanel {
         let pin_label = crate::i18n::t!("common.pin").to_string();
         let cancel_label = crate::i18n::t!("scroll.action.cancel").to_string();
 
-        let bar = div()
+        let capsule = crate::ui::e2e::debug_ui_style()
+            .unwrap_or_else(|| crate::model::settings::current().ui_style())
+            == crate::model::settings::UiStyle::Capsule;
+        let t = theme::c();
+        let mut bar = div()
             .flex()
             .items_center()
             .gap(px(btn_gap))
             .h(px(TOOLBAR_H))
-            .px(px(bar_px))
-            .rounded(px(10.))
-            .bg(rgba(theme::c().toolbar_bg))
-            .border_1()
-            .border_color(rgba(theme::c().toolbar_border))
-            .shadow_md()
+            .px(px(bar_px));
+        bar = if capsule {
+            bar.rounded(px(13.))
+                .bg(rgba(t.capsule_surface()))
+                .border_1()
+                .border_color(rgba(t.capsule_border()))
+                .shadow(theme::capsule_floating_shadow())
+        } else {
+            bar.rounded(px(10.))
+                .bg(rgba(t.toolbar_bg))
+                .border_1()
+                .border_color(rgba(t.toolbar_border))
+                .shadow_md()
+        };
+        let bar = bar
             .child(deck_button(
+                capsule,
                 "scroll-deck-pause",
                 pause_label.clone(),
                 format!("{pause_label} · Space"),
@@ -801,6 +825,7 @@ impl Render for PreviewPanel {
                 cx.listener(|this, _, _, cx| this.toggle_pause(cx)),
             ))
             .child(deck_button(
+                capsule,
                 "scroll-deck-axis",
                 axis_label.clone(),
                 axis_tip,
@@ -809,13 +834,13 @@ impl Render for PreviewPanel {
                 !self.axis_locked,
                 cx.listener(|this, _, _, cx| this.toggle_axis(cx)),
             ))
-            .child(
-                div()
-                    .w(px(1.))
-                    .h(px(16.))
-                    .bg(rgba(theme::c().toolbar_border)),
-            )
+            .child(div().w(px(1.)).h(px(16.)).bg(rgba(if capsule {
+                t.capsule_border()
+            } else {
+                t.toolbar_border
+            })))
             .child(deck_button(
+                capsule,
                 "scroll-deck-copy",
                 copy_label.clone(),
                 format!("{copy_label} · Enter"),
@@ -825,6 +850,7 @@ impl Render for PreviewPanel {
                 cx.listener(|this, _, _, cx| this.request_exit(ExitTarget::Copy, cx)),
             ))
             .child(deck_button(
+                capsule,
                 "scroll-deck-save",
                 save_label.clone(),
                 format!("{save_label} · Ctrl+S"),
@@ -834,6 +860,7 @@ impl Render for PreviewPanel {
                 cx.listener(|this, _, _, cx| this.request_save(cx)),
             ))
             .child(deck_button(
+                capsule,
                 "scroll-deck-pin",
                 pin_label.clone(),
                 format!("{pin_label} · Ctrl+P"),
@@ -843,6 +870,7 @@ impl Render for PreviewPanel {
                 cx.listener(|this, _, _, cx| this.request_pin(cx)),
             ))
             .child(deck_button(
+                capsule,
                 "scroll-deck-cancel",
                 cancel_label.clone(),
                 format!("{cancel_label} · Esc"),
@@ -852,17 +880,25 @@ impl Render for PreviewPanel {
                 cx.listener(|this, _, _, cx| this.request_cancel(cx)),
             ));
         let toolbar = div().w_full().flex().justify_center().child(bar);
-        let info_bar = self.render_info_bar(size_label, cx);
+        let info_bar = self.render_info_bar(capsule, size_label, cx);
 
         let (_, well_w, well_h) = self.well_box();
         let mut preview = div()
             .flex_1()
             .relative()
             .overflow_hidden()
-            .rounded(px(10.))
-            .bg(rgba(theme::c().toolbar_hover))
+            .rounded(px(if capsule { 14. } else { 10. }))
+            .bg(rgba(if capsule {
+                alpha(t.toolbar_bg, 0xD8)
+            } else {
+                t.toolbar_hover
+            }))
             .border_1()
-            .border_color(rgba(alpha(theme::c().toolbar_border, 0xD0)))
+            .border_color(rgba(if capsule {
+                t.capsule_border()
+            } else {
+                alpha(t.toolbar_border, 0xD0)
+            }))
             .on_scroll(cx.listener(Self::scroll_preview));
 
         if let Some(image) = self.image.clone() {
@@ -980,7 +1016,9 @@ impl Render for PreviewPanel {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deck_button(
+    capsule: bool,
     id: &'static str,
     label: String,
     tooltip: String,
@@ -996,15 +1034,20 @@ fn deck_button(
         .items_center()
         .justify_center()
         .size(px(tile_px))
-        .rounded(px(6.))
+        .rounded(px(if capsule { 8. } else { 6. }))
         .aria_label(label)
         .tooltip(move |_, cx| {
             cx.new(|_| crate::ui::toolbar::ToolbarTooltip(tooltip.clone().into()))
                 .into()
         });
     let button = if enabled {
+        let hover_bg = if capsule {
+            theme::c().capsule_hover()
+        } else {
+            theme::c().toolbar_hover
+        };
         button
-            .hover(|style| style.bg(rgba(theme::c().toolbar_hover)))
+            .hover(move |style| style.bg(rgba(hover_bg)))
             .cursor(CursorStyle::PointingHand)
             .on_click(on_click)
     } else {

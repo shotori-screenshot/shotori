@@ -11,7 +11,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 /// Builds the settings row for the active `edit_kind`. `session` and
 /// `settings_focus` are shared with the caller's chain; controls clone
 /// what their closures capture.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn annot_options(
+    style: UiStyle,
     edit_kind: Option<crate::annotation::ShapeKind>,
     annotations: &crate::annotation::Annotations,
     session: &Entity<ScreenshotSession>,
@@ -28,16 +30,11 @@ pub(super) fn annot_options(
         edit_kind,
         Some(crate::annotation::ShapeKind::Eraser | crate::annotation::ShapeKind::EraserRect)
     );
-    // Settings rows hug their content like every other row — no
-    // fixed widths. The filter/eraser rows once carried `.w()`
-    // tuned for the old S/M/L preset buttons; when the slider
-    // bundle (wider than the three buttons) replaced them, the
-    // readout silently spilled past the painted border — near-black
-    // on near-black, only obvious on a HiDPI screen (user-reported).
-    let mut options = bar().debug_selector(|| "tb-options".to_string());
+    let capsule = style == UiStyle::Capsule;
+    let mut options = bar_for(style).debug_selector(|| "tb-options".to_string());
     if edit_kind == Some(crate::annotation::ShapeKind::Spotlight) {
         let ellipse = annotations.spotlight_ellipse();
-        options = options.child(shape_menu(ellipse, true, session, settings_focus));
+        options = options.child(shape_menu(style, ellipse, true, session, settings_focus));
         if let Some(sc) = size_slider {
             options = options
                 .child(
@@ -45,10 +42,11 @@ pub(super) fn annot_options(
                         .text_size(px(12.))
                         .child(crate::i18n::t!("toolbar.spotlight_opacity").into_owned()),
                 )
-                .child(size_control(sc, ""))
+                .child(size_control_for(style, sc, ""))
                 .child("%");
         }
         return options.child(super::spotlight_options::SpotlightOptions {
+            style,
             session: session.clone(),
             focus: settings_focus.clone(),
             color: swatch_picker.clone(),
@@ -57,7 +55,7 @@ pub(super) fn annot_options(
     if edit_kind == Some(crate::annotation::ShapeKind::Magnifier) {
         use crate::annotation::LensOption;
         let (ellipse, smooth, marks, connector) = annotations.lens_options();
-        options = options.child(shape_menu(ellipse, false, session, settings_focus));
+        options = options.child(shape_menu(style, ellipse, false, session, settings_focus));
         for (option, active, key, icon) in [
             (
                 LensOption::Annotations,
@@ -73,8 +71,10 @@ pub(super) fn annot_options(
             ),
         ] {
             let session = session.clone();
+            let fg = icon_tint(style, active);
             options = options.child(
-                control(
+                control_for(
+                    style,
                     key.into(),
                     crate::i18n::t!(key).into_owned(),
                     settings_focus.clone(),
@@ -90,14 +90,15 @@ pub(super) fn annot_options(
                     svg()
                         .data(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><g fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M2 12V8H6V4H10'/><path d='M5 15L15 5'/></g></svg>")
                         .size(px(18.))
-                        .text_color(rgba(theme::c().toolbar_text))
+                        .text_color(rgba(fg))
                         .into_any_element()
                 } else {
-                    menu_icon(icon, 18.).into_any_element()
+                    menu_icon_colored(icon, 18., fg).into_any_element()
                 }),
             );
         }
         options = options.child(super::line_options::connector_menu(
+            style,
             connector,
             session,
             settings_focus,
@@ -107,9 +108,10 @@ pub(super) fn annot_options(
         let shadow_icon = svg()
             .data(b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'><g fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='2' width='11' height='10' rx='1.5'/><path d='M5 15H15' opacity='.5'/><path d='M7 17H16' opacity='.25'/></g></svg>")
             .size(px(18.))
-            .text_color(rgba(theme::c().toolbar_text));
+            .text_color(rgba(icon_tint(style, shadow)));
         options = options.child(
-            control(
+            control_for(
+                style,
                 "lens-shadow".into(),
                 crate::i18n::t!("toolbar.lens_shadow").into_owned(),
                 settings_focus.clone(),
@@ -124,18 +126,20 @@ pub(super) fn annot_options(
             .child(shadow_icon),
         );
         if let Some(sc) = size_slider {
-            options = options.child(size_control(sc, "×"));
+            options = options.child(size_control_for(style, sc, "×"));
         }
         if let Some(picker) = swatch_picker {
-            options = options.child(separator()).child(
+            options = options.child(separator_for(style)).child(
                 ColorPicker::new(picker, crate::i18n::t!("toolbar.lens_color").into_owned())
-                    .opaque(),
+                    .opaque()
+                    .capsule_ring(capsule),
             );
         }
         return options;
     }
     if filter_tool {
         options = options.child(icon_choice_menu(
+            style,
             "filter-effect",
             "toolbar.filter_mosaic",
             edit_kind.unwrap_or(ShapeKind::Mosaic),
@@ -158,6 +162,7 @@ pub(super) fn annot_options(
         let area_kind = annotations.filter_area_kind();
         let brush = area_kind == crate::annotation::FilterAreaKind::Brush;
         options = options.child(icon_choice_menu(
+            style,
             "filter-area",
             "toolbar.region_shape",
             area_kind,
@@ -184,6 +189,7 @@ pub(super) fn annot_options(
         ));
         if brush {
             options = options.child(icon_choice_menu(
+                style,
                 "filter-size",
                 "toolbar.filter_strength",
                 annotations.editing_filter_brush_size(),
@@ -205,12 +211,13 @@ pub(super) fn annot_options(
             ));
         }
         if let Some(sc) = size_slider {
-            options = options.child(size_control(sc, ""));
+            options = options.child(size_control_for(style, sc, ""));
         }
         return options;
     }
     if eraser_tool {
         options = options.child(icon_choice_menu(
+            style,
             "eraser-mode",
             "toolbar.eraser_brush",
             edit_kind.unwrap_or(ShapeKind::Eraser),
@@ -237,11 +244,12 @@ pub(super) fn annot_options(
         if edit_kind == Some(ShapeKind::EraserRect) {
             return options;
         }
-        options = options.child(separator());
+        options = options.child(separator_for(style));
     }
 
     if matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)) {
         options = options.child(super::line_options::geometry_fill_menu(
+            style,
             annotations.geometry_fill_mode(),
             session,
             settings_focus,
@@ -249,6 +257,7 @@ pub(super) fn annot_options(
     }
     if edit_kind == Some(ShapeKind::Highlighter) {
         options = options.child(super::line_options::highlighter_menus(
+            style,
             annotations,
             session,
             settings_focus,
@@ -256,6 +265,7 @@ pub(super) fn annot_options(
     }
     if edit_kind == Some(ShapeKind::Pencil) {
         options = options.child(super::line_options::pencil_angle_menu(
+            style,
             annotations.pencil_angle(),
             session,
             settings_focus,
@@ -263,7 +273,8 @@ pub(super) fn annot_options(
         let smooth = annotations.pencil_smooth();
         let session = session.clone();
         options = options.child(
-            control(
+            control_for(
+                style,
                 "pencil-smooth".into(),
                 crate::i18n::t!("toolbar.pencil_smooth").into_owned(),
                 settings_focus.clone(),
@@ -275,11 +286,16 @@ pub(super) fn annot_options(
                 },
             )
             .selected(smooth)
-            .child(menu_icon(IconName::Sparkles, 18.)),
+            .child(menu_icon_colored(
+                IconName::Sparkles,
+                18.,
+                icon_tint(style, smooth),
+            )),
         );
     }
     if edit_kind == Some(ShapeKind::Text) {
         options = options.child(super::text_options::TextOptions::new(
+            style,
             session,
             settings_focus,
         ));
@@ -288,7 +304,8 @@ pub(super) fn annot_options(
         let active = annotations.number_fill();
         let fill_session = session.clone();
         options = options.child(
-            control(
+            control_for(
+                style,
                 "number-fill".into(),
                 crate::i18n::t!("toolbar.number_fill").into_owned(),
                 settings_focus.clone(),
@@ -308,10 +325,11 @@ pub(super) fn annot_options(
                         b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><circle cx='9' cy='9' r='6.25' fill='none' stroke='black' stroke-width='1.5'/><path d='M9.75 5.6H8.65L6.9 6.8V8.05L8.35 7.1V12.5H9.75Z'/></svg>"
                     })
                     .size(px(18.))
-                    .text_color(rgba(theme::c().toolbar_text)),
+                    .text_color(rgba(icon_tint(style, active))),
             ),
         );
         options = options.child(super::line_options::number_menu(
+            style,
             annotations.number_format(),
             session,
             settings_focus,
@@ -322,7 +340,8 @@ pub(super) fn annot_options(
         ] {
             let session = session.clone();
             options = options.child(
-                control(
+                control_for(
+                    style,
                     key.into(),
                     crate::i18n::t!(key).into_owned(),
                     settings_focus.clone(),
@@ -340,6 +359,7 @@ pub(super) fn annot_options(
     }
     if matches!(edit_kind, Some(ShapeKind::Line | ShapeKind::Polyline)) {
         options = options.child(super::line_options::line_end_menus(
+            style,
             annotations.line_ends(),
             session,
             settings_focus,
@@ -347,6 +367,7 @@ pub(super) fn annot_options(
     }
     if matches!(edit_kind, Some(ShapeKind::Arrow | ShapeKind::Number)) {
         options = options.child(super::line_options::arrow_menu(
+            style,
             annotations.arrow_style(),
             session,
             settings_focus,
@@ -364,6 +385,7 @@ pub(super) fn annot_options(
     ) && (edit_kind != Some(ShapeKind::Arrow) || annotations.arrow_style().supports_line_style())
     {
         options = options.child(super::line_options::line_menu(
+            style,
             annotations.line_style(),
             session,
             settings_focus,
@@ -390,11 +412,12 @@ pub(super) fn annot_options(
                         })
                     },
                 )
-                .child(size_control(sc, "")),
+                .child(size_control_for(style, sc, "")),
         );
     }
     if edit_kind == Some(ShapeKind::Rectangle) {
         options = options.child(super::geometry_options::CornerRadius::new(
+            style,
             session,
             settings_focus,
         ));
@@ -402,7 +425,10 @@ pub(super) fn annot_options(
     if eraser_tool {
         return options;
     }
-    options = options.child(separator()).child(div().flex_1());
+    options = options.child(separator_for(style));
+    if style == UiStyle::Classic {
+        options = options.child(div().flex_1());
+    }
     let active_ix = annotations.active_swatch_index();
     for (ix, color) in crate::model::settings::current()
         .annotation_colors()
@@ -414,28 +440,22 @@ pub(super) fn annot_options(
         if active_ix == Some(ix)
             && let Some(picker) = &swatch_picker
         {
-            // The SELECTED swatch becomes the inline color
-            // editor: clicking it again opens the picker's
-            // popover (palette + HSLA sliders + hex). Edits
-            // land in settings.toml through
-            // `settings::set_annotation_color` (the Overlay
-            // owns the state and the subscription — see its
-            // `swatch_picker`). Non-selected swatches stay
-            // plain one-click selectors, so "pick a color" and
-            // "edit a color" never fight over the same click.
             options = options.child(
                 ColorPicker::new(
                     picker,
                     crate::i18n::t!("toolbar.color_edit_aria", name = name).to_string(),
                 )
                 .opaque()
+                .capsule_ring(capsule)
                 .selected(true),
             );
             continue;
         }
         let session = session.clone();
-        options = options.child(
-            control(
+        let is_selected = selected_color == color;
+        let btn = match style {
+            UiStyle::Classic => control_for(
+                style,
                 format!("tb-color-{ix}"),
                 crate::i18n::t!("toolbar.color_label", name = name).to_string(),
                 settings_focus.clone(),
@@ -447,7 +467,7 @@ pub(super) fn annot_options(
                 },
             )
             .w(px(28.))
-            .selected(selected_color == color)
+            .selected(is_selected)
             .child(
                 div()
                     .size(px(20.))
@@ -456,7 +476,45 @@ pub(super) fn annot_options(
                     .border_1()
                     .border_color(rgba(theme::c().swatch_border)),
             ),
-        );
+            UiStyle::Capsule => {
+                let t = theme::c();
+                let selector = format!("tb-color-{ix}");
+                let label = crate::i18n::t!("toolbar.color_label", name = name).to_string();
+                let tooltip: SharedString = label.clone().into();
+                let focus = settings_focus.clone();
+                Button::new(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector)
+                    .accessibility_label(label)
+                    .tooltip(move |_, cx| cx.new(|_| ToolbarTooltip(tooltip.clone())).into())
+                    .on_click(move |_, window, cx| {
+                        window.focus(&focus, cx);
+                        session.update(cx, |s, cx| {
+                            s.edit_annotation_settings(|a| a.set_color(ix));
+                            cx.notify();
+                        });
+                    })
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_2()
+                    .border_color(if is_selected {
+                        rgba(t.accent)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(move |s| s.border_color(rgba(theme::alpha(t.toolbar_text, 0x66))))
+                    .focus_visible(move |s| s.border_color(rgba(t.accent)))
+                    .child(
+                        div()
+                            .size(px(18.))
+                            .rounded_full()
+                            .bg(rgba(color))
+                            .border_1()
+                            .border_color(rgba(t.swatch_border)),
+                    )
+            }
+        };
+        options = options.child(btn);
     }
     options
 }
@@ -467,14 +525,16 @@ enum OptionIcon {
     Mosaic,
 }
 
-fn option_icon(icon: OptionIcon) -> Svg {
+fn option_icon(icon: OptionIcon, color: u32) -> Svg {
     match icon {
-        OptionIcon::BuiltIn(icon) => menu_icon(icon, 18.),
-        OptionIcon::Mosaic => own_icon("icons/mosaic.svg"),
+        OptionIcon::BuiltIn(icon) => menu_icon_colored(icon, 18., color),
+        OptionIcon::Mosaic => own_icon_colored("icons/mosaic.svg", color),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn icon_choice_menu<T: Copy + PartialEq + 'static>(
+    style: UiStyle,
     id: &'static str,
     label: &'static str,
     value: T,
@@ -484,7 +544,8 @@ fn icon_choice_menu<T: Copy + PartialEq + 'static>(
     apply: fn(&mut crate::annotation::Annotations, T),
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu(
+    choice_menu_for(
+        style,
         id,
         label,
         value,
@@ -501,12 +562,14 @@ fn icon_choice_menu<T: Copy + PartialEq + 'static>(
 }
 
 fn shape_menu(
+    style: UiStyle,
     ellipse: bool,
     spotlight: bool,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     icon_choice_menu(
+        style,
         if spotlight {
             "spotlight-shape"
         } else {
@@ -538,10 +601,14 @@ fn shape_menu(
 
 /// Raw SVG elements require an explicit paint color; button text color is not inherited.
 pub(super) fn menu_icon(icon: IconName, size: f32) -> Svg {
+    menu_icon_colored(icon, size, theme::c().toolbar_text)
+}
+
+pub(super) fn menu_icon_colored(icon: IconName, size: f32, color: u32) -> Svg {
     svg()
         .path(icon.path())
         .size(px(size))
-        .text_color(rgba(theme::c().toolbar_text))
+        .text_color(rgba(color))
 }
 
 #[cfg(test)]

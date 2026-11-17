@@ -15,6 +15,7 @@
 use gpui_kit::*;
 
 use crate::model::session::ScrollRect;
+use crate::model::settings::{Settings, UiStyle};
 
 /// Rough label width covering the widest "3072 × 1920" + padding; the
 /// height matches the rendered chip.
@@ -52,6 +53,58 @@ pub(crate) const ROW_H: f32 = 38.;
 /// Two-row height (the tall case used for placement decisions)
 pub(crate) const TB_H: f32 = ROW_H * 2. + 6.;
 
+/// Frosted capsule preset geometry: taller rows with concentric 8px-radius
+/// 32px buttons inside a 14px-radius 44px bar (`14 - 6 = 8`).
+pub(crate) const CAPSULE_ROW_H: f32 = 44.;
+pub(crate) const CAPSULE_BAR_PAD: f32 = 8.;
+pub(crate) const CAPSULE_ROW_GAP: f32 = 8.;
+pub(crate) const CAPSULE_TB_H: f32 = CAPSULE_ROW_H * 2. + CAPSULE_ROW_GAP;
+pub(crate) const CAPSULE_TB_W: f32 = 748.;
+pub(crate) const CAPSULE_BTN_SIZE: f32 = 32.;
+pub(crate) const CAPSULE_BTN_GAP: f32 = 3.;
+const CAPSULE_BTN_PITCH: f32 = CAPSULE_BTN_SIZE + CAPSULE_BTN_GAP;
+const CAPSULE_SEP_PITCH: f32 = 11. + CAPSULE_BTN_GAP;
+
+/// How a [`UiStyle`] anchors its primary toolbar relative to the selection.
+///
+/// Separating anchor strategy from color tokens keeps layout extensible:
+/// `Classic` aligns left below the box, `Capsule` centers a floating capsule
+/// below the box, and a future edge-hugging rail preset can add an
+/// edge-wrapping rail mode without touching palettes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ToolbarAnchorMode {
+    BelowLeft,
+    BelowCenter,
+}
+
+pub(crate) const fn anchor_mode_for(style: UiStyle) -> ToolbarAnchorMode {
+    match style {
+        UiStyle::Classic => ToolbarAnchorMode::BelowLeft,
+        UiStyle::Capsule => ToolbarAnchorMode::BelowCenter,
+    }
+}
+
+pub(crate) const fn row_height_for(style: UiStyle) -> f32 {
+    match style {
+        UiStyle::Classic => ROW_H,
+        UiStyle::Capsule => CAPSULE_ROW_H,
+    }
+}
+
+pub(crate) const fn bar_pad_for(style: UiStyle) -> f32 {
+    match style {
+        UiStyle::Classic => BAR_PAD,
+        UiStyle::Capsule => CAPSULE_BAR_PAD,
+    }
+}
+
+pub(crate) const fn row_gap_for(style: UiStyle) -> f32 {
+    match style {
+        UiStyle::Classic => 6.,
+        UiStyle::Capsule => CAPSULE_ROW_GAP,
+    }
+}
+
 /// Breathing room kept between the lowest element and the screen edge —
 /// "fits at exactly zero margin" still looks glued on (measured).
 const EDGE_B: f32 = 12.;
@@ -73,38 +126,67 @@ pub(crate) fn label_anchor(b: &Bounds<Pixels>, ws: Size<Pixels>) -> (f32, f32) {
 }
 
 /// Toolbar placement: BELOW the selection, or — when the selection
-/// reaches the bottom of the screen — INSIDE the box at its bottom-left
-/// corner. Horizontally clamped; `width`/`height` are the toolbar's
-/// current size basis (see [`toolbar_size`]).
+/// reaches the bottom of the screen — INSIDE the box. Horizontally clamped;
+/// `width`/`height` are the toolbar's current size basis (see [`toolbar_size_for`]).
+#[cfg(test)]
 pub(crate) fn toolbar_anchor(
     b: &Bounds<Pixels>,
     ws: Size<Pixels>,
     width: f32,
     height: f32,
 ) -> (f32, f32) {
-    let inside = f32::from(b.bottom()) + height + 8. + EDGE_B > f32::from(ws.height);
-    let x = (f32::from(b.left()) + if inside { INSET } else { 0. })
-        .clamp(8., (f32::from(ws.width) - width - 8.).max(8.));
+    toolbar_anchor_for(UiStyle::Classic, b, ws, width, height)
+}
+
+pub(crate) fn toolbar_anchor_for(
+    style: UiStyle,
+    b: &Bounds<Pixels>,
+    ws: Size<Pixels>,
+    width: f32,
+    height: f32,
+) -> (f32, f32) {
+    let gap = match style {
+        UiStyle::Classic => 8.,
+        UiStyle::Capsule => 10.,
+    };
+    let inside = f32::from(b.bottom()) + height + gap + EDGE_B > f32::from(ws.height);
+    let raw_x = match anchor_mode_for(style) {
+        ToolbarAnchorMode::BelowLeft => f32::from(b.left()) + if inside { INSET } else { 0. },
+        ToolbarAnchorMode::BelowCenter => {
+            f32::from(b.left()) + f32::from(b.size.width) * 0.5 - width * 0.5
+        }
+    };
+    let x = raw_x.clamp(8., (f32::from(ws.width) - width - 8.).max(8.));
     let y = if inside {
-        // inside, bottom-left corner (inset from the border)
-        f32::from(b.bottom()) - height - 8.
+        f32::from(b.bottom()) - height - gap
     } else {
-        f32::from(b.bottom()) + 8.
+        f32::from(b.bottom()) + gap
     };
     (x, y.clamp(8., (f32::from(ws.height) - height - 8.).max(8.)))
 }
 
-/// The toolbar's full rect: [`toolbar_anchor`] plus the width clamp the
+/// The toolbar's full rect: [`toolbar_anchor_for`] plus the width clamp the
 /// render side applies (the state's base width, or the window minus
 /// breathing room on narrow screens). One source of truth for render,
 /// cursor hit-tests and the drag clamp — they cannot drift apart.
+#[cfg(test)]
 pub(crate) fn toolbar_bounds(
     b: &Bounds<Pixels>,
     ws: Size<Pixels>,
     width: f32,
     height: f32,
 ) -> Bounds<Pixels> {
-    let (x, y) = toolbar_anchor(b, ws, width, height);
+    toolbar_bounds_for(UiStyle::Classic, b, ws, width, height)
+}
+
+pub(crate) fn toolbar_bounds_for(
+    style: UiStyle,
+    b: &Bounds<Pixels>,
+    ws: Size<Pixels>,
+    width: f32,
+    height: f32,
+) -> Bounds<Pixels> {
+    let (x, y) = toolbar_anchor_for(style, b, ws, width, height);
     let w = width.min((f32::from(ws.width) - 16.).max(1.));
     Bounds {
         origin: point(px(x), px(y)),
@@ -114,14 +196,32 @@ pub(crate) fn toolbar_bounds(
 
 /// Reserve both rows while editing. The configured tool row can be wider than
 /// the options row; neither may extend beyond the shared drag/placement bounds.
-pub(crate) fn toolbar_size(
+#[cfg(test)]
+pub(crate) fn toolbar_size(annotating: bool, settings: &Settings) -> (f32, f32) {
+    toolbar_size_for(UiStyle::Classic, annotating, settings)
+}
+
+pub(crate) fn toolbar_size_for(
+    style: UiStyle,
     annotating: bool,
-    settings: &crate::model::settings::Settings,
+    settings: &Settings,
 ) -> (f32, f32) {
-    if annotating {
-        (TB_W.max(row1_basis(settings)), TB_H)
-    } else {
-        (row1_basis(settings), ROW_H)
+    let row1 = row1_basis_for(style, settings);
+    match style {
+        UiStyle::Classic => {
+            if annotating {
+                (TB_W.max(row1), TB_H)
+            } else {
+                (row1, ROW_H)
+            }
+        }
+        UiStyle::Capsule => {
+            if annotating {
+                (CAPSULE_TB_W.max(row1), CAPSULE_TB_H)
+            } else {
+                (row1, CAPSULE_ROW_H)
+            }
+        }
     }
 }
 
@@ -160,13 +260,27 @@ pub(crate) fn default_row1_basis() -> f32 {
 /// removed/added child is exact geometry). Today's factory row: 20
 /// buttons and two separators, no spacer child →
 /// 660 - 2 + 32 + 11 = 701.
-pub(crate) fn row1_basis(settings: &crate::model::settings::Settings) -> f32 {
+pub(crate) fn row1_basis(settings: &Settings) -> f32 {
     let buttons = settings.row1_button_count() as f32;
     let separators = settings.row1_separator_count() as f32;
     (TB_W_ROW1 - GONE_SPACER_GAP
         + BTN_PITCH * (buttons - ANCHOR_BUTTONS)
         + SEP_PITCH * (separators - ANCHOR_SEPARATORS))
         .max(ROW1_W_MIN)
+}
+
+/// Style-dispatched single-row width basis. For `Capsule`: `2px` border +
+/// `16px` horizontal padding + `24px` two grips + `3px` grip-to-grip gap
+/// = `45px` base, plus `35px` per button and `14px` per separator.
+pub(crate) fn row1_basis_for(style: UiStyle, settings: &Settings) -> f32 {
+    match style {
+        UiStyle::Classic => row1_basis(settings),
+        UiStyle::Capsule => {
+            let buttons = settings.row1_button_count() as f32;
+            let separators = settings.row1_separator_count() as f32;
+            (45. + CAPSULE_BTN_PITCH * buttons + CAPSULE_SEP_PITCH * separators).max(ROW1_W_MIN)
+        }
+    }
 }
 
 /// Snap a bounds to whole pixels for DISPLAY (dim strips, chrome,
@@ -629,21 +743,55 @@ mod tests {
                 }
                 let b = bounds(50., top, 300., bottom - top);
                 let (_, ly) = label_anchor(&b, screen());
-                let (_, ty) = toolbar_anchor(&b, screen(), TB_W, TB_H);
-                assert!(ly >= 0., "label off-screen for {b:?}");
-                assert!(
-                    ty >= 0. && ty + TB_H <= 1080.,
-                    "toolbar off-screen for {b:?}"
-                );
-                assert!(
-                    ly + LABEL_H <= ty,
-                    "zones overlap for {b:?}: label {}..{}, toolbar {ty}..{}",
-                    ly,
-                    ly + LABEL_H,
-                    ty + TB_H
-                );
+                for (style, w, h) in [
+                    (super::UiStyle::Classic, TB_W, TB_H),
+                    (
+                        super::UiStyle::Capsule,
+                        super::CAPSULE_TB_W,
+                        super::CAPSULE_TB_H,
+                    ),
+                ] {
+                    let (_, ty) = super::toolbar_anchor_for(style, &b, screen(), w, h);
+                    assert!(ly >= 0., "label off-screen for {b:?} ({style:?})");
+                    assert!(
+                        ty >= 0. && ty + h <= 1080.,
+                        "toolbar off-screen for {b:?} ({style:?})"
+                    );
+                    assert!(
+                        ly + LABEL_H <= ty,
+                        "zones overlap for {b:?} ({style:?}): label {}..{}, toolbar {ty}..{}",
+                        ly,
+                        ly + LABEL_H,
+                        ty + h
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn capsule_toolbar_centers_horizontally_and_clamps_near_edges() {
+        use super::{CAPSULE_ROW_H, CAPSULE_TB_H, CAPSULE_TB_W, UiStyle, toolbar_anchor_for};
+        let b = bounds(600., 200., 400., 300.); // center x = 800
+        let (x, y) = toolbar_anchor_for(UiStyle::Capsule, &b, screen(), 500., CAPSULE_ROW_H);
+        assert_eq!((x, y), (800. - 250., 510.));
+
+        // Near left screen edge: clamps to 8px margin
+        let left_box = bounds(10., 200., 80., 200.);
+        let (lx, _) =
+            toolbar_anchor_for(UiStyle::Capsule, &left_box, screen(), 500., CAPSULE_ROW_H);
+        assert_eq!(lx, 8.);
+
+        // Near right screen edge: clamps to 1920 - width - 8
+        let right_box = bounds(1800., 200., 100., 200.);
+        let (rx, _) = toolbar_anchor_for(
+            UiStyle::Capsule,
+            &right_box,
+            screen(),
+            CAPSULE_TB_W,
+            CAPSULE_TB_H,
+        );
+        assert_eq!(rx, 1920. - CAPSULE_TB_W - 8.);
     }
 
     fn rect(x: i32, y: i32) -> ScrollRect {

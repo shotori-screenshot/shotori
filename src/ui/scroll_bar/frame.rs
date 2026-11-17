@@ -340,6 +340,10 @@ impl FrameView {
                 cx.notify();
             }
         });
+        let style = crate::ui::e2e::debug_ui_style()
+            .unwrap_or_else(|| crate::model::settings::current().ui_style());
+        let capsule = style == crate::model::settings::UiStyle::Capsule;
+        let t = theme::c();
         div()
             .id("shotori-scroll-frame")
             // The ShotoriScroll context + focus are only live when this
@@ -356,7 +360,7 @@ impl FrameView {
             // in paint order so the buttons win the element hit-test.
             .child(pointer_sink(cx.entity().downgrade(), self.output))
             .children(chip.map(|chip| {
-                div()
+                let mut el = div()
                     .id("frame-grab-chip")
                     .absolute()
                     .left(chip.origin.x)
@@ -367,22 +371,30 @@ impl FrameView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(rgba(alpha(stroke_color, 0x2E)))
-                    .border_1()
-                    .border_color(rgba(alpha(stroke_color, 0x66)))
-                    .cursor(CursorStyle::ResizeUpDown)
-                    .hover(move |style| style.bg(rgba(alpha(stroke_color, 0x4A))))
-                    .active(move |style| style.bg(rgba(alpha(stroke_color, 0x66))))
-                    .tooltip(|_, cx| {
-                        cx.new(|_| {
-                            crate::ui::toolbar::ToolbarTooltip(
-                                crate::i18n::t!("scroll.action.drag").to_string().into(),
-                            )
-                        })
-                        .into()
+                    .cursor(CursorStyle::ResizeUpDown);
+                el = if capsule {
+                    el.bg(rgba(t.capsule_surface()))
+                        .border_1()
+                        .border_color(rgba(t.capsule_border()))
+                        .hover(move |s| s.bg(rgba(t.capsule_hover())))
+                        .active(move |s| s.bg(rgba(t.toolbar_hover)))
+                } else {
+                    el.bg(rgba(alpha(stroke_color, 0x2E)))
+                        .border_1()
+                        .border_color(rgba(alpha(stroke_color, 0x66)))
+                        .hover(move |style| style.bg(rgba(alpha(stroke_color, 0x4A))))
+                        .active(move |style| style.bg(rgba(alpha(stroke_color, 0x66))))
+                };
+                el.tooltip(|_, cx| {
+                    cx.new(|_| {
+                        crate::ui::toolbar::ToolbarTooltip(
+                            crate::i18n::t!("scroll.action.drag").to_string().into(),
+                        )
                     })
-                    .on_mouse_down(MouseButton::Left, chip_grab)
-                    .child(crate::ui::toolbar::chip_grip())
+                    .into()
+                })
+                .on_mouse_down(MouseButton::Left, chip_grab)
+                .child(crate::ui::toolbar::chip_grip_for(style))
             }))
             .children(strokes.iter().map(|s| {
                 div()
@@ -403,7 +415,7 @@ impl FrameView {
                 } else {
                     crate::i18n::t!("scroll.action.pause").to_string()
                 };
-                div()
+                let mut bar = div()
                     .id("frame-toolbar")
                     .absolute()
                     .left(toolbar.origin.x)
@@ -413,19 +425,26 @@ impl FrameView {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .px(px(4.))
-                    .rounded(px(10.))
-                    .bg(rgba(theme::c().toolbar_bg))
-                    .border_1()
-                    .border_color(rgba(theme::c().toolbar_border))
-                    .shadow_md()
-                    .child(frame_grip(grab))
-                    .child(
-                        div()
-                            .w(px(1.))
-                            .h(px(18.))
-                            .bg(rgba(theme::c().toolbar_border)),
-                    )
+                    .px(px(4.));
+                bar = if capsule {
+                    bar.rounded(px(14.))
+                        .bg(rgba(t.capsule_surface()))
+                        .border_1()
+                        .border_color(rgba(t.capsule_border()))
+                        .shadow(theme::capsule_floating_shadow())
+                } else {
+                    bar.rounded(px(10.))
+                        .bg(rgba(t.toolbar_bg))
+                        .border_1()
+                        .border_color(rgba(t.toolbar_border))
+                        .shadow_md()
+                };
+                bar.child(frame_grip(grab))
+                    .child(div().w(px(1.)).h(px(18.)).bg(rgba(if capsule {
+                        t.capsule_border()
+                    } else {
+                        t.toolbar_border
+                    })))
                     .child(frame_button(
                         "frame-tb-pause",
                         pause_label.clone(),

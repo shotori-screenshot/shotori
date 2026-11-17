@@ -1,6 +1,6 @@
 //! Floating-pin context menu and transient HUD status badge.
 //!
-//! Layout follows modern screenshot tools (PixPin / CleanShot): a top icon
+//! Layout groups pin controls by frequency: a top icon
 //! strip for transforms, annotation, collapse, and click-through lock, a
 //! compact zoom/opacity bar, and keyboard-hinted action rows — automatically
 //! tightening row metrics on constrained outputs so every control stays
@@ -24,10 +24,20 @@ use super::PinBoard;
 pub(super) const MENU_W: f32 = 244.;
 
 impl PinBoard {
-    pub(super) fn render_menu_on(&self, output: Bounds<Pixels>) -> Option<Stateful<Div>> {
+    pub(super) fn render_menu_on(
+        &self,
+        output: Bounds<Pixels>,
+        capsule: bool,
+    ) -> Option<Stateful<Div>> {
         let (pin_id, position) = self.menu.filter(|(_, pos)| output.contains(pos))?;
         let pin = self.pins.iter().find(|p| p.id == pin_id)?;
         let c = theme::c();
+        let hover_bg = if capsule {
+            c.capsule_hover()
+        } else {
+            c.toolbar_hover
+        };
+        let row_radius = if capsule { px(6.) } else { px(4.) };
 
         let zoom_pct = ((f32::from(pin.rect.size.width) / f32::from(pin.base.width).max(1.)) * 100.)
             .round() as u32;
@@ -77,24 +87,30 @@ impl PinBoard {
                         icon: IconName,
                         active: bool,
                         action: fn() -> Box<dyn Action>| {
+            let sel_bg = if capsule {
+                c.accent
+            } else {
+                c.toolbar_selected
+            };
+            let icon_col = if active && capsule {
+                c.capsule_on_accent()
+            } else {
+                c.toolbar_text
+            };
             Button::new(id)
                 .debug_selector(move || id.into())
                 .accessibility_label(label)
                 .w(px(if compact { 22. } else { 25. }))
                 .h(px(strip_h))
-                .rounded_sm()
+                .rounded(row_radius)
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(if active {
-                    c.toolbar_selected
-                } else {
-                    0x0000_0000
-                }))
-                .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                .bg(rgba(if active { sel_bg } else { 0x0000_0000 }))
+                .hover(move |s| s.bg(rgba(if active { sel_bg } else { hover_bg })))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                .child(Icon::new(icon).size_3p5().text_color(rgba(c.toolbar_text)))
+                .child(Icon::new(icon).size_3p5().text_color(rgba(icon_col)))
         };
 
         let strip = div()
@@ -255,7 +271,12 @@ impl PinBoard {
                     )),
             );
 
-        let sep = || div().w_full().h(px(sep_h)).bg(rgba(c.toolbar_border));
+        let sep_col = if capsule {
+            c.capsule_border()
+        } else {
+            c.toolbar_border
+        };
+        let sep = || div().w_full().h(px(sep_h)).bg(rgba(sep_col));
 
         let item = |id: &'static str,
                     label: &str,
@@ -267,13 +288,19 @@ impl PinBoard {
                 .w_full()
                 .h(px(item_h))
                 .px_2()
-                .rounded_sm()
+                .rounded(row_radius)
                 .flex()
                 .items_center()
                 .justify_between()
                 .text_xs()
                 .text_color(rgba(c.toolbar_text))
-                .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                .hover(move |s| {
+                    if capsule {
+                        s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
+                    } else {
+                        s.bg(rgba(hover_bg))
+                    }
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
                 .child(label.to_string())
@@ -297,13 +324,19 @@ impl PinBoard {
                     .flex_1()
                     .h_full()
                     .px_2()
-                    .rounded_sm()
+                    .rounded(row_radius)
                     .flex()
                     .items_center()
                     .justify_between()
                     .text_xs()
                     .text_color(rgba(c.toolbar_text))
-                    .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                    .hover(move |s| {
+                        if capsule {
+                            s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
+                        } else {
+                            s.bg(rgba(hover_bg))
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPinHistory), cx))
                     .child(crate::i18n::t!("pin.menu.history").to_string())
@@ -315,13 +348,13 @@ impl PinBoard {
                     .accessibility_label(crate::i18n::t!("pin.menu.restore_closed").as_ref())
                     .px_1p5()
                     .h_full()
-                    .rounded_sm()
+                    .rounded(row_radius)
                     .flex()
                     .items_center()
                     .gap_1()
                     .text_xs()
                     .text_color(rgba(c.accent))
-                    .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                    .hover(move |s| s.bg(rgba(hover_bg)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(RestoreClosedPin), cx);
@@ -346,11 +379,21 @@ impl PinBoard {
             .flex_col()
             .gap(px(gap))
             .overflow_hidden()
-            .rounded_md()
             .border_1()
-            .border_color(rgba(c.toolbar_border))
-            .bg(rgba(c.toolbar_bg))
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        menu_div = if capsule {
+            menu_div
+                .rounded(px(12.))
+                .border_color(rgba(c.capsule_border()))
+                .bg(rgba(c.capsule_sheet_surface()))
+                .shadow(theme::capsule_floating_shadow())
+        } else {
+            menu_div
+                .rounded_md()
+                .border_color(rgba(c.toolbar_border))
+                .bg(rgba(c.toolbar_bg))
+        };
+        let mut menu_div = menu_div
             .child(strip)
             .child(sep())
             .child(status_bar)
@@ -408,19 +451,23 @@ impl PinBoard {
 }
 
 /// Compact top-left status badge inside a floating pin (zoom %, opacity %, OCR…).
-pub(super) fn render_hud_pill(text: &str) -> Div {
+pub(super) fn render_hud_pill(text: &str, capsule: bool) -> Div {
     let c = theme::c();
-    div()
-        .absolute()
-        .left(px(6.))
-        .top(px(6.))
-        .px_2()
-        .py_0p5()
-        .rounded_sm()
-        .bg(rgba((c.chip_bg & 0xFFFF_FF00) | 0xE6))
-        .border_1()
-        .border_color(rgba(c.toolbar_border))
-        .text_xs()
-        .text_color(rgba(c.btn_text))
-        .child(text.to_owned())
+    let mut pill = div().absolute().left(px(6.)).top(px(6.)).px_2().py_0p5();
+    pill = if capsule {
+        pill.rounded_full()
+            .bg(rgba(c.capsule_surface()))
+            .border_1()
+            .border_color(rgba(c.capsule_border()))
+            .text_xs()
+            .text_color(rgba(c.toolbar_text))
+    } else {
+        pill.rounded_sm()
+            .bg(rgba((c.chip_bg & 0xFFFF_FF00) | 0xE6))
+            .border_1()
+            .border_color(rgba(c.toolbar_border))
+            .text_xs()
+            .text_color(rgba(c.btn_text))
+    };
+    pill.child(text.to_owned())
 }

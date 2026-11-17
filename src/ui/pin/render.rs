@@ -126,6 +126,9 @@ impl Render for PinSurface {
         .absolute()
         .size_full();
 
+        let capsule = crate::ui::e2e::debug_ui_style()
+            .unwrap_or_else(|| crate::model::settings::current().ui_style())
+            == crate::model::settings::UiStyle::Capsule;
         let pin_cfg = crate::model::settings::current().pin();
         let show_border = pin_cfg.show_border;
         let show_shadow = pin_cfg.shadow;
@@ -145,6 +148,7 @@ impl Render for PinSurface {
                         return None;
                     }
                     let id = pin.id;
+                    let is_focused = active && focused == Some(id);
                     let local = pin.rect.origin - output.origin;
                     let pin_opacity = (f32::from(pin.opacity) / 100.).clamp(0.2, 1.0);
                     let is_annotating_this = annotating_id == Some(id);
@@ -166,9 +170,12 @@ impl Render for PinSurface {
                             .opacity(pin_opacity)
                             .overflow_hidden();
                         if show_border {
-                            ghost_box = ghost_box
-                                .border_1()
-                                .border_color(rgba((c.pin_border & 0xFFFF_FF00) | 0x66));
+                            let ghost_border = if capsule {
+                                c.capsule_border()
+                            } else {
+                                (c.pin_border & 0xFFFF_FF00) | 0x66
+                            };
+                            ghost_box = ghost_box.border_1().border_color(rgba(ghost_border));
                         }
                         let unlock_btn = Button::new(("pin-ghost-unlock", id))
                             .debug_selector(move || format!("pin-ghost-unlock-{id}"))
@@ -178,13 +185,21 @@ impl Render for PinSurface {
                             .top(chip_local.y)
                             .w(px(GHOST_CHIP_SIDE))
                             .h(px(GHOST_CHIP_SIDE))
-                            .rounded_sm()
+                            .rounded(if capsule { px(6.) } else { px(4.) })
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(rgba((c.toolbar_bg & 0xFFFF_FF00) | 0xBF))
+                            .bg(rgba(if capsule {
+                                c.capsule_surface()
+                            } else {
+                                (c.toolbar_bg & 0xFFFF_FF00) | 0xBF
+                            }))
                             .border_1()
-                            .border_color(rgba(c.toolbar_border))
+                            .border_color(rgba(if capsule {
+                                c.capsule_border()
+                            } else {
+                                c.toolbar_border
+                            }))
                             .opacity(0.65)
                             .hover(|s| s.opacity(1.0).border_color(rgba(c.accent)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -215,7 +230,11 @@ impl Render for PinSurface {
                                                         .object_fit(ObjectFit::Fill),
                                                 ),
                                         )
-                                        .children(hud_text.as_deref().map(render_hud_pill)),
+                                        .children(
+                                            hud_text
+                                                .as_deref()
+                                                .map(|t| render_hud_pill(t, capsule)),
+                                        ),
                                 )
                                 .child(unlock_btn)
                                 .into_any_element(),
@@ -232,16 +251,31 @@ impl Render for PinSurface {
                             .top(local.y)
                             .w(pin.rect.size.width)
                             .h(pin.rect.size.height)
-                            .rounded_md()
+                            .rounded(if capsule { px(10.) } else { px(6.) })
                             .overflow_hidden()
                             .opacity(pin_opacity)
-                            .border_2()
-                            .border_color(rgba(if active && focused == Some(id) {
+                            .border(if capsule && !is_focused {
+                                px(1.)
+                            } else {
+                                px(2.)
+                            })
+                            .border_color(rgba(if is_focused {
                                 c.accent
+                            } else if capsule {
+                                c.capsule_border()
                             } else {
                                 c.pin_border
                             }))
-                            .bg(rgba(c.toolbar_bg))
+                            .bg(rgba(if capsule {
+                                c.capsule_surface()
+                            } else {
+                                c.toolbar_bg
+                            }))
+                            .shadow(if show_shadow && capsule {
+                                theme::capsule_floating_shadow()
+                            } else {
+                                Vec::new()
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -307,7 +341,11 @@ impl Render for PinSurface {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .bg(rgba((c.toolbar_bg & 0xFFFF_FF00) | 0xD8))
+                                    .bg(rgba(if capsule {
+                                        c.capsule_surface()
+                                    } else {
+                                        (c.toolbar_bg & 0xFFFF_FF00) | 0xD8
+                                    }))
                                     .child(
                                         Icon::new(IconName::Maximize2)
                                             .size_2p5()
@@ -318,6 +356,11 @@ impl Render for PinSurface {
                     }
 
                     // ── Full floating pin (standard or annotating) ────────────
+                    // The frame is drawn AROUND the image, not inside it: the
+                    // div is grown by the 1px border width on every side, so
+                    // the border box's CONTENT area is exactly the pin rect
+                    // and the bitmap lands pixel-perfect over the desktop it
+                    // froze.
                     let frame = if show_border || is_annotating_this {
                         px(1.)
                     } else {
@@ -353,36 +396,55 @@ impl Render for PinSurface {
                         .opacity(pin_opacity)
                         .overflow_hidden();
                     if show_border || is_annotating_this {
-                        container =
-                            container
-                                .border_1()
-                                .border_color(rgba(if is_annotating_this {
-                                    c.accent
-                                } else {
-                                    c.pin_border
-                                }));
+                        let border_col = if is_annotating_this {
+                            c.accent
+                        } else if capsule && !is_focused {
+                            c.capsule_border()
+                        } else {
+                            c.pin_border
+                        };
+                        container = container.border_1().border_color(rgba(border_col));
                     }
+                    let shadows = if !show_shadow {
+                        Vec::new()
+                    } else if capsule {
+                        if is_focused {
+                            vec![
+                                BoxShadow::new(px(0.), px(8.), rgba(0x0000_0059).into())
+                                    .blur_radius(px(28.))
+                                    .spread_radius(px(-2.)),
+                                BoxShadow::new(
+                                    px(0.),
+                                    px(0.),
+                                    rgba((c.accent & 0xFFFF_FF00) | 0x55).into(),
+                                )
+                                .blur_radius(px(10.)),
+                            ]
+                        } else {
+                            theme::capsule_floating_shadow()
+                        }
+                    } else if is_focused {
+                        vec![
+                            BoxShadow::new(
+                                px(0.),
+                                px(0.),
+                                rgba((c.accent & 0xFFFF_FF00) | 0x8C).into(),
+                            )
+                            .blur_radius(px(6.)),
+                            BoxShadow::new(
+                                px(0.),
+                                px(0.),
+                                rgba((c.accent & 0xFFFF_FF00) | 0x47).into(),
+                            )
+                            .blur_radius(px(24.)),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
 
                     Some(
                         container
-                            .shadow(if show_shadow && active && focused == Some(id) {
-                                vec![
-                                    BoxShadow::new(
-                                        px(0.),
-                                        px(0.),
-                                        rgba((c.accent & 0xFFFF_FF00) | 0x8C).into(),
-                                    )
-                                    .blur_radius(px(6.)),
-                                    BoxShadow::new(
-                                        px(0.),
-                                        px(0.),
-                                        rgba((c.accent & 0xFFFF_FF00) | 0x47).into(),
-                                    )
-                                    .blur_radius(px(24.)),
-                                ]
-                            } else {
-                                Vec::new()
-                            })
+                            .shadow(shadows)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -533,7 +595,9 @@ impl Render for PinSurface {
                                             .border_1()
                                             .border_color(rgba(c.accent))
                                     }))
-                                    .children(hud_text.as_deref().map(render_hud_pill)),
+                                    .children(
+                                        hud_text.as_deref().map(|t| render_hud_pill(t, capsule)),
+                                    ),
                             )
                             .into_any_element(),
                     )
@@ -541,7 +605,7 @@ impl Render for PinSurface {
                 .collect()
         };
 
-        let menu_el = self.board.read(cx).render_menu_on(output);
+        let menu_el = self.board.read(cx).render_menu_on(output, capsule);
         let annot_bar_el = annot_bar.and_then(|b| self.render_annot_bar(b, cx));
         let text_prompt_el = self.render_text_prompt(cx);
 

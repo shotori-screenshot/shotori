@@ -580,7 +580,16 @@ impl PinSurface {
             .unwrap_or_else(|| pin.annotations.color_index());
         let cur_size = pin.annotations.current_edit_size().round() as u32;
         let palette_colors = *crate::model::settings::current().annotation_colors();
+        let capsule = crate::ui::e2e::debug_ui_style()
+            .unwrap_or_else(|| crate::model::settings::current().ui_style())
+            == crate::model::settings::UiStyle::Capsule;
         let c = theme::c();
+        let hover_bg = if capsule {
+            c.capsule_hover()
+        } else {
+            c.toolbar_hover
+        };
+        let btn_radius = if capsule { px(8.) } else { px(4.) };
         let local = bar_global.origin - self.output.bounds.origin;
 
         let tool_btn = |btn_id: &'static str,
@@ -588,23 +597,29 @@ impl PinSurface {
                         icon: IconName,
                         action: fn() -> Box<dyn Action>| {
             let selected = active_tool == Some(kind);
+            let sel_bg = if capsule {
+                c.accent
+            } else {
+                c.toolbar_selected
+            };
+            let icon_col = if selected && capsule {
+                c.capsule_on_accent()
+            } else {
+                c.toolbar_text
+            };
             Button::new(btn_id)
                 .debug_selector(move || btn_id.into())
                 .w(px(28.))
                 .h(px(28.))
-                .rounded_sm()
+                .rounded(btn_radius)
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(if selected {
-                    c.toolbar_selected
-                } else {
-                    0x0000_0000
-                }))
-                .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                .bg(rgba(if selected { sel_bg } else { 0x0000_0000 }))
+                .hover(move |s| s.bg(rgba(if selected { sel_bg } else { hover_bg })))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                .child(Icon::new(icon).size_4().text_color(rgba(c.toolbar_text)))
+                .child(Icon::new(icon).size_4().text_color(rgba(icon_col)))
         };
 
         let act_btn = |btn_id: &'static str,
@@ -615,27 +630,35 @@ impl PinSurface {
                 .debug_selector(move || btn_id.into())
                 .w(px(28.))
                 .h(px(28.))
-                .rounded_sm()
+                .rounded(if accent && capsule {
+                    px(14.)
+                } else {
+                    btn_radius
+                })
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(rgba(if accent { c.accent } else { 0x0000_0000 }))
-                .hover(|s| s.bg(rgba(if accent { c.accent } else { c.toolbar_hover })))
+                .hover(move |s| s.bg(rgba(if accent { c.accent } else { hover_bg })))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
                 .child(Icon::new(icon).size_4().text_color(rgba(if accent {
-                    0xFFFF_FFFF
+                    if capsule {
+                        c.capsule_on_accent()
+                    } else {
+                        0xFFFF_FFFF
+                    }
                 } else {
                     c.toolbar_text
                 })))
         };
 
         let sep = || {
-            div()
-                .w(px(1.))
-                .h(px(18.))
-                .mx_0p5()
-                .bg(rgba(c.toolbar_border))
+            div().w(px(1.)).h(px(18.)).mx_0p5().bg(rgba(if capsule {
+                c.capsule_border()
+            } else {
+                c.toolbar_border
+            }))
         };
 
         let row1 = div()
@@ -795,29 +818,33 @@ impl PinSurface {
             .child(swatches)
             .child(size_cluster);
 
-        Some(
-            div()
-                .id("pin-annot-bar")
-                .debug_selector(|| "pin-annot-bar".into())
-                .absolute()
-                .left(local.x)
-                .top(local.y)
-                .w(bar_global.size.width)
-                .h(bar_global.size.height)
-                .px_2()
-                .py_1()
-                .flex()
-                .flex_col()
-                .justify_between()
-                .rounded_md()
-                .border_1()
+        let mut bar = div()
+            .id("pin-annot-bar")
+            .debug_selector(|| "pin-annot-bar".into())
+            .absolute()
+            .left(local.x)
+            .top(local.y)
+            .w(bar_global.size.width)
+            .h(bar_global.size.height)
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .border_1()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
+        bar = if capsule {
+            bar.rounded(px(14.))
+                .border_color(rgba(c.capsule_border()))
+                .bg(rgba(c.capsule_surface()))
+                .shadow(theme::capsule_floating_shadow())
+        } else {
+            bar.rounded_md()
                 .border_color(rgba(c.toolbar_border))
                 .bg(rgba(c.toolbar_bg))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .child(row1)
-                .child(row2),
-        )
+        };
+        Some(bar.child(row1).child(row2))
     }
 
     pub(super) fn render_text_prompt(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -826,6 +853,9 @@ impl PinSurface {
         if !self.output.bounds.contains(&prompt.global_bounds.origin) {
             return None;
         }
+        let capsule = crate::ui::e2e::debug_ui_style()
+            .unwrap_or_else(|| crate::model::settings::current().ui_style())
+            == crate::model::settings::UiStyle::Capsule;
         let c = theme::c();
         let local = prompt.global_bounds.origin - self.output.bounds.origin;
         let input = prompt.input.clone();
@@ -840,10 +870,19 @@ impl PinSurface {
                 .h(prompt.global_bounds.size.height)
                 .px_2()
                 .py_1()
-                .rounded_md()
+                .rounded(if capsule { px(10.) } else { px(6.) })
                 .border_1()
                 .border_color(rgba(c.accent))
-                .bg(rgba(c.toolbar_bg))
+                .bg(rgba(if capsule {
+                    c.capsule_sheet_surface()
+                } else {
+                    c.toolbar_bg
+                }))
+                .shadow(if capsule {
+                    theme::capsule_floating_shadow()
+                } else {
+                    Vec::new()
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     div().relative().size_full().child(

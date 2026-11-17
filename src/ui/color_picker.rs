@@ -18,6 +18,7 @@ pub(super) struct ColorPicker {
     label: SharedString,
     selected: bool,
     opacity: bool,
+    capsule_ring: bool,
 }
 
 impl ColorPicker {
@@ -27,6 +28,7 @@ impl ColorPicker {
             label: label.into(),
             selected: false,
             opacity: true,
+            capsule_ring: false,
         }
     }
 
@@ -38,6 +40,12 @@ impl ColorPicker {
     /// Palette slots are opaque; text backgrounds and outlines retain alpha.
     pub(super) fn opaque(mut self) -> Self {
         self.opacity = false;
+        self
+    }
+
+    /// Render the trigger as an Capsule-style circular swatch with a concentric ring.
+    pub(super) fn capsule_ring(mut self, capsule_ring: bool) -> Self {
+        self.capsule_ring = capsule_ring;
         self
     }
 
@@ -311,7 +319,33 @@ impl RenderOnce for ColorPicker {
                     .on_open_change(move |open: &bool, _, cx| {
                         popup_state.update(cx, |state, cx| state.set_open(*open, cx))
                     })
-                    .trigger(
+                    .trigger(if self.capsule_ring {
+                        let t = crate::ui::theme::c();
+                        let active = self.selected || open || focused;
+                        Button::new("swatch-trigger")
+                            .debug_selector(|| "color-picker-trigger".into())
+                            .focusable(false)
+                            .size(px(28.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(if active {
+                                rgba(t.accent)
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .hover(move |s| {
+                                s.border_color(rgba(crate::ui::theme::alpha(t.toolbar_text, 0x66)))
+                            })
+                            .focus_visible(move |s| s.border_color(rgba(t.accent)))
+                            .child(
+                                div()
+                                    .size(px(18.))
+                                    .rounded_full()
+                                    .bg(color)
+                                    .border_1()
+                                    .border_color(rgba(t.swatch_border)),
+                            )
+                    } else {
                         Button::new("swatch-trigger")
                             .debug_selector(|| "color-picker-trigger".into())
                             .focusable(false)
@@ -325,8 +359,8 @@ impl RenderOnce for ColorPicker {
                                 cx.theme().transparent
                             })
                             .hover(|s| s.border_color(cx.theme().foreground))
-                            .focus_visible(|s| s.border_color(cx.theme().ring)),
-                    )
+                            .focus_visible(|s| s.border_color(cx.theme().ring))
+                    })
                     .children(open.then(|| self.content(window, cx))),
             )
     }

@@ -35,6 +35,7 @@ mod annotation;
 mod capture;
 mod export;
 mod ocr;
+mod style;
 mod toolbar;
 
 pub(crate) use annotation::{
@@ -52,6 +53,7 @@ pub use export::{
     validate_filename_template, write_last_save_dir,
 };
 pub use ocr::{DEFAULT_OCR_MODEL, OcrModel};
+pub use style::UiStyle;
 pub use toolbar::{DEFAULT_ROW, ToolbarButton, ToolbarCluster, ToolbarItem};
 
 /// Settings file name inside the config dir (see [`config_dir`]).
@@ -133,6 +135,8 @@ pub struct Settings {
     ocr_custom_config: Option<String>,
     /// UI language (`language` top-level key; Auto = system locale).
     language: Language,
+    /// Screenshot UI presentation preset (`ui_style` top-level key; Classic = default).
+    ui_style: UiStyle,
     /// Settings-window sidebar collapsed (written through on every
     /// toggle; the next `shotori settings` restores the rail).
     sidebar_collapsed: bool,
@@ -167,6 +171,7 @@ impl Default for Settings {
             ocr_join_lines: false,
             ocr_custom_config: None,
             language: Language::Auto,
+            ui_style: UiStyle::default(),
             sidebar_collapsed: false,
             smart_region: true,
             annotation_auto_select: true,
@@ -200,6 +205,8 @@ struct File {
     keys: Option<std::collections::BTreeMap<String, String>>,
     /// Top-level `language = "auto" | "en" | "zh-CN"`.
     language: Option<String>,
+    /// Top-level `ui_style = "classic" | "capsule"`.
+    ui_style: Option<String>,
     /// Settings-window sidebar collapsed (`sidebar_collapsed`,
     /// absent = expanded).
     sidebar_collapsed: Option<bool>,
@@ -325,6 +332,15 @@ impl Settings {
 
     pub fn set_language(&mut self, language: Language) {
         self.language = language;
+    }
+
+    /// Screenshot UI style preset (`classic` default, or `capsule`).
+    pub fn ui_style(&self) -> UiStyle {
+        self.ui_style
+    }
+
+    pub fn set_ui_style(&mut self, style: UiStyle) {
+        self.ui_style = style;
     }
 
     /// Settings-window sidebar collapsed (persisted; absent = expanded).
@@ -642,6 +658,20 @@ impl Settings {
                 }
             },
         };
+        let ui_style = match file.ui_style.as_deref() {
+            None => UiStyle::default(),
+            Some(id) => match UiStyle::from_id(id) {
+                Some(style) => style,
+                None => {
+                    errors.push(format!(
+                        "{}: unknown ui_style {id:?} (using {})",
+                        path.display(),
+                        UiStyle::default().id()
+                    ));
+                    UiStyle::default()
+                }
+            },
+        };
         let capture = file.capture.resolve(path, &mut errors);
         let export = file.export.resolve(path, &mut errors);
         let annotation = file.annotation.resolve(path, &mut errors);
@@ -662,6 +692,7 @@ impl Settings {
                 ocr_join_lines,
                 ocr_custom_config,
                 language,
+                ui_style,
                 sidebar_collapsed: file.sidebar_collapsed.unwrap_or(false),
                 smart_region: file.smart_region.unwrap_or(true),
                 annotation_auto_select: file.annotation_auto_select.unwrap_or(true),
@@ -725,6 +756,7 @@ impl Settings {
             toolbar.insert("colors".into(), colors);
         }
         table.insert("language".into(), toml::Value::from(self.language.id()));
+        table.insert("ui_style".into(), toml::Value::from(self.ui_style.id()));
         table.insert(
             "sidebar_collapsed".into(),
             toml::Value::from(self.sidebar_collapsed),
@@ -1338,6 +1370,7 @@ mod tests {
         let path = dir.path().join(FILE_NAME);
 
         let mut s = Settings::default();
+        s.set_ui_style(UiStyle::Capsule);
         s.capture_mut().window_snap = false;
         s.capture_mut().crosshair = true;
         s.capture_mut().size_label = SizeLabelMode::Bounds;
@@ -1422,7 +1455,8 @@ mod tests {
         // Out-of-range and unknown enum values degrade per-field with warnings
         std::fs::write(
             &path,
-            "[capture]\nsize_label = \"nope\"\nloupe_zoom = 99\n\
+            "ui_style = \"unknown-future\"\n\
+             [capture]\nsize_label = \"nope\"\nloupe_zoom = 99\n\
              [export]\nformat = \"bmp\"\njpeg_quality = 0\nfilename_template = \"../bad\"\n\
              [annotation]\nstroke_width = 99\ndefault_color_index = 20\ngeometry_radius = 99\n\
              [notify]\ntimeout_secs = 99\n\
@@ -1432,18 +1466,20 @@ mod tests {
         .unwrap();
         let (degraded, errors) = Settings::load(Some(&path));
         assert_eq!(degraded, Settings::default());
-        assert_eq!(errors.len(), 17, "errors: {errors:?}");
+        assert_eq!(errors.len(), 18, "errors: {errors:?}");
     }
 
     #[test]
     fn reset_helpers_preserve_cross_page_fields_and_single_keys() {
         let mut s = Settings::default();
+        s.set_ui_style(UiStyle::Capsule);
         s.capture_mut().reduce_motion = true;
         s.capture_mut().crosshair = true;
         s.capture_mut().double_click_copy = true;
         s.set_smart_region(false);
         s.scroll_mut().max_length = 50_000;
         s.reset_capture_defaults();
+        assert_eq!(s.ui_style(), UiStyle::Capsule);
         assert!(
             s.capture().reduce_motion,
             "reduce_motion belongs to Appearance and must survive Capture reset"

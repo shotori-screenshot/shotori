@@ -45,6 +45,7 @@ Headless Wayland sessions (`WLR_LIBINPUT_NO_DEVICES=1`) start `seat0` with
 | `SHOTORI_DEBUG_EDITING_SCENE` | `hover` \| `selected` \| `reselect` \| `cancel` \| `rectangle` \| `ellipse` \| `numbers` \| `lens` \| `multiselect` \| `spotlight` \| `textstyles` | Seeds deterministic annotation marks, selection states, or crop-reselection states inside `SHOTORI_DEBUG_SELECTION` |
 | `SHOTORI_DEBUG_ACTION` | **Exits / commands** (fire at 1.5 s): `copy` \| `save` \| `pin` \| `ocr` \| `qr` \| `scroll` \| `clear` \| `quit` \| `ocrsetup` (triggers `OcrSelection` at 1.5 s, `OcrSetupConfirm` at 6.0 s)<br>**Inline text editors**: `textnew` \| `textmiddle` \| `textedit` \| `textempty`<br>**Held-drag async replays**: `spotlightdraw` \| `lensdrag` (16-step drag with a 1.5 s mid-drag hold at step 8) | Dispatches real actions, synthetic text keystrokes, or multi-step pointer drags inside the targeted overlay window |
 | `SHOTORI_DEBUG_SAVE_PATH` | `/abs/path/out.png` | Bypasses the `xdg-desktop-portal` file dialog in overlay and scroll-capture save flows, writing directly to the path |
+| `SHOTORI_DEBUG_UI_STYLE` | `classic` \| `capsule` | Overrides the active `UiStyle` preset in-memory across overlay, scroll bar, OCR dialog/OSD, and floating pins |
 
 ### Settings Window Backdoors (`shotori settings`)
 

@@ -8,6 +8,9 @@
 # UI language: "auto" (follows system locale), "en", or "zh-CN".
 language = "auto"
 
+# Screenshot UI style preset: "classic" (compact strip) or "capsule" (frosted capsule).
+ui_style = "classic"
+
 # Pixel-based smart region selection (hover highlight, click snap,
 # wheel hierarchy). Window snapping via compositor IPC is configured
 # separately under `[capture] window_snap`.

@@ -564,6 +564,24 @@ settings:
         en: Replace line breaks with spaces before copying recognized text
         zh-CN: 复制识别结果前将换行符替换为空格，适合粘贴段落文本
   appearance:
+    ui_style:
+      en: Interface style
+      zh-CN: 界面风格
+    style:
+      classic:
+        title:
+          en: Classic
+          zh-CN: 经典
+        body:
+          en: Compact floating strip with dot-matrix grips, accent handles and square swatches
+          zh-CN: 紧凑悬浮条、点阵拖动手柄、强调色控制点与方形色块
+      capsule:
+        title:
+          en: Capsule
+          zh-CN: 胶囊
+        body:
+          en: Centered frosted capsule, concentric rounded controls, circular loupe and ring swatches
+          zh-CN: 居中半透明胶囊栏、同心圆角控件、圆形像素放大镜与圆环色盘
     shotori_light:
       en: Shotori Light
       zh-CN: Shotori Light
