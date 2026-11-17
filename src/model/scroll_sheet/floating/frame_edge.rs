@@ -1,9 +1,40 @@
 //! Captured window decorations stay on the stitched image's outer perimeter.
 //! Pixel masks keep rounded corners separate from document and column content.
 
-use super::{EDGE_CONTRAST, Region, STILL_TOLERANCE, difference};
+use super::{EDGE_CONTRAST, Region, STILL_TOLERANCE, difference, lerp_rgb};
 
 const FRAME_EDGE_FRACTION: usize = 8;
+
+/// Whether `pixel` differs from its translated vertical partner in `partner`
+/// at continuous row `coord`. Near-integer coordinates keep the exact single-row
+/// check; fractional coordinates require contrast against both straddling rows
+/// and their linear blend (+1 LSB for double rounding) so subpixel-filtered
+/// glyph edges and gentle ramps do not masquerade as stationary window borders.
+fn partner_differs(
+    pixel: &[u8],
+    partner: &[u8],
+    x: usize,
+    coord: f64,
+    width: usize,
+    height: usize,
+) -> bool {
+    let nearest = coord.round();
+    if (coord - nearest).abs() <= 1e-4 {
+        let row = (nearest as usize).min(height - 1);
+        let j = (row * width + x) * 4;
+        return difference(pixel, &partner[j..j + 4]) > STILL_TOLERANCE;
+    }
+    let s0 = coord.floor() as usize;
+    let s1 = (s0 + 1).min(height - 1);
+    let frac = (coord - s0 as f64) as f32;
+    let j0 = (s0 * width + x) * 4;
+    let j1 = (s1 * width + x) * 4;
+    let p0 = &partner[j0..j0 + 4];
+    let p1 = &partner[j1..j1 + 4];
+    difference(pixel, p0) > STILL_TOLERANCE
+        && difference(pixel, p1) > STILL_TOLERANCE
+        && difference(pixel, &lerp_rgb(p0, p1, frac)) > STILL_TOLERANCE + 1
+}
 
 /// Seed window decorations connected to the lower capture edge. Unlike a
 /// floating control, a thin frame needs a pixel mask, not a rectangular halo.
@@ -70,27 +101,26 @@ impl FrameEdge {
         }
     }
 
-    pub(super) fn observe(&mut self, current: &[u8], reference: &[u8], displacement: i64) {
-        if displacement == 0 {
+    pub(super) fn observe(&mut self, current: &[u8], reference: &[u8], subpixel_displacement: f64) {
+        let width = self.width;
+        if width == 0 {
             return;
         }
-        let width = self.width;
         let height = self.mask.len() / width;
-        let row = width * 4;
-        if let Some(y) = (0..self.seed_prefix_rows)
-            .find(|&y| current[y * row..(y + 1) * row] != self.seed[y * row..(y + 1) * row])
-        {
-            self.seed_prefix_rows = y;
+        if height == 0 || subpixel_displacement.abs() < 0.5 {
+            return;
         }
+        self.observe_seed_prefix(current);
         let first = height - height / FRAME_EDGE_FRACTION;
         // Antialiasing changes color with the document beneath the rim. Keep
         // its established coverage while fresh opaque edge pixels attest the
         // same frame; losing that support clears the whole mask below.
         let mut candidates = self.mask.clone();
         let mut fixed_bottom = 0;
+        let max_y = (height - 1) as f64;
         for y in first..height {
-            let forward = y as i64 + displacement;
-            let reverse = y as i64 - displacement;
+            let forward = y as f64 + subpixel_displacement;
+            let reverse = y as f64 - subpixel_displacement;
             for x in 0..width {
                 let i = y * width + x;
                 let pixel = &current[i * 4..i * 4 + 4];
@@ -99,12 +129,17 @@ impl FrameEdge {
                 {
                     continue;
                 }
-                let displaced = if (0..height as i64).contains(&forward) {
-                    let j = (forward as usize * width + x) * 4;
-                    difference(pixel, &reference[j..j + 4]) > STILL_TOLERANCE
-                } else if (0..height as i64).contains(&reverse) {
-                    let j = (reverse as usize * width + x) * 4;
-                    difference(&reference[i * 4..i * 4 + 4], &current[j..j + 4]) > STILL_TOLERANCE
+                let displaced = if (0.0..=max_y).contains(&forward) {
+                    partner_differs(pixel, reference, x, forward, width, height)
+                } else if (0.0..=max_y).contains(&reverse) {
+                    partner_differs(
+                        &reference[i * 4..i * 4 + 4],
+                        current,
+                        x,
+                        reverse,
+                        width,
+                        height,
+                    )
                 } else {
                     false
                 };
@@ -204,6 +239,39 @@ impl FrameEdge {
             self.rails.fill(None);
             return;
         }
+        // A blank bottom margin on a frameless page looks "displaced" whenever a
+        // wide contrasting banner or code block crosses the reverse sample row,
+        // flooding uniform whitespace up to `strip` and overwriting later text.
+        // Require either bilateral vertical rails or a stationary horizontal
+        // perimeter contrast against the interior row immediately above `strip`.
+        let has_side_rails = self.rails[..edge].iter().any(Option::is_some)
+            && self.rails[width - edge..].iter().any(Option::is_some);
+        let above_y = strip.saturating_sub(1);
+        let has_bottom_border = !has_side_rails && {
+            let contrasting = (0..width)
+                .filter(|&x| {
+                    let above = (above_y * width + x) * 4;
+                    let seed_above = &self.seed[above..above + 4];
+                    let cur_above = &current[above..above + 4];
+                    (strip..height).any(|y| {
+                        let i = y * width + x;
+                        if !self.mask[i] {
+                            return false;
+                        }
+                        let at = i * 4;
+                        difference(&self.seed[at..at + 4], seed_above) > EDGE_CONTRAST
+                            && difference(&current[at..at + 4], cur_above) > EDGE_CONTRAST
+                    })
+                })
+                .count();
+            contrasting * 2 > width
+        };
+        if !has_side_rails && !has_bottom_border {
+            self.mask.fill(false);
+            self.first_row = height;
+            self.rails.fill(None);
+            return;
+        }
         let mut left = width / 2;
         let mut right = width / 2;
         for y in (first..strip).rev() {
@@ -293,6 +361,148 @@ impl FrameEdge {
                     let at = (y * self.width + x) * 4;
                     frame[at..at + 4].copy_from_slice(&background);
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::FloatingOverlays;
+    use std::ops::Range;
+
+    fn paint_text_lines(page: &mut [u8], width: usize, rows: Range<usize>) {
+        let mut y = rows.start;
+        let mut line = 0usize;
+        while y + 8 < rows.end {
+            for dy in 0..3 {
+                for x in 24..width - 24 {
+                    // Varied word gaps keep horizontal edge structure realistic.
+                    if (x + line * 11) % 29 >= 6 {
+                        let at = ((y + dy) * width + x) * 4;
+                        page[at..at + 4].copy_from_slice(&[35, 35, 35, 255]);
+                    }
+                }
+            }
+            y += 18 + (line % 3) * 2;
+            line += 1;
+        }
+    }
+
+    fn slice(page: &[u8], width: usize, height: usize, top: usize) -> Vec<u8> {
+        let row = width * 4;
+        page[top * row..(top + height) * row].to_vec()
+    }
+
+    #[test]
+    fn frameless_blank_bottom_margin_with_wide_banner_preserves_later_text() {
+        let (width, height, page_height) = (240usize, 320usize, 800usize);
+        let row = width * 4;
+        let mut seed_page = vec![255u8; width * page_height * 4];
+        paint_text_lines(&mut seed_page, width, 20..240);
+        paint_text_lines(&mut seed_page, width, 360..760);
+
+        // Once scrolling starts, a full-width dark banner/code-block sits at
+        // page rows 295..320 so at `top = 40` (`reverse = y - 40` for `y` in
+        // 295..320) the reverse sample lands squarely inside the dark block
+        // while `280..320` on both seed and current are blank white margin.
+        let mut scrolled_page = seed_page.clone();
+        for y in 295..320 {
+            for x in 12..width - 12 {
+                let at = (y * width + x) * 4;
+                scrolled_page[at..at + 4].copy_from_slice(&[24, 28, 36, 255]);
+            }
+        }
+
+        let seed = slice(&seed_page, width, height, 0);
+        let mut canvas = seed.clone();
+        let mut floating = FloatingOverlays::new(&seed, width as u32);
+        for top in (40..=280).step_by(40) {
+            let frame = slice(&scrolled_page, width, height, top);
+            let retained = 0..canvas.len() / row;
+            canvas.resize((top + height) * row, 0);
+            floating.observe_frame_edge_subpixel(&frame, 40, 40.0);
+            assert!(
+                floating.frame_edge.is_empty(),
+                "false bottom-margin perimeter lock at top={top}"
+            );
+            floating.observe(&frame, (width as u32, height as u32), None);
+            floating.composite(&mut canvas, &frame, width, top, 0..height, retained);
+            floating.frame_edge.composite(&mut canvas, &frame, top);
+        }
+
+        // Every bottom text line entering after the blank margin must survive intact.
+        let text_range = 360 * row..(280 + height) * row;
+        assert_eq!(&canvas[text_range.clone()], &scrolled_page[text_range]);
+    }
+
+    #[test]
+    fn stationary_bottom_border_without_side_rails_is_preserved() {
+        let (width, height, page_height) = (240usize, 320usize, 720usize);
+        let row = width * 4;
+        let border = [20u8, 130, 230, 255];
+        let mut page = vec![255u8; width * page_height * 4];
+        paint_text_lines(&mut page, width, 20..700);
+
+        let capture = |top: usize| {
+            let mut frame = slice(&page, width, height, top);
+            for y in height - 3..height {
+                for x in 0..width {
+                    let at = (y * width + x) * 4;
+                    frame[at..at + 4].copy_from_slice(&border);
+                }
+            }
+            frame
+        };
+
+        let seed = capture(0);
+        let mut canvas = seed.clone();
+        let mut floating = FloatingOverlays::new(&seed, width as u32);
+        for top in (24..=240).step_by(24) {
+            let frame = capture(top);
+            let retained = 0..canvas.len() / row;
+            canvas.resize((top + height) * row, 0);
+            floating.observe_frame_edge_subpixel(&frame, 24, 24.0);
+            assert!(
+                !floating.frame_edge.is_empty(),
+                "missed bottom border at top={top}"
+            );
+            assert!(
+                floating.frame_edge.rails.iter().all(Option::is_none),
+                "frameless sides must not synthesize vertical rails"
+            );
+            assert_eq!(floating.frame_edge.first_row(), height - 3);
+            for y in 0..height - 3 {
+                for x in 0..width {
+                    assert!(
+                        !floating.frame_edge.contains(x, y),
+                        "interior pixel ({x}, {y}) masked at top={top}"
+                    );
+                }
+            }
+            for y in height - 3..height {
+                for x in 0..width {
+                    assert!(
+                        floating.frame_edge.contains(x, y),
+                        "border pixel ({x}, {y}) unmasked at top={top}"
+                    );
+                }
+            }
+            floating.observe(&frame, (width as u32, height as u32), None);
+            floating.composite(&mut canvas, &frame, width, top, 0..height, retained);
+            floating.frame_edge.composite(&mut canvas, &frame, top);
+        }
+
+        let interior_end = 240 + height - 3;
+        assert_eq!(
+            &canvas[..interior_end * row],
+            &page[..interior_end * row],
+            "stationary bottom border leaked into interior scrolled rows"
+        );
+        for y in interior_end..240 + height {
+            for x in 0..width {
+                let at = (y * width + x) * 4;
+                assert_eq!(&canvas[at..at + 4], &border);
             }
         }
     }
