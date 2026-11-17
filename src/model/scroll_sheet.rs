@@ -121,8 +121,10 @@
 //! previous bottom copy with fresh content on the way down, so no extra
 //! surgery is needed.)
 //!
-//! Known limitations (deliberate): integer offsets only (sub-pixel smooth
-//! scrolling can drop/duplicate one seam row per step), broad or animated
+//! Known limitations (deliberate): canvas rows stay on an integer pixel grid
+//! (sub-pixel offsets are verified by eighth-row interpolation and their
+//! residual phase is carried across frames so seams do not drift, without
+//! resampling stored RGBA rows), broad or animated
 //! floating panels and content never exposed by scrolling cannot be recovered,
 //! collapsing toolbars keep their tallest extent (rows a shrunken band exposes
 //! are lost, not misplaced), single contiguous sheet (no tiling for
@@ -439,6 +441,11 @@ pub(crate) struct ScrollSheet {
     /// search order; it never gates correctness (the coarse sweep still
     /// covers the full range when the user reverses).
     last_dy: i32,
+    /// Sub-row phase residual (`true_canvas_position - state.position as f32`,
+    /// bounded in `[-0.5, 0.5]`) of [`Self::stable_profile`]. Accumulates
+    /// fractional scroll displacements across accepted frames so rounding
+    /// each step onto the integer canvas never drifts over a long session.
+    subpixel_carry: f32,
     /// Confirmed lateral displacement relative to the seed document.
     horizontal_offset: i32,
     /// A textured screen-fixed backdrop has no document-row translation.
@@ -528,6 +535,7 @@ impl ScrollSheet {
             stable_profile: profile,
             motion: MotionMask::default(),
             last_dy: 0,
+            subpixel_carry: 0.0,
             horizontal_offset: 0,
             fixed_backdrop: false,
             frames_pushed: 1,
@@ -580,6 +588,7 @@ impl ScrollSheet {
         self.sticky = StickyBands::new();
         self.motion = MotionMask::default();
         self.last_dy = 0;
+        self.subpixel_carry = 0.0;
         self.horizontal_offset = 0;
         self.fixed_backdrop = false;
         self.state = ViewportState::default();
@@ -819,7 +828,8 @@ impl ScrollSheet {
                 false,
                 false,
             )
-            && body.dy == full.dy
+            && (body.dy - full.dy).abs() <= 1
+            && (body.subpixel_dy - full.subpixel_dy).abs() <= 0.5
             && body.cost <= self.options.cost_threshold
         {
             estimate = full;
@@ -843,15 +853,21 @@ impl ScrollSheet {
             ));
             return Placement::Reject(Refusal::Mismatch);
         }
-        if estimate.dy == 0 {
+        if estimate.dy == 0
+            && (f64::from(self.subpixel_carry) + f64::from(estimate.subpixel_dy)).round() as i64
+                == 0
+        {
             return Placement::Still;
         }
         // A synchronized column can use independently verified document
-        // motion to resolve a weak but unique pixel-perfect match. Exact
-        // periodic ties and columns already moving independently cannot.
-        let coherent_column = document_motion == Some(estimate.dy)
-            && estimate.cost <= f32::EPSILON
-            && estimate.runner_up > estimate.cost;
+        // motion to resolve a weak but unique match (including a 1-row
+        // subpixel rounding split on multi-row steps). Exact periodic ties
+        // and columns already moving independently cannot.
+        let coherent_column = document_motion.is_some_and(|doc_dy| {
+            (estimate.dy == doc_dy || (doc_dy.abs() > 1 && (estimate.dy - doc_dy).abs() <= 1))
+                && estimate.cost <= self.options.cost_threshold
+                && estimate.runner_up > estimate.cost
+        });
         if !coherent_column && estimate.runner_up - estimate.cost < self.options.ambiguity_margin {
             sheet_log(&format!(
                 "#{} Refused(Unclear) dy={} cost={:.2} runner={:.2} margin={:.2}",
@@ -864,6 +880,38 @@ impl ScrollSheet {
             return Placement::Reject(Refusal::Unclear);
         }
         Placement::Match(estimate)
+    }
+
+    fn place_still(&mut self, frame: &[u8]) -> Fold {
+        // A late column repaint can recover while the body is idle.
+        // Refresh that column alone and invalidate the preview cache.
+        let height = self.height();
+        if !self.fixed_backdrop
+            && let Some(sidebar) = &mut self.sidebar
+            && sidebar.is_incomplete()
+        {
+            sidebar.observe(
+                frame,
+                (0, self.subpixel_carry),
+                0,
+                height,
+                self.sticky.top as usize..(self.viewport_height - self.sticky.bot) as usize,
+                &self.floating.frame_edge,
+            );
+            sidebar.composite(
+                &mut self.canvas,
+                self.width as usize,
+                self.sticky.bot as usize,
+            );
+            self.floating.frame_edge.composite(
+                &mut self.canvas,
+                frame,
+                self.state.position as usize,
+            );
+            self.top_shifts = self.top_shifts.saturating_add(1);
+            return Fold::Shifted { dy: 0 };
+        }
+        Fold::Still
     }
 
     fn place(&mut self, frame: &[u8], profile: &RowProfile, placement: Placement) -> Fold {
@@ -887,43 +935,28 @@ impl ScrollSheet {
         // nothing is written, the canvas stays exactly as it was, and
         // the next frame that overlaps the (unchanged) base links up
         // again with its full displacement.
-        let estimate = match placement {
-            Placement::Match(e) => e,
-            Placement::Still => {
-                // A late column repaint can recover while the body is idle.
-                // Refresh that column alone and invalidate the preview cache.
-                let height = self.height();
-                if !self.fixed_backdrop
-                    && let Some(sidebar) = &mut self.sidebar
-                    && sidebar.is_incomplete()
-                {
-                    sidebar.observe(
-                        frame,
-                        0,
-                        0,
-                        height,
-                        self.sticky.top as usize..(self.viewport_height - self.sticky.bot) as usize,
-                        &self.floating.frame_edge,
-                    );
-                    sidebar.composite(
-                        &mut self.canvas,
-                        self.width as usize,
-                        self.sticky.bot as usize,
-                    );
-                    self.floating.frame_edge.composite(
-                        &mut self.canvas,
-                        frame,
-                        self.state.position as usize,
-                    );
-                    self.top_shifts = self.top_shifts.saturating_add(1);
-                    return Fold::Shifted { dy: 0 };
+        let (estimate, effective_dy, next_carry) = match placement {
+            Placement::Match(e) => {
+                let exact_next = (self.state.position as f64)
+                    + f64::from(self.subpixel_carry)
+                    + f64::from(e.subpixel_dy);
+                let rounded_next = exact_next.round() as i64;
+                let effective_dy = (rounded_next - self.state.position) as i32;
+                let next_carry = (exact_next - rounded_next as f64) as f32;
+                if effective_dy == 0 {
+                    // Sub-half-pixel micro-scroll: leave `stable_profile` and
+                    // `subpixel_carry` untouched so subsequent micro-steps
+                    // accumulate relative to the stable anchor until they
+                    // cross a half-pixel boundary.
+                    return self.place_still(frame);
                 }
-                return Fold::Still;
+                (e, effective_dy, next_carry)
             }
+            Placement::Still => return self.place_still(frame),
             Placement::Reject(reason) => return Fold::Refused(reason),
         };
 
-        let (next, branch, growth) = self.state.transition(estimate.dy);
+        let (next, branch, growth) = self.state.transition(effective_dy);
         if u64::from(self.viewport_height) + next.max_position as u64
             > self.options.max_height as u64
         {
@@ -944,7 +977,7 @@ impl ScrollSheet {
                 &self.stable_profile,
                 profile,
                 &self.options,
-                estimate.dy,
+                effective_dy,
                 true,
             );
             if !evidence.still.is_empty() {
@@ -957,11 +990,19 @@ impl ScrollSheet {
                 }
             }
             self.place_over_backdrop(frame, profile, next.position as usize, branch, growth);
-            return self.accept(profile, &estimate, next, branch, growth);
+            return self.accept(
+                profile,
+                &estimate,
+                effective_dy,
+                next_carry,
+                next,
+                branch,
+                growth,
+            );
         }
 
         let had_floating = !self.floating.is_empty();
-        self.floating.observe_frame_edge(frame, estimate.dy);
+        self.floating.observe_frame_edge(frame, effective_dy);
         self.sticky.seed_top = self
             .sticky
             .seed_top
@@ -970,7 +1011,7 @@ impl ScrollSheet {
             let prepend = if branch == Branch::Above { growth } else { 0 };
             sidebar.observe(
                 frame,
-                estimate.dy,
+                (effective_dy, next_carry),
                 prepend,
                 self.viewport_height + next.max_position as u32,
                 self.sticky.top as usize..(self.viewport_height - self.sticky.bot) as usize,
@@ -997,7 +1038,7 @@ impl ScrollSheet {
                 &self.stable_profile,
                 profile,
                 &self.options,
-                estimate.dy,
+                effective_dy,
                 false,
             );
             if !evidence.still.is_empty() {
@@ -1103,7 +1144,15 @@ impl ScrollSheet {
         self.floating
             .frame_edge
             .composite(&mut self.canvas, frame, next.position as usize);
-        self.accept(profile, &estimate, next, branch, growth)
+        self.accept(
+            profile,
+            &estimate,
+            effective_dy,
+            next_carry,
+            next,
+            branch,
+            growth,
+        )
     }
 
     /// A fixed backdrop is not a collection of occluding controls. Repairing
@@ -1183,26 +1232,32 @@ impl ScrollSheet {
         self.top_shifts = self.top_shifts.saturating_add(1);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn accept(
         &mut self,
         profile: &RowProfile,
         estimate: &OffsetEstimate,
+        effective_dy: i32,
+        next_carry: f32,
         next: ViewportState,
         branch: Branch,
         growth: u32,
     ) -> Fold {
         self.state = next;
+        self.subpixel_carry = next_carry;
         self.frames_accepted += 1;
         // A non-seed frame has entered the canvas; the axis can no
         // longer be swapped losslessly.
         self.axis_locked = true;
-        self.last_dy = estimate.dy;
+        self.last_dy = effective_dy;
         // The accepted frame is the new stable base (see `place`).
         self.stable_profile = profile.clone();
         sheet_log(&format!(
-            "#{} Match dy={} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} seed_top={} prefix={} fixed_backdrop={}",
+            "#{} Match dy={} sub_dy={:.3} carry={:.3} cost={:.2} margin={:.2} branch={branch:?} growth={growth} pos={} top={} seed_top={} prefix={} fixed_backdrop={}",
             self.frames_pushed,
-            estimate.dy,
+            effective_dy,
+            estimate.subpixel_dy,
+            self.subpixel_carry,
             estimate.cost,
             estimate.runner_up - estimate.cost,
             self.state.position,
@@ -1213,14 +1268,14 @@ impl ScrollSheet {
         ));
         match branch {
             Branch::Below => Fold::GrewBottom {
-                dy: estimate.dy.unsigned_abs(),
+                dy: effective_dy.unsigned_abs(),
                 growth,
             },
             Branch::Above => Fold::GrewTop {
-                dy: estimate.dy.unsigned_abs(),
+                dy: effective_dy.unsigned_abs(),
                 growth,
             },
-            Branch::Within => Fold::Shifted { dy: estimate.dy },
+            Branch::Within => Fold::Shifted { dy: effective_dy },
         }
     }
 

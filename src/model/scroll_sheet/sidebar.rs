@@ -91,12 +91,13 @@ impl Sidebar {
     pub(super) fn observe(
         &mut self,
         frame: &[u8],
-        document_dy: i32,
+        document_step: (i32, f32),
         prepend: u32,
         output_height: u32,
         content: Range<usize>,
         frame_edge: &FrameEdge,
     ) {
+        let (document_dy, document_carry) = document_step;
         let width = self.left + self.sheet.width as usize;
         self.frame_edge.copy_from_slice(frame_edge.mask());
         let mut content_frame = (!frame_edge.is_empty()).then(|| frame.to_vec());
@@ -126,9 +127,12 @@ impl Sidebar {
                 .sheet
                 .classify(&self.sheet.stable_profile, &profile, None)
             {
-                Placement::Match(estimate) => {
-                    Some(self.sheet.state.position + i64::from(estimate.dy))
-                }
+                Placement::Match(estimate) => Some(
+                    (self.sheet.state.position as f64
+                        + f64::from(self.sheet.subpixel_carry)
+                        + f64::from(estimate.subpixel_dy))
+                    .round() as i64,
+                ),
                 Placement::Still => Some(self.sheet.state.position),
                 Placement::Reject(_) => None,
             }
@@ -278,7 +282,11 @@ impl Sidebar {
             self.status = ColumnStatus::Retained;
         }
         let retained = matches!(self.status, ColumnStatus::Retained);
-        self.independent |= retained || dy != document_dy;
+        let doc_continuous = self.document_position as f64 + f64::from(document_carry);
+        let col_continuous =
+            (self.sheet.state.position + self.origin) as f64 + f64::from(self.sheet.subpixel_carry);
+        let diverged = dy != document_dy && (col_continuous - doc_continuous).abs() > 0.75;
+        self.independent |= retained || diverged;
         if !retained {
             self.background = self.background_row();
         }
