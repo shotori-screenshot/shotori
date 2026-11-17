@@ -54,6 +54,7 @@ pub(super) struct FloatingOverlays {
     regions: Vec<Region>,
     reference: Vec<u8>,
     displacement: i64,
+    subpixel_displacement: f64,
     samples: Vec<RowSamples>,
     seed_pending: bool,
     pub(super) frame_edge: FrameEdge,
@@ -103,12 +104,99 @@ fn difference(a: &[u8], b: &[u8]) -> u8 {
         .unwrap_or(0)
 }
 
+fn lerp_rgb(a: &[u8], b: &[u8], t: f32) -> [u8; 4] {
+    [
+        (f32::from(a[0]) * (1.0 - t) + f32::from(b[0]) * t).round() as u8,
+        (f32::from(a[1]) * (1.0 - t) + f32::from(b[1]) * t).round() as u8,
+        (f32::from(a[2]) * (1.0 - t) + f32::from(b[2]) * t).round() as u8,
+        255,
+    ]
+}
+
+/// Whether `src_img` at `(x, y)` fails to match the page-translated partner
+/// in `dst_img` at continuous vertical coordinate `target_y`.
+///
+/// Under fractional scroll, a translated horizontal glyph stroke can sit
+/// halfway between `dst_img[s0]` and `dst_img[s1]` (`0.5 * 40 + 0.5 * 255 = 148`),
+/// differing by `> 100` from either integer row alone even though it moved
+/// cleanly with the page. Checking forward, reverse, and midpoint 2-tap
+/// blends while always keeping weight `>= 0.5` on `src_img[y]` preserves exact
+/// integer-scroll sensitivity on pale rims (`frac == 0` reduces to a single
+/// `difference(p, d0) > EDGE_CONTRAST` check) without misclassifying repeated
+/// text prefixes as stationary floating buttons.
+#[allow(clippy::too_many_arguments)]
+fn translated_differs(
+    src_img: &[u8],
+    dst_img: &[u8],
+    x: usize,
+    y: usize,
+    target_y: f64,
+    width: usize,
+    height: usize,
+    frame_edge: &FrameEdge,
+) -> bool {
+    let s0 = target_y.floor() as usize;
+    let s1 = (s0 + 1).min(height - 1);
+    let frac = (target_y - s0 as f64) as f32;
+    if frame_edge.contains(x, s0) || (frac > 1e-4 && frame_edge.contains(x, s1)) {
+        return false;
+    }
+    let p_idx = (y * width + x) * 4;
+    let p = &src_img[p_idx..p_idx + 4];
+    let d0_idx = (s0 * width + x) * 4;
+    let d0 = &dst_img[d0_idx..d0_idx + 4];
+    if frac <= 1e-4 || s0 == s1 {
+        return difference(p, d0) > EDGE_CONTRAST;
+    }
+    let d1_idx = (s1 * width + x) * 4;
+    let d1 = &dst_img[d1_idx..d1_idx + 4];
+    if difference(p, &lerp_rgb(d0, d1, frac)) <= EDGE_CONTRAST {
+        return false;
+    }
+    if frac <= 0.5 {
+        if y > 0 {
+            let prev_idx = ((y - 1) * width + x) * 4;
+            let p_prev = &src_img[prev_idx..prev_idx + 4];
+            if difference(&lerp_rgb(p, p_prev, frac), d0) <= EDGE_CONTRAST {
+                return false;
+            }
+        }
+        if y + 1 < height {
+            let next_idx = ((y + 1) * width + x) * 4;
+            let p_next = &src_img[next_idx..next_idx + 4];
+            if difference(&lerp_rgb(p, p_next, 0.5), &lerp_rgb(d0, d1, 0.5 + frac)) <= EDGE_CONTRAST
+            {
+                return false;
+            }
+        }
+    }
+    if frac >= 0.5 {
+        if y + 1 < height {
+            let next_idx = ((y + 1) * width + x) * 4;
+            let p_next = &src_img[next_idx..next_idx + 4];
+            if difference(&lerp_rgb(p, p_next, 1.0 - frac), d1) <= EDGE_CONTRAST {
+                return false;
+            }
+        }
+        if y > 0 {
+            let prev_idx = ((y - 1) * width + x) * 4;
+            let p_prev = &src_img[prev_idx..prev_idx + 4];
+            if difference(&lerp_rgb(p, p_prev, 0.5), &lerp_rgb(d0, d1, frac - 0.5)) <= EDGE_CONTRAST
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 impl FloatingOverlays {
     pub(super) fn new(seed: &[u8], width: u32) -> Self {
         Self {
             regions: Vec::new(),
             reference: seed.to_vec(),
             displacement: 0,
+            subpixel_displacement: 0.0,
             seed_pending: true,
             frame_edge: FrameEdge::new(seed, width as usize),
             samples: (0..seed.len() / (width as usize * 4))
@@ -210,10 +298,25 @@ impl FloatingOverlays {
 
     /// Window decoration evidence uses the whole capture, independently of
     /// column ownership, before the column samples are stripped of chrome.
+    #[cfg(test)]
     pub(super) fn observe_frame_edge(&mut self, current: &[u8], dy: i32) {
+        self.observe_frame_edge_subpixel(current, dy, f64::from(dy));
+    }
+
+    pub(super) fn observe_frame_edge_subpixel(
+        &mut self,
+        current: &[u8],
+        dy: i32,
+        subpixel_step: f64,
+    ) {
         self.displacement += i64::from(dy);
+        self.subpixel_displacement += subpixel_step;
         self.frame_edge
             .observe(current, &self.reference, self.displacement);
+    }
+
+    pub(super) fn advance_subpixel(&mut self, subpixel_step: f64) {
+        self.subpixel_displacement += subpixel_step;
     }
 
     /// Find localized edges that stay at viewport coordinates despite an
@@ -250,7 +353,9 @@ impl FloatingOverlays {
                 let mut displaced = 0;
                 let mut stable_edges = 0;
                 for y in ty * TILE_PIXELS..((ty + 1) * TILE_PIXELS).min(height - 1) {
-                    let shifted = y as i64 + self.displacement;
+                    let shifted_f64 = y as f64 + self.subpixel_displacement;
+                    let reverse_f64 = y as f64 - self.subpixel_displacement;
+                    let max_y = (height - 1) as f64;
                     let body_right = excluded
                         .filter(|column| y + 1 >= column.top && y < column.bottom)
                         .map_or(width, |column| column.left);
@@ -285,22 +390,33 @@ impl FloatingOverlays {
                             // large jump can put that reverse sample beneath a
                             // newly appearing edge bar, so it cannot establish
                             // an overlay without a closer reference.
-                            let differs = if (0..height as i64).contains(&shifted) {
-                                let j = (shifted as usize * width + x) * 4;
-                                !self.frame_edge.contains(x, shifted as usize)
-                                    && difference(p, &previous[j..j + 4]) > EDGE_CONTRAST
+                            let differs = if (0.0..=max_y).contains(&shifted_f64) {
+                                translated_differs(
+                                    current,
+                                    previous,
+                                    x,
+                                    y,
+                                    shifted_f64,
+                                    width,
+                                    height,
+                                    &self.frame_edge,
+                                )
+                            } else if self.subpixel_displacement.abs()
+                                <= REFERENCE_TRAVEL_PIXELS as f64
+                                && (0.0..=max_y).contains(&reverse_f64)
+                            {
+                                translated_differs(
+                                    previous,
+                                    current,
+                                    x,
+                                    y,
+                                    reverse_f64,
+                                    width,
+                                    height,
+                                    &self.frame_edge,
+                                )
                             } else {
-                                let reverse = y as i64 - self.displacement;
-                                if self.displacement.abs() <= REFERENCE_TRAVEL_PIXELS
-                                    && (0..height as i64).contains(&reverse)
-                                {
-                                    let j = (reverse as usize * width + x) * 4;
-                                    !self.frame_edge.contains(x, reverse as usize)
-                                        && difference(&previous[i..i + 4], &current[j..j + 4])
-                                            > EDGE_CONTRAST
-                                } else {
-                                    false
-                                }
+                                false
                             };
                             displaced += usize::from(differs);
                         }
@@ -403,6 +519,7 @@ impl FloatingOverlays {
         if self.displacement.abs() >= REFERENCE_TRAVEL_PIXELS.min(height as i64 / 4) {
             self.reference.copy_from_slice(current);
             self.displacement = 0;
+            self.subpixel_displacement = 0.0;
         }
     }
 

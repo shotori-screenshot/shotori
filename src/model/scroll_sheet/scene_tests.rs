@@ -2083,3 +2083,194 @@ fn lateral_layout_warning_does_not_turn_into_scroll_speed_advice() {
     assert_eq!(phase_of(2, Refusal::NoOverlap), Phase::NoOverlap);
     assert_eq!(phase_of(2, Refusal::Mismatch), Phase::Unstable);
 }
+
+fn fractional_viewport(page: &[u8], top_f32: f32) -> Vec<u8> {
+    let row_bytes = (WIDTH * 4) as usize;
+    let mut out = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    for j in 0..HEIGHT {
+        let y = (top_f32 + j as f32).max(0.0);
+        let y0 = (y.floor() as u32).min(PAGE_HEIGHT - 1);
+        let y1 = (y0 + 1).min(PAGE_HEIGHT - 1);
+        let frac = y - y.floor();
+        let src0 = &page[y0 as usize * row_bytes..(y0 as usize + 1) * row_bytes];
+        let src1 = &page[y1 as usize * row_bytes..(y1 as usize + 1) * row_bytes];
+        let dst = &mut out[j as usize * row_bytes..(j as usize + 1) * row_bytes];
+        if frac <= 1e-6 {
+            dst.copy_from_slice(src0);
+        } else {
+            for ((out_b, &a), &b) in dst.iter_mut().zip(src0.iter()).zip(src1.iter()) {
+                *out_b = (f32::from(a) * (1.0 - frac) + f32::from(b) * frac).round() as u8;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn fractional_downward_scroll_folds_cleanly_without_seam_drift() {
+    let page = document();
+    for (step, steps, expected_scroll) in [
+        (12.5_f32, 20usize, 250u32),
+        (14.25, 20, 285),
+        (18.25, 20, 365),
+        (40.0 / 3.0, 15, 200),
+        (13.6, 25, 340),
+    ] {
+        let mut sheet = ScrollSheet::new(
+            WIDTH,
+            HEIGHT,
+            &fractional_viewport(&page, 0.0),
+            SheetLimits::default(),
+        )
+        .unwrap();
+        for i in 1..=steps {
+            let top = i as f32 * step;
+            let verdict = sheet.push(&fractional_viewport(&page, top));
+            assert!(
+                matches!(verdict, Fold::GrewBottom { .. }),
+                "step={step} i={i} top={top}: {verdict:?}"
+            );
+            if (top - top.round()).abs() <= 1e-4 {
+                let top_int = top.round() as u32;
+                assert_eq!(sheet.height(), HEIGHT + top_int, "step={step} top={top}");
+                assert_eq!(sheet.viewport_span(), (top_int, HEIGHT));
+                assert_pixels(
+                    sheet.canvas(),
+                    &page[..((HEIGHT + top_int) * WIDTH * 4) as usize],
+                    top_int + HEIGHT / 4,
+                    HEIGHT + top_int,
+                );
+            }
+        }
+        assert_eq!(sheet.height(), HEIGHT + expected_scroll, "step={step}");
+        let expected = &page[..((HEIGHT + expected_scroll) * WIDTH * 4) as usize];
+        assert_pixels(sheet.canvas(), expected, 0, HEIGHT / 4);
+        assert_pixels(
+            sheet.canvas(),
+            expected,
+            expected_scroll + HEIGHT / 4,
+            HEIGHT + expected_scroll,
+        );
+    }
+
+    // Starting at a non-zero fractional document phase (`0.75` -> `13.25` -> `25.75` ...)
+    // exercises integer-boundary phase crossings (`0.75 -> 0.25`) without drift.
+    let mut non_zero_phase = ScrollSheet::new(
+        WIDTH,
+        HEIGHT,
+        &fractional_viewport(&page, 0.75),
+        SheetLimits::default(),
+    )
+    .unwrap();
+    for i in 1..=20 {
+        let top = 0.75 + i as f32 * 12.5;
+        let verdict = non_zero_phase.push(&fractional_viewport(&page, top));
+        assert!(
+            matches!(verdict, Fold::GrewBottom { .. }),
+            "phase=0.75 i={i} top={top}: {verdict:?}"
+        );
+    }
+    assert_eq!(non_zero_phase.height(), HEIGHT + 250);
+}
+
+#[test]
+fn fractional_two_column_synchronized_scroll_stays_aligned() {
+    let (page, _) = pinned_heading_scene(246);
+    let mut sheet = ScrollSheet::new(
+        WIDTH,
+        HEIGHT,
+        &fractional_viewport(&page, 64.0),
+        SheetLimits::default(),
+    )
+    .unwrap();
+    assert!(sheet.sidebar.is_some());
+    for i in 1..=16 {
+        let top = 64.0 + i as f32 * 12.5;
+        let verdict = sheet.push(&fractional_viewport(&page, top));
+        assert!(
+            matches!(verdict, Fold::GrewBottom { .. }),
+            "two-col i={i} top={top}: {verdict:?}"
+        );
+    }
+    assert_eq!(sheet.height(), HEIGHT + 200);
+    assert!(!sheet.has_incomplete_column());
+    let expected = &page[(64 * WIDTH * 4) as usize..((64 + HEIGHT + 200) * WIDTH * 4) as usize];
+    assert_pixels(sheet.canvas(), expected, 200 + HEIGHT / 4, HEIGHT + 200);
+}
+
+#[test]
+fn fractional_upward_prepend_and_direction_reversal_preserve_exact_height() {
+    let page = document();
+    let mut sheet = ScrollSheet::new(
+        WIDTH,
+        HEIGHT,
+        &fractional_viewport(&page, 200.0),
+        SheetLimits::default(),
+    )
+    .unwrap();
+    for i in 1..=16 {
+        let top = 200.0 - i as f32 * 12.5;
+        let verdict = sheet.push(&fractional_viewport(&page, top));
+        assert!(
+            matches!(verdict, Fold::GrewTop { .. }),
+            "upward i={i} top={top}: {verdict:?}"
+        );
+    }
+    assert_eq!(sheet.height(), HEIGHT + 200);
+    assert_eq!(sheet.viewport_span(), (0, HEIGHT));
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 200) * WIDTH * 4) as usize],
+        0,
+        HEIGHT * 3 / 4,
+    );
+
+    // Reverse back down over the captured extent: no phantom growth, and
+    // landing back on `top = 200.0` aligns pixel-for-pixel with `page`.
+    for i in 1..=16 {
+        let top = i as f32 * 12.5;
+        let verdict = sheet.push(&fractional_viewport(&page, top));
+        assert!(
+            matches!(verdict, Fold::Shifted { .. }),
+            "return i={i} top={top}: {verdict:?}"
+        );
+        assert_eq!(sheet.height(), HEIGHT + 200);
+    }
+    assert_eq!(sheet.viewport_span(), (200, HEIGHT));
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 200) * WIDTH * 4) as usize],
+        200 + HEIGHT / 4,
+        HEIGHT + 200,
+    );
+}
+
+#[test]
+fn sub_half_pixel_micro_scroll_on_rasterized_text_accumulates_to_exact_extent() {
+    let page = document();
+    let mut sheet = ScrollSheet::new(
+        WIDTH,
+        HEIGHT,
+        &fractional_viewport(&page, 0.0),
+        SheetLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(sheet.push(&fractional_viewport(&page, 0.3)), Fold::Still);
+    assert_eq!(sheet.captured_extent(), 0);
+    for i in 2..=20 {
+        let top = i as f32 * 0.3;
+        let verdict = sheet.push(&fractional_viewport(&page, top));
+        assert!(
+            matches!(verdict, Fold::Still | Fold::GrewBottom { .. }),
+            "micro i={i} top={top}: {verdict:?}"
+        );
+    }
+    assert_eq!(sheet.captured_extent(), 6);
+    assert_eq!(sheet.height(), HEIGHT + 6);
+    assert_pixels(
+        sheet.canvas(),
+        &page[..((HEIGHT + 6) * WIDTH * 4) as usize],
+        6 + HEIGHT / 4,
+        HEIGHT + 6,
+    );
+}

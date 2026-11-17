@@ -386,6 +386,7 @@ pub(super) fn estimate(
         let edge = if prediction < 0 { -window } else { window };
         return Some(OffsetEstimate {
             dy: edge,
+            subpixel_dy: edge as f32,
             cost: f32::INFINITY,
             runner_up: f32::INFINITY,
             window,
@@ -399,6 +400,7 @@ pub(super) fn estimate(
         .fold(f32::INFINITY, f32::min);
     Some(OffsetEstimate {
         dy,
+        subpixel_dy: dy as f32,
         cost: score,
         runner_up,
         window,
