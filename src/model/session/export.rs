@@ -324,8 +324,8 @@ impl ScreenshotSession {
     /// Reuse the exported composite for freehand strokes, pixel filters and text.
     /// Captures are immutable; selection, shapes and display geometry own invalidation.
     /// The committed indices being edited by a live drag (move or
-    /// handle), if any. `filtered_preview` uses this to repaint only
-    /// the dragged shapes per frame instead of the whole scene.
+    /// handle) or keyboard nudge, if any. `filtered_preview` uses this to
+    /// repaint only the edited shapes per frame instead of the whole scene.
     fn editing_shape_indices(&self) -> Option<Vec<usize>> {
         let mut set: Vec<usize> = Vec::new();
         if let Some(drag) = &self.moving {
@@ -333,6 +333,9 @@ impl ScreenshotSession {
         }
         if let Some(drag) = &self.handle_drag {
             set.push(drag.ix);
+        }
+        if let Some(super::editing::NudgeGesture::Shapes { before }) = &self.nudge {
+            set.extend(before.iter().map(|(ix, _)| *ix));
         }
         if set.is_empty() {
             None
@@ -436,11 +439,11 @@ impl ScreenshotSession {
             let dims = (cached.original.width, cached.original.height);
             let origin = cached.original.bounds.origin;
             let scale = cached.original.scale;
+            let prev_replay = cached.moved.as_ref().map(|m| m.indices.clone());
             let rebuilt_base = base_stale
-                || cached
-                    .moved
+                || prev_replay
                     .as_ref()
-                    .is_none_or(|m| m.indices.as_slice() != replay.as_slice());
+                    .is_none_or(|indices| indices.as_slice() != replay.as_slice());
             if rebuilt_base {
                 let mut base = cached
                     .moved
@@ -472,41 +475,53 @@ impl ScreenshotSession {
                     ShapeKind::Spotlight | ShapeKind::Magnifier
                 )
             });
-            if rebuilt_base
-                || has_full_canvas_effect
-                || cached.committed.len() != committed.len()
-                || cached.pixels.len() != moved_base.len()
-            {
-                cached.pixels.clone_from(moved_base);
-            } else if let Some(dirty) = replay
-                .iter()
-                .filter_map(|&ix| cached.committed.get(ix))
-                .map(padded_shape_bounds)
-                .reduce(|a, b| a.union(&b))
-            {
-                // Restore only the physical pixel bounding box dirtied by
-                // the previous drag frame's replay set instead of cloning
-                // the full capture buffer per pointer move (#32).
-                let x0 = ((f32::from(dirty.left() - origin.x) * scale).floor() - 2.)
-                    .clamp(0., dims.0 as f32) as usize;
-                let y0 = ((f32::from(dirty.top() - origin.y) * scale).floor() - 2.)
-                    .clamp(0., dims.1 as f32) as usize;
-                let x1 = ((f32::from(dirty.right() - origin.x) * scale).ceil() + 2.)
-                    .clamp(0., dims.0 as f32) as usize;
-                let y1 = ((f32::from(dirty.bottom() - origin.y) * scale).ceil() + 2.)
-                    .clamp(0., dims.1 as f32) as usize;
-                if x0 < x1 && y0 < y1 {
-                    let stride = dims.0 as usize * 4;
-                    let col_start = x0 * 4;
-                    let col_end = x1 * 4;
-                    for row in y0..y1 {
-                        let row_offset = row * stride;
-                        cached.pixels[row_offset + col_start..row_offset + col_end]
-                            .copy_from_slice(
-                                &moved_base[row_offset + col_start..row_offset + col_end],
-                            );
+            if let Some(old_indices) = prev_replay.filter(|_| {
+                !base_stale
+                    && !has_full_canvas_effect
+                    && cached.committed.len() == committed.len()
+                    && cached.pixels.len() == moved_base.len()
+            }) {
+                let prev_dirty = old_indices
+                    .iter()
+                    .filter_map(|&ix| cached.committed.get(ix))
+                    .map(padded_shape_bounds);
+                let next_dirty = rebuilt_base
+                    .then(|| {
+                        replay
+                            .iter()
+                            .filter_map(|&ix| committed.get(ix))
+                            .map(padded_shape_bounds)
+                    })
+                    .into_iter()
+                    .flatten();
+                if let Some(dirty) = prev_dirty.chain(next_dirty).reduce(|a, b| a.union(&b)) {
+                    // Restore only the physical pixel bounding box dirtied by
+                    // the previous drag frame's replay set (and any newly joined
+                    // replay shapes when the split base rebuilt) instead of
+                    // cloning the full capture buffer per pointer move (#32).
+                    let x0 = ((f32::from(dirty.left() - origin.x) * scale).floor() - 2.)
+                        .clamp(0., dims.0 as f32) as usize;
+                    let y0 = ((f32::from(dirty.top() - origin.y) * scale).floor() - 2.)
+                        .clamp(0., dims.1 as f32) as usize;
+                    let x1 = ((f32::from(dirty.right() - origin.x) * scale).ceil() + 2.)
+                        .clamp(0., dims.0 as f32) as usize;
+                    let y1 = ((f32::from(dirty.bottom() - origin.y) * scale).ceil() + 2.)
+                        .clamp(0., dims.1 as f32) as usize;
+                    if x0 < x1 && y0 < y1 {
+                        let stride = dims.0 as usize * 4;
+                        let col_start = x0 * 4;
+                        let col_end = x1 * 4;
+                        for row in y0..y1 {
+                            let row_offset = row * stride;
+                            cached.pixels[row_offset + col_start..row_offset + col_end]
+                                .copy_from_slice(
+                                    &moved_base[row_offset + col_start..row_offset + col_end],
+                                );
+                        }
                     }
                 }
+            } else {
+                cached.pixels.clone_from(moved_base);
             }
             crate::annotation::Annotations::rasterize_shapes(
                 replay.iter().map(|&ix| &committed[ix]),
@@ -544,57 +559,55 @@ impl ScreenshotSession {
                 cached.stroke = None;
             }
             let history_changed = cached.committed != committed;
-            let appended_one = committed.len() == cached.committed.len() + 1
-                && committed.starts_with(&cached.committed);
-            // Appending a finished pencil/highlighter stroke only replays the
-            // new suffix. Undo, replacement and edits rebuild from the
-            // immutable capture. The pair lookup degrades instead of
-            // unwrapping; any miss lands in the full rebuild below, which is
-            // always correct.
-            let suffix =
-                if appended_one && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier) {
-                    cached.stroke.as_mut().zip(committed.last())
+            if history_changed {
+                let appended_one = committed.len() == cached.committed.len() + 1
+                    && committed.starts_with(&cached.committed);
+                // Appending a finished pencil/highlighter stroke only replays the
+                // new suffix. Undo, replacement and edits rebuild from the
+                // immutable capture. The pair lookup degrades instead of
+                // unwrapping; any miss lands in the full rebuild below, which is
+                // always correct.
+                let suffix =
+                    if appended_one && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier) {
+                        cached.stroke.as_mut().zip(committed.last())
+                    } else {
+                        None
+                    }
+                    .filter(|(_, shape)| shape.is_freehand());
+                if let Some((stroke, last)) = suffix {
+                    // Promote the final incremental draft, including a new release
+                    // point, instead of rasterizing the entire long stroke again.
+                    cached.pixels = stroke
+                        .render(
+                            last,
+                            &cached.pixels,
+                            (original.width, original.height),
+                            original.bounds.origin,
+                            original.scale,
+                        )
+                        .to_vec();
                 } else {
-                    None
-                }
-                .filter(|(_, shape)| shape.is_freehand());
-            if let Some((stroke, last)) = suffix {
-                // Promote the final incremental draft, including a new release
-                // point, instead of rasterizing the entire long stroke again.
-                cached.pixels = stroke
-                    .render(
-                        last,
-                        &cached.pixels,
-                        (original.width, original.height),
+                    // Lenses can sample the unmarked capture; a suffix-only replay
+                    // would incorrectly treat already painted annotations as the source.
+                    // Spotlight masks also need the entire union, without repeated dimming.
+                    if committed
+                        .iter()
+                        .any(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
+                        || !committed.starts_with(&cached.committed)
+                    {
+                        cached.pixels.clone_from(&original.rgba);
+                        cached.committed.clear();
+                    }
+                    crate::annotation::Annotations::rasterize_shapes(
+                        committed[cached.committed.len()..].iter(),
+                        &mut cached.pixels,
+                        original.width,
+                        original.height,
                         original.bounds.origin,
                         original.scale,
-                    )
-                    .to_vec();
-            } else {
-                // Lenses can sample the unmarked capture; a suffix-only replay
-                // would incorrectly treat already painted annotations as the source.
-                // Spotlight masks also need the entire union, without repeated dimming.
-                if committed
-                    .iter()
-                    .any(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
-                    || !committed.starts_with(&cached.committed)
-                {
-                    cached.pixels.clone_from(&original.rgba);
-                    cached.committed.clear();
+                    );
                 }
-                crate::annotation::Annotations::rasterize_shapes(
-                    committed[cached.committed.len()..].iter(),
-                    &mut cached.pixels,
-                    original.width,
-                    original.height,
-                    original.bounds.origin,
-                    original.scale,
-                );
-            }
-            if history_changed {
                 cached.stroke = None;
-            }
-            if cached.committed != committed {
                 cached.committed = committed.to_vec();
             }
             if let Some(shape) =
@@ -1253,5 +1266,167 @@ mod tests {
                 fresh_reference_rgba(s, "secondary")
             );
         });
+    }
+
+    #[test]
+    fn arrow_key_nudge_uses_split_plane_dirty_rect_and_dynamic_replay_without_ghosts() {
+        let mut s = ScreenshotSession::new(
+            vec![patterned_capture("primary", (0, 0), 320, 200, 1.)],
+            Vec::new(),
+        );
+        s.select_all();
+        let area = s.selection.bounds().unwrap();
+
+        s.edit_annotations(|a| {
+            // ix = 0: lower-Z Pencil stroke to be nudged via keyboard.
+            a.toggle(ShapeKind::Pencil);
+            a.set_color(0);
+            a.set_tool_size(12.);
+            a.begin(point(px(20.), px(60.)), area, false);
+            a.drag_to(point(px(50.), px(80.)), area, false);
+            a.end();
+
+            // ix = 1: higher-Z Pencil stroke in the middle (entered and exited during nudge).
+            if a.tool() != Some(ShapeKind::Pencil) {
+                a.toggle(ShapeKind::Pencil);
+            }
+            a.set_color(2);
+            a.set_tool_size(14.);
+            a.begin(point(px(110.), px(50.)), area, false);
+            a.drag_to(point(px(130.), px(100.)), area, false);
+            a.end();
+
+            // ix = 2: stationary far-right stroke that stays in MovedReplay::base.
+            if a.tool() != Some(ShapeKind::Pencil) {
+                a.toggle(ShapeKind::Pencil);
+            }
+            a.set_color(1);
+            a.set_tool_size(8.);
+            a.begin(point(px(260.), px(140.)), area, false);
+            a.drag_to(point(px(300.), px(170.)), area, false);
+            a.end();
+
+            a.toggle(ShapeKind::Select);
+            a.select_index(0);
+        });
+
+        s.filtered_preview("primary").unwrap();
+
+        // First nudge step initializes MovedReplay with only shape 0 in replay.
+        assert!(s.nudge(point(px(10.), px(0.))));
+        s.filtered_preview("primary").unwrap();
+        let initial_ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+        assert_eq!(
+            s.filter_preview
+                .borrow()
+                .as_ref()
+                .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone())),
+            Some(vec![0])
+        );
+        assert_eq!(
+            s.filter_preview.borrow().as_ref().unwrap().pixels,
+            fresh_reference_rgba(&s, "primary")
+        );
+
+        // Nudge into overlap with higher-Z shape 1 (replay transitions [0] -> [0, 1]),
+        // then past shape 1 so it leaves overlap again (replay transitions [0, 1] -> [0]).
+        for (step, dx) in [35., 35., 45., 45.].into_iter().enumerate() {
+            assert!(s.nudge(point(px(dx), px(0.))));
+            s.filtered_preview("primary").unwrap();
+            let ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+            assert_eq!(
+                ptr, initial_ptr,
+                "step={step}: cached.pixels reallocated during keyboard nudge"
+            );
+            assert_eq!(
+                s.filter_preview.borrow().as_ref().unwrap().pixels,
+                fresh_reference_rgba(&s, "primary"),
+                "step={step}: pixel mismatch or ghost trail during keyboard nudge"
+            );
+        }
+        assert_eq!(
+            s.filter_preview
+                .borrow()
+                .as_ref()
+                .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone())),
+            Some(vec![0]),
+            "replay must shrink back to [0] after leaving overlap with shape 1"
+        );
+
+        // Finishing the nudge drops MovedReplay in O(1) while retaining the buffer.
+        s.finish_nudge();
+        s.filtered_preview("primary").unwrap();
+        assert!(s.filter_preview.borrow().as_ref().unwrap().moved.is_none());
+        assert_eq!(
+            s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr(),
+            initial_ptr
+        );
+        assert_eq!(
+            s.crop("primary").unwrap().2,
+            fresh_reference_rgba(&s, "primary")
+        );
+    }
+
+    #[test]
+    fn live_freehand_draft_with_committed_spotlight_or_magnifier_reuses_committed_pixels() {
+        for lens_kind in [ShapeKind::Spotlight, ShapeKind::Magnifier] {
+            let mut s = ScreenshotSession::new(
+                vec![patterned_capture("primary", (0, 0), 260, 180, 1.)],
+                Vec::new(),
+            );
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+
+            s.edit_annotations(|a| {
+                a.toggle(lens_kind);
+                a.begin(point(px(30.), px(30.)), area, false);
+                a.drag_to(point(px(120.), px(110.)), area, false);
+                a.end();
+                a.finish_interaction();
+            });
+            s.filtered_preview("primary").unwrap();
+            let committed_snapshot = s.filter_preview.borrow().as_ref().unwrap().pixels.clone();
+            let pixels_ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+            let committed_vec_ptr = s
+                .filter_preview
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .committed
+                .as_ptr();
+
+            // Begin a live freehand Pencil stroke and move across several points.
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Pencil);
+                a.begin(point(px(140.), px(40.)), area, false);
+            });
+            for x in [155., 175., 195., 215.] {
+                s.edit_annotations(|a| {
+                    a.drag_to(point(px(x), px(75.)), area, false);
+                });
+                s.filtered_preview("primary").unwrap();
+                let cache = s.filter_preview.borrow();
+                let cached = cache.as_ref().unwrap();
+                assert_eq!(
+                    cached.pixels.as_ptr(),
+                    pixels_ptr,
+                    "{lens_kind:?}: cached.pixels reallocated during freehand draft"
+                );
+                assert_eq!(
+                    cached.committed.as_ptr(),
+                    committed_vec_ptr,
+                    "{lens_kind:?}: cached.committed reallocated during freehand draft where history_changed is false"
+                );
+                assert_eq!(cached.pixels, committed_snapshot);
+            }
+
+            s.edit_annotations(|a| a.end());
+            s.filtered_preview("primary").unwrap();
+            assert_eq!(
+                s.crop("primary").unwrap().2,
+                fresh_reference_rgba(&s, "primary"),
+                "{lens_kind:?}: post-stroke export mismatch"
+            );
+        }
     }
 }
