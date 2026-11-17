@@ -18,14 +18,59 @@ repository = "https://github.com/shotori-screenshot/shotori"
 keywords = ["screenshot", "wayland", "gpui", "screencopy", "clipboard"]
 categories = ["graphics", "multimedia::images", "command-line-utilities"]
 
-# The scroll_sheet pixel-regression fixtures are per-pixel f32 math over
-# hundreds of 480×640 frames; at the default unoptimized test profile they
-# alone took ~7 minutes per suite run (427 s for the worst single test).
-# opt-level 3 for tests only — `cargo build` keeps its fast dev profile —
-# cuts the full suite to ~17 s (individual tests 23–48× faster) while the
-# inherited overflow-checks/debug-assertions stay on.
+# Unit tests live in `src/` modules under the library target (`src/main.rs`
+# has no `#[test]`s and there are no doc-tests). Disabling the empty bin-test
+# and doctest targets avoids compiling `shotori` a second time as an `rlib`,
+# linking a duplicate ~100 MiB binary, and running `rustdoc` on zero tests.
+[lib]
+doctest = false
+
+[[bin]]
+name = "shotori"
+path = "src/main.rs"
+test = false
+
+# Pixel-heavy tests (ScrollSheet stitching, blur/mosaic/lens rasterization)
+# and pure-Rust font/blur leaf crates need LLVM loop vectorization (`opt-level = 2`),
+# whereas `[profile.test] opt-level = 3` forced a separate `-O3` build of all
+# 400+ dependencies (`gpui`, `wgpu`, `naga`, `zbus`, ...) and >3.5 min rebuilds.
+# Keeping `[profile.test.package."*"]` at `opt-level = 0` shares cached
+# dependency artifacts with `cargo build` while keeping the test run under ~5 s.
 [profile.test]
-opt-level = 3
+opt-level = 2
+
+[profile.test.package."*"]
+opt-level = 0
+
+[profile.test.package.image]
+opt-level = 2
+
+[profile.test.package.ab_glyph]
+opt-level = 2
+
+[profile.test.package.ab_glyph_rasterizer]
+opt-level = 2
+
+[profile.test.package.owned_ttf_parser]
+opt-level = 2
+
+[profile.test.package.ttf-parser]
+opt-level = 2
+
+[profile.test.package.rustybuzz]
+opt-level = 2
+
+[profile.test.package.swash]
+opt-level = 2
+
+[profile.test.package.zeno]
+opt-level = 2
+
+[profile.test.package.fontdb]
+opt-level = 2
+
+[profile.test.package.cosmic-text]
+opt-level = 2
 
 [dependencies]
 # default-features off: the default pulls the component library, whose
