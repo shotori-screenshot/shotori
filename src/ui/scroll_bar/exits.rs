@@ -92,6 +92,11 @@ pub(super) fn scroll_copy_exit(
             .spawn(async move {
                 let png = crate::model::export::encode_png_fast(width, height, &rgba)?;
                 crate::clipboard::copy_image(width, height, &rgba, &png)?;
+                if crate::model::settings::current().export().save_on_copy
+                    && let Err(e) = crate::model::export::save_to_default_dir(width, height, &rgba)
+                {
+                    eprintln!("[shotori] long screenshot save_on_copy failed: {e:#}");
+                }
                 Ok::<Vec<u8>, anyhow::Error>(png)
             })
             .await;

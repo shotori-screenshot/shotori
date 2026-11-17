@@ -53,6 +53,12 @@ pub fn send(summary: &str, body: &str) {
     spawn_child(summary, body, None, None);
 }
 
+/// Queue a live test notification from the settings window using the
+/// edited `timeout_secs` directly (bypasses the startup `enabled` snapshot).
+pub fn send_test(summary: &str, body: &str, timeout_secs: u8) {
+    spawn_child_with_timeout(summary, body, None, None, timeout_secs);
+}
+
 /// Retain the full-resolution clipboard PNG so the notification can open
 /// it, and queue the notification. The parent does NO pixel work: writing
 /// the cache file is a plain byte copy; the thumbnail renders in the
@@ -202,18 +208,28 @@ fn spawn_child(
     image: Option<&std::path::Path>,
     open_path: Option<&std::path::Path>,
 ) {
+    spawn_child_with_timeout(
+        summary,
+        body,
+        image,
+        open_path,
+        crate::model::settings::current().notify().timeout_secs,
+    );
+}
+
+fn spawn_child_with_timeout(
+    summary: &str,
+    body: &str,
+    image: Option<&std::path::Path>,
+    open_path: Option<&std::path::Path>,
+    timeout_secs: u8,
+) {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(_) => return,
     };
     let mut cmd = Command::new(exe);
-    cmd.env(
-        TIMEOUT_ENV,
-        crate::model::settings::current()
-            .notify()
-            .timeout_secs
-            .to_string(),
-    );
+    cmd.env(TIMEOUT_ENV, timeout_secs.clamp(2, 30).to_string());
     cmd.arg(NOTIFY_ARG).arg(summary).arg(body);
     if image.is_some() || open_path.is_some() {
         cmd.arg(image.unwrap_or_else(|| std::path::Path::new("")));
@@ -435,14 +451,81 @@ fn escape_markup(text: &str) -> String {
 
 // ── Preview thumbnails ────────────────────────────────────────────────
 
-fn cache_dir() -> Option<PathBuf> {
+fn cache_dir_raw() -> Option<PathBuf> {
     let base = match std::env::var("XDG_CACHE_HOME") {
         Ok(d) => PathBuf::from(d),
         Err(_) => PathBuf::from(std::env::var("HOME").ok()?).join(".cache"),
     };
-    let dir = base.join("shotori");
+    Some(base.join("shotori"))
+}
+
+fn cache_dir() -> Option<PathBuf> {
+    let dir = cache_dir_raw()?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// Resolved notification/preview cache directory path (`~/.cache/shotori`).
+pub fn cache_dir_display() -> Option<PathBuf> {
+    cache_dir_raw()
+}
+
+/// Ensure the notification cache directory exists and return its path.
+pub fn open_cache_dir() -> anyhow::Result<PathBuf> {
+    use anyhow::Context as _;
+    let dir = cache_dir_raw().context("HOME environment variable is not set")?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn is_transient_cache_entry(name: &str) -> bool {
+    name.starts_with("preview-")
+        || name.starts_with("clipboard-")
+        || name.starts_with("ocr-")
+        || name.starts_with("qr-")
+}
+
+/// Count and byte total of transient notification/clipboard cache files.
+pub fn cache_stats() -> (usize, u64) {
+    let Some(dir) = cache_dir_raw() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if is_transient_cache_entry(&name.to_string_lossy())
+            && let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            count += 1;
+            bytes = bytes.saturating_add(meta.len());
+        }
+    }
+    (count, bytes)
+}
+
+/// Remove all transient notification/clipboard preview files in `~/.cache/shotori`.
+pub fn clear_cache() -> usize {
+    let Some(dir) = cache_dir_raw() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if is_transient_cache_entry(&name.to_string_lossy())
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Child-side: load the full-resolution PNG, downscale it to a cached

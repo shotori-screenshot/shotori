@@ -2,10 +2,13 @@
 //! applied to captures and written through immediately to theme.toml.
 
 use crate::ui::color_picker::ColorPicker;
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Button;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::slider::Slider as ThemedSlider;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use crate::ui::theme::load::{self, ThemeFile};
@@ -41,18 +44,31 @@ impl SettingsWindow {
             })
         };
 
+        let has_color_overrides = ColorKey::ALL
+            .iter()
+            .any(|key| self.appearance.file.color(*key).is_some());
+
+        let palette_badge = has_color_overrides.then(|| {
+            div()
+                .text_xs()
+                .px_2()
+                .py_0p5()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().accent)
+                .text_color(cx.theme().primary)
+                .child(crate::i18n::t!("settings.appearance.custom_active").to_string())
+                .into_any_element()
+        });
+
         let mut body = super::layout::content_column()
             .child(page_header(cx, "settings.preferences.appearance", None))
             .child(card_group(
                 cx,
-                None,
+                Some(crate::i18n::t!("settings.appearance.group.interface").as_ref()),
                 vec![
                     card_row(
                         cx,
                         crate::i18n::t!("settings.general.language.label").to_string(),
-                        // No hint: picking a language re-renders every
-                        // string on the spot, so "applies immediately"
-                        // tells the user what the click already proved.
                         None,
                         None,
                         Select::new(&self.language_select).w_full(),
@@ -66,32 +82,42 @@ impl SettingsWindow {
                     ),
                 ],
             ))
-            .child(card_group(
+            .child(super::layout::section_block(
                 cx,
                 Some(crate::i18n::t!("settings.appearance.base_palette").as_ref()),
-                vec![self.theme_choices(window, cx)],
+                palette_badge,
+                self.theme_choices(window, cx),
             ));
-        let mut custom = div().flex().flex_col().gap_2().child(
+
+        let mut custom = div().flex().flex_col().gap_3().child(
             div()
                 .flex()
                 .items_center()
+                .justify_between()
                 .gap_3()
+                .px_3()
+                .py_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().group_box)
                 .child(
-                    gpui_kit::base::Button::new("custom-colors")
+                    Button::new("custom-colors")
                         .flex_1()
                         .flex()
                         .items_center()
                         .justify_start()
                         .gap_2()
-                        .py_2()
+                        .py_1()
                         .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(cx.theme().foreground)
                         .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
                         .child(
-                            gpui_kit::component::Icon::new(if self.custom_colors {
-                                gpui_kit::assets::IconName::ChevronDown
+                            Icon::new(if self.custom_colors {
+                                IconName::ChevronDown
                             } else {
-                                gpui_kit::assets::IconName::ChevronRight
+                                IconName::ChevronRight
                             })
                             .size_4(),
                         )
@@ -101,7 +127,7 @@ impl SettingsWindow {
                             cx.notify();
                         })),
                 )
-                .children(self.custom_colors.then(|| {
+                .children((self.custom_colors || has_color_overrides).then(|| {
                     super::shell::reset_button("settings.appearance.reset_colors", cx, {
                         let entity = cx.entity();
                         move |_, window, cx| {
@@ -111,7 +137,7 @@ impl SettingsWindow {
                 })),
         );
         if self.custom_colors {
-            let mut colors = div().flex().flex_col().gap_3();
+            let mut colors = div().flex().flex_col().gap_4();
             for (title, keys) in [
                 (
                     "settings.appearance.custom.selection",
@@ -154,14 +180,15 @@ impl SettingsWindow {
         page_body("page-appearance").child(body)
     }
 
-    /// One row per [`ColorKey`]: label + picker showing the resolved
-    /// color. Wraps two per line at the default width.
+    /// One cell per [`ColorKey`]: picker + label + per-color reset button when overridden.
     fn color_grid(&self, keys: &[ColorKey], cx: &Context<Self>) -> Div {
+        let reset_hint = crate::i18n::t!("settings.appearance.reset_single").to_string();
         let mut grid = div()
             .grid()
             .grid_cols(2)
-            .gap_x_4()
-            .gap_y_1()
+            .gap_x_6()
+            .gap_y_2()
+            .py_2p5()
             .w_full()
             .min_w_0();
         for (key, state) in self
@@ -170,23 +197,55 @@ impl SettingsWindow {
             .iter()
             .filter(|(key, _)| keys.contains(key))
         {
-            // Swatch first, label next, both left-aligned: the picker
-            // used to sit 280px away from the name it belongs to, which
-            // read as two unrelated columns.
+            let key = *key;
+            let overridden = self.appearance.file.color(key).is_some();
+            let entity = cx.entity();
+            let hint = reset_hint.clone();
             grid = grid.child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
                     .gap_2()
                     .min_w_0()
                     .py_1()
-                    .child(ColorPicker::new(state, key.label().into_owned()))
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .child(key.label().into_owned()),
-                    ),
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
+                            .min_w_0()
+                            .child(ColorPicker::new(state, key.label().into_owned()))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    .text_color(cx.theme().foreground)
+                                    .child(key.label().into_owned()),
+                            ),
+                    )
+                    .children(overridden.then(|| {
+                        Button::new(SharedString::from(format!("reset-color-{}", key.key())))
+                            .accessibility_label(format!("{}: {}", hint, key.label()))
+                            .size_6()
+                            .flex_shrink_0()
+                            .rounded(cx.theme().radius)
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|s| {
+                                s.bg(cx.theme().secondary_hover)
+                                    .text_color(cx.theme().foreground)
+                            })
+                            .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+                            .tooltip(move |_, cx| cx.new(|_| Tooltip::new(hint.clone())).into())
+                            .child(Icon::new(IconName::Undo2).size_3p5())
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.appearance.file.set_color(key, None);
+                                    this.appearance_resync(window, cx);
+                                    this.appearance_apply(cx);
+                                });
+                            })
+                    })),
             );
         }
         grid
@@ -204,6 +263,7 @@ fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
     div()
         .flex()
         .items_center()
+        .justify_end()
         .gap_3()
         .w_full()
         .child(
@@ -214,6 +274,8 @@ fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
         )
         .child(
             div()
+                .min_w(rems(3.5))
+                .text_right()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{:.0}%", value * 100.)),
@@ -223,12 +285,6 @@ fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
 // ── Appearance: state plumbing ─────────────────────────────────────────────
 
 impl AppearanceState {
-    /// Load the working copy (config file or a blank auto base) and
-    /// build the interactive rows — every picker seeded with the
-    /// resolved color, the slider with the resolved opacity. The
-    /// subscriptions route Change events back into the write-through
-    /// pipeline; `set_value` (the resync path) emits nothing, so a
-    /// base switch cannot loop.
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
         let path = theme::load::config_path();
         let (file, errors) = load::load_editable(path.as_deref());
@@ -259,13 +315,6 @@ impl AppearanceState {
         });
         subs.push(cx.subscribe(&opacity, |this, _, event, cx| {
             if let SliderEvent::Change(SliderValue::Single(value)) = event {
-                // The base slider step-snaps AFTER its own clamping —
-                // (value / step).round() * step can land just past max
-                // (0.05 has no exact binary form; the top of the range
-                // yields ~1.0000001), and the loader would reject the
-                // file with "dim_opacity must be between 0 and 1" on
-                // every drag to the end. Clamp at the boundary and round
-                // to the step's two decimals.
                 let value = (value.clamp(0., 1.) * 100.).round() / 100.;
                 this.appearance.file.dim_opacity = Some(value);
                 this.appearance_apply(cx);
@@ -289,7 +338,6 @@ impl SettingsWindow {
     pub(super) fn appearance_apply(&mut self, cx: &mut Context<Self>) {
         let (theme, palette_errors) = self.appearance.file.palette();
         theme::set(theme);
-        // appearance edits re-skin the whole shell, not just accent
         sync_shell_palette(cx);
         self.appearance.error = match palette_errors.first() {
             Some(error) => Some(error.clone()),
@@ -301,9 +349,7 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Re-seed every picker and the slider from the resolved palette —
-    /// after a base switch or a reset the swatches must show what a
-    /// capture would show. `set_value` emits nothing, so no loop.
+    /// Re-seed every picker and the slider from the resolved palette.
     pub(super) fn appearance_resync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = current_palette(&self.appearance.file);
         for (key, state) in &self.appearance.pickers {
@@ -347,8 +393,6 @@ impl SettingsWindow {
     }
 }
 
-/// The palette a capture would show right now for this editing state
-/// (one fixed palette — the system-following pair is retired).
 fn current_palette(file: &ThemeFile) -> crate::ui::theme::Theme {
     let (theme, _) = file.palette();
     theme

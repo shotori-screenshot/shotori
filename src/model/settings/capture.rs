@@ -107,6 +107,10 @@ pub struct CaptureSettings {
     pub keep_open_after_copy: bool,
     /// Stay in the capture overlay after a direct save (`export.auto_save = true`).
     pub keep_open_after_save: bool,
+    /// Double-click empty space inside the selection to copy and finish.
+    pub double_click_copy: bool,
+    /// Right-click outside annotation mode cancels the active selection or exits.
+    pub right_click_cancel: bool,
     /// Skip non-essential chrome animations (loupe fade, OSD orbit, sidebar slide).
     pub reduce_motion: bool,
 }
@@ -122,6 +126,8 @@ impl Default for CaptureSettings {
             loupe_size: LoupeSize::Medium,
             keep_open_after_copy: false,
             keep_open_after_save: false,
+            double_click_copy: false,
+            right_click_cancel: false,
             reduce_motion: false,
         }
     }
@@ -138,6 +144,8 @@ pub(super) struct CaptureFile {
     loupe_size: Option<String>,
     keep_open_after_copy: Option<bool>,
     keep_open_after_save: Option<bool>,
+    double_click_copy: Option<bool>,
+    right_click_cancel: Option<bool>,
     reduce_motion: Option<bool>,
 }
 
@@ -185,6 +193,8 @@ impl CaptureFile {
             loupe_size,
             keep_open_after_copy: self.keep_open_after_copy.unwrap_or(d.keep_open_after_copy),
             keep_open_after_save: self.keep_open_after_save.unwrap_or(d.keep_open_after_save),
+            double_click_copy: self.double_click_copy.unwrap_or(d.double_click_copy),
+            right_click_cancel: self.right_click_cancel.unwrap_or(d.right_click_cancel),
             reduce_motion: self.reduce_motion.unwrap_or(d.reduce_motion),
         }
     }
@@ -221,6 +231,14 @@ impl CaptureSettings {
         t.insert(
             "keep_open_after_save".into(),
             toml::Value::from(self.keep_open_after_save),
+        );
+        t.insert(
+            "double_click_copy".into(),
+            toml::Value::from(self.double_click_copy),
+        );
+        t.insert(
+            "right_click_cancel".into(),
+            toml::Value::from(self.right_click_cancel),
         );
         t.insert(
             "reduce_motion".into(),
@@ -493,12 +511,52 @@ impl PinZoomModifier {
     }
 }
 
+/// Action triggered by double-clicking a floating pin.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PinDoubleClick {
+    #[default]
+    None,
+    Close,
+    CopyAndClose,
+    ResetZoom,
+}
+
+impl PinDoubleClick {
+    pub const ALL: [Self; 4] = [Self::None, Self::Close, Self::CopyAndClose, Self::ResetZoom];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Close => "close",
+            Self::CopyAndClose => "copy_close",
+            Self::ResetZoom => "reset_zoom",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.id() == id.trim())
+    }
+
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::None => crate::i18n::t!("settings.pin.double_click.none"),
+            Self::Close => crate::i18n::t!("settings.pin.double_click.close"),
+            Self::CopyAndClose => crate::i18n::t!("settings.pin.double_click.copy_close"),
+            Self::ResetZoom => crate::i18n::t!("settings.pin.double_click.reset_zoom"),
+        }
+    }
+}
+
 /// `[pin]` configuration block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinSettings {
     pub zoom_modifier: PinZoomModifier,
     /// Percentage zoom increment per wheel line (`5..=50`, default `12` = `1.12×`).
     pub zoom_step: u8,
+    /// Default opacity percentage (`20..=100`, default `100`).
+    pub opacity: u8,
+    /// Double-click behavior on a floating pin.
+    pub double_click: PinDoubleClick,
     pub show_border: bool,
     pub shadow: bool,
     pub snap_to_edge: bool,
@@ -509,6 +567,8 @@ impl Default for PinSettings {
         Self {
             zoom_modifier: PinZoomModifier::None,
             zoom_step: 12,
+            opacity: 100,
+            double_click: PinDoubleClick::None,
             show_border: true,
             shadow: true,
             snap_to_edge: false,
@@ -521,6 +581,8 @@ impl Default for PinSettings {
 pub(super) struct PinFile {
     zoom_modifier: Option<String>,
     zoom_step: Option<i64>,
+    opacity: Option<i64>,
+    double_click: Option<String>,
     show_border: Option<bool>,
     shadow: Option<bool>,
     snap_to_edge: Option<bool>,
@@ -551,9 +613,33 @@ impl PinFile {
                 d.zoom_step
             }
         };
+        let opacity = match self.opacity {
+            None => d.opacity,
+            Some(v) if (20..=100).contains(&v) => v as u8,
+            Some(v) => {
+                errors.push(format!(
+                    "{}: pin.opacity = {v} must be in 20..=100 (using {})",
+                    path.display(),
+                    d.opacity
+                ));
+                d.opacity
+            }
+        };
+        let double_click = match self.double_click.as_deref() {
+            None => d.double_click,
+            Some(id) => PinDoubleClick::from_id(id).unwrap_or_else(|| {
+                errors.push(format!(
+                    "{}: unknown pin.double_click {id:?} (using none)",
+                    path.display()
+                ));
+                d.double_click
+            }),
+        };
         PinSettings {
             zoom_modifier,
             zoom_step,
+            opacity,
+            double_click,
             show_border: self.show_border.unwrap_or(d.show_border),
             shadow: self.shadow.unwrap_or(d.shadow),
             snap_to_edge: self.snap_to_edge.unwrap_or(d.snap_to_edge),
@@ -584,6 +670,11 @@ impl PinSettings {
             "zoom_step".into(),
             toml::Value::from(i64::from(self.zoom_step)),
         );
+        t.insert("opacity".into(), toml::Value::from(i64::from(self.opacity)));
+        t.insert(
+            "double_click".into(),
+            toml::Value::from(self.double_click.id()),
+        );
         t.insert("show_border".into(), toml::Value::from(self.show_border));
         t.insert("shadow".into(), toml::Value::from(self.shadow));
         t.insert("snap_to_edge".into(), toml::Value::from(self.snap_to_edge));
@@ -608,6 +699,9 @@ mod tests {
         }
         for modif in PinZoomModifier::ALL {
             assert_eq!(PinZoomModifier::from_id(modif.id()), Some(modif));
+        }
+        for dc in PinDoubleClick::ALL {
+            assert_eq!(PinDoubleClick::from_id(dc.id()), Some(dc));
         }
     }
 }

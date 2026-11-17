@@ -56,10 +56,12 @@ use crate::ui::e2e;
 use crate::ui::theme::load::ThemeFile;
 use crate::ui::theme::{self, ColorKey};
 
+use self::advanced::AdvancedPageState;
 use self::annotation_page::AnnotationPageState;
 use self::capture_page::CapturePageState;
 use self::desktop_page::DesktopPageState;
 use self::export_page::ExportPageState;
+use self::ocr::OcrPageState;
 use self::toolbar_editor::DragPreview;
 
 gpui_kit::actions!([
@@ -143,23 +145,6 @@ struct LanguageItem(crate::model::settings::Language);
 
 impl SearchableListItem for LanguageItem {
     type Value = crate::model::settings::Language;
-
-    fn title(&self) -> SharedString {
-        self.0.label().into()
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.0
-    }
-}
-
-/// One row of the OCR model Select (title = the model's localized
-/// label; the langs/tier detail line renders outside the dropdown).
-#[derive(Clone)]
-struct OcrModelItem(OcrModel);
-
-impl SearchableListItem for OcrModelItem {
-    type Value = OcrModel;
 
     fn title(&self) -> SharedString {
         self.0.label().into()
@@ -297,12 +282,11 @@ struct SettingsWindow {
     annotation_page: AnnotationPageState,
     export_page: ExportPageState,
     desktop_page: DesktopPageState,
+    ocr_page: OcrPageState,
+    advanced_page: AdvancedPageState,
+    about_copied_flash: bool,
     /// The language picker's Select state (Appearance page).
     language_select: gpui_kit::Entity<SelectState<SearchableVec<LanguageItem>>>,
-    /// The OCR model picker's Select state (OCR page). Selection
-    /// commits through the Confirm subscription; the detail line below
-    /// renders from `settings` — the file stays the single truth.
-    ocr_select: gpui_kit::Entity<SelectState<SearchableVec<OcrModelItem>>>,
     /// Collapsed navigation sidebar (icon-only rail) — persisted in
     /// settings.toml, written through on every toggle.
     sidebar_collapsed: bool,
@@ -435,8 +419,9 @@ impl SettingsWindow {
             )
         });
         let mut subscriptions = subscriptions;
-        subscriptions.push(cx.subscribe(&search, |_, _, event, cx| {
+        subscriptions.push(cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, InputEvent::Change) {
+                this.sync_section_to_search(cx);
                 cx.notify();
             }
         }));
@@ -460,28 +445,9 @@ impl SettingsWindow {
         let annotation_page = AnnotationPageState::new(&settings, window, cx);
         let export_page = ExportPageState::new(&settings, window, cx);
         let desktop_page = DesktopPageState::new(&settings, window, cx);
-        // OCR model picker: same shape, without the locale flip.
-        let ocr_current = settings.ocr_model();
-        let ocr_select = cx.new(|cx| {
-            let selected = OcrModel::ALL
-                .iter()
-                .position(|m| *m == ocr_current)
-                .map(IndexPath::new);
-            SelectState::new(
-                SearchableVec::new(OcrModel::ALL.map(OcrModelItem).to_vec()),
-                selected,
-                window,
-                cx,
-            )
-        });
-        subscriptions.push(cx.subscribe(&ocr_select, |this, _, event, cx| {
-            if let SelectEvent::Confirm(Some(model)) = event {
-                this.select_ocr_model(*model, cx);
-            }
-        }));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self {
+        let mut view = Self {
             section: initial_page
                 .map(Section::from_page)
                 .or_else(|| {
@@ -503,8 +469,10 @@ impl SettingsWindow {
             annotation_page,
             export_page,
             desktop_page,
+            ocr_page: OcrPageState::default(),
+            advanced_page: AdvancedPageState::default(),
+            about_copied_flash: false,
             language_select,
-            ocr_select,
             preview_scroll: ScrollHandle::new(),
             page_scroll: std::array::from_fn(|_| ScrollHandle::new()),
             rail_has_overflow: None,
@@ -516,6 +484,26 @@ impl SettingsWindow {
             edge_scroll: AutoScroll::default(),
             focus,
             _subscriptions: subscriptions,
+        };
+        view.sync_section_to_search(cx);
+        view
+    }
+
+    fn sync_section_to_search(&mut self, cx: &App) {
+        let query = self.search.read(cx).value().to_lowercase();
+        if query.trim().is_empty() {
+            return;
+        }
+        let current_matches = shell::SECTION_SEARCH_ITEMS
+            .iter()
+            .find(|(sec, _, _, _)| *sec == self.section)
+            .is_some_and(|(sec, key, _, kw)| shell::section_matches_query(*sec, key, kw, &query));
+        if !current_matches
+            && let Some((first, _, _, _)) = shell::SECTION_SEARCH_ITEMS
+                .iter()
+                .find(|(sec, key, _, kw)| shell::section_matches_query(*sec, key, kw, &query))
+        {
+            self.section = *first;
         }
     }
 
@@ -590,6 +578,76 @@ impl SettingsWindow {
                 cx,
             );
         });
+        cx.refresh_windows();
+    }
+
+    fn resync_all_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let lang_ix = crate::model::settings::Language::ALL
+            .iter()
+            .position(|l| *l == self.settings.language())
+            .map(IndexPath::new);
+        self.language_select
+            .update(cx, |s, cx| s.set_selected_index(lang_ix, window, cx));
+        self.capture_page.resync(&self.settings, window, cx);
+        self.annotation_page.resync(&self.settings, window, cx);
+        self.export_page.resync(&self.settings, window, cx);
+        self.desktop_page.resync(&self.settings, window, cx);
+        self.appearance_resync(window, cx);
+    }
+
+    /// Re-read `settings.toml` and `theme.toml` from disk and resync every
+    /// control live so hand edits take effect without reopening the window.
+    fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (settings, warnings) = Settings::load(self.path.as_deref());
+        self.settings = settings;
+        self.sidebar_collapsed = self.settings.sidebar_collapsed();
+        self.error = warnings.first().cloned();
+        let (file, theme_errors) = theme::load::load_editable(self.appearance.path.as_deref());
+        self.appearance.file = file;
+        self.appearance.error = theme_errors.first().cloned();
+        let (palette, _) = self.appearance.file.palette();
+        theme::set(palette);
+        sync_shell_palette(cx);
+        crate::i18n::set(self.settings.language());
+        self.search.update(cx, |search, cx| {
+            search.set_placeholder(
+                crate::i18n::t!("settings.preferences.search").to_string(),
+                window,
+                cx,
+            );
+        });
+        self.resync_all_controls(window, cx);
+        self.advanced_page.reloaded_flash = true;
+        cx.refresh_windows();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1600))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.advanced_page.reloaded_flash = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Restore all settings and theme overrides to factory defaults.
+    fn factory_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.advanced_page.confirm_factory_reset = false;
+        self.settings = Settings::default();
+        self.sidebar_collapsed = false;
+        self.appearance.file = ThemeFile::default();
+        crate::i18n::set(self.settings.language());
+        self.search.update(cx, |search, cx| {
+            search.set_placeholder(
+                crate::i18n::t!("settings.preferences.search").to_string(),
+                window,
+                cx,
+            );
+        });
+        self.resync_all_controls(window, cx);
+        self.appearance_apply(cx);
+        self.persist(cx);
         cx.refresh_windows();
     }
 }
@@ -772,7 +830,7 @@ mod toolbar_editor;
 mod color_surface_tests {
     use super::{Section, SettingsWindow};
     use crate::model::settings::{ExportFormat, Settings};
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{Focusable, TestAppContext};
 
     #[gpui_kit::test]
     fn editor_surfaces_are_opaque_even_when_screenshot_chips_are_translucent(
@@ -845,5 +903,70 @@ mod color_surface_tests {
             Some("~/Pictures/Direct")
         );
         assert_eq!(loaded.export().format, ExportFormat::Webp);
+    }
+
+    #[gpui_kit::test]
+    fn search_auto_navigates_to_matching_section_and_reload_resyncs_disk_edits(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let config = tempfile::tempdir().expect("test config directory");
+        let path = config.path().join("settings.toml");
+        let theme_path = config.path().join("theme.toml");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = SettingsWindow::new(window, cx);
+            view.settings = Settings::default();
+            view.path = Some(path.clone());
+            view.appearance.path = Some(theme_path.clone());
+            view.error = None;
+            view
+        });
+
+        // Typing "webp" in the focused search box switches automatically to Export.
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                assert_eq!(this.section, Section::Appearance);
+                this.search.focus_handle(cx).focus(window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("w e b p");
+        cx.update(|_, cx| {
+            assert_eq!(view.read(cx).section, Section::Export);
+        });
+
+        // Append a filename token and verify write-through.
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.append_filename_token("{w}x{h}", window, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        let (disk, _) = Settings::load(Some(&path));
+        assert!(disk.export().filename_template.ends_with("_{w}x{h}"));
+
+        // External hand-edit on disk is picked up by reload_from_disk.
+        std::fs::write(
+            &path,
+            "[ocr]\nmodel = \"ppocrv6-medium\"\njoin_lines = true\n[pin]\nopacity = 75\n",
+        )
+        .expect("write hand-edited settings");
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.reload_from_disk(window, cx);
+                assert_eq!(
+                    this.settings.ocr_model(),
+                    crate::model::settings::OcrModel::Ppocrv6Medium
+                );
+                assert!(this.settings.ocr_join_lines());
+                assert_eq!(this.settings.pin().opacity, 75);
+                this.factory_reset_all(window, cx);
+                assert_eq!(this.settings, Settings::default());
+            });
+            window.draw(cx).clear(cx);
+        });
     }
 }
