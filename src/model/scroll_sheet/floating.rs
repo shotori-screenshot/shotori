@@ -312,7 +312,7 @@ impl FloatingOverlays {
         self.displacement += i64::from(dy);
         self.subpixel_displacement += subpixel_step;
         self.frame_edge
-            .observe(current, &self.reference, self.displacement);
+            .observe(current, &self.reference, self.subpixel_displacement);
     }
 
     pub(super) fn advance_subpixel(&mut self, subpixel_step: f64) {
@@ -332,8 +332,11 @@ impl FloatingOverlays {
         size: (u32, u32),
         column: Option<(usize, Range<usize>)>,
     ) {
-        let previous = &self.reference;
         let (width, height) = (size.0 as usize, size.1 as usize);
+        if width == 0 || height == 0 || current.len() != self.reference.len() {
+            return;
+        }
+        let previous = &self.reference;
         let excluded = column.map(|(left, rows)| Region {
             left,
             right: width,
@@ -352,14 +355,16 @@ impl FloatingOverlays {
                 let mut still = 0;
                 let mut displaced = 0;
                 let mut stable_edges = 0;
-                for y in ty * TILE_PIXELS..((ty + 1) * TILE_PIXELS).min(height - 1) {
+                for y in ty * TILE_PIXELS..((ty + 1) * TILE_PIXELS).min(height.saturating_sub(1)) {
                     let shifted_f64 = y as f64 + self.subpixel_displacement;
                     let reverse_f64 = y as f64 - self.subpixel_displacement;
-                    let max_y = (height - 1) as f64;
+                    let max_y = height.saturating_sub(1) as f64;
                     let body_right = excluded
                         .filter(|column| y + 1 >= column.top && y < column.bottom)
                         .map_or(width, |column| column.left);
-                    for x in tx * TILE_PIXELS..((tx + 1) * TILE_PIXELS).min(body_right - 1) {
+                    for x in
+                        tx * TILE_PIXELS..((tx + 1) * TILE_PIXELS).min(body_right.saturating_sub(1))
+                    {
                         if self.frame_edge.contains(x, y) {
                             continue;
                         }
@@ -516,7 +521,9 @@ impl FloatingOverlays {
             }
         }
         self.regions = regions;
-        if self.displacement.abs() >= REFERENCE_TRAVEL_PIXELS.min(height as i64 / 4) {
+        if self.subpixel_displacement.abs()
+            >= (REFERENCE_TRAVEL_PIXELS.min(height as i64 / 4)) as f64
+        {
             self.reference.copy_from_slice(current);
             self.displacement = 0;
             self.subpixel_displacement = 0.0;
@@ -628,5 +635,182 @@ impl FloatingOverlays {
             };
         }
         self.seed_pending = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FloatingOverlays, lerp_rgb};
+
+    fn synthetic_page(width: usize, page_height: usize) -> Vec<u8> {
+        let mut page = vec![255u8; width * page_height * 4];
+        let mut y = 16usize;
+        let mut line = 0usize;
+        while y + 8 < page_height {
+            for dy in 0..3 {
+                for x in 24..width - 24 {
+                    if (x + line * 13) % 23 >= 5 {
+                        let at = ((y + dy) * width + x) * 4;
+                        page[at..at + 4].copy_from_slice(&[38, 38, 38, 255]);
+                    }
+                }
+            }
+            y += 17 + (line % 4) * 3;
+            line += 1;
+        }
+        page
+    }
+
+    fn fractional_slice(page: &[u8], width: usize, height: usize, top: f64) -> Vec<u8> {
+        let page_height = page.len() / (width * 4);
+        let mut out = vec![255u8; width * height * 4];
+        for y in 0..height {
+            let src_y = (top + y as f64).max(0.0);
+            let s0 = (src_y.floor() as usize).min(page_height - 1);
+            let s1 = (s0 + 1).min(page_height - 1);
+            let frac = (src_y - s0 as f64) as f32;
+            for x in 0..width {
+                let a = (s0 * width + x) * 4;
+                let b = (s1 * width + x) * 4;
+                let dst = (y * width + x) * 4;
+                if frac <= 1e-6 {
+                    out[dst..dst + 4].copy_from_slice(&page[a..a + 4]);
+                } else {
+                    out[dst..dst + 4].copy_from_slice(&lerp_rgb(
+                        &page[a..a + 4],
+                        &page[b..b + 4],
+                        frac,
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    fn stamp_rounded_window(pixels: &mut [u8], width: usize, radius: f32, border: [u8; 3]) {
+        let height = pixels.len() / (width * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let cx = px.clamp(radius, width as f32 - radius);
+                let cy = py.clamp(radius, height as f32 - radius);
+                let distance = radius - (px - cx).hypot(py - cy);
+                let inside = distance.clamp(0.0, 1.0);
+                let fill = (distance - 2.0).clamp(0.0, 1.0);
+                let at = (y * width + x) * 4;
+                for (channel, edge) in pixels[at..at + 3].iter_mut().zip(border) {
+                    let window = f32::from(*channel) * fill + f32::from(edge) * (1.0 - fill);
+                    *channel = (window * inside + 90.0 * (1.0 - inside)).round() as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_subpixel_scroll_tracks_rounded_frame_and_resets_reference() {
+        let (width, height, page_height) = (240usize, 320usize, 640usize);
+        let page = synthetic_page(width, page_height);
+        let capture_framed = |top: f64| {
+            let mut frame = fractional_slice(&page, width, height, top);
+            // Stationary top titlebar, matching real rounded windows.
+            frame[..32 * width * 4].fill(234);
+            for pixel in frame[..32 * width * 4].as_chunks_mut::<4>().0 {
+                pixel[3] = 255;
+            }
+            stamp_rounded_window(&mut frame, width, 16.0, [20, 130, 230]);
+            frame
+        };
+
+        let seed = capture_framed(0.0);
+        let mut floating = FloatingOverlays::new(&seed, width as u32);
+
+        // Step 1: 12.5 px fractional scroll, followed by a -0.4 px sharpen_still
+        // adjustment so integer `displacement` (13) diverges from `subpixel_displacement` (12.1).
+        let f1 = capture_framed(12.5);
+        floating.observe_frame_edge_subpixel(&f1, 13, 12.5);
+        floating.observe(&f1, (width as u32, height as u32), None);
+        assert!(!floating.frame_edge.is_empty());
+        floating.advance_subpixel(-0.4);
+
+        let steps = [
+            (24.6, 13, 12.5),
+            (37.1, 12, 12.5),
+            (49.6, 13, 12.5),
+            // Here integer `displacement` reaches 64 (`13+13+12+13+13 = 64`),
+            // while true `subpixel_displacement` is still 62.1 (< 64.0).
+            (62.1, 13, 12.5),
+        ];
+        for (top, dy, sub_step) in steps {
+            let frame = capture_framed(top);
+            floating.observe_frame_edge_subpixel(&frame, dy, sub_step);
+            floating.observe(&frame, (width as u32, height as u32), None);
+            assert!(
+                !floating.frame_edge.is_empty(),
+                "lost rounded window perimeter at top={top}"
+            );
+            assert!(
+                floating.regions.is_empty(),
+                "false floating region on rounded window at top={top}"
+            );
+            for y in 0..height - 3 {
+                for x in 24..width - 24 {
+                    assert!(
+                        !floating.frame_edge.contains(x, y),
+                        "document pixel ({x}, {y}) masked at top={top}"
+                    );
+                }
+            }
+        }
+        assert_eq!(floating.displacement, 64);
+        assert!((floating.subpixel_displacement - 62.1).abs() < 1e-6);
+
+        // Crossing `REFERENCE_TRAVEL_PIXELS` (64.0) synchronizes reference rollover.
+        let rollover_frame = capture_framed(74.6);
+        floating.observe_frame_edge_subpixel(&rollover_frame, 12, 12.5);
+        floating.observe(&rollover_frame, (width as u32, height as u32), None);
+        assert_eq!(floating.displacement, 0);
+        assert_eq!(floating.subpixel_displacement, 0.0);
+        assert_eq!(floating.reference, rollover_frame);
+        assert!(!floating.frame_edge.is_empty());
+
+        // Frameless subpixel-shifted text (starting at 0.5-px phase) must never
+        // trigger false perimeter or floating-control masks across phase flips.
+        let text_seed = fractional_slice(&page, width, height, 0.5);
+        let mut text_floating = FloatingOverlays::new(&text_seed, width as u32);
+        let mut top = 0.5f64;
+        for step_idx in 0..8 {
+            let dy = if step_idx % 2 == 0 { 13 } else { 12 };
+            top += 12.5;
+            let frame = fractional_slice(&page, width, height, top);
+            text_floating.observe_frame_edge_subpixel(&frame, dy, 12.5);
+            text_floating.observe(&frame, (width as u32, height as u32), None);
+            assert!(
+                text_floating.is_empty(),
+                "subpixel-shifted text misclassified at top={top}"
+            );
+        }
+    }
+
+    #[test]
+    fn column_at_left_zero_does_not_underflow() {
+        let (width, height) = (64u32, 64u32);
+        let page = synthetic_page(width as usize, 192);
+        let seed = fractional_slice(&page, width as usize, height as usize, 0.0);
+        let next = fractional_slice(&page, width as usize, height as usize, 12.5);
+        let mut floating = FloatingOverlays::new(&seed, width);
+        floating.observe_frame_edge_subpixel(&next, 12, 12.5);
+        floating.observe(&next, (width, height), Some((0, 0..height as usize)));
+        assert!(floating.regions.is_empty());
+
+        // Also guard 1-row and 0-row viewports without panicking on `height - 1`.
+        let one_row = vec![255u8; width as usize * 4];
+        let mut tiny = FloatingOverlays::new(&one_row, width);
+        tiny.observe(&one_row, (width, 1), Some((0, 0..1)));
+        assert!(tiny.regions.is_empty());
+
+        let mut empty = FloatingOverlays::new(&[], width);
+        empty.observe(&[], (width, 0), Some((0, 0..0)));
+        assert!(empty.regions.is_empty());
     }
 }
