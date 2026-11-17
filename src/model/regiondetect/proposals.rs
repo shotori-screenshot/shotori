@@ -395,8 +395,8 @@ struct Rail {
 
 fn extract_rails(edges: &GrayImage, vertical: bool) -> Vec<Rail> {
     const MIN_SEG_LEN: i32 = 20;
-    const MAX_RUN_GAP: i32 = 0;
-    const MIN_RUN_FILL_PCT: i32 = 100;
+    const MAX_RUN_GAP: i32 = 1;
+    const MIN_RUN_FILL_PCT: i32 = 88;
     const MIN_MERGED_FILL_PCT: i32 = 90;
     const MAX_INTERIOR_RAILS: usize = 80;
     const MAX_BAND_SPAN: i32 = 2;
@@ -528,15 +528,19 @@ fn extract_rails(edges: &GrayImage, vertical: bool) -> Vec<Rail> {
 
 /// Nominate screen-flush bars, sidebars, and T-junction split panes by
 /// pairing capture-boundary rails (`x = 0`, `x = width`, `y = 0`,
-/// `y = height`) with continuous interior divider rails.
+/// `y = height`) and outer window border rails with continuous interior
+/// divider rails.
 ///
 /// Unlike [`quad_proposals`] (which rejects T-junctions where a shared
 /// toolbar or sidebar rail overshoots a corner) and [`component_proposals`]
 /// on `background` (which drops panes once text/code pushes empty fill
 /// below 72%), a split cell permits rails to overshoot its corners while
-/// forbidding any rail from *undershooting* a corner by more than
-/// `JUNCTION_SLACK` px — so an isolated floating line in open space
-/// cannot pair with distant screen edges.
+/// requiring each corner to be either a tight T/L-junction (`<= JUNCTION_SLACK`
+/// px) or a balanced outer rounded L-corner (neither rail is a synthetic
+/// capture boundary, neither overshoots, and both endpoints stop within
+/// `r_max` px with `|gx - gy| <= 8`) — so rounded-window header bars,
+/// sidebars, split editors, and footers are nominated while isolated
+/// floating lines in open space cannot pair with distant screen edges.
 pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
     const MIN_CELL_DIM: i32 = 8;
     const MAX_JUNCTION_SLACK: i32 = 4;
@@ -567,6 +571,9 @@ pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
             // on a 30 px bar) so 1..2 px T-junction NMS gaps connect while
             // inset decorative bar ticks (`5 px` padding) do not slice a bar.
             let v_slack = (cell_h / 10).clamp(2, MAX_JUNCTION_SLACK);
+            let r_bound = (cell_h / 2 + 1).clamp(v_slack, 24);
+            let top_bound = top == 0 || top == height;
+            let bot_bound = bottom == 0 || bottom == height;
             let ov_start = h_top.start.max(h_bot.start);
             let ov_end = h_top.end.min(h_bot.end);
             if ov_end - ov_start < MIN_CELL_DIM {
@@ -575,10 +582,29 @@ pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
 
             valid_v.clear();
             for &v in &v_rails {
-                if v.start <= top + v_slack
-                    && v.end >= bottom - v_slack
-                    && v.fixed >= ov_start - MAX_JUNCTION_SLACK
-                    && v.fixed <= ov_end + MAX_JUNCTION_SLACK
+                let v_bound = v.fixed == 0 || v.fixed == width;
+                let top_outer = !top_bound
+                    && !v_bound
+                    && (h_top.start - v.fixed >= -3 || v.fixed - h_top.end >= -3);
+                let bot_outer = !bot_bound
+                    && !v_bound
+                    && (h_bot.start - v.fixed >= -3 || v.fixed - h_bot.end >= -3);
+                let top_v_slack = if top_outer { r_bound } else { v_slack };
+                let bot_v_slack = if bot_outer { r_bound } else { v_slack };
+                let top_h_slack = if top_outer {
+                    r_bound
+                } else {
+                    MAX_JUNCTION_SLACK
+                };
+                let bot_h_slack = if bot_outer {
+                    r_bound
+                } else {
+                    MAX_JUNCTION_SLACK
+                };
+                if v.start <= top + top_v_slack
+                    && v.end >= bottom - bot_v_slack
+                    && v.fixed >= (h_top.start - top_h_slack).max(h_bot.start - bot_h_slack)
+                    && v.fixed <= (h_top.end + top_h_slack).min(h_bot.end + bot_h_slack)
                 {
                     valid_v.push(v);
                 }
@@ -605,13 +631,61 @@ pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
                     if cell_w < MIN_CELL_DIM {
                         continue;
                     }
-                    let h_slack = (cell_w / 10).clamp(2, MAX_JUNCTION_SLACK);
-                    if left < ov_start - h_slack || right > ov_end + h_slack {
-                        continue;
-                    }
                     if left == 0 && top == 0 && right == width && bottom == height {
                         continue;
                     }
+                    let h_slack = (cell_w / 10).clamp(2, MAX_JUNCTION_SLACK);
+                    let r_max = (cell_w.min(cell_h) / 2 + 1).clamp(4, 24);
+                    let left_bound = left == 0 || left == width;
+                    let right_bound = right == 0 || right == width;
+                    let corner_slack = |gx: i32, gy: i32, h_bound: bool, v_bound: bool| {
+                        if gx <= h_slack && gy <= v_slack {
+                            Some(gx.max(0) + gy.max(0))
+                        } else if !h_bound
+                            && !v_bound
+                            && gx >= -3
+                            && gy >= -3
+                            && gx <= r_max
+                            && gy <= r_max
+                            && (gx.max(0) - gy.max(0)).abs() <= 8
+                        {
+                            Some(gx.max(0) + gy.max(0) + (gx.max(0) - gy.max(0)).abs())
+                        } else {
+                            None
+                        }
+                    };
+                    let Some(tl) = corner_slack(
+                        h_top.start - left,
+                        v_left.start - top,
+                        top_bound,
+                        left_bound,
+                    ) else {
+                        continue;
+                    };
+                    let Some(tr) = corner_slack(
+                        right - h_top.end,
+                        v_right.start - top,
+                        top_bound,
+                        right_bound,
+                    ) else {
+                        continue;
+                    };
+                    let Some(bl) = corner_slack(
+                        h_bot.start - left,
+                        bottom - v_left.end,
+                        bot_bound,
+                        left_bound,
+                    ) else {
+                        continue;
+                    };
+                    let Some(br) = corner_slack(
+                        right - h_bot.end,
+                        bottom - v_right.end,
+                        bot_bound,
+                        right_bound,
+                    ) else {
+                        continue;
+                    };
 
                     let v_splits = (m - k - 1) as i32;
                     let h_splits = h_rails[i + 1..j]
@@ -623,14 +697,7 @@ pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
                                 && h_mid.end >= right - h_slack
                         })
                         .count() as i32;
-                    let slack_err = (h_top.start - left).max(0)
-                        + (right - h_top.end).max(0)
-                        + (h_bot.start - left).max(0)
-                        + (right - h_bot.end).max(0)
-                        + (v_left.start - top).max(0)
-                        + (bottom - v_left.end).max(0)
-                        + (v_right.start - top).max(0)
-                        + (bottom - v_right.end).max(0);
+                    let slack_err = tl + tr + bl + br;
 
                     scored.push((
                         ((v_splits + h_splits).min(3), slack_err),
@@ -738,9 +805,12 @@ fn span_support(
 ///
 /// Pill buttons and large-radius dialogs curve inward past the 10% trim
 /// (`min(12, len/10)`), so sides ≥ 16 px also evaluate a corner-trimmed
-/// central span (`min(24, len/4)`); only a nearly continuous straight
-/// center (≥ 0.85) earns the 0.95-discounted score so short interior
-/// dashes still cannot masquerade as full borders.
+/// central span (`min(24, len/4)`); rounded window header/footer bars
+/// curve at only one end of their vertical sides while meeting a sharp
+/// T-junction divider at the other, so sides ≥ 20 px also evaluate the
+/// two one-end-trimmed spans (`arc_margin = min(24, 2·len/5)`). Only a
+/// nearly continuous straight span earns the 0.95-discounted score so
+/// short interior dashes still cannot masquerade as full borders.
 fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: bool) -> f32 {
     let limit = if vertical { edges.width } else { edges.height };
     if fixed <= 1 || fixed + 2 >= limit {
@@ -748,7 +818,7 @@ fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: b
     }
     let len = end - start;
     let margin = (len / 10).min(12);
-    let standard_best = span_support(edges, fixed, limit, start + margin, end - margin, vertical);
+    let mut best = span_support(edges, fixed, limit, start + margin, end - margin, vertical);
     if len >= 16 {
         let corner_margin = (len / 4).min(24);
         if corner_margin > margin {
@@ -761,11 +831,35 @@ fn side_support(edges: &GrayImage, fixed: i32, start: i32, end: i32, vertical: b
                 vertical,
             );
             if central_best >= 0.85 {
-                return standard_best.max(central_best * 0.95);
+                best = best.max(central_best * 0.95);
+            }
+        }
+        if len >= 20 {
+            let arc_margin = (len * 2 / 5).max(corner_margin + 1).min(24);
+            if arc_margin > corner_margin {
+                let one_end_best = span_support(
+                    edges,
+                    fixed,
+                    limit,
+                    start + arc_margin,
+                    end - margin,
+                    vertical,
+                )
+                .max(span_support(
+                    edges,
+                    fixed,
+                    limit,
+                    start + margin,
+                    end - arc_margin,
+                    vertical,
+                ));
+                if one_end_best >= 0.88 {
+                    best = best.max(one_end_best * 0.95);
+                }
             }
         }
     }
-    standard_best
+    best
 }
 
 /// Support of all four sides: left, top, right, bottom.

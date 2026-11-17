@@ -201,7 +201,7 @@ fn weak_lines(gradient: &GrayImage, other: &GrayImage, vertical: bool) -> GrayIm
                     start = position;
                 }
             } else {
-                if start >= 0 && position - start >= 24 {
+                if start >= 0 && position - start >= 14 {
                     for along_pos in start..position {
                         let (px, py) = if vertical {
                             (fixed, along_pos)
