@@ -210,6 +210,9 @@ impl StickyBands {
     /// `bot_run` counts from the BOTTOM edge, so its anchored skip and
     /// structure rows are mirrored.
     pub(super) fn bot_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
+        if cur.height == 0 {
+            return None;
+        }
         let step = cur.step.max(1);
         let skip = (self.bot as usize).div_ceil(step);
         let rows = self.commit_height(
@@ -219,10 +222,16 @@ impl StickyBands {
             step,
             viewport_height,
         )?;
+        // Mirror `top_commit`: only sample rows strictly inside the candidate
+        // bottom band `[cur.height - rows, cur.height)`. When `j * step == rows`,
+        // `last - rows` lands on the first scrolling content row just above the
+        // band, which would let a blank bottom margin pin itself as a sticky
+        // footer off the texture of scrolling text above it.
         let last = cur.height as usize - 1;
         let structured = (skip..)
-            .take_while(|&j| (j * step) as u32 <= rows)
-            .any(|j| grid_row_structured(cur, last - j * step));
+            .take_while(|&j| ((j * step) as u32) < rows)
+            .filter_map(|j| last.checked_sub(j * step))
+            .any(|y| grid_row_structured(cur, y));
         (structured && rows > self.bot).then_some(rows)
     }
 
@@ -411,4 +420,139 @@ fn row_mad(a: &[u8], b: &[u8]) -> f32 {
         .map(|(x, y)| u32::from(x.abs_diff(*y)))
         .sum::<u32>() as f32
         / a.len() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{COMMIT_FRAMES, RowProfile, SheetLimits, StickyBands, stillness_grid};
+    use crate::model::scroll_sheet::profile::BAND_COUNT;
+
+    fn render_viewport(
+        width: u32,
+        height: u32,
+        scroll_top: u32,
+        structured_footer: bool,
+    ) -> Vec<u8> {
+        const FOOTER_ROWS: u32 = 8;
+        let mut rgba = vec![255u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * 4) as usize;
+                let px = if y >= height - FOOTER_ROWS {
+                    if structured_footer {
+                        // Stationary structured status bar inside the bottom 8 rows.
+                        let glyph = (x / 6 + y).is_multiple_of(5) && (16..width - 16).contains(&x);
+                        let v = if glyph { 36 } else { 228 };
+                        [v, v, v, 255]
+                    } else {
+                        // Completely flat blank bottom margin.
+                        [248, 248, 250, 255]
+                    }
+                } else {
+                    // Non-periodic scrolling content right down to `height - FOOTER_ROWS - 1`
+                    // (the exact boundary row `last - rows` just above the margin).
+                    let doc_y = y + scroll_top;
+                    let hash = doc_y
+                        .wrapping_mul(73)
+                        .wrapping_add(x.wrapping_mul(37))
+                        .wrapping_add((doc_y / 3) ^ (x / 5));
+                    let ink = (16..width - 16).contains(&x) && (hash % 7 < 3);
+                    let v = if ink { 24 } else { 248 };
+                    [v, v, v, 255]
+                };
+                rgba[idx..idx + 4].copy_from_slice(&px);
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn blank_bottom_margin_below_scrolling_text_never_commits_as_footer() {
+        const W: u32 = 160;
+        const H: u32 = 200;
+        const STEP_DY: i32 = 16;
+
+        let limits = SheetLimits::default();
+        let mut blank_bands = StickyBands::new();
+        let mut prev_blank = RowProfile::from_rgba(&render_viewport(W, H, 0, false), W, H);
+
+        let mut footer_bands = StickyBands::new();
+        let mut prev_footer = RowProfile::from_rgba(&render_viewport(W, H, 0, true), W, H);
+
+        for frame_idx in 1..=u32::from(COMMIT_FRAMES) + 2 {
+            let scroll_top = frame_idx * STEP_DY as u32;
+
+            let cur_blank = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, false), W, H);
+            let blank_ev = stillness_grid(&prev_blank, &cur_blank, &limits, STEP_DY, false);
+            blank_bands.update(&blank_ev);
+            assert_eq!(
+                blank_bands.bot_commit(&cur_blank, H),
+                None,
+                "blank bottom margin must not commit off scrolling text at frame {frame_idx}"
+            );
+            prev_blank = cur_blank;
+
+            let cur_footer = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, true), W, H);
+            let footer_ev = stillness_grid(&prev_footer, &cur_footer, &limits, STEP_DY, false);
+            footer_bands.update(&footer_ev);
+            if frame_idx >= u32::from(COMMIT_FRAMES) && footer_bands.bot == 0 {
+                let committed = footer_bands.bot_commit(&cur_footer, H);
+                assert_eq!(committed, Some(8));
+                footer_bands.bot = 8;
+            }
+            prev_footer = cur_footer;
+        }
+
+        assert_eq!(footer_bands.bot, 8);
+    }
+
+    #[test]
+    fn bot_commit_handles_zero_and_tiny_heights_without_underflow() {
+        let mut bands = StickyBands::new();
+        bands.bot_run = vec![COMMIT_FRAMES; 4];
+        bands.bot_verified = vec![COMMIT_FRAMES; 4];
+
+        let empty_profile = RowProfile {
+            height: 0,
+            stride: 16,
+            step: 1,
+            data: Vec::new(),
+            bands: [(0, 0); BAND_COUNT],
+            band_means: Vec::new(),
+            spread: 0,
+            row_weight: Vec::new(),
+        };
+        assert_eq!(bands.bot_commit(&empty_profile, 64), None);
+
+        // `cur.height == 2` while `commit_height` proposes `rows == 2` (`rows == height`)
+        // and `rows == 4` (`rows > cur.height` when `viewport_height` is larger): neither
+        // may underflow `last - j * step`.
+        let mut structured_row = vec![20u8; 32];
+        structured_row[0] = 220;
+        structured_row[16] = 220;
+        let tiny_structured = RowProfile {
+            height: 2,
+            stride: 16,
+            step: 1,
+            data: structured_row,
+            bands: [(0, 16); BAND_COUNT],
+            band_means: vec![[120.0; BAND_COUNT]; 2],
+            spread: 0,
+            row_weight: vec![1.0; 2],
+        };
+        bands.bot_run = vec![COMMIT_FRAMES; 2];
+        bands.bot_verified = vec![COMMIT_FRAMES; 2];
+        assert_eq!(bands.bot_commit(&tiny_structured, 8), Some(2));
+
+        bands.bot_run = vec![COMMIT_FRAMES; 4];
+        bands.bot_verified = vec![COMMIT_FRAMES; 4];
+        assert_eq!(bands.bot_commit(&tiny_structured, 32), Some(4));
+
+        let tiny_flat = RowProfile {
+            data: vec![200u8; 32],
+            ..tiny_structured
+        };
+        assert_eq!(bands.bot_commit(&tiny_flat, 8), None);
+        assert_eq!(bands.bot_commit(&tiny_flat, 32), None);
+    }
 }
