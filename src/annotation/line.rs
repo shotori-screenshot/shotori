@@ -462,6 +462,11 @@ fn curve_points(shape: &super::Shape) -> std::borrow::Cow<'_, [Point<Pixels>]> {
 }
 
 pub(super) fn paths(shape: &super::Shape, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
+    if shape.geometry_fill() {
+        return super::geometry::filled_path(shape, offset)
+            .into_iter()
+            .collect();
+    }
     shape_geometry(shape)
         .into_iter()
         .filter_map(|polygon| {
