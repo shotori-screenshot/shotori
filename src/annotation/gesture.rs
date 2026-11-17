@@ -73,7 +73,14 @@ impl Annotations {
         if let super::ShapeParameters::Highlighter { options, .. } = &mut parameters {
             *options = self.highlighter;
         }
-        if let super::ShapeParameters::Badge { format, arrow, .. } = &mut parameters {
+        if let super::ShapeParameters::Badge {
+            fill,
+            format,
+            arrow,
+            ..
+        } = &mut parameters
+        {
+            *fill = self.number_fill;
             *format = self.number_format;
             *arrow = self.number_arrow_style;
         }

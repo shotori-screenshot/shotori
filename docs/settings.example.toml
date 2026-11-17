@@ -92,6 +92,7 @@ mosaic_strength = 16           # 4..=48
 eraser_size = 32               # 8..=96
 text_size = 24                 # 12..=72
 number_size = 32               # 16..=64
+number_fill = true             # true (solid badge) | false (outline ring)
 number_format = "decimal"      # "decimal" | "alphabetic" | "roman"
 arrow_style = "open"           # "open" | "filled" | "triangle" | "outline" | "double_open" | "double_triangle" | "dimension"
 smooth_pencil = true

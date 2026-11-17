@@ -640,6 +640,13 @@ settings:
       title:
         en: Sequence badge format
         zh-CN: 序号编码格式
+    number_fill:
+      title:
+        en: Fill sequence badges
+        zh-CN: 填充序号徽章
+      body:
+        en: Start sequence badges as solid circles instead of hollow rings
+        zh-CN: 默认使用实心圆标而非空心圆环
     mosaic_strength:
       title:
         en: Mosaic & blur strength
@@ -1152,6 +1159,9 @@ toolbar:
   corner_radius:
     en: Corner radius
     zh-CN: 圆角半径
+  number_fill:
+    en: Fill badge
+    zh-CN: 填充徽章
   number_value:
     en: Sequence value
     zh-CN: 序号数值

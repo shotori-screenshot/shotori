@@ -234,6 +234,7 @@ pub(crate) struct Annotations {
     pencil_angle: u16,
     geometry_fill: bool,
     geometry_radius: f32,
+    number_fill: bool,
     number_format: NumberFormat,
     number_arrow_style: ArrowStyle,
     number_override: Option<u32>,
@@ -284,6 +285,7 @@ impl Default for Annotations {
             pencil_angle: 0,
             geometry_fill: false,
             geometry_radius: 0.,
+            number_fill: true,
             number_format: NumberFormat::default(),
             number_arrow_style: ArrowStyle::default(),
             number_override: None,
@@ -570,6 +572,7 @@ impl Annotations {
                 ..Default::default()
             },
             pencil_smooth: cfg.smooth_pencil,
+            number_fill: cfg.number_fill,
             number_format: cfg.number_format,
             preset: ToolSizes {
                 rectangle: stroke,
@@ -1867,6 +1870,7 @@ mod tests {
         cfg.eraser_size = 56;
         cfg.text_size = 40;
         cfg.number_size = 48;
+        cfg.number_fill = false;
         cfg.number_format = super::NumberFormat::Roman;
         cfg.arrow_style = super::ArrowStyle::Filled;
         cfg.smooth_pencil = false;
@@ -1887,6 +1891,7 @@ mod tests {
         assert_eq!(a.size_of(super::ShapeKind::Spotlight), 75.);
         assert_eq!(a.size_of(super::ShapeKind::Magnifier), 5.);
         assert_eq!(a.arrow_style(), super::ArrowStyle::Filled);
+        assert!(!a.number_fill());
         assert_eq!(a.number_format(), super::NumberFormat::Roman);
         assert!(!a.pencil_smooth());
         assert_eq!(
