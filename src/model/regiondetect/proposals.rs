@@ -1,8 +1,9 @@
 //! Candidate generation and scoring: proposal sources (closed contours,
 //! connected components, edge-bounded background, paired long lines,
-//! and orthogonal rounded-box completion), four-side border-support
-//! scoring with texture penalties, and original-resolution side
-//! refinement that undoes downscale blur without snapping to shadows.
+//! orthogonal rounded-box completion, and divider/boundary split-pane
+//! cells), four-side border-support scoring with texture penalties, and
+//! original-resolution side refinement that undoes downscale blur
+//! without snapping to shadows.
 
 use super::edges::{EdgeField, connected_components, contour_rects};
 use super::image::{GrayImage, RgbaView, color_difference};
@@ -37,6 +38,7 @@ fn extract_segments(
     for fixed in 0..across {
         let mut start: i32 = -1;
         let mut last = 0;
+        let mut active = 0i32;
         for position in 0..=along {
             let hit = position < along
                 && (if vertical {
@@ -47,10 +49,16 @@ fn extract_segments(
             if hit {
                 if start < 0 {
                     start = position;
+                    active = 0;
                 }
                 last = position;
+                active += 1;
             } else if start >= 0 && (position == along || position - last > 3) {
-                if last + 1 - start >= min_len {
+                let len = last + 1 - start;
+                // Reject periodic dashed chains (e.g. downscaled monospace
+                // glyph columns separated by 2..3 px line gaps, ~70% fill)
+                // while still bridging isolated 1..3 px junction breaks.
+                if len >= min_len && active * 100 >= len * 85 {
                     segments.push(Segment {
                         fixed,
                         start,
@@ -368,6 +376,293 @@ pub(super) fn quad_proposals(field: &EdgeField) -> Vec<Proposal> {
     proposals
 }
 
+/// A divider or capture-boundary rail along one axis. Merging collinear
+/// segments within a 3 px normal band bridges T-junction crossings and
+/// 1 px NMS polarity shifts (e.g. a top bar whose bottom edge borders a
+/// dark pane on the left and a light pane on the right) without drifting
+/// across rows.
+#[derive(Clone, Copy)]
+struct Rail {
+    fixed: i32,
+    min_fixed: i32,
+    max_fixed: i32,
+    start: i32,
+    end: i32,
+    active: i32,
+    weight: i64,
+    weighted_fixed: i64,
+}
+
+fn extract_rails(edges: &GrayImage, vertical: bool) -> Vec<Rail> {
+    const MIN_SEG_LEN: i32 = 20;
+    const MAX_RUN_GAP: i32 = 0;
+    const MIN_RUN_FILL_PCT: i32 = 100;
+    const MIN_MERGED_FILL_PCT: i32 = 90;
+    const MAX_INTERIOR_RAILS: usize = 80;
+    const MAX_BAND_SPAN: i32 = 2;
+    const MERGE_GAP: i32 = 4;
+
+    let across = if vertical { edges.width } else { edges.height };
+    let along = if vertical { edges.height } else { edges.width };
+
+    // Extract solid directional runs (`gap <= 1`, fill >= 88%) rather than
+    // reusing `extract_segments`'s 3 px gap tolerance: in monospace code and
+    // terminal panes, 2..3 px inter-glyph and inter-line spacing would
+    // otherwise chain thousands of text rows/columns into fake rails and
+    // crowd real splitters out of the rail budget.
+    let mut rails: Vec<Rail> = Vec::new();
+    for fixed in 4..(across - 3) {
+        let mut start: i32 = -1;
+        let mut last = 0;
+        let mut active = 0i32;
+        for position in 0..=along {
+            let hit = position < along
+                && (if vertical {
+                    edges.at(fixed, position)
+                } else {
+                    edges.at(position, fixed)
+                }) != 0;
+            if hit {
+                if start < 0 {
+                    start = position;
+                    active = 0;
+                }
+                last = position;
+                active += 1;
+            } else if start >= 0 && (position == along || position - last > MAX_RUN_GAP) {
+                let len = last + 1 - start;
+                if len >= MIN_SEG_LEN && active * 100 >= len * MIN_RUN_FILL_PCT {
+                    let weight = i64::from(len);
+                    rails.push(Rail {
+                        fixed,
+                        min_fixed: fixed,
+                        max_fixed: fixed,
+                        start,
+                        end: last + 1,
+                        active,
+                        weight,
+                        weighted_fixed: weight * i64::from(fixed),
+                    });
+                }
+                start = -1;
+            }
+        }
+    }
+
+    loop {
+        let mut merged_any = false;
+        let mut i = 0;
+        while i < rails.len() {
+            let mut j = i + 1;
+            while j < rails.len() {
+                let (a, b) = (rails[i], rails[j]);
+                let band = a.max_fixed.max(b.max_fixed) - a.min_fixed.min(b.min_fixed);
+                let touches = a.start <= b.end + MERGE_GAP && b.start <= a.end + MERGE_GAP;
+                if band <= MAX_BAND_SPAN && touches {
+                    let start = a.start.min(b.start);
+                    let end = a.end.max(b.end);
+                    // Overlap double-counts at most `MERGE_GAP` pixels; clamp
+                    // to the merged span so density stays meaningful.
+                    let active = (a.active + b.active).min(end - start);
+                    if active * 100 >= (end - start).max(1) * MIN_MERGED_FILL_PCT {
+                        let weight = a.weight + b.weight;
+                        let weighted_fixed = a.weighted_fixed + b.weighted_fixed;
+                        rails[i] = Rail {
+                            fixed: ((weighted_fixed + weight / 2) / weight.max(1)) as i32,
+                            min_fixed: a.min_fixed.min(b.min_fixed),
+                            max_fixed: a.max_fixed.max(b.max_fixed),
+                            start,
+                            end,
+                            active,
+                            weight,
+                            weighted_fixed,
+                        };
+                        rails.swap_remove(j);
+                        merged_any = true;
+                        continue;
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        if !merged_any {
+            break;
+        }
+    }
+
+    rails.sort_by_key(|r| std::cmp::Reverse(r.end - r.start));
+    let mut kept: Vec<Rail> = Vec::with_capacity(rails.len().min(MAX_INTERIOR_RAILS) + 2);
+    for rail in rails {
+        let duplicate = kept.iter().any(|other| {
+            (rail.fixed - other.fixed).abs() <= 2
+                && (rail.start - other.start).abs() <= 6
+                && (rail.end - other.end).abs() <= 6
+        });
+        if !duplicate {
+            kept.push(rail);
+            if kept.len() >= MAX_INTERIOR_RAILS {
+                break;
+            }
+        }
+    }
+
+    // Model the capture edges as full-span rails so screen-flush bars,
+    // sidebars, and tiled panes complete 4-rail cells alongside interior
+    // splitters.
+    for boundary in [0, across] {
+        kept.push(Rail {
+            fixed: boundary,
+            min_fixed: boundary,
+            max_fixed: boundary,
+            start: 0,
+            end: along,
+            active: along,
+            weight: i64::from(along),
+            weighted_fixed: i64::from(along) * i64::from(boundary),
+        });
+    }
+    kept.sort_by_key(|r| r.fixed);
+    kept
+}
+
+/// Nominate screen-flush bars, sidebars, and T-junction split panes by
+/// pairing capture-boundary rails (`x = 0`, `x = width`, `y = 0`,
+/// `y = height`) with continuous interior divider rails.
+///
+/// Unlike [`quad_proposals`] (which rejects T-junctions where a shared
+/// toolbar or sidebar rail overshoots a corner) and [`component_proposals`]
+/// on `background` (which drops panes once text/code pushes empty fill
+/// below 72%), a split cell permits rails to overshoot its corners while
+/// forbidding any rail from *undershooting* a corner by more than
+/// `JUNCTION_SLACK` px — so an isolated floating line in open space
+/// cannot pair with distant screen edges.
+pub(super) fn split_pane_proposals(field: &EdgeField) -> Vec<Proposal> {
+    const MIN_CELL_DIM: i32 = 8;
+    const MAX_JUNCTION_SLACK: i32 = 4;
+    const MAX_SPLIT_PROPOSALS: usize = 256;
+
+    let width = field.vertical.width;
+    let height = field.vertical.height;
+    if width < MIN_CELL_DIM * 2 || height < MIN_CELL_DIM * 2 {
+        return Vec::new();
+    }
+
+    let h_rails = extract_rails(&field.horizontal, false);
+    let v_rails = extract_rails(&field.vertical, true);
+
+    let mut scored: Vec<((i32, i32), Proposal)> = Vec::new();
+    let mut valid_v: Vec<Rail> = Vec::new();
+
+    for i in 0..h_rails.len() {
+        let h_top = h_rails[i];
+        for (j, &h_bot) in h_rails.iter().enumerate().skip(i + 1) {
+            let top = h_top.fixed;
+            let bottom = h_bot.fixed;
+            let cell_h = bottom - top;
+            if cell_h < MIN_CELL_DIM {
+                continue;
+            }
+            // Scale junction slack with the cell's span (`<= 4 px`, `<= 3 px`
+            // on a 30 px bar) so 1..2 px T-junction NMS gaps connect while
+            // inset decorative bar ticks (`5 px` padding) do not slice a bar.
+            let v_slack = (cell_h / 10).clamp(2, MAX_JUNCTION_SLACK);
+            let ov_start = h_top.start.max(h_bot.start);
+            let ov_end = h_top.end.min(h_bot.end);
+            if ov_end - ov_start < MIN_CELL_DIM {
+                continue;
+            }
+
+            valid_v.clear();
+            for &v in &v_rails {
+                if v.start <= top + v_slack
+                    && v.end >= bottom - v_slack
+                    && v.fixed >= ov_start - MAX_JUNCTION_SLACK
+                    && v.fixed <= ov_end + MAX_JUNCTION_SLACK
+                {
+                    valid_v.push(v);
+                }
+            }
+            if valid_v.len() < 2 {
+                continue;
+            }
+
+            let last_idx = valid_v.len() - 1;
+            for k in 0..last_idx {
+                let v_left = valid_v[k];
+                let mut partners = [k + 1, (k + 2).min(last_idx), last_idx];
+                partners.sort_unstable();
+                let mut prev_m = k;
+                for m in partners {
+                    if m <= prev_m {
+                        continue;
+                    }
+                    prev_m = m;
+                    let v_right = valid_v[m];
+                    let left = v_left.fixed;
+                    let right = v_right.fixed;
+                    let cell_w = right - left;
+                    if cell_w < MIN_CELL_DIM {
+                        continue;
+                    }
+                    let h_slack = (cell_w / 10).clamp(2, MAX_JUNCTION_SLACK);
+                    if left < ov_start - h_slack || right > ov_end + h_slack {
+                        continue;
+                    }
+                    if left == 0 && top == 0 && right == width && bottom == height {
+                        continue;
+                    }
+
+                    let v_splits = (m - k - 1) as i32;
+                    let h_splits = h_rails[i + 1..j]
+                        .iter()
+                        .filter(|h_mid| {
+                            h_mid.fixed - top >= MIN_CELL_DIM
+                                && bottom - h_mid.fixed >= MIN_CELL_DIM
+                                && h_mid.start <= left + h_slack
+                                && h_mid.end >= right - h_slack
+                        })
+                        .count() as i32;
+                    let slack_err = (h_top.start - left).max(0)
+                        + (right - h_top.end).max(0)
+                        + (h_bot.start - left).max(0)
+                        + (right - h_bot.end).max(0)
+                        + (v_left.start - top).max(0)
+                        + (bottom - v_left.end).max(0)
+                        + (v_right.start - top).max(0)
+                        + (bottom - v_right.end).max(0);
+
+                    scored.push((
+                        ((v_splits + h_splits).min(3), slack_err),
+                        Proposal {
+                            rect: IntRect::new(left, top, right, bottom),
+                            source: Sources::SPLIT,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    scored.sort_by_key(|(rank_key, _)| *rank_key);
+    let mut proposals: Vec<Proposal> = Vec::with_capacity(scored.len().min(MAX_SPLIT_PROPOSALS));
+    for (_, proposal) in scored {
+        let duplicate = proposals.iter().any(|existing| {
+            (existing.rect.left - proposal.rect.left).abs() <= 2
+                && (existing.rect.top - proposal.rect.top).abs() <= 2
+                && (existing.rect.right - proposal.rect.right).abs() <= 2
+                && (existing.rect.bottom - proposal.rect.bottom).abs() <= 2
+        });
+        if !duplicate {
+            proposals.push(proposal);
+            if proposals.len() >= MAX_SPLIT_PROPOSALS {
+                break;
+            }
+        }
+    }
+    proposals
+}
+
 /// Alignment tolerance for a pair, proportional to the shorter segment
 /// (12%), clamped to [4, 16] px.
 fn pair_tolerance(a: Segment, b: Segment) -> i32 {
@@ -395,15 +690,42 @@ fn span_support(
         let mut along = start;
         while along < end {
             let hit = if vertical {
-                edges.at(across, along)
+                edges.at(across, along) != 0
             } else {
-                edges.at(along, across)
-            } != 0;
+                edges.at(along, across) != 0
+            };
             supported += i32::from(hit);
             samples += 1;
             along += step;
         }
         best = best.max(supported as f32 / samples.max(1) as f32);
+
+        // A 1 px border spanning two differently colored panes can shift its
+        // NMS peak by 1 px (`across` -> `across + 1`) across the split. Only
+        // credit the adjacent scanline when either line forms a locally
+        // continuous >= 3 px run so jagged glyph tops cannot union two rows.
+        if across < across_max {
+            let next = across + 1;
+            let (mut pair_supported, mut pair_samples) = (0i32, 0i32);
+            let mut along = start;
+            while along < end {
+                let run_at = |line: i32| {
+                    if vertical {
+                        edges.at(line, along - 1) != 0
+                            && edges.at(line, along) != 0
+                            && edges.at(line, along + 1) != 0
+                    } else {
+                        edges.at(along - 1, line) != 0
+                            && edges.at(along, line) != 0
+                            && edges.at(along + 1, line) != 0
+                    }
+                };
+                pair_supported += i32::from(run_at(across) || run_at(next));
+                pair_samples += 1;
+                along += step;
+            }
+            best = best.max(pair_supported as f32 / pair_samples.max(1) as f32);
+        }
     }
     best
 }
