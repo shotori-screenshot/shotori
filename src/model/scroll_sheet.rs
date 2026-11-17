@@ -696,8 +696,9 @@ impl ScrollSheet {
             }
         };
         let raw_frame = frame;
+        let trim = (self.sticky.top, self.sticky.bot);
         let normalized = (self.horizontal_offset != 0)
-            .then(|| alignment::normalize(frame, self.width as usize, self.horizontal_offset))
+            .then(|| alignment::normalize(frame, self.width as usize, self.horizontal_offset, trim))
             .flatten();
         let frame = normalized.as_deref().unwrap_or(frame);
         if (self.horizontal_offset == 0 || normalized.is_some())
@@ -1048,6 +1049,7 @@ impl ScrollSheet {
                 profile,
                 &self.options,
                 effective_dy,
+                estimate.subpixel_dy,
                 true,
             );
             if !evidence.still.is_empty() {
@@ -1112,6 +1114,7 @@ impl ScrollSheet {
                 profile,
                 &self.options,
                 effective_dy,
+                estimate.subpixel_dy,
                 false,
             );
             if !evidence.still.is_empty() {

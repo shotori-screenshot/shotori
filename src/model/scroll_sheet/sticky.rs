@@ -12,6 +12,7 @@
 //! canvas bottom. Previously exposed content survives return passes.
 
 use super::SheetLimits;
+use super::alignment::phase_gain_64;
 use super::profile::RowProfile;
 
 /// Consecutive stationary observations needed for a candidate prefix.
@@ -343,6 +344,7 @@ pub(super) fn stillness_grid(
     cur: &RowProfile,
     options: &SheetLimits,
     dy: i32,
+    subpixel_dy: f32,
     fixed_backdrop: bool,
 ) -> RowStillness {
     if base.stride != cur.stride || base.height != cur.height {
@@ -392,25 +394,67 @@ pub(super) fn stillness_grid(
             }
         } else {
             // Displacement verification: under the accepted step, the
-            // content of viewport row j pairs with base row j + dy. The
-            // matcher's own "these rows align" bar doubles as the "this
-            // row moved with the page" bar.
-            let t = j as i64 + i64::from(dy);
-            if t < 0 || t >= i64::from(cur.height) {
-                // Off the frame: the edge opposite the scroll cannot
-                // testify; inherit the offset-0 verdict.
-                true
-            } else {
-                let t = t as usize;
-                row_mad(c, &base.data[t * cur.stride..(t + 1) * cur.stride])
-                    >= options.cost_threshold
-            }
+            // content of viewport row j pairs with base row j + dy (and
+            // bi-phase subpixel blends at `subpixel_dy` when the scroll step
+            // has a fractional vertical component). The matcher's own "these
+            // rows align" bar doubles as the "this row moved with the page" bar.
+            row_translated_misfit(base, cur, j, dy, subpixel_dy, options.cost_threshold)
         };
         still.push(s);
         verified.push(v);
         j += cur.step;
     }
     RowStillness { still, verified }
+}
+
+/// Whether row `j` of `cur` misfits `base` at both integer `dy` and every valid
+/// bi-phase subpixel blend at `subpixel_dy` (or has its translated partner fall
+/// completely outside the frame).
+fn row_translated_misfit(
+    base: &RowProfile,
+    cur: &RowProfile,
+    j: usize,
+    dy: i32,
+    subpixel_dy: f32,
+    cost_threshold: f32,
+) -> bool {
+    let h = cur.height as usize;
+    let stride = cur.stride;
+    let c = &cur.data[j * stride..(j + 1) * stride];
+    let t = j as i64 + i64::from(dy);
+    if t >= 0 && t < i64::from(cur.height) {
+        let t = t as usize;
+        if row_mad(c, &base.data[t * stride..(t + 1) * stride]) < cost_threshold {
+            return false;
+        }
+    }
+    if !subpixel_dy.is_finite() {
+        return true;
+    }
+    let d_floor = subpixel_dy.floor() as i32;
+    let q64 = ((subpixel_dy - d_floor as f32) * 64.0)
+        .round()
+        .clamp(0.0, 64.0) as u32;
+    let phase_count = if q64 == 0 || q64 == 64 { 1 } else { 8 };
+    for p_phase in 0..phase_count {
+        let p64 = p_phase * 8;
+        let sum = p64 + q64;
+        let d_base = d_floor + (sum >> 6) as i32;
+        let c64 = sum & 63;
+        if j + usize::from(p64 > 0) >= h {
+            continue;
+        }
+        let s0 = j as i32 + d_base;
+        if s0 < 0 || (s0 as usize) + usize::from(c64 > 0) >= h {
+            continue;
+        }
+        let s0 = s0 as usize;
+        let raw = row_mad_bi_phase_64(cur, base, j, s0, p64, c64);
+        if raw / phase_gain_64(p64, c64) < cost_threshold {
+            return false;
+        }
+    }
+    true
 }
 
 /// Mean absolute difference of two luma rows.
@@ -420,6 +464,41 @@ fn row_mad(a: &[u8], b: &[u8]) -> f32 {
         .map(|(x, y)| u32::from(x.abs_diff(*y)))
         .sum::<u32>() as f32
         / a.len() as f32
+}
+
+/// Bi-phase 2-tap vertical MAD between `cur[j..j+1]` blended by `p64 / 64` and
+/// `base[s0..s0+1]` blended by `c64 / 64`.
+fn row_mad_bi_phase_64(
+    cur: &RowProfile,
+    base: &RowProfile,
+    j: usize,
+    s0: usize,
+    p64: u32,
+    c64: u32,
+) -> f32 {
+    let stride = cur.stride;
+    let c0 = &cur.data[j * stride..(j + 1) * stride];
+    if p64 == 0 && c64 == 0 {
+        return row_mad(c0, &base.data[s0 * stride..(s0 + 1) * stride]);
+    }
+    let j1 = j + usize::from(p64 > 0);
+    let s1 = s0 + usize::from(c64 > 0);
+    let c1 = &cur.data[j1 * stride..(j1 + 1) * stride];
+    let b0 = &base.data[s0 * stride..(s0 + 1) * stride];
+    let b1 = &base.data[s1 * stride..(s1 + 1) * stride];
+    let inv_p = 64 - p64;
+    let inv_c = 64 - c64;
+    let sum: u32 = c0
+        .iter()
+        .zip(c1.iter())
+        .zip(b0.iter().zip(b1.iter()))
+        .map(|((&ca, &cb), (&ba, &bb))| {
+            let cv = ((u32::from(ca) * inv_p + u32::from(cb) * p64 + 32) >> 6) as u8;
+            let bv = ((u32::from(ba) * inv_c + u32::from(bb) * c64 + 32) >> 6) as u8;
+            u32::from(cv.abs_diff(bv))
+        })
+        .sum();
+    sum as f32 / stride as f32
 }
 
 #[cfg(test)]
@@ -483,7 +562,14 @@ mod tests {
             let scroll_top = frame_idx * STEP_DY as u32;
 
             let cur_blank = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, false), W, H);
-            let blank_ev = stillness_grid(&prev_blank, &cur_blank, &limits, STEP_DY, false);
+            let blank_ev = stillness_grid(
+                &prev_blank,
+                &cur_blank,
+                &limits,
+                STEP_DY,
+                STEP_DY as f32,
+                false,
+            );
             blank_bands.update(&blank_ev);
             assert_eq!(
                 blank_bands.bot_commit(&cur_blank, H),
@@ -493,7 +579,14 @@ mod tests {
             prev_blank = cur_blank;
 
             let cur_footer = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, true), W, H);
-            let footer_ev = stillness_grid(&prev_footer, &cur_footer, &limits, STEP_DY, false);
+            let footer_ev = stillness_grid(
+                &prev_footer,
+                &cur_footer,
+                &limits,
+                STEP_DY,
+                STEP_DY as f32,
+                false,
+            );
             footer_bands.update(&footer_ev);
             if frame_idx >= u32::from(COMMIT_FRAMES) && footer_bands.bot == 0 {
                 let committed = footer_bands.bot_commit(&cur_footer, H);
@@ -554,5 +647,56 @@ mod tests {
         };
         assert_eq!(bands.bot_commit(&tiny_flat, 8), None);
         assert_eq!(bands.bot_commit(&tiny_flat, 32), None);
+    }
+
+    #[test]
+    fn stillness_grid_rejects_false_verification_on_half_pixel_scrolling_rows() {
+        const W: usize = 64;
+        const H: usize = 48;
+        let limits = SheetLimits::default();
+
+        // Construct a document row pair at `base[16..17]` (vertical edge `20 -> 220`
+        // across all columns) that scrolled up by `subpixel_dy = 16.5` so `cur[0]`
+        // sits at the half-pixel blend `(20 + 220) / 2 = 120`. Suppose `base[0]`
+        // also had luma `120` (e.g. a gray rule or repeated texture that happens
+        // to match at offset 0).
+        // Under an integer-only probe at `dy = 17` (or `16`), `cur[0]` (`120`) vs
+        // `base[17]` (`220`) has MAD = `100.0 >= 2.5`, which would falsely mark
+        // `verified[0] = true`. Under bi-phase subpixel verification at `16.5`,
+        // `cur[0]` matches `0.5 * base[16] + 0.5 * base[17] = 120` with MAD = `0.0`,
+        // proving row 0 moved with the page (`verified[0] = false`).
+        let mut base_data = vec![240u8; W * H];
+        let mut cur_data = vec![240u8; W * H];
+        base_data[..W].fill(120);
+        base_data[16 * W..17 * W].fill(20);
+        base_data[17 * W..18 * W].fill(220);
+        cur_data[..W].fill(120);
+
+        let make_profile = |data: Vec<u8>| RowProfile {
+            height: H as u32,
+            stride: W,
+            step: 1,
+            data,
+            bands: [(0, W); BAND_COUNT],
+            band_means: vec![[120.0; BAND_COUNT]; H],
+            spread: 200,
+            row_weight: vec![1.0; H],
+        };
+        let base = make_profile(base_data);
+        let cur = make_profile(cur_data);
+
+        let int_only = stillness_grid(&base, &cur, &limits, 17, 17.0, false);
+        assert!(int_only.still[0]);
+        assert!(
+            int_only.verified[0],
+            "integer-only probe at 17.0 misfits the half-pixel row"
+        );
+
+        let subpixel = stillness_grid(&base, &cur, &limits, 17, 16.5, false);
+        assert!(subpixel.still[0]);
+        assert!(
+            !subpixel.verified[0],
+            "subpixel probe at 16.5 must see the half-pixel blend match and clear verified[0]"
+        );
     }
 }
