@@ -32,6 +32,23 @@ impl Shape {
         if self.has_custom_geometry() {
             return ink_aabb(self);
         }
+        if self.kind == ShapeKind::Text && self.rotation() != 0. {
+            let b = self.bounds;
+            let corners = [
+                b.origin,
+                point(b.right(), b.top()),
+                b.bottom_right(),
+                point(b.left(), b.bottom()),
+            ]
+            .map(|p| self.rotated_point(p, false));
+            let mut min = corners[0];
+            let mut max = corners[0];
+            for c in &corners[1..] {
+                min = point(min.x.min(c.x), min.y.min(c.y));
+                max = point(max.x.max(c.x), max.y.max(c.y));
+            }
+            return Bounds::from_corners(min, max);
+        }
         match self.kind {
             ShapeKind::Pencil
             | ShapeKind::Highlighter
@@ -75,6 +92,39 @@ impl Shape {
                 point(self.bounds.right(), self.bounds.bottom()),
                 point(self.bounds.left(), self.bounds.bottom()),
             ],
+            ShapeKind::Mosaic | ShapeKind::Blur
+                if matches!(
+                    self.filter_area(),
+                    Some(super::FilterArea::Rectangle | super::FilterArea::Ellipse)
+                ) =>
+            {
+                let b = self.bounds;
+                let c = b.center();
+                vec![
+                    b.origin,
+                    point(b.right(), b.top()),
+                    b.bottom_right(),
+                    point(b.left(), b.bottom()),
+                    point(c.x, b.top()),
+                    point(b.right(), c.y),
+                    point(c.x, b.bottom()),
+                    point(b.left(), c.y),
+                ]
+            }
+            ShapeKind::Highlighter if self.highlighter_options().rectangle => {
+                let b = self.bounds;
+                let c = b.center();
+                vec![
+                    b.origin,
+                    point(b.right(), b.top()),
+                    b.bottom_right(),
+                    point(b.left(), b.bottom()),
+                    point(c.x, b.top()),
+                    point(b.right(), c.y),
+                    point(c.x, b.bottom()),
+                    point(b.left(), c.y),
+                ]
+            }
             _ => Vec::new(),
         }
     }
@@ -106,8 +156,12 @@ impl Shape {
             ShapeKind::Rectangle | ShapeKind::Ellipse => self.set_geometry_handle(anchor, p),
             ShapeKind::Number if anchor == 0 => self.set_number_tip(Some(p)),
             ShapeKind::Line | ShapeKind::Arrow if self.points.len() >= 2 => {
-                if anchor == 2 && self.points.len() == 2 {
-                    self.points.push(p);
+                if anchor == 2 {
+                    if self.points.len() == 2 {
+                        self.points.push(p);
+                    } else {
+                        self.points[2] = p;
+                    }
                 } else if let Some(handle) = self.points.get_mut(anchor) {
                     *handle = p;
                 }
@@ -117,18 +171,37 @@ impl Shape {
                     *q = p;
                 }
             }
-            ShapeKind::Magnifier | ShapeKind::Spotlight => {
+            ShapeKind::Magnifier
+            | ShapeKind::Spotlight
+            | ShapeKind::Mosaic
+            | ShapeKind::Blur
+            | ShapeKind::Highlighter => {
                 let b = self.bounds;
-                // opposite corner stays fixed (TL, TR, BR, BL order);
-                // dragging through it must re-normalize like drawing
+                if anchor >= 8 {
+                    return;
+                }
                 let opposite = match anchor {
                     0 => b.bottom_right(),
                     1 => point(b.left(), b.bottom()),
                     2 => b.origin,
-                    _ => point(b.right(), b.top()),
+                    3 => point(b.right(), b.top()),
+                    4 => point(b.center().x, b.bottom()),
+                    5 => point(b.left(), b.center().y),
+                    6 => point(b.center().x, b.top()),
+                    _ => point(b.right(), b.center().y),
                 };
-                let (x0, x1) = (opposite.x.min(p.x), opposite.x.max(p.x));
-                let (y0, y1) = (opposite.y.min(p.y), opposite.y.max(p.y));
+                let mut x0 = opposite.x.min(p.x);
+                let mut x1 = opposite.x.max(p.x);
+                let mut y0 = opposite.y.min(p.y);
+                let mut y1 = opposite.y.max(p.y);
+                if anchor == 4 || anchor == 6 {
+                    x0 = b.left();
+                    x1 = b.right();
+                }
+                if anchor == 5 || anchor == 7 {
+                    y0 = b.top();
+                    y1 = b.bottom();
+                }
                 self.bounds = Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0));
             }
             _ => {}

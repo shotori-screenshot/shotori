@@ -38,6 +38,15 @@ pub(crate) enum EndMarker {
     Open,
     Triangle,
     Bar,
+    Dot,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GeometryFill {
+    #[default]
+    None,
+    Translucent,
+    Solid,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,7 +60,15 @@ pub(crate) struct LineEnds {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum FilterArea {
     Rectangle,
+    Ellipse,
     Brush { diameter: f32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilterAreaKind {
+    Rectangle,
+    Ellipse,
+    Brush,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,7 +76,7 @@ pub(super) enum ShapeParameters {
     Magnifier(super::magnifier::Lens),
     Geometry {
         width: f32,
-        fill: bool,
+        fill: GeometryFill,
         radius: f32,
         transform: super::geometry::GeometryTransform,
         style: LineStyle,
@@ -99,7 +116,7 @@ impl ShapeParameters {
         match kind {
             ShapeKind::Rectangle | ShapeKind::Ellipse => Self::Geometry {
                 width: value,
-                fill: false,
+                fill: GeometryFill::None,
                 radius: 0.,
                 transform: Default::default(),
                 style: LineStyle::Solid,
@@ -266,16 +283,13 @@ impl Annotations {
 
     pub(crate) fn set_line_ends(&mut self, value: LineEnds) {
         self.line_ends = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if matches!(before.kind, ShapeKind::Line | ShapeKind::Polyline)
-                && let ShapeParameters::Stroke { ends, .. } = &mut self.shapes[ix].parameters
+        self.edit_selected(|shape| {
+            if matches!(shape.kind, ShapeKind::Line | ShapeKind::Polyline)
+                && let ShapeParameters::Stroke { ends, .. } = &mut shape.parameters
             {
                 *ends = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn pencil_smooth(&self) -> bool {
@@ -309,23 +323,23 @@ impl Annotations {
         } else {
             self.arrow_style = value;
         }
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index()
-            && matches!(self.shapes[ix].kind, ShapeKind::Arrow | ShapeKind::Number)
-        {
-            let before = self.shapes[ix].clone();
+        let resize_bounds = self.resize_bounds;
+        self.edit_selected(|shape| {
+            if !matches!(shape.kind, ShapeKind::Arrow | ShapeKind::Number) {
+                return;
+            }
+            let prev_ink = shape.ink_bounds();
             if let ShapeParameters::Stroke { arrow, .. } | ShapeParameters::Badge { arrow, .. } =
-                &mut self.shapes[ix].parameters
+                &mut shape.parameters
             {
                 *arrow = value;
             }
-            if let Some(area) = self.resize_bounds
-                && let Some(tip) = self.shapes[ix].number_tip()
+            if let Some(area) = resize_bounds
+                && let Some(tip) = shape.number_tip()
             {
-                self.shapes[ix].drag_number_tip(tip, area.union(&before.ink_bounds()));
+                shape.drag_number_tip(tip, area.union(&prev_ink));
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn line_style(&self) -> LineStyle {
@@ -336,25 +350,20 @@ impl Annotations {
 
     pub(crate) fn set_line_style(&mut self, value: LineStyle) {
         self.line_style = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index()
-            && matches!(
-                self.shapes[ix].kind,
+        self.edit_selected(|shape| {
+            if matches!(
+                shape.kind,
                 ShapeKind::Line
                     | ShapeKind::Polyline
                     | ShapeKind::Arrow
                     | ShapeKind::Rectangle
                     | ShapeKind::Ellipse
-            )
-        {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Stroke { style, .. } | ShapeParameters::Geometry { style, .. } =
-                &mut self.shapes[ix].parameters
+            ) && let ShapeParameters::Stroke { style, .. }
+            | ShapeParameters::Geometry { style, .. } = &mut shape.parameters
             {
                 *style = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn spotlight_ellipse(&self) -> bool {
@@ -366,28 +375,28 @@ impl Annotations {
 
     pub(crate) fn set_spotlight_ellipse(&mut self, enabled: bool) {
         self.spotlight_ellipse = enabled;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Spotlight { ellipse, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Spotlight { ellipse, .. } = &mut shape.parameters {
                 *ellipse = enabled;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
-    /// Change the filter effect without discarding a selected region or brush path.
+    /// Change the filter effect without discarding selected regions or brush paths.
     pub(crate) fn set_filter_effect(&mut self, kind: ShapeKind) {
         if !matches!(kind, ShapeKind::Mosaic | ShapeKind::Blur) {
             return;
         }
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index()
-            && self.shapes[ix].filter_area().is_some()
+        if self
+            .selected_shapes()
+            .iter()
+            .any(|s| s.filter_area().is_some())
         {
-            let before = self.shapes[ix].clone();
-            self.shapes[ix].kind = kind;
-            self.commit_move(ix, before);
+            self.edit_selected(|shape| {
+                if shape.filter_area().is_some() {
+                    shape.kind = kind;
+                }
+            });
             self.tool = Some(kind);
         } else if self.tool != Some(kind) {
             self.toggle(kind);
@@ -400,23 +409,61 @@ impl Annotations {
             .unwrap_or(self.filter_area)
     }
 
+    pub(crate) fn filter_area_kind(&self) -> FilterAreaKind {
+        match self.filter_area() {
+            FilterArea::Rectangle => FilterAreaKind::Rectangle,
+            FilterArea::Ellipse => FilterAreaKind::Ellipse,
+            FilterArea::Brush { .. } => FilterAreaKind::Brush,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_filter_area(&mut self, brush: bool) {
+        self.set_filter_area_kind(if brush {
+            FilterAreaKind::Brush
+        } else {
+            FilterAreaKind::Rectangle
+        });
+    }
+
+    pub(crate) fn set_filter_area_kind(&mut self, area_kind: FilterAreaKind) {
         let Some(kind @ (ShapeKind::Mosaic | ShapeKind::Blur)) = self.edit_kind() else {
             return;
         };
-        if matches!(self.filter_area(), FilterArea::Brush { .. }) == brush {
+        if self.filter_area_kind() == area_kind {
+            return;
+        }
+        let target = match area_kind {
+            FilterAreaKind::Rectangle => FilterArea::Rectangle,
+            FilterAreaKind::Ellipse => FilterArea::Ellipse,
+            FilterAreaKind::Brush => FilterArea::Brush {
+                diameter: self.filter_brush_size,
+            },
+        };
+        // Switching between Rectangle and Ellipse preserves selected region marks in place.
+        let region_to_region = area_kind != FilterAreaKind::Brush
+            && self.selected_shapes().iter().any(|s| {
+                matches!(
+                    s.filter_area(),
+                    Some(FilterArea::Rectangle | FilterArea::Ellipse)
+                )
+            });
+        self.filter_area = target;
+        self.filter_edit_brush_size = area_kind == FilterAreaKind::Brush;
+        if region_to_region {
+            self.edit_selected(|shape| {
+                if let ShapeParameters::Filter {
+                    area: area @ (FilterArea::Rectangle | FilterArea::Ellipse),
+                    ..
+                } = &mut shape.parameters
+                {
+                    *area = target;
+                }
+            });
             return;
         }
         self.finish_interaction();
         self.tool = Some(kind);
-        self.filter_area = if brush {
-            FilterArea::Brush {
-                diameter: self.filter_brush_size,
-            }
-        } else {
-            FilterArea::Rectangle
-        };
-        self.filter_edit_brush_size = brush;
     }
 
     pub(crate) fn editing_filter_brush_size(&self) -> bool {

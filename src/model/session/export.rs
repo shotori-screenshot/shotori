@@ -251,8 +251,7 @@ impl ScreenshotSession {
                 .zip(committed)
                 .enumerate()
                 .all(|(ix, (old, new))| {
-                    old == new
-                        || (self.annotations.selected_index() == Some(ix) && old.kind == new.kind)
+                    old == new || (self.annotations.is_selected(ix) && old.kind == new.kind)
                 });
         let same_gesture = display.draft_generation == self.annotations.draft_generation();
         let just_finished = same_gesture
@@ -278,20 +277,21 @@ impl ScreenshotSession {
     }
 
     pub(crate) fn uses_raster_preview(&self) -> bool {
-        use crate::annotation::ShapeKind;
+        use crate::annotation::{GeometryFill, ShapeKind};
         self.annotations.committed().len() >= 64
             || self.annotations.visible().any(|shape| {
-                matches!(
-                    shape.kind,
-                    ShapeKind::Pencil
-                        | ShapeKind::Highlighter
-                        | ShapeKind::Polyline
-                        | ShapeKind::Spotlight
-                        | ShapeKind::Magnifier
-                        | ShapeKind::Mosaic
-                        | ShapeKind::Blur
-                        | ShapeKind::Text
-                )
+                shape.geometry_fill_mode() == GeometryFill::Translucent
+                    || matches!(
+                        shape.kind,
+                        ShapeKind::Pencil
+                            | ShapeKind::Highlighter
+                            | ShapeKind::Polyline
+                            | ShapeKind::Spotlight
+                            | ShapeKind::Magnifier
+                            | ShapeKind::Mosaic
+                            | ShapeKind::Blur
+                            | ShapeKind::Text
+                    )
             })
     }
 

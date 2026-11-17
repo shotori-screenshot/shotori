@@ -798,3 +798,179 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
         assert!(grip.left() >= strip.left());
     });
 }
+
+#[gpui_kit::test]
+fn shortcuts_duplicate_reorder_step_size_pop_polyline_and_cancel_badge_edit(
+    cx: &mut TestAppContext,
+) {
+    crate::annotation::text::with_test_font(|| {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            crate::actions::init_annotation_keybindings(cx);
+            crate::actions::bind_keys(cx, &crate::actions::default_keys());
+        });
+        let mut capture = Capture::for_test((0, 0), 1.);
+        capture.output_name = "screen".into();
+        capture.width = 1000;
+        capture.height = 650;
+        capture.rgba = vec![255; 1000 * 650 * 4];
+        let capture = Arc::new(capture);
+        let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+        cx.simulate_resize(size(px(1000.), px(650.)));
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.select_all();
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+
+        // `[` and `]` step active tool size; Alt+Shift draws a centered square around press.
+        cx.simulate_keystrokes("r ] ]");
+        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().width(), 5.));
+        let alt_shift = gpui_kit::Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_down(point(px(200.), px(200.)), MouseButton::Left, alt_shift);
+        cx.simulate_mouse_move(
+            point(px(240.), px(225.)),
+            Some(MouseButton::Left),
+            alt_shift,
+        );
+        cx.simulate_mouse_up(point(px(240.), px(225.)), MouseButton::Left, alt_shift);
+        cx.update(|_, cx| {
+            let b = session.read(cx).annotations().committed()[0].bounds;
+            assert_eq!(b.origin, point(px(160.), px(160.)));
+            assert_eq!(b.size, size(px(80.), px(80.)));
+        });
+
+        // Select, Ctrl+D duplicate, `[` step selected size down, Ctrl+[ send backward.
+        cx.simulate_keystrokes("v");
+        cx.simulate_click(point(px(160.), px(200.)), Default::default());
+        cx.simulate_keystrokes("ctrl-d [");
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.committed().len(), 2);
+            assert_eq!(a.selected_indices(), &[1]);
+            assert_eq!(a.committed()[1].size(), 4.);
+        });
+        cx.simulate_keystrokes("ctrl-[");
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.selected_indices(), &[0]);
+            assert_eq!(a.committed()[0].size(), 4.);
+        });
+
+        // Polyline Backspace pops only the last vertex instead of cancelling the whole draft.
+        cx.simulate_keystrokes("p");
+        for pt in [
+            point(px(400.), px(120.)),
+            point(px(500.), px(120.)),
+            point(px(500.), px(220.)),
+        ] {
+            cx.simulate_click(pt, Default::default());
+        }
+        cx.simulate_keystrokes("backspace enter");
+        cx.update(|_, cx| {
+            let a = session.read(cx).annotations();
+            assert_eq!(a.committed().len(), 3);
+            assert_eq!(a.committed()[2].points.len(), 2);
+        });
+
+        // Double-click curved arrow bend handle resets it back to straight.
+        cx.simulate_keystrokes("a");
+        cx.simulate_mouse_down(
+            point(px(400.), px(320.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(560.), px(320.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_keystrokes("v");
+        cx.simulate_click(point(px(480.), px(320.)), Default::default());
+        cx.simulate_mouse_down(
+            point(px(480.), px(320.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(480.), px(380.)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(480.), px(380.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().committed()[3].points.len(),
+                3
+            );
+        });
+        cx.simulate_event(gpui_kit::MouseDownEvent {
+            position: point(px(480.), px(380.)),
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui_kit::MouseUpEvent {
+            position: point(px(480.), px(380.)),
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().committed()[3].points.len(),
+                2
+            );
+        });
+
+        // Escape cancels an inline number-badge edit and restores the original value.
+        cx.simulate_keystrokes("n");
+        cx.simulate_click(point(px(700.), px(200.)), Default::default());
+        cx.simulate_keystrokes("v");
+        cx.simulate_event(gpui_kit::MouseDownEvent {
+            position: point(px(700.), px(200.)),
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui_kit::MouseUpEvent {
+            position: point(px(700.), px(200.)),
+            button: MouseButton::Left,
+            click_count: 2,
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(view.read(cx).number_edit.is_some()));
+        cx.simulate_keystrokes("ctrl-a");
+        cx.simulate_input("9");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(
+                session.read(cx).annotations().committed()[4].number,
+                Some(9)
+            );
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert!(view.read(cx).number_edit.is_none());
+            assert_eq!(
+                session.read(cx).annotations().committed()[4].number,
+                Some(1)
+            );
+        });
+    });
+}

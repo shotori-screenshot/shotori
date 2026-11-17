@@ -125,6 +125,14 @@ gpui_kit::actions!([
     ToggleEraser,
     TogglePolyline,
     FinishPolyline,
+    PopPolylineVertex,
+    DuplicateAnnotation,
+    BringForward,
+    SendBackward,
+    BringToFront,
+    SendToBack,
+    StepSizeDown,
+    StepSizeUp,
     UndoAnnotation,
     RedoAnnotation,
     DeleteAnnotation,
@@ -488,6 +496,7 @@ fn bind_fixed_annotation_keys(cx: &mut App) {
         KeyBinding::new("enter", FinishPolyline, Some("PolylineDrawing")),
         KeyBinding::new("ctrl-shift-z", RedoAnnotation, Some("ShotoriOverlay")),
         KeyBinding::new("backspace", DeleteAnnotation, Some("ShotoriOverlay")),
+        KeyBinding::new("backspace", PopPolylineVertex, Some("PolylineDrawing")),
         // Ctrl+Shift mirrors the Delete/Backspace pair without touching
         // the plain keys' shape-granular delete (issue #15)
         KeyBinding::new(
@@ -495,6 +504,13 @@ fn bind_fixed_annotation_keys(cx: &mut App) {
             ClearAnnotations,
             Some("ShotoriOverlay"),
         ),
+        KeyBinding::new("ctrl-d", DuplicateAnnotation, Some("ShotoriOverlay")),
+        KeyBinding::new("ctrl-]", BringForward, Some("ShotoriOverlay")),
+        KeyBinding::new("ctrl-[", SendBackward, Some("ShotoriOverlay")),
+        KeyBinding::new("ctrl-shift-]", BringToFront, Some("ShotoriOverlay")),
+        KeyBinding::new("ctrl-shift-[", SendToBack, Some("ShotoriOverlay")),
+        KeyBinding::new("[", StepSizeDown, Some("ShotoriOverlay")),
+        KeyBinding::new("]", StepSizeUp, Some("ShotoriOverlay")),
     ]);
 }
 

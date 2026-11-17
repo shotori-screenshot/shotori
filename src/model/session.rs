@@ -40,6 +40,9 @@ struct MoveDrag {
     /// snapshot.
     before: Vec<(usize, crate::annotation::Shape)>,
     press: Point<Pixels>,
+    /// Present when Alt+drag cloned the selection so release records one
+    /// `AddMany` step and Escape removes the uncommitted clones.
+    cloned: Option<crate::annotation::CloneDrag>,
 }
 
 /// The marquee (rubber-band) selection in flight: a drag that started
@@ -180,9 +183,8 @@ pub struct ScreenshotSession {
     /// resolve: release without motion CLICKS (select), motion past
     /// CLICK_SLOP converts it into a normal draw stroke starting at the
     /// press point (draw-through — pressing on a shape never blocks
-    /// drawing, issue #5). The flag is the press's Shift state, so a
-    /// Shift+click that TOGGLED the shape out does not start a drag.
-    pending_click: Option<(usize, Point<Pixels>, bool)>,
+    /// drawing, issue #5). Flags store `(shift, alt)` at press time.
+    pending_click: Option<(usize, Point<Pixels>, bool, bool)>,
     /// The marquee selection in flight (select tool, press on blank
     /// canvas). Set at press and dropped on release; a press that never
     /// leaves CLICK_SLOP is a click (deselect), not a marquee.

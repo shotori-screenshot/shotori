@@ -142,27 +142,34 @@ impl super::Annotations {
             return;
         }
         if self.editing_text().is_some() {
-            self.text_style = value.clone();
+            let mut preset = value.clone();
+            preset.rotation = 0.;
+            self.text_style = preset;
             if let Some(shape) = self.editing_text_mut() {
+                let saved_rotation = shape.text_style.rotation;
                 shape.text_style = value;
+                shape.text_style.rotation = saved_rotation;
             }
             return;
         }
-        if let Some(ix) = self.selected_index()
-            && self.shapes[ix].kind == super::ShapeKind::Text
-        {
-            let before = self.shapes[ix].clone();
+        let resize_bounds = self.resize_bounds;
+        self.edit_selected_drag(|before| {
+            if before.kind != super::ShapeKind::Text {
+                return before.clone();
+            }
+            let mut style = value.clone();
+            style.rotation = before.text_style.rotation;
             let mut after = before.clone();
-            after.text_style = value.clone();
-            let limit = self.resize_bounds.map_or(before.bounds.size.width, |area| {
+            after.text_style = style.clone();
+            let limit = resize_bounds.map_or(before.bounds.size.width, |area| {
                 area.right() - before.bounds.left()
             });
             let buffer = styled_buffer(
                 after.text.as_deref().unwrap_or(""),
-                (f32::from(limit) - value.inset() * 2.).max(1.),
+                (f32::from(limit) - style.inset() * 2.).max(1.),
                 f32::MAX,
                 after.size(),
-                &value,
+                &style,
             );
             let width = buffer.layout_runs().map(|r| r.line_w).fold(1., f32::max) + 1.;
             let height = buffer
@@ -170,34 +177,24 @@ impl super::Annotations {
                 .map(|r| r.line_top + r.line_height)
                 .fold(after.size() * 1.35, f32::max);
             after.bounds.size = gpui_kit::size(
-                gpui_kit::px(width + value.inset() * 2.),
-                gpui_kit::px(height + value.inset() * 2.),
+                gpui_kit::px(width + style.inset() * 2.),
+                gpui_kit::px(height + style.inset() * 2.),
             );
-            if self.resize_bounds.is_some_and(|area| {
+            if resize_bounds.is_some_and(|area| {
+                let limit_area = area.union(&before.ink_bounds());
                 let b = after.ink_bounds();
-                b.left() < area.left()
-                    || b.top() < area.top()
-                    || b.right() > area.right()
-                    || b.bottom() > area.bottom()
+                b.left() < limit_area.left()
+                    || b.top() < limit_area.top()
+                    || b.right() > limit_area.right()
+                    || b.bottom() > limit_area.bottom()
             }) {
-                return;
+                return before.clone();
             }
-            self.shapes[ix] = after;
-            if self.size_drag_active
-                && let Some(super::HistoryEntry::Edit {
-                    ix: previous,
-                    after,
-                    ..
-                }) = self.history.last_mut()
-                && *previous == ix
-            {
-                *after = self.shapes[ix].clone();
-            } else {
-                self.commit_move(ix, before);
-                self.size_drag_active = true;
-            }
-        }
-        self.text_style = value;
+            after
+        });
+        let mut preset = value;
+        preset.rotation = 0.;
+        self.text_style = preset;
     }
 }
 
@@ -256,6 +253,10 @@ pub(super) fn rasterize(
     let style = &shape.text_style;
     let inset = (style.inset() * scale).round() as i32;
     let mut glyphs = vec![0u8; width * height * 4];
+    let mut gx_min = width as i32;
+    let mut gy_min = height as i32;
+    let mut gx_max = -1_i32;
+    let mut gy_max = -1_i32;
     FONTS.with_borrow_mut(|(fonts, cache)| {
         let mut buffer = Buffer::new(
             fonts,
@@ -273,8 +274,21 @@ pub(super) fn rasterize(
             cache,
             Color::rgba(r, g, b, a),
             |x, y, pw, ph, color| {
-                for row in (y + inset).max(0)..(y + inset + ph as i32).min(height as i32) {
-                    for col in (x + inset).max(0)..(x + inset + pw as i32).min(width as i32) {
+                if color.a() == 0 {
+                    return;
+                }
+                let r0 = (y + inset).max(0);
+                let r1 = (y + inset + ph as i32).min(height as i32);
+                let c0 = (x + inset).max(0);
+                let c1 = (x + inset + pw as i32).min(width as i32);
+                if r0 < r1 && c0 < c1 {
+                    gx_min = gx_min.min(c0);
+                    gy_min = gy_min.min(r0);
+                    gx_max = gx_max.max(c1 - 1);
+                    gy_max = gy_max.max(r1 - 1);
+                }
+                for row in r0..r1 {
+                    for col in c0..c1 {
                         let offset = (row as usize * width + col as usize) * 4;
                         over(
                             &mut glyphs[offset..offset + 4],
@@ -299,10 +313,17 @@ pub(super) fn rasterize(
             }
         }
     }
-    if let Some(color) = style.outline {
+    if let Some(color) = style.outline
+        && gx_min <= gx_max
+        && gy_min <= gy_max
+    {
         let radius = (1.5 * scale).ceil() as i32;
-        for y in 0..height {
-            for x in 0..width {
+        let ox0 = (gx_min - radius).max(0) as usize;
+        let ox1 = (gx_max + radius).min(width as i32 - 1) as usize;
+        let oy0 = (gy_min - radius).max(0) as usize;
+        let oy1 = (gy_max + radius).min(height as i32 - 1) as usize;
+        for y in oy0..=oy1 {
+            for x in ox0..=ox1 {
                 let mut coverage = 0u8;
                 for dy in -radius..=radius {
                     for dx in -radius..=radius {
@@ -310,11 +331,14 @@ pub(super) fn rasterize(
                             continue;
                         }
                         let (sx, sy) = (x as i32 + dx, y as i32 + dy);
-                        if sx >= 0 && sy >= 0 && sx < width as i32 && sy < height as i32 {
+                        if sx >= gx_min && sy >= gy_min && sx <= gx_max && sy <= gy_max {
                             coverage =
                                 coverage.max(glyphs[(sy as usize * width + sx as usize) * 4 + 3]);
                         }
                     }
+                }
+                if coverage == 0 {
+                    continue;
                 }
                 let mut color = color.to_be_bytes();
                 color[3] = (color[3] as u16 * coverage as u16 / 255) as u8;
@@ -328,7 +352,9 @@ pub(super) fn rasterize(
         .iter_mut()
         .zip(glyphs.as_chunks::<4>().0.iter())
     {
-        over(dst, [src[0], src[1], src[2], src[3]]);
+        if src[3] != 0 {
+            over(dst, [src[0], src[1], src[2], src[3]]);
+        }
     }
     let left = (f32::from(shape.bounds.left() - origin.x) * scale).round();
     let top = (f32::from(shape.bounds.top() - origin.y) * scale).round();
@@ -337,27 +363,101 @@ pub(super) fn rasterize(
     let y0 = ((f32::from(b.top() - origin.y) * scale).floor() as i32).max(0);
     let x1 = ((f32::from(b.right() - origin.x) * scale).ceil() as i32).min(w as i32);
     let y1 = ((f32::from(b.bottom() - origin.y) * scale).ceil() as i32).min(h as i32);
-    let (sin, cos) = style.rotation.sin_cos();
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let dx = x as f32 + 0.5 - left - width as f32 / 2.;
-            let dy = y as f32 + 0.5 - top - height as f32 / 2.;
-            let sx = (dx * cos + dy * sin + width as f32 / 2.).floor() as i32;
-            let sy = (-dx * sin + dy * cos + height as f32 / 2.).floor() as i32;
-            if sx < 0 || sy < 0 || sx >= width as i32 || sy >= height as i32 {
+    if style.rotation == 0. {
+        let left_i = left as i32;
+        let top_i = top as i32;
+        for y in y0..y1 {
+            let sy = y - top_i;
+            if sy < 0 || sy >= height as i32 {
                 continue;
             }
-            let src = (sy as usize * width + sx as usize) * 4;
+            for x in x0..x1 {
+                let sx = x - left_i;
+                if sx < 0 || sx >= width as i32 {
+                    continue;
+                }
+                let src = (sy as usize * width + sx as usize) * 4;
+                if tile[src + 3] == 0 {
+                    continue;
+                }
+                let dst = (y as usize * w as usize + x as usize) * 4;
+                if rgba[dst + 3] == 0 {
+                    continue;
+                }
+                let alpha = tile[src + 3] as f32 / 255.;
+                for c in 0..3 {
+                    rgba[dst + c] = (rgba[dst + c] as f32 * (1. - alpha)
+                        + tile[src + c] as f32 * alpha)
+                        .round() as u8;
+                }
+            }
+        }
+        return;
+    }
+    let (sin, cos) = style.rotation.sin_cos();
+    let half_w = width as f32 / 2.;
+    let half_h = height as f32 / 2.;
+    for y in y0..y1 {
+        for x in x0..x1 {
             let dst = (y as usize * w as usize + x as usize) * 4;
             if rgba[dst + 3] == 0 {
                 continue;
             }
-            let alpha = tile[src + 3] as f32 / 255.;
-            for c in 0..3 {
-                rgba[dst + c] = (rgba[dst + c] as f32 * (1. - alpha) + tile[src + c] as f32 * alpha)
-                    .round() as u8;
+            let dx = x as f32 + 0.5 - left - half_w;
+            let dy = y as f32 + 0.5 - top - half_h;
+            let fx = dx * cos + dy * sin + half_w - 0.5;
+            let fy = -dx * sin + dy * cos + half_h - 0.5;
+            if fx < -0.5 || fy < -0.5 || fx > width as f32 - 0.5 || fy > height as f32 - 0.5 {
+                continue;
+            }
+            let (sr, sg, sb, sa) = sample_tile_bilinear(&tile, width, height, fx, fy);
+            if sa <= 0. {
+                continue;
+            }
+            for (c, sc) in [sr, sg, sb].into_iter().enumerate() {
+                rgba[dst + c] = (rgba[dst + c] as f32 * (1. - sa) + sc * sa).round() as u8;
             }
         }
+    }
+}
+
+fn sample_tile_bilinear(
+    tile: &[u8],
+    width: usize,
+    height: usize,
+    fx: f32,
+    fy: f32,
+) -> (f32, f32, f32, f32) {
+    let x0 = fx.floor() as i32;
+    let y0 = fy.floor() as i32;
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let mut accum = [0_f32; 4];
+    for (ox, wx) in [(0, 1. - tx), (1, tx)] {
+        for (oy, wy) in [(0, 1. - ty), (1, ty)] {
+            let sx = x0 + ox;
+            let sy = y0 + oy;
+            if sx < 0 || sy < 0 || sx >= width as i32 || sy >= height as i32 {
+                continue;
+            }
+            let w = wx * wy;
+            let p = &tile[(sy as usize * width + sx as usize) * 4..][..4];
+            let a = p[3] as f32 / 255. * w;
+            accum[0] += p[0] as f32 * a;
+            accum[1] += p[1] as f32 * a;
+            accum[2] += p[2] as f32 * a;
+            accum[3] += a;
+        }
+    }
+    if accum[3] <= 1e-5 {
+        (0., 0., 0., 0.)
+    } else {
+        (
+            accum[0] / accum[3],
+            accum[1] / accum[3],
+            accum[2] / accum[3],
+            accum[3].clamp(0., 1.),
+        )
     }
 }
 

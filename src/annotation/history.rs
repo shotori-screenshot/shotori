@@ -20,6 +20,13 @@ pub(super) enum HistoryEntry {
         number_before: Option<u32>,
         number_after: Option<u32>,
     },
+    /// Batch placement from duplicate or Alt-drag cloning: one undo removes
+    /// every cloned mark and restores the sequence cursor.
+    AddMany {
+        shapes: Vec<Shape>,
+        number_before: Option<u32>,
+        number_after: Option<u32>,
+    },
     NumberCursor {
         before: Option<u32>,
         after: Option<u32>,
@@ -38,6 +45,11 @@ pub(super) enum HistoryEntry {
     /// snapshot as ONE step, so the selection the user built does not
     /// come back half-undone.
     EditMany { edits: Vec<ShapeEdit> },
+    /// Z-order change across the committed stack.
+    Reorder {
+        before: Vec<Shape>,
+        after: Vec<Shape>,
+    },
     /// Single or grouped deletion, including each numbering change in gesture order.
     Remove {
         removals: Vec<ShapeRemoval>,
@@ -165,6 +177,93 @@ impl Annotations {
         true
     }
 
+    /// Apply a discrete style/parameter edit across every selected shape,
+    /// recording a single `Edit` or `EditMany` step when any mark changed.
+    pub(super) fn edit_selected(&mut self, mut apply: impl FnMut(&mut Shape)) {
+        self.end_size_drag();
+        if self.selected.is_empty() {
+            return;
+        }
+        let mut before = Vec::with_capacity(self.selected.len());
+        for &ix in &self.selected {
+            if let Some(shape) = self.shapes.get_mut(ix) {
+                let snapshot = shape.clone();
+                apply(shape);
+                before.push((ix, snapshot));
+            }
+        }
+        self.commit_moves(&before);
+    }
+
+    /// Apply a continuous slider edit across every selected shape, merging
+    /// consecutive ticks of the same drag into one `Edit` or `EditMany` entry
+    /// while always re-deriving from the pre-drag snapshot to avoid float drift.
+    pub(super) fn edit_selected_drag(&mut self, mut apply: impl FnMut(&Shape) -> Shape) {
+        if self.selected.is_empty() {
+            return;
+        }
+        if self.size_drag_active {
+            match self.history.last_mut() {
+                Some(HistoryEntry::Edit { ix, before, after })
+                    if self.selected.contains(ix)
+                        && self.selected.iter().all(|&other| {
+                            other == *ix || self.shapes.get(other).is_none_or(|s| apply(s) == *s)
+                        }) =>
+                {
+                    let next = apply(before);
+                    if let Some(slot) = self.shapes.get_mut(*ix) {
+                        *slot = next.clone();
+                    }
+                    *after = next;
+                    return;
+                }
+                Some(HistoryEntry::EditMany { edits })
+                    if edits.iter().all(|(ix, ..)| self.selected.contains(ix))
+                        && self.selected.iter().all(|&other| {
+                            edits.iter().any(|(ix, ..)| *ix == other)
+                                || self.shapes.get(other).is_none_or(|s| apply(s) == *s)
+                        }) =>
+                {
+                    for (ix, before, after) in edits.iter_mut() {
+                        let next = apply(before);
+                        if let Some(slot) = self.shapes.get_mut(*ix) {
+                            *slot = next.clone();
+                        }
+                        *after = next;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let mut edits = Vec::new();
+        for &ix in &self.selected {
+            let Some(current) = self.shapes.get(ix) else {
+                continue;
+            };
+            let next = apply(current);
+            if next != *current {
+                let before = current.clone();
+                self.shapes[ix] = next.clone();
+                edits.push((ix, before, next));
+            }
+        }
+        match edits.len() {
+            0 => {}
+            1 => {
+                let (ix, before, after) = edits.remove(0);
+                self.history.push(HistoryEntry::Edit { ix, before, after });
+                self.redo.clear();
+                self.size_drag_active = true;
+            }
+            _ => {
+                self.history.push(HistoryEntry::EditMany { edits });
+                self.redo.clear();
+                self.size_drag_active = true;
+            }
+        }
+    }
+
     /// Record a finalized crop change in the same ledger as annotation edits.
     pub(crate) fn record_selection(&mut self, before: Bounds<Pixels>, after: Bounds<Pixels>) {
         if before != after {
@@ -205,6 +304,15 @@ impl Annotations {
                     self.shapes.pop();
                     self.number_override = *number_before;
                 }
+                HistoryEntry::AddMany {
+                    shapes,
+                    number_before,
+                    ..
+                } => {
+                    let keep = self.shapes.len().saturating_sub(shapes.len());
+                    self.shapes.truncate(keep);
+                    self.number_override = *number_before;
+                }
                 HistoryEntry::NumberCursor { before, .. } => {
                     self.number_override = *before;
                 }
@@ -219,6 +327,9 @@ impl Annotations {
                             *shape = before.clone();
                         }
                     }
+                }
+                HistoryEntry::Reorder { before, .. } => {
+                    self.shapes = before.clone();
                 }
                 HistoryEntry::Remove {
                     removals,
@@ -274,6 +385,14 @@ impl Annotations {
                     self.shapes.push(shape.clone());
                     self.number_override = *number_after;
                 }
+                HistoryEntry::AddMany {
+                    shapes,
+                    number_after,
+                    ..
+                } => {
+                    self.shapes.extend(shapes.iter().cloned());
+                    self.number_override = *number_after;
+                }
                 HistoryEntry::NumberCursor { after, .. } => {
                     self.number_override = *after;
                 }
@@ -288,6 +407,9 @@ impl Annotations {
                             *shape = after.clone();
                         }
                     }
+                }
+                HistoryEntry::Reorder { after, .. } => {
+                    self.shapes = after.clone();
                 }
                 HistoryEntry::Remove {
                     removals,

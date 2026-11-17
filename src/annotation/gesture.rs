@@ -130,6 +130,16 @@ impl Annotations {
         selection: Bounds<Pixels>,
         square: bool,
     ) -> bool {
+        self.drag_to_with(p, selection, square, false)
+    }
+
+    pub(crate) fn drag_to_with(
+        &mut self,
+        p: Point<Pixels>,
+        selection: Bounds<Pixels>,
+        square: bool,
+        centered: bool,
+    ) -> bool {
         // Copy the gesture out (it is `Copy`) — the sampling below
         // needs `&mut self` for the removals themselves.
         if let Some(EraserGesture::Stroke { last }) = self.eraser {
@@ -233,7 +243,14 @@ impl Annotations {
         ) {
             let last = draft.shape.points.len() - 1;
             let start = draft.shape.points[last - 1];
-            let end = line_endpoint(start, p, selection, square);
+            let mut end = line_endpoint(start, p, selection, square);
+            if draft.shape.kind == ShapeKind::Polyline
+                && !square
+                && draft.shape.points.len() >= 4
+                && distance(draft.shape.points[0], end) <= super::select::CLOSURE_SLOP
+            {
+                end = draft.shape.points[0];
+            }
             let changed = draft.shape.points[last] != end;
             draft.shape.points[last] = end;
             return changed;
@@ -243,33 +260,57 @@ impl Annotations {
             p.x.clamp(selection.left(), selection.right()),
             p.y.clamp(selection.top(), selection.bottom()),
         );
-        if square {
-            let dx = f32::from(end.x - start.x);
-            let dy = f32::from(end.y - start.y);
-            let available_x = if dx < 0. {
-                start.x - selection.left()
+        let bounds = if centered {
+            let max_hx =
+                f32::from((start.x - selection.left()).min(selection.right() - start.x)).max(0.);
+            let max_hy =
+                f32::from((start.y - selection.top()).min(selection.bottom() - start.y)).max(0.);
+            let (hx, hy) = if square {
+                let half = f32::from(end.x - start.x)
+                    .abs()
+                    .max(f32::from(end.y - start.y).abs())
+                    .min(max_hx)
+                    .min(max_hy);
+                (half, half)
             } else {
-                selection.right() - start.x
+                (
+                    f32::from(end.x - start.x).abs().min(max_hx),
+                    f32::from(end.y - start.y).abs().min(max_hy),
+                )
             };
-            let available_y = if dy < 0. {
-                start.y - selection.top()
-            } else {
-                selection.bottom() - start.y
-            };
-            let side = dx
-                .abs()
-                .max(dy.abs())
-                .min(f32::from(available_x))
-                .min(f32::from(available_y));
-            end = point(
-                start.x + px(if dx < 0. { -side } else { side }),
-                start.y + px(if dy < 0. { -side } else { side }),
-            );
-        }
-        let bounds = Bounds::from_corners(
-            point(start.x.min(end.x), start.y.min(end.y)),
-            point(start.x.max(end.x), start.y.max(end.y)),
-        );
+            Bounds::from_corners(
+                point(start.x - px(hx), start.y - px(hy)),
+                point(start.x + px(hx), start.y + px(hy)),
+            )
+        } else {
+            if square {
+                let dx = f32::from(end.x - start.x);
+                let dy = f32::from(end.y - start.y);
+                let available_x = if dx < 0. {
+                    start.x - selection.left()
+                } else {
+                    selection.right() - start.x
+                };
+                let available_y = if dy < 0. {
+                    start.y - selection.top()
+                } else {
+                    selection.bottom() - start.y
+                };
+                let side = dx
+                    .abs()
+                    .max(dy.abs())
+                    .min(f32::from(available_x))
+                    .min(f32::from(available_y));
+                end = point(
+                    start.x + px(if dx < 0. { -side } else { side }),
+                    start.y + px(if dy < 0. { -side } else { side }),
+                );
+            }
+            Bounds::from_corners(
+                point(start.x.min(end.x), start.y.min(end.y)),
+                point(start.x.max(end.x), start.y.max(end.y)),
+            )
+        };
         let changed = draft.shape.bounds != bounds;
         draft.shape.bounds = bounds;
         if draft.shape.kind == ShapeKind::Magnifier {
@@ -354,6 +395,27 @@ impl Annotations {
         if shape.points.len() >= 2 {
             self.record_add(shape);
         }
+    }
+
+    /// Pop the most recently confirmed polyline vertex on Backspace; if only
+    /// the anchor vertex existed, cancel the unfinished polyline draft.
+    pub(crate) fn pop_polyline_vertex(&mut self) -> bool {
+        let Some(draft) = self.draft.as_mut() else {
+            return false;
+        };
+        if draft.shape.kind != ShapeKind::Polyline {
+            return false;
+        }
+        if draft.shape.points.len() <= 2 {
+            self.draft = None;
+            self.pressed = false;
+            return true;
+        }
+        if let Some(cursor) = draft.shape.points.pop() {
+            draft.shape.points.pop();
+            draft.shape.points.push(cursor);
+        }
+        true
     }
 
     /// Return to the crop with no active tool, preserving completed marks.

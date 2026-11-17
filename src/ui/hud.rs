@@ -337,13 +337,12 @@ pub(crate) fn marquee_chrome(bounds: Bounds<Pixels>) -> impl IntoElement {
     .size_full()
 }
 
-/// A hover target has a dashed outline without selection handles.
-pub(crate) fn annotation_hover_chrome(bounds: Bounds<Pixels>) -> impl IntoElement {
+/// A hover target has a dashed outline matching its rotated or axis-aligned frame, without handles.
+pub(crate) fn annotation_hover_chrome(corners: [Point<Pixels>; 4]) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |viewport, (), window, _| {
-            let b = Bounds::new(bounds.origin + viewport.origin, bounds.size);
-            paint_annotation_frame(window, b);
+            paint_annotation_polygon(window, &corners.map(|p| p + viewport.origin));
         },
     )
     .absolute()

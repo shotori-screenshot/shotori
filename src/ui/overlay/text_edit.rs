@@ -6,12 +6,13 @@ use super::Overlay;
 use gpui_kit::*;
 
 impl Overlay {
-    /// Escape finishes active editing, or exits when the canvas is idle.
+    /// Escape finishes active text editing, cancels active number-badge value
+    /// editing, or exits the current canvas interaction.
     pub(super) fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ocr_setup.is_some() {
             self.ocr_setup_cancel(window, cx);
         } else if self.text_editing.is_some() {
-            self.finish_text(true, window, cx);
+            self.finish_text(self.number_edit.is_none(), window, cx);
         } else {
             let interrupted = self.session.update(cx, |s, cx| {
                 let interrupted = s.escape_interaction();
@@ -54,6 +55,9 @@ impl Overlay {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.session.update(cx, |s, _| {
+            s.edit_annotations(|a| a.deselect());
+        });
         let font_size = self.session.read(cx).annotations().text_size();
         let Some(bounds) =
             self.session
@@ -166,12 +170,14 @@ impl Overlay {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (shape, local_origin, available) = {
+        let (shape, local_origin, available, unrotated_click) = {
             let s = self.session.read(cx);
             let screen_origin = s.screen_origin(&self.capture.output_name);
             let Some(shape) = s.annotations().shape(ix).cloned() else {
                 return;
             };
+            let click_global = click_local + screen_origin;
+            let unrotated_click = shape.rotated_point(click_global, true) - screen_origin;
             // Occupied bounds are for selection; editing can grow to the
             // screenshot edge, just like a newly placed text annotation.
             let local_origin = shape.bounds.origin - screen_origin;
@@ -180,7 +186,12 @@ impl Overlay {
             else {
                 return;
             };
-            (shape, available.origin - screen_origin, available)
+            (
+                shape,
+                available.origin - screen_origin,
+                available,
+                unrotated_click,
+            )
         };
         let text = shape.text.as_deref().unwrap_or("");
         let font_size = shape.size();
@@ -194,8 +205,10 @@ impl Overlay {
             None,
             cx,
         );
-        editor.sync_style(font_size, color, &shape.text_style, cx);
-        editor.place_caret(click_local, cx);
+        let mut upright_style = shape.text_style.clone();
+        upright_style.rotation = 0.;
+        editor.sync_style(font_size, color, &upright_style, cx);
+        editor.place_caret(unrotated_click, cx);
         let started = self.session.update(cx, |s, cx| {
             let started = s.begin_text_edit(ix);
             if started {

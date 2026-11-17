@@ -1029,6 +1029,9 @@ toolbar:
   endpoint_bar:
     en: Bar
     zh-CN: 端点横杠
+  endpoint_dot:
+    en: Circle
+    zh-CN: 实心圆点
   line_caps:
     en: Line caps
     zh-CN: 端点样式
@@ -1146,6 +1149,15 @@ toolbar:
   geometry_fill:
     en: Fill shape
     zh-CN: 填充形状
+  geometry_outline:
+    en: Outline only
+    zh-CN: 仅描边
+  geometry_translucent:
+    en: Translucent fill
+    zh-CN: 半透明填充
+  geometry_solid:
+    en: Solid fill
+    zh-CN: 实心填充
   line_width:
     en: Stroke width
     zh-CN: 线条粗细
@@ -1248,6 +1260,9 @@ toolbar:
   filter_rectangle:
     en: Rectangle
     zh-CN: 矩形
+  filter_ellipse:
+    en: Ellipse
+    zh-CN: 椭圆
   filter_brush:
     en: Brush
     zh-CN: 画笔

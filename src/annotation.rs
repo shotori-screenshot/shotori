@@ -4,18 +4,23 @@
 //! selection and history modules own editing; per-tool modules share geometry
 //! between live previews, hit testing and export. The raster module composites
 //! capture pixels, ordinary marks, spotlights and magnifier sampling.
+mod arrange;
 mod chrome;
 mod filter;
 mod magnifier;
 mod raster;
 mod spotlight;
+pub(crate) use arrange::{CloneDrag, LayerOrder};
 pub(crate) use magnifier::{LensConnector, LensOption};
 pub(crate) use spotlight::SpotlightAdjustment;
 mod geometry;
 pub(crate) const ROTATION_HANDLE: usize = usize::MAX;
 mod parameters;
 use parameters::ShapeParameters;
-pub(crate) use parameters::{ArrowStyle, EndMarker, FilterArea, LineEnds, LineStyle, NumberFormat};
+pub(crate) use parameters::{
+    ArrowStyle, EndMarker, FilterArea, FilterAreaKind, GeometryFill, LineEnds, LineStyle,
+    NumberFormat,
+};
 mod highlighter;
 mod line;
 pub(crate) use line::StrokePreview;
@@ -58,7 +63,13 @@ impl ShapeKind {
     pub(crate) fn is_region(self) -> bool {
         matches!(
             self,
-            ShapeKind::Rectangle | ShapeKind::Ellipse | ShapeKind::Magnifier | ShapeKind::Spotlight
+            ShapeKind::Rectangle
+                | ShapeKind::Ellipse
+                | ShapeKind::Magnifier
+                | ShapeKind::Spotlight
+                | ShapeKind::Mosaic
+                | ShapeKind::Blur
+                | ShapeKind::Highlighter
         )
     }
 }
@@ -66,6 +77,7 @@ impl ShapeKind {
 /// A tool family's continuous size model (issue #3, phase 2): a
 /// clamped min/max range. One spec per family — the wheel and the
 /// slider both read the same numbers.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SizeSpec {
     pub(crate) min: f32,
     pub(crate) max: f32,
@@ -232,7 +244,7 @@ pub(crate) struct Annotations {
     text_style: text::TextStyle,
     pencil_smooth: bool,
     pencil_angle: u16,
-    geometry_fill: bool,
+    geometry_fill: GeometryFill,
     geometry_radius: f32,
     number_format: NumberFormat,
     number_arrow_style: ArrowStyle,
@@ -282,7 +294,7 @@ impl Default for Annotations {
             text_style: Default::default(),
             pencil_smooth: true,
             pencil_angle: 0,
-            geometry_fill: false,
+            geometry_fill: GeometryFill::None,
             geometry_radius: 0.,
             number_format: NumberFormat::default(),
             number_arrow_style: ArrowStyle::default(),
@@ -341,11 +353,24 @@ impl Annotations {
     pub(crate) fn enabled(&self) -> bool {
         self.tool.is_some_and(|k| k != ShapeKind::Select)
     }
-    /// The swatch-board index the ACTIVE tool would paint with —
-    /// highlighter keeps its own slot. The toolbar's inline color
-    /// editor (the picker replacing the selected swatch) binds to
-    /// this index.
+    /// The swatch-board index the current edit target or active tool binds to —
+    /// highlighter keeps its own slot, and a selected mark matching a palette
+    /// entry points at that swatch so inline editing targets the mark's color.
     pub(crate) fn color_index(&self) -> usize {
+        if let Some(shape) = self.editing_text().or_else(|| self.selected()) {
+            if let Some(ix) = crate::model::settings::current()
+                .annotation_colors()
+                .iter()
+                .position(|&c| c == shape.color)
+            {
+                return ix;
+            }
+            return if shape.kind == ShapeKind::Highlighter {
+                self.highlighter_color_ix
+            } else {
+                self.color_ix
+            };
+        }
         if self.tool == Some(ShapeKind::Highlighter) {
             self.highlighter_color_ix
         } else {
@@ -353,11 +378,27 @@ impl Annotations {
         }
     }
 
+    /// Which swatch cell should render as the inline color-picker trigger:
+    /// `None` when a selected mark holds an older custom color no longer on
+    /// the palette board, keeping every swatch clickable in one click.
+    pub(crate) fn active_swatch_index(&self) -> Option<usize> {
+        let target = self
+            .editing_text()
+            .or_else(|| self.selected())
+            .map(|s| s.color)
+            .unwrap_or_else(|| self.color().0);
+        let ix = self.color_index();
+        (crate::model::settings::current().annotation_colors()[ix] == target).then_some(ix)
+    }
+
     pub(crate) fn color(&self) -> (u32, &'static str) {
         if let Some(shape) = self.editing_text() {
             return (shape.color, "Text");
         }
         let ix = self.color_index();
+        if let Some(shape) = self.selected() {
+            return (shape.color, crate::model::settings::PALETTE_NAMES[ix]);
+        }
         (
             crate::model::settings::current().annotation_colors()[ix],
             crate::model::settings::PALETTE_NAMES[ix],
@@ -609,34 +650,28 @@ impl Annotations {
         if ix >= crate::model::settings::PALETTE {
             return;
         }
+        let color = crate::model::settings::current().annotation_colors()[ix];
         if self.editing_text().is_some() {
             self.color_ix = ix;
         }
         if let Some(shape) = self.editing_text_mut() {
-            shape.color = crate::model::settings::current().annotation_colors()[ix];
+            shape.color = color;
             return;
         }
-        if let Some(selected_ix) = self.selected_index() {
-            let kind = self.shapes[selected_ix].kind;
-            if kind == ShapeKind::Highlighter {
+        if !self.selected.is_empty() {
+            if self
+                .selected()
+                .is_some_and(|s| s.kind == ShapeKind::Highlighter)
+            {
                 self.highlighter_color_ix = ix;
             } else {
                 self.color_ix = ix;
             }
-            if !matches!(kind, ShapeKind::Mosaic | ShapeKind::Blur) {
-                let color = crate::model::settings::current().annotation_colors()[ix];
-                if self.shapes[selected_ix].color != color {
-                    let before = self.shapes[selected_ix].clone();
-                    self.shapes[selected_ix].color = color;
-                    let after = self.shapes[selected_ix].clone();
-                    self.history.push(HistoryEntry::Edit {
-                        ix: selected_ix,
-                        before,
-                        after,
-                    });
-                    self.redo.clear();
+            self.edit_selected(|shape| {
+                if !matches!(shape.kind, ShapeKind::Mosaic | ShapeKind::Blur) {
+                    shape.color = color;
                 }
-            }
+            });
             return;
         }
         if self.tool == Some(ShapeKind::Highlighter) {
@@ -645,10 +680,9 @@ impl Annotations {
             self.color_ix = ix;
         }
     }
-    /// Nudge a size by one unit (the wheel). With a live selection this
-    /// targets the SELECTED shape's size (recorded as a reversible
-    /// edit); otherwise it steps the active tool's size — the value the
-    /// NEXT stroke will take. Continuous within the tool's [`SizeSpec`].
+    /// Nudge a size by one unit (the wheel or `[` / `]`). With a live selection
+    /// this targets every selected shape in the same size family (recorded as a
+    /// single reversible edit); otherwise it steps the active tool's preset.
     pub(crate) fn step_size(&mut self, up: bool) -> bool {
         if self.editing_filter_brush_size() {
             let current = self.current_edit_size();
@@ -710,7 +744,9 @@ impl Annotations {
     }
 
     /// The live replacement stays at its original layer index, so raster caches
-    /// and exports see the same image while typing.
+    /// and exports see the same image while typing. Rotated text temporarily
+    /// straightens upright while the inline editor is open so caret and glyphs
+    /// align, then restores its rotation on finish.
     pub(crate) fn begin_text_edit(&mut self, ix: usize) -> bool {
         if self.text_original.is_some() {
             return false;
@@ -719,6 +755,7 @@ impl Annotations {
             return false;
         };
         self.text_original = Some((ix, shape.clone()));
+        self.shapes[ix].text_style.rotation = 0.;
         self.end_size_drag();
         self.selected = vec![ix];
         true
@@ -749,11 +786,25 @@ impl Annotations {
             let Some(slot) = self.shapes.get_mut(ix) else {
                 return;
             };
-            let edited = std::mem::replace(slot, original.clone());
+            let mut edited = std::mem::replace(slot, original.clone());
             if commit {
                 if edited.text.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     self.delete_shape(ix);
                 } else {
+                    edited.text_style.rotation = original.text_style.rotation;
+                    if let Some(area) = self.resize_bounds
+                        && edited.text_style.rotation != 0.
+                    {
+                        let limit = area.union(&original.ink_bounds());
+                        let ink = edited.ink_bounds();
+                        let dx = (limit.left() - ink.left())
+                            .max(px(0.))
+                            .min((limit.right() - ink.right()).min(px(0.)));
+                        let dy = (limit.top() - ink.top())
+                            .max(px(0.))
+                            .min((limit.bottom() - ink.bottom()).min(px(0.)));
+                        edited.translate(point(dx, dy));
+                    }
                     self.shapes[ix] = edited;
                     self.commit_move(ix, original);
                 }

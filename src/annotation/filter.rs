@@ -10,8 +10,18 @@ pub(super) fn rasterize(
     origin: Point<Pixels>,
     scale: f32,
 ) {
+    match shape.filter_area() {
+        None | Some(super::FilterArea::Rectangle) => {
+            rasterize_rect(shape, rgba, w, h, origin, scale);
+            return;
+        }
+        Some(super::FilterArea::Ellipse) => {
+            rasterize_ellipse(shape, rgba, w, h, origin, scale);
+            return;
+        }
+        Some(super::FilterArea::Brush { .. }) => {}
+    }
     let Some(super::FilterArea::Brush { diameter }) = shape.filter_area() else {
-        rasterize_rect(shape, rgba, w, h, origin, scale);
         return;
     };
     let bounds = shape.ink_bounds();
@@ -50,18 +60,106 @@ pub(super) fn rasterize(
         ),
     );
     rasterize_rect(&region, &mut filtered, width, height, local_origin, scale);
-    // Rasterize the same capsule geometry used by picking, including antialiased edges.
-    let mut mask: Vec<u8> = (0..width * height).flat_map(|_| [0, 0, 0, 255]).collect();
+    // Stream the exact capsule union coverage directly into destination pixels
+    // without allocating a full-bbox mask image or scanning uncovered background.
     let mut stroke = shape.clone();
     stroke.kind = ShapeKind::Pencil;
     stroke.parameters = super::ShapeParameters::new(ShapeKind::Pencil, diameter);
-    stroke.color = 0xffffffff;
-    super::line::rasterize(&stroke, &mut mask, width, height, local_origin, scale);
-    for y in 0..height {
-        for x in 0..width {
-            let source = ((y * width + x) * 4) as usize;
+    super::line::coverage(
+        &stroke,
+        width,
+        height,
+        local_origin,
+        scale,
+        |source, cov| {
+            let pix_idx = source / 4;
+            let x = pix_idx as u32 % width;
+            let y = pix_idx as u32 / width;
             let target = (((y + top) * w + x + left) * 4) as usize;
-            let coverage = mask[source] as u32;
+            if rgba[target + 3] == 0 {
+                return;
+            }
+            let coverage = (cov * 255.).round() as u32;
+            for channel in 0..3 {
+                rgba[target + channel] = ((filtered[source + channel] as u32 * coverage
+                    + rgba[target + channel] as u32 * (255 - coverage)
+                    + 127)
+                    / 255) as u8;
+            }
+        },
+    );
+}
+
+fn rasterize_ellipse(
+    shape: &Shape,
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    origin: Point<Pixels>,
+    scale: f32,
+) {
+    let rx = f32::from(shape.bounds.size.width) * scale / 2.;
+    let ry = f32::from(shape.bounds.size.height) * scale / 2.;
+    if rx <= 0. || ry <= 0. {
+        return;
+    }
+    let cx = f32::from(shape.bounds.left() - origin.x) * scale + rx;
+    let cy = f32::from(shape.bounds.top() - origin.y) * scale + ry;
+    let left = (cx - rx).floor().clamp(0., w as f32) as u32;
+    let right = (cx + rx).ceil().clamp(0., w as f32) as u32;
+    let top = (cy - ry).floor().clamp(0., h as f32) as u32;
+    let bottom = (cy + ry).ceil().clamp(0., h as f32) as u32;
+    if right <= left || bottom <= top {
+        return;
+    }
+    let (width, height) = (right - left, bottom - top);
+    let local_origin = origin
+        + gpui_kit::point(
+            gpui_kit::px(left as f32 / scale),
+            gpui_kit::px(top as f32 / scale),
+        );
+    let mut filtered = Vec::with_capacity((width * height * 4) as usize);
+    for y in top..bottom {
+        let start = ((y * w + left) * 4) as usize;
+        filtered.extend_from_slice(&rgba[start..start + (width * 4) as usize]);
+    }
+    let mut region = shape.clone();
+    region.bounds = gpui_kit::Bounds::new(
+        local_origin,
+        gpui_kit::size(
+            gpui_kit::px(width as f32 / scale),
+            gpui_kit::px(height as f32 / scale),
+        ),
+    );
+    rasterize_rect(&region, &mut filtered, width, height, local_origin, scale);
+    let mut row_cov = vec![0_f32; width as usize];
+    for y in 0..height {
+        row_cov.fill(0.);
+        let global_row = top + y;
+        for sample in 0..8 {
+            let dy = global_row as f32 + (sample as f32 + 0.5) / 8. - cy;
+            if dy.abs() >= ry {
+                continue;
+            }
+            let half = rx * (1. - (dy / ry).powi(2)).sqrt();
+            let (start, end) = (cx - half, cx + half);
+            let start_col = (start.floor().max(left as f32) as u32).min(right);
+            let end_col = (end.ceil().max(left as f32) as u32).min(right);
+            for col in start_col..end_col {
+                row_cov[(col - left) as usize] +=
+                    (end.min(col as f32 + 1.) - start.max(col as f32)).max(0.) / 8.;
+            }
+        }
+        for (ix, cov) in row_cov.iter().copied().enumerate() {
+            if cov <= 0. {
+                continue;
+            }
+            let source = ((y * width + ix as u32) * 4) as usize;
+            let target = ((global_row * w + left + ix as u32) * 4) as usize;
+            if rgba[target + 3] == 0 {
+                continue;
+            }
+            let coverage = (cov.min(1.) * 255.).round() as u32;
             for channel in 0..3 {
                 rgba[target + channel] = ((filtered[source + channel] as u32 * coverage
                     + rgba[target + channel] as u32 * (255 - coverage)
@@ -378,6 +476,44 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn elliptical_filters_preserve_corners_convert_in_place_and_resize() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(120.), px(120.)));
+        for kind in [ShapeKind::Mosaic, ShapeKind::Blur] {
+            let mut marks = crate::annotation::Annotations::default();
+            marks.toggle(kind);
+            marks.set_filter_area_kind(crate::annotation::FilterAreaKind::Ellipse);
+            marks.begin(point(px(20.), px(20.)), area, false);
+            marks.drag_to(point(px(100.), px(100.)), area, false);
+            marks.end();
+            marks.select_index(0);
+            assert_eq!(marks.shapes[0].handle_points().len(), 8);
+            // Corner of the bounding box lies outside the inscribed circle.
+            assert_eq!(marks.hit_test(point(px(22.), px(22.))), None);
+            assert_eq!(marks.hit_test(point(px(60.), px(60.))), Some(0));
+
+            let before: Vec<u8> = (0..120 * 120)
+                .flat_map(|i| [(i * 29 % 251) as u8, (i * 17 % 251) as u8, 90, 255])
+                .collect();
+            let mut pixels = before.clone();
+            marks.rasterize(&mut pixels, 120, 120, area.origin, 1.);
+            let corner = (22 * 120 + 22) * 4;
+            let center = (60 * 120 + 60) * 4;
+            assert_eq!(&pixels[corner..corner + 4], &before[corner..corner + 4]);
+            assert_ne!(&pixels[center..center + 4], &before[center..center + 4]);
+
+            // Converting Ellipse -> Rectangle keeps the selection and records one undo step.
+            marks.set_filter_area_kind(crate::annotation::FilterAreaKind::Rectangle);
+            assert_eq!(marks.selected_index(), Some(0));
+            assert_eq!(marks.hit_test(point(px(22.), px(22.))), Some(0));
+            marks.undo();
+            assert_eq!(
+                marks.shapes[0].filter_area(),
+                Some(super::super::FilterArea::Ellipse)
+            );
         }
     }
 }

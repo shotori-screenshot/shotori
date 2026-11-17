@@ -1,5 +1,6 @@
 //! Filled and patterned geometry shares polygons across preview, export and picking.
-use super::{Annotations, HistoryEntry, LineStyle, Shape, ShapeKind, ShapeParameters};
+use super::parameters::GeometryFill;
+use super::{Annotations, LineStyle, Shape, ShapeKind, ShapeParameters};
 use gpui_kit::{Pixels, Point, point, px};
 
 /// Ellipse angles use clockwise radians in the mark's unrotated coordinate system.
@@ -30,16 +31,39 @@ impl Shape {
         }
     }
 
+    pub(crate) fn rotation(&self) -> f32 {
+        match self.parameters {
+            ShapeParameters::Geometry { transform, .. } => transform.rotation,
+            _ if self.kind == ShapeKind::Text => self.text_style.rotation,
+            _ => 0.,
+        }
+    }
+
+    pub(super) fn set_rotation(&mut self, rotation: f32) {
+        match &mut self.parameters {
+            ShapeParameters::Geometry { transform, .. } => transform.rotation = rotation,
+            _ if self.kind == ShapeKind::Text => self.text_style.rotation = rotation,
+            _ => {}
+        }
+    }
+
     pub(crate) fn rotated_point(&self, p: Point<Pixels>, inverse: bool) -> Point<Pixels> {
+        let rotation = self.rotation();
+        if rotation == 0. {
+            return p;
+        }
         let center = self.bounds.center();
-        let angle = self.geometry_transform().rotation * if inverse { -1. } else { 1. };
+        let angle = rotation * if inverse { -1. } else { 1. };
         let (sin, cos) = angle.sin_cos();
         let d = p - center;
         center + point(d.x * cos - d.y * sin, d.x * sin + d.y * cos)
     }
 
     pub(crate) fn can_rotate(&self) -> bool {
-        matches!(self.kind, ShapeKind::Rectangle | ShapeKind::Ellipse)
+        matches!(
+            self.kind,
+            ShapeKind::Rectangle | ShapeKind::Ellipse | ShapeKind::Text
+        )
     }
 
     pub(crate) fn frame_corners(&self) -> [Point<Pixels>; 4] {
@@ -81,16 +105,18 @@ impl Shape {
             point(b.left(), center.y),
         ];
         if self.kind == ShapeKind::Rectangle {
-            let r = px(self
-                .geometry_radius()
-                .max(12.)
-                .min(f32::from(b.size.width.min(b.size.height)) / 2.));
-            handles.extend([
-                b.origin + point(r, r),
-                point(b.right() - r, b.top() + r),
-                b.bottom_right() - point(r, r),
-                point(b.left() + r, b.bottom() - r),
-            ]);
+            if b.size.width >= px(16.) && b.size.height >= px(16.) {
+                let r = px(self
+                    .geometry_radius()
+                    .max(12.)
+                    .min(f32::from(b.size.width.min(b.size.height)) / 2.));
+                handles.extend([
+                    b.origin + point(r, r),
+                    point(b.right() - r, b.top() + r),
+                    b.bottom_right() - point(r, r),
+                    point(b.left() + r, b.bottom() - r),
+                ]);
+            }
         } else {
             let t = self.geometry_transform();
             let at = |angle: f32, radius: f32| {
@@ -175,11 +201,15 @@ impl Shape {
         }
     }
 
+    pub(crate) fn geometry_fill_mode(&self) -> GeometryFill {
+        match self.parameters {
+            ShapeParameters::Geometry { fill, .. } => fill,
+            _ => GeometryFill::None,
+        }
+    }
+
     pub(crate) fn geometry_fill(&self) -> bool {
-        matches!(
-            self.parameters,
-            ShapeParameters::Geometry { fill: true, .. }
-        )
+        self.geometry_fill_mode() != GeometryFill::None
     }
 
     pub(crate) fn geometry_radius(&self) -> f32 {
@@ -214,7 +244,7 @@ impl Annotations {
         let center = before.bounds.center();
         let angle_at =
             |p: Point<Pixels>| f32::from(p.y - center.y).atan2(f32::from(p.x - center.x));
-        let from = before.geometry_transform().rotation;
+        let from = before.rotation();
         let delta = (angle_at(p) - angle_at(press) + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI;
@@ -229,9 +259,7 @@ impl Annotations {
         };
         let mut apply = |fraction| {
             *shape = before.clone();
-            if let ShapeParameters::Geometry { transform, .. } = &mut shape.parameters {
-                transform.rotation = from + (target - from) * fraction;
-            }
+            shape.set_rotation(from + (target - from) * fraction);
             let b = shape.selection_box();
             b.left() >= limit.left()
                 && b.right() <= limit.right()
@@ -253,9 +281,10 @@ impl Annotations {
         apply(low);
     }
 
-    pub(crate) fn geometry_fill(&self) -> bool {
+    pub(crate) fn geometry_fill_mode(&self) -> GeometryFill {
         self.selected()
-            .map(Shape::geometry_fill)
+            .filter(|s| matches!(s.kind, ShapeKind::Rectangle | ShapeKind::Ellipse))
+            .map(Shape::geometry_fill_mode)
             .unwrap_or(self.geometry_fill)
     }
 
@@ -265,16 +294,22 @@ impl Annotations {
             .unwrap_or(self.geometry_radius)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_geometry_fill(&mut self, value: bool) {
+        self.set_geometry_fill_mode(if value {
+            GeometryFill::Solid
+        } else {
+            GeometryFill::None
+        });
+    }
+
+    pub(crate) fn set_geometry_fill_mode(&mut self, value: GeometryFill) {
         self.geometry_fill = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Geometry { fill, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Geometry { fill, .. } = &mut shape.parameters {
                 *fill = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     /// Adjust rectangle corners independently of stroke width, merging one slider gesture.
@@ -284,48 +319,58 @@ impl Annotations {
         }
         let value = value.clamp(0., Self::MAX_CORNER_RADIUS);
         self.geometry_radius = value;
-        let Some(ix) = self.selected_index() else {
-            return;
-        };
-        let before = self.shapes[ix].clone();
-        if let ShapeParameters::Geometry { radius, .. } = &mut self.shapes[ix].parameters {
-            *radius = value;
-        }
-        if self.shapes[ix] == before {
-            return;
-        }
-        if self.size_drag_active
-            && let Some(HistoryEntry::Edit {
-                ix: previous,
-                after,
-                ..
-            }) = self.history.last_mut()
-            && *previous == ix
-        {
-            *after = self.shapes[ix].clone();
-        } else {
-            self.commit_move(ix, before);
-        }
-        self.redo.clear();
-        self.size_drag_active = true;
+        self.edit_selected_drag(|before| {
+            let mut next = before.clone();
+            if next.kind == ShapeKind::Rectangle
+                && let ShapeParameters::Geometry { radius, .. } = &mut next.parameters
+            {
+                *radius = value;
+            }
+            next
+        });
     }
 
     pub(crate) const MAX_CORNER_RADIUS: f32 = 128.;
 }
 
 pub(super) fn polygons(shape: &Shape) -> Vec<Vec<Point<Pixels>>> {
+    polygons_with_mode(shape, shape.geometry_fill_mode() == GeometryFill::Solid, 0.)
+}
+
+/// Interior wash polygons for `GeometryFill::Translucent`, inset inside solid
+/// borders so the stroke and wash never double-blend along their shared edge.
+pub(super) fn translucent_fill_polygons(shape: &Shape) -> Vec<Vec<Point<Pixels>>> {
+    let inset = if shape.line_style() == LineStyle::Solid {
+        shape
+            .size()
+            .min(f32::from(shape.bounds.size.width))
+            .min(f32::from(shape.bounds.size.height))
+    } else {
+        0.
+    };
+    polygons_with_mode(shape, true, inset)
+}
+
+/// Outline stroke polygons for `GeometryFill::Translucent`.
+pub(super) fn outline_polygons(shape: &Shape) -> Vec<Vec<Point<Pixels>>> {
+    polygons_with_mode(shape, false, 0.)
+}
+
+fn polygons_with_mode(shape: &Shape, filled: bool, extra_inset: f32) -> Vec<Vec<Point<Pixels>>> {
     let width = f32::from(shape.bounds.size.width).max(0.);
     let height = f32::from(shape.bounds.size.height).max(0.);
     if width <= 0. || height <= 0. {
         return Vec::new();
     }
-    let filled = shape.geometry_fill();
     let stroke = shape.size().min(width).min(height);
-    let inset = if filled { 0. } else { stroke / 2. };
+    let inset = if filled { extra_inset } else { stroke / 2. };
     let x = f32::from(shape.bounds.left()) + inset;
     let y = f32::from(shape.bounds.top()) + inset;
     let w = (width - inset * 2.).max(0.);
     let h = (height - inset * 2.).max(0.);
+    if w <= 0. || h <= 0. {
+        return Vec::new();
+    }
     let mut contour = Vec::new();
     if shape.kind == ShapeKind::Ellipse {
         let steps = ((w + h) * std::f32::consts::PI / 2.)
@@ -340,11 +385,13 @@ pub(super) fn polygons(shape: &Shape) -> Vec<Vec<Point<Pixels>>> {
             ));
         }
         if t.inner > 0. {
+            let inner_rx = (w / 2. * t.inner + if filled { extra_inset } else { 0. }).min(w / 2.);
+            let inner_ry = (h / 2. * t.inner + if filled { extra_inset } else { 0. }).min(h / 2.);
             for i in (0..=steps).rev() {
                 let (sin, cos) = (t.start + i as f32 * t.sweep / steps as f32).sin_cos();
                 contour.push(point(
-                    px(x + w / 2. * (1. + cos * t.inner)),
-                    px(y + h / 2. * (1. + sin * t.inner)),
+                    px(x + w / 2. + cos * inner_rx),
+                    px(y + h / 2. + sin * inner_ry),
                 ));
             }
         } else if t.sweep < std::f32::consts::TAU - 0.001 {
@@ -390,7 +437,7 @@ fn positive_sweep(angle: f32) -> f32 {
 }
 
 /// Triangles keep concave sectors and ring holes valid for both coverage engines.
-fn tessellate_fill(contour: &[Point<Pixels>]) -> Vec<Vec<Point<Pixels>>> {
+pub(super) fn tessellate_fill(contour: &[Point<Pixels>]) -> Vec<Vec<Point<Pixels>>> {
     use lyon_tessellation::path::{Path, math::point as vertex};
     use lyon_tessellation::{
         BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers,
@@ -533,5 +580,86 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn translucent_fill_tints_interior_with_full_strength_border() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(160.), px(120.)));
+        for kind in [ShapeKind::Rectangle, ShapeKind::Ellipse] {
+            let mut marks = Annotations::default();
+            marks.toggle(kind);
+            marks.apply_size(4.);
+            marks.set_geometry_fill_mode(GeometryFill::Translucent);
+            marks.begin(point(px(20.), px(20.)), area, false);
+            marks.drag_to(point(px(140.), px(100.)), area, false);
+            marks.end();
+            let mut pixels = vec![255; 160 * 120 * 4];
+            marks.rasterize(&mut pixels, 160, 120, area.origin, 1.);
+            let center = (60 * 160 + 80) * 4;
+            // Interior is tinted, neither untouched white nor fully opaque ink.
+            assert!(
+                pixels[center + 1] < 255 && pixels[center + 1] > 150,
+                "{kind:?}"
+            );
+            // Border stroke reaches full ink strength without double-blending.
+            let edge = (21 * 160 + 80) * 4;
+            assert!(pixels[edge + 1] < 80, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn rotated_text_updates_ink_bounds_picking_and_upright_editing() {
+        crate::annotation::text::with_test_font(|| {
+            let area = Bounds::new(point(px(0.), px(0.)), size(px(320.), px(260.)));
+            let mut marks = Annotations::default();
+            marks.add_text(
+                Bounds::new(point(px(90.), px(100.)), size(px(140.), px(36.))),
+                "Rotated label".into(),
+            );
+            marks.select_index(0);
+            let before = marks.shapes[0].clone();
+            assert!(before.can_rotate());
+            marks.rotate_shape(
+                0,
+                &before,
+                point(px(230.), px(118.)),
+                point(px(160.), px(188.)),
+                area,
+                true,
+            );
+            marks.commit_move(0, before.clone());
+            let rotated = marks.shapes[0].clone();
+            assert!((rotated.rotation() - std::f32::consts::FRAC_PI_2).abs() < 0.01);
+            assert!(rotated.ink_bounds().size.height > before.ink_bounds().size.height);
+            // Unrotated left tail is outside the 90°-rotated oriented box.
+            assert!(!super::super::select::shape_hit(
+                &rotated,
+                point(px(95.), px(118.))
+            ));
+            assert!(super::super::select::shape_hit(
+                &rotated,
+                rotated.bounds.center()
+            ));
+
+            let mut pixels = vec![255; 320 * 260 * 4];
+            marks.rasterize(&mut pixels, 320, 260, area.origin, 1.);
+            // Ink extends vertically past the unrotated 36px box height without clipping
+            // (check channel +1 because palette swatch 0 is #ff3b30 with R == 255).
+            let has_vertical_ink =
+                (50..88).any(|y| (140..180).any(|x| pixels[(y * 320 + x) * 4 + 1] < 200));
+            assert!(
+                has_vertical_ink,
+                "rotated text top half must not be clipped"
+            );
+
+            // Inline editing straightens upright while typing, then restores rotation.
+            assert!(marks.begin_text_edit(0));
+            assert_eq!(marks.shapes[0].rotation(), 0.);
+            marks.preview_text(before.bounds, "Edited rotated".into());
+            marks.finish_text_edit(true);
+            assert!((marks.shapes[0].rotation() - rotated.rotation()).abs() < 0.001);
+            marks.undo();
+            assert_eq!(marks.shapes[0], rotated);
+        });
     }
 }

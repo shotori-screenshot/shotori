@@ -48,14 +48,11 @@ impl Annotations {
 
     pub(crate) fn set_highlighter_blend(&mut self, blend: HighlightBlend) {
         self.highlighter.blend = blend;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Highlighter { options, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Highlighter { options, .. } = &mut shape.parameters {
                 options.blend = blend;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 }
 
