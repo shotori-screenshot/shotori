@@ -56,8 +56,8 @@ impl ScreenshotSession {
             .map(|r| (r.width, r.height, r.rgba))
     }
 
-    /// One background render per session. Pointer updates remain in the model;
-    /// when work finishes we snapshot only the newest state, never a frame queue.
+    /// Publish edited text and lenses with their current selection geometry.
+    /// Other heavy previews use one worker that snapshots the latest state on completion.
     pub(crate) fn request_filtered_preview(
         &mut self,
         output: &str,
@@ -68,13 +68,15 @@ impl ScreenshotSession {
             self.preview_display = None;
             return None;
         }
-        // Text geometry and its selection frame must be published together.
-        // A heavy lens elsewhere must not leave the text at an older position.
+        // Edited geometry and its selection frame must be published together.
+        // A cached lens only recomposites its changing suffix on this path.
         if self.annotations.editing_text().is_some()
-            || self
-                .annotations
-                .selected()
-                .is_some_and(|shape| shape.kind == crate::annotation::ShapeKind::Text)
+            || self.annotations.selected().is_some_and(|shape| {
+                matches!(
+                    shape.kind,
+                    crate::annotation::ShapeKind::Text | crate::annotation::ShapeKind::Magnifier
+                )
+            })
         {
             self.preview_display = None;
             return self.filtered_preview(output);
@@ -332,227 +334,65 @@ impl ScreenshotSession {
         let draft = self.annotations.raster_draft_shape();
         if cache.as_ref().is_none_or(|c| c.selection != selection) {
             let original = self.crop_impl(output, false)?;
-            let pixels = original.rgba.clone();
-            let image = crate::render_image::rgba_to_render_image(
-                pixels.clone(),
-                original.width,
-                original.height,
-            );
-            *cache = Some(FilterPreview {
+            *cache = Some(FilterPreview::new(
                 selection,
-                committed: Vec::new(),
-                draft: None,
-                draft_generation: self.annotations.draft_generation(),
                 original,
-                pixels,
-                image,
-                stroke: None,
-                moved: None,
-            });
+                self.annotations.draft_generation(),
+            ));
         }
         let cached = cache.as_mut()?;
-        // Live move/handle drag: replaying the whole scene per pointer
-        // move (full-frame base copy + every committed shape
-        // re-rasterized) cost ~20 ms/frame at 1080p and ~65 ms with a
-        // magnifier on screen — the dragged shape visibly trailed the
-        // pointer. Instead, composite the scene WITHOUT the dragged
-        // shapes once (split plane), then repaint only the dragged set
-        // over that stable base each frame.
+        let mut bounds = cached.original.bounds;
+        bounds.origin -= self.screen(output).bounds().origin;
         if let Some(editing) = self.editing_shape_indices() {
-            // A spotlight dim applies once over the union of ALL
-            // spotlights and a lens samples the marked layer, so both
-            // always ride with the replay set — a naive split would
-            // double-dim outside the dragged spotlight's hole or leave
-            // the lens showing pre-drag content.
-            let mut replay: Vec<usize> = editing;
-            for (ix, shape) in committed.iter().enumerate() {
-                if matches!(shape.kind, ShapeKind::Spotlight | ShapeKind::Magnifier)
-                    && !replay.contains(&ix)
-                {
-                    replay.push(ix);
-                }
+            let single_lens = editing.as_slice() == [editing[0]]
+                && committed
+                    .get(editing[0])
+                    .is_some_and(|s| s.kind == ShapeKind::Magnifier);
+            if single_lens {
+                // Single-lens drags route through MagnifierPreview instead of
+                // MovedReplay so annotations=false never samples un-dragged marks
+                // and later marks keep their display order over the lens.
+                cached.moved = None;
+            } else if let Some(image) = cached.update_moved_replay(editing, committed) {
+                return Some((bounds, image));
             }
-            replay.sort_unstable();
-            // Idempotence: the renderer may call this twice for one
-            // frame (element paint + the next frame before the move
-            // lands). Each call would otherwise mint a fresh image
-            // that never reaches the atlas — only a NEW committed
-            // state (a drag frame) rebuilds.
-            if cached.moved.as_ref().is_some_and(|m| m.indices == replay)
-                && cached.committed == committed
-            {
-                return Some((cached.original.bounds, cached.image.clone()));
-            }
-            let dims = (cached.original.width, cached.original.height);
-            let origin = cached.original.bounds.origin;
-            let scale = cached.original.scale;
-            if cached.moved.as_ref().is_none_or(|m| m.indices != replay) {
-                let mut base = cached.original.rgba.clone();
-                crate::annotation::Annotations::rasterize_shapes(
-                    committed
-                        .iter()
-                        .enumerate()
-                        .filter(|(ix, _)| !replay.contains(ix))
-                        .map(|(_, shape)| shape),
-                    &mut base,
-                    dims.0,
-                    dims.1,
-                    origin,
-                    scale,
-                );
-                cached.moved = Some(MovedReplay {
-                    base,
-                    indices: replay.clone(),
-                });
-            }
-            let base = cached.moved.as_ref().map(|m| m.base.clone())?;
-            cached.pixels = base;
-            crate::annotation::Annotations::rasterize_shapes(
-                committed
-                    .iter()
-                    .enumerate()
-                    .filter(|(ix, _)| replay.contains(ix))
-                    .map(|(_, shape)| shape),
-                &mut cached.pixels,
-                dims.0,
-                dims.1,
-                origin,
-                scale,
-            );
-            cached.image =
-                crate::render_image::rgba_to_render_image(cached.pixels.clone(), dims.0, dims.1);
-            cached.committed = committed.to_vec();
-            cached.draft = None;
-            cached.stroke = None;
-            return Some((cached.original.bounds, cached.image.clone()));
-        }
-        // A drag just ended: the split composite already equals the full
-        // replay (base + dragged shapes at their final positions), so keep
-        // the frame and just drop the split state.
-        if cached.moved.take().is_some() && cached.committed == committed {
+        } else if cached.moved.take().is_some() && cached.committed == committed {
+            // A drag just ended: the split composite already equals the full
+            // replay (base + dragged shapes at their final positions).
             cached.draft = draft.cloned();
-            return Some((cached.original.bounds, cached.image.clone()));
+            return Some((bounds, cached.image.clone()));
         }
         if cached.committed != committed
             || cached.draft.as_ref() != draft
             || cached.draft_generation != self.annotations.draft_generation()
         {
-            let original = &cached.original;
-            // Appending a finished stroke only replays the new suffix. Undo,
-            // replacement and edits rebuild from the immutable capture.
             if cached.draft_generation != self.annotations.draft_generation() {
                 cached.stroke = None;
             }
             let history_changed = cached.committed != committed;
-            let appended_one = committed.len() == cached.committed.len() + 1
-                && committed.starts_with(&cached.committed);
-            // Appending a finished pencil/highlighter stroke only replays the
-            // new suffix. Undo, replacement and edits rebuild from the
-            // immutable capture. The pair lookup degrades instead of
-            // unwrapping; any miss lands in the full rebuild below, which is
-            // always correct.
-            let suffix =
-                if appended_one && !committed.iter().any(|s| s.kind == ShapeKind::Magnifier) {
-                    cached.stroke.as_mut().zip(committed.last())
-                } else {
-                    None
-                }
-                .filter(|(_, shape)| shape.is_freehand());
-            if let Some((stroke, last)) = suffix {
-                // Promote the final incremental draft, including a new release
-                // point, instead of rasterizing the entire long stroke again.
-                cached.pixels = stroke
-                    .render(
-                        last,
-                        &cached.pixels,
-                        (original.width, original.height),
-                        original.bounds.origin,
-                        original.scale,
-                    )
-                    .to_vec();
-            } else {
-                // Lenses can sample the unmarked capture; a suffix-only replay
-                // would incorrectly treat already painted annotations as the source.
-                // Spotlight masks also need the entire union, without repeated dimming.
-                if committed
-                    .iter()
-                    .any(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
-                    || !committed.starts_with(&cached.committed)
-                {
-                    cached.pixels.clone_from(&original.rgba);
-                    cached.committed.clear();
-                }
-                crate::annotation::Annotations::rasterize_shapes(
-                    committed[cached.committed.len()..].iter(),
-                    &mut cached.pixels,
-                    original.width,
-                    original.height,
-                    original.bounds.origin,
-                    original.scale,
-                );
-            }
+            let has_lens = committed.iter().any(|s| s.kind == ShapeKind::Magnifier);
+            let image_was_committed = cached.draft.as_ref().is_none_or(|shape| {
+                shape.is_freehand() && !shape.needs_composited_ink() && !has_lens
+            });
             if history_changed {
+                if has_lens {
+                    cached.update_lens_history(committed, self.annotations.selected_index())?;
+                } else {
+                    cached.update_standard_history(committed);
+                }
                 cached.stroke = None;
-            }
-            if cached.committed != committed {
                 cached.committed = committed.to_vec();
             }
-            if let Some(shape) =
-                draft.filter(|s| s.is_freehand() && !self.annotations.composite_draft())
-            {
-                // Live freehand stroke: advance the incremental raster so
-                // the release promotion stays O(new segments), but do NOT
-                // rebuild the selection image — the stroke paints as a
-                // vector union path on the overlay (see local_draft).
-                // Re-swapping the whole crop into the atlas on every
-                // pointer move was the stutter that broke strokes into
-                // visible dots.
-                cached.stroke.get_or_insert_with(Default::default).render(
-                    shape,
-                    &cached.pixels,
-                    (original.width, original.height),
-                    original.bounds.origin,
-                    original.scale,
-                );
-            } else {
-                cached.stroke = None;
-                let mut pixels = cached.pixels.clone();
-                // Lens and spotlight drafts re-run the whole composite (they
-                // sample/dim the marked layer).
-                if draft
-                    .is_some_and(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
-                    || (draft.is_some() && committed.iter().any(|s| s.kind == ShapeKind::Magnifier))
-                {
-                    pixels.clone_from(&original.rgba);
-                    crate::annotation::Annotations::rasterize_shapes(
-                        committed.iter().chain(draft),
-                        &mut pixels,
-                        original.width,
-                        original.height,
-                        original.bounds.origin,
-                        original.scale,
-                    );
-                } else {
-                    crate::annotation::Annotations::rasterize_shapes(
-                        draft.into_iter(),
-                        &mut pixels,
-                        original.width,
-                        original.height,
-                        original.bounds.origin,
-                        original.scale,
-                    );
-                }
-                cached.image = crate::render_image::rgba_to_render_image(
-                    pixels,
-                    original.width,
-                    original.height,
-                );
-            }
+            cached.update_draft_image(
+                committed,
+                draft,
+                self.annotations.composite_draft(),
+                history_changed,
+                image_was_committed,
+            );
             cached.draft = draft.cloned();
             cached.draft_generation = self.annotations.draft_generation();
         }
-        let mut bounds = cached.original.bounds;
-        bounds.origin -= self.screen(output).bounds().origin;
         Some((bounds, cached.image.clone()))
     }
 
@@ -717,5 +557,238 @@ impl ScreenshotSession {
                 size(px(w as f32 / scale), px(h as f32 / scale)),
             ),
         })
+    }
+}
+
+impl FilterPreview {
+    fn new(
+        selection: Option<Bounds<Pixels>>,
+        original: RasterSelection,
+        draft_generation: u64,
+    ) -> Self {
+        let pixels = original.rgba.clone();
+        let image = crate::render_image::rgba_to_render_image(
+            pixels.clone(),
+            original.width,
+            original.height,
+        );
+        Self {
+            selection,
+            committed: Vec::new(),
+            draft: None,
+            draft_generation,
+            original,
+            pixels,
+            image,
+            stroke: None,
+            moved: None,
+            magnifier: None,
+        }
+    }
+
+    /// Composite a non-lens drag over a cached split plane of un-dragged shapes.
+    /// Returns `None` if an un-dragged mark would pollute an `annotations: false` lens.
+    fn update_moved_replay(
+        &mut self,
+        mut replay: Vec<usize>,
+        committed: &[crate::annotation::Shape],
+    ) -> Option<Arc<RenderImage>> {
+        use crate::annotation::ShapeKind;
+        for (ix, shape) in committed.iter().enumerate() {
+            if matches!(shape.kind, ShapeKind::Spotlight | ShapeKind::Magnifier)
+                && !replay.contains(&ix)
+            {
+                replay.push(ix);
+            }
+        }
+        replay.sort_unstable();
+        if replay.len() < committed.len()
+            && committed
+                .iter()
+                .any(|s| s.kind == ShapeKind::Magnifier && !s.lens_samples_annotations())
+        {
+            self.moved = None;
+            return None;
+        }
+        if self.moved.as_ref().is_some_and(|m| m.indices == replay) && self.committed == committed {
+            return Some(self.image.clone());
+        }
+        let dims = (self.original.width, self.original.height);
+        let origin = self.original.bounds.origin;
+        let scale = self.original.scale;
+        if self.moved.as_ref().is_none_or(|m| m.indices != replay) {
+            let mut base = self.original.rgba.clone();
+            crate::annotation::Annotations::rasterize_shapes(
+                committed
+                    .iter()
+                    .enumerate()
+                    .filter(|(ix, _)| !replay.contains(ix))
+                    .map(|(_, shape)| shape),
+                &mut base,
+                dims.0,
+                dims.1,
+                origin,
+                scale,
+            );
+            self.moved = Some(MovedReplay {
+                base,
+                indices: replay.clone(),
+            });
+        }
+        let base = self.moved.as_ref().map(|m| m.base.clone())?;
+        self.pixels = base;
+        crate::annotation::Annotations::rasterize_shapes(
+            committed
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| replay.contains(ix))
+                .map(|(_, shape)| shape),
+            &mut self.pixels,
+            dims.0,
+            dims.1,
+            origin,
+            scale,
+        );
+        self.image = crate::render_image::rgba_to_render_image(self.pixels.clone(), dims.0, dims.1);
+        self.committed = committed.to_vec();
+        self.draft = None;
+        self.stroke = None;
+        self.magnifier = None;
+        Some(self.image.clone())
+    }
+
+    fn update_lens_history(
+        &mut self,
+        committed: &[crate::annotation::Shape],
+        preferred_index: Option<usize>,
+    ) -> Option<()> {
+        use crate::annotation::ShapeKind;
+        if self
+            .magnifier
+            .as_ref()
+            .is_none_or(|preview| !preview.matches(committed))
+        {
+            let index = preferred_index
+                .filter(|&index| committed[index].kind == ShapeKind::Magnifier)
+                .or_else(|| {
+                    committed
+                        .iter()
+                        .rposition(|s| s.kind == ShapeKind::Magnifier)
+                })?;
+            self.magnifier = Some(crate::annotation::MagnifierPreview::new(
+                committed,
+                index,
+                &self.original.rgba,
+                (self.original.width, self.original.height),
+                self.original.bounds.origin,
+                self.original.scale,
+            ));
+        }
+        self.magnifier
+            .as_ref()?
+            .render(committed, &self.original.rgba, &mut self.pixels);
+        Some(())
+    }
+
+    fn update_standard_history(&mut self, committed: &[crate::annotation::Shape]) {
+        use crate::annotation::ShapeKind;
+        self.magnifier = None;
+        let appended_one =
+            committed.len() == self.committed.len() + 1 && committed.starts_with(&self.committed);
+        let suffix = if appended_one {
+            self.stroke.as_mut().zip(committed.last())
+        } else {
+            None
+        }
+        .filter(|(_, shape)| shape.is_freehand());
+        if let Some((stroke, last)) = suffix {
+            self.pixels = stroke
+                .render(
+                    last,
+                    &self.pixels,
+                    (self.original.width, self.original.height),
+                    self.original.bounds.origin,
+                    self.original.scale,
+                )
+                .to_vec();
+            return;
+        }
+        // Spotlight masks need the entire union without repeated dimming.
+        if committed.iter().any(|s| s.kind == ShapeKind::Spotlight)
+            || !committed.starts_with(&self.committed)
+        {
+            self.pixels.clone_from(&self.original.rgba);
+            self.committed.clear();
+        }
+        crate::annotation::Annotations::rasterize_shapes(
+            committed[self.committed.len()..].iter(),
+            &mut self.pixels,
+            self.original.width,
+            self.original.height,
+            self.original.bounds.origin,
+            self.original.scale,
+        );
+    }
+
+    fn update_draft_image(
+        &mut self,
+        committed: &[crate::annotation::Shape],
+        draft: Option<&crate::annotation::Shape>,
+        composite_draft: bool,
+        history_changed: bool,
+        image_was_committed: bool,
+    ) {
+        use crate::annotation::ShapeKind;
+        if let Some(shape) = draft.filter(|s| s.is_freehand() && !composite_draft) {
+            // Live freehand stroke: advance the incremental raster so release
+            // promotion stays O(new segments), while the stroke paints as a
+            // vector overlay. Refresh `image` only when switching from vector-only
+            // marks or a previous raster draft so committed marks stay visible.
+            self.stroke.get_or_insert_with(Default::default).render(
+                shape,
+                &self.pixels,
+                (self.original.width, self.original.height),
+                self.original.bounds.origin,
+                self.original.scale,
+            );
+            if history_changed || !image_was_committed {
+                self.image = crate::render_image::rgba_to_render_image(
+                    self.pixels.clone(),
+                    self.original.width,
+                    self.original.height,
+                );
+            }
+            return;
+        }
+        self.stroke = None;
+        let mut pixels = self.pixels.clone();
+        let has_lens = committed.iter().any(|s| s.kind == ShapeKind::Magnifier);
+        if draft.is_some_and(|s| matches!(s.kind, ShapeKind::Magnifier | ShapeKind::Spotlight))
+            || (draft.is_some() && has_lens)
+        {
+            pixels.clone_from(&self.original.rgba);
+            crate::annotation::Annotations::rasterize_shapes(
+                committed.iter().chain(draft),
+                &mut pixels,
+                self.original.width,
+                self.original.height,
+                self.original.bounds.origin,
+                self.original.scale,
+            );
+        } else {
+            crate::annotation::Annotations::rasterize_shapes(
+                draft.into_iter(),
+                &mut pixels,
+                self.original.width,
+                self.original.height,
+                self.original.bounds.origin,
+                self.original.scale,
+            );
+        }
+        self.image = crate::render_image::rgba_to_render_image(
+            pixels,
+            self.original.width,
+            self.original.height,
+        );
     }
 }

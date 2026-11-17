@@ -141,6 +141,7 @@ struct FilterPreview {
     /// `base` composites every committed shape EXCEPT the replay set,
     /// so each drag frame repaints only the dragged shapes.
     moved: Option<MovedReplay>,
+    magnifier: Option<crate::annotation::MagnifierPreview>,
 }
 
 /// The stable half of a drag-in-progress composite. `indices` covers
@@ -768,7 +769,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn lens_option_changes_keep_the_completed_frame_until_replacement(
+    fn lens_option_changes_publish_current_pixels_without_worker(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         use crate::annotation::{LensOption, ShapeKind};
@@ -794,12 +795,21 @@ mod tests {
                 a.set_lens_connector(crate::annotation::LensConnector::CenterDot)
             });
             let (_, during) = s.request_filtered_preview("left", cx).unwrap();
-            assert!(Arc::ptr_eq(&before, &during));
+            assert_ne!(before.id, during.id);
+            assert!(!s.preview_busy);
             for option in [LensOption::Annotations, LensOption::Smooth] {
                 s.edit_annotations(|a| a.set_lens_option(option, false));
                 let (_, during) = s.request_filtered_preview("left", cx).unwrap();
-                assert!(Arc::ptr_eq(&before, &during));
-                assert!(s.preview_busy);
+                assert!(!s.preview_busy);
+                let mut pixels = [50, 100, 150, 255].repeat(800 * 800);
+                s.annotations
+                    .rasterize(&mut pixels, 800, 800, point(px(0.), px(0.)), 1.);
+                let expected = crate::render_image::rgba_to_render_image(pixels, 800, 800);
+                assert_eq!(during.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
+                assert_eq!(
+                    s.request_filtered_preview("left", cx).unwrap().1.id,
+                    during.id
+                );
             }
         });
         cx.run_until_parked();
@@ -864,11 +874,11 @@ mod tests {
                 );
                 s.pointer_up("left", point(px(450.), px(450.)), false);
                 assert!(s.local_lens_draft_outline("left").is_none());
-                assert_eq!(
+                assert_ne!(
                     s.request_filtered_preview("left", cx).unwrap().1.id,
                     image.id
                 );
-                assert!(s.preview_busy);
+                assert!(!s.preview_busy);
             });
             cx.run_until_parked();
             session.update(cx, |s, cx| {
@@ -1036,6 +1046,9 @@ mod tests {
                 a.drag_to(point(px(150.), px(150.)), area, false);
                 a.end();
             });
+            // Unselected heavy changes still use the worker; text edits must
+            // supersede an already running job rather than revive its old pixels.
+            s.edit_annotations(|a| a.deselect());
             s.request_filtered_preview("left", cx);
             assert!(s.preview_busy);
             let bounds = s.text_bounds("left", point(px(50.), px(60.)), 24.).unwrap();
@@ -1153,6 +1166,28 @@ mod tests {
                 // the retired per-frame worker is the bug this test
                 // guards against.
                 assert!(!s.preview_busy, "{kind:?} spawned a drag worker");
+                if kind == ShapeKind::Magnifier {
+                    // No executor drain: every pointer update must already contain
+                    // the new lens pixels used by the current selection frame.
+                    for step in 1..8 {
+                        s.pointer_move("left", destination - point(px(step as f32), px(0.)), false);
+                        let (_, image) = s.request_filtered_preview("left", cx).unwrap();
+                        let original = s.crop_original("left").unwrap();
+                        let mut pixels = original.2;
+                        s.annotations.rasterize(
+                            &mut pixels,
+                            original.0,
+                            original.1,
+                            point(px(0.), px(0.)),
+                            1.,
+                        );
+                        let expected = crate::render_image::rgba_to_render_image(
+                            pixels, original.0, original.1,
+                        );
+                        assert_eq!(image.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
+                        assert!(!s.preview_busy);
+                    }
+                }
                 s.pointer_move("left", destination - point(px(5.), px(5.)), false);
                 assert!(s.request_filtered_preview("left", cx).is_some());
                 s.pointer_up("left", destination, false);
@@ -3189,5 +3224,198 @@ mod tests {
         assert!(s.text_bounds("left", half_line, 12.).is_some());
         let near_edge = selection.bottom_right() - s.screen_origin("left") - point(px(3.), px(3.));
         assert!(s.text_bounds("left", near_edge, 24.).is_none());
+    }
+
+    fn sized_session(width: u32, height: u32) -> ScreenshotSession {
+        let mut cap = Capture::for_test((0, 0), 1.);
+        cap.output_name = "screen".into();
+        cap.width = width;
+        cap.height = height;
+        cap.rgba = [40, 70, 100, 255].repeat((width * height) as usize);
+        let mut session = ScreenshotSession::new(vec![Arc::new(cap)], Vec::new());
+        session.select_all();
+        session
+    }
+
+    #[test]
+    fn lens_preview_restores_cancel_undo_and_refreshes_new_marks() {
+        use crate::annotation::ShapeKind;
+        let mut s = sized_session(640, 480);
+        let area = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Magnifier);
+            a.begin(point(px(80.), px(220.)), area, false);
+            a.drag_to(point(px(240.), px(300.)), area, false);
+            a.end();
+        });
+        let check = |s: &ScreenshotSession| {
+            let (_, image) = s.filtered_preview("screen").unwrap();
+            let (w, h, mut pixels) = s.crop_original("screen").unwrap();
+            s.annotations.rasterize(&mut pixels, w, h, area.origin, 1.);
+            let expected = crate::render_image::rgba_to_render_image(pixels, w, h);
+            assert_eq!(image.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
+        };
+        check(&s);
+        let original = s.annotations.committed().to_vec();
+        for part in 0..3 {
+            let shape = s.annotations.selected().unwrap();
+            let press = match part {
+                0 => shape.magnified_bounds().unwrap().center(),
+                1 => shape.bounds.center(),
+                _ => shape.bounds.bottom_right(),
+            };
+            s.pointer_down("screen", press, false, false);
+            s.pointer_move("screen", press + point(px(-12.), px(-15.)), false);
+            assert_ne!(s.annotations.committed(), original);
+            check(&s);
+            assert!(s.cancel_annotation());
+            assert_eq!(s.annotations.committed(), original);
+            check(&s);
+            s.pointer_down("screen", press, false, false);
+            s.pointer_move("screen", press + point(px(-12.), px(-15.)), false);
+            s.pointer_up("screen", press + point(px(-12.), px(-15.)), false);
+            check(&s);
+            s.undo();
+            check(&s);
+            assert_eq!(s.annotations.committed(), original);
+            s.redo();
+            check(&s);
+            s.undo();
+            s.edit_annotations(|a| {
+                a.select_index(0);
+            });
+        }
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Pencil);
+            a.begin(point(px(100.), px(240.)), area, false);
+            a.drag_to(point(px(200.), px(260.)), area, false);
+        });
+        check(&s);
+        s.edit_annotations(|a| a.end());
+        check(&s);
+        s.edit_annotations(|a| {
+            a.select_index(0);
+            a.move_selected_lens(point(px(-16.), px(12.)));
+        });
+        check(&s);
+    }
+
+    #[test]
+    fn lens_drag_with_annotations_disabled_ignores_other_marks() {
+        use crate::annotation::{LensOption, ShapeKind};
+        let mut s = sized_session(480, 360);
+        let area = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Rectangle);
+            a.begin(point(px(80.), px(80.)), area, false);
+            a.drag_to(point(px(180.), px(180.)), area, false);
+            a.end();
+            a.toggle(ShapeKind::Magnifier);
+            a.set_lens_option(LensOption::Annotations, false);
+            a.begin(point(px(90.), px(90.)), area, false);
+            a.drag_to(point(px(170.), px(170.)), area, false);
+            a.end();
+            a.toggle(ShapeKind::Pencil);
+            a.begin(point(px(20.), px(20.)), area, false);
+            a.drag_to(point(px(400.), px(300.)), area, false);
+            a.end();
+        });
+        let check = |s: &ScreenshotSession| {
+            let (_, image) = s.filtered_preview("screen").unwrap();
+            let (w, h, pixels) = s.crop("screen").unwrap();
+            let expected = crate::render_image::rgba_to_render_image(pixels, w, h);
+            assert_eq!(image.as_bytes(0).unwrap(), expected.as_bytes(0).unwrap());
+        };
+        check(&s);
+        // Dragging the lens itself (with annotations=false and a later Pencil above it)
+        let lens_center = s.annotations.committed()[1]
+            .magnified_bounds()
+            .unwrap()
+            .center();
+        s.pointer_down("screen", lens_center, false, false);
+        s.pointer_move("screen", lens_center + point(px(10.), px(10.)), false);
+        check(&s);
+        s.pointer_up("screen", lens_center + point(px(10.), px(10.)), false);
+        check(&s);
+        // Dragging the unrelated rectangle while an annotations=false lens exists
+        s.pointer_down("screen", point(px(80.), px(130.)), false, false);
+        s.pointer_move("screen", point(px(75.), px(125.)), false);
+        check(&s);
+        s.pointer_up("screen", point(px(75.), px(125.)), false);
+        check(&s);
+    }
+
+    #[test]
+    fn first_freehand_frame_preserves_previously_vector_painted_marks() {
+        use crate::annotation::ShapeKind;
+        for kind in [ShapeKind::Pencil, ShapeKind::Highlighter] {
+            let mut s = sized_session(320, 240);
+            let area = s.selection.bounds().unwrap();
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Rectangle);
+                a.begin(point(px(30.), px(30.)), area, false);
+                a.drag_to(point(px(250.), px(180.)), area, false);
+                a.end();
+            });
+            assert!(!s.uses_raster_preview());
+            let (w, h, base) = s.crop("screen").unwrap();
+            let expected = crate::render_image::rgba_to_render_image(base, w, h);
+            s.edit_annotations(|a| {
+                a.toggle(kind);
+                a.set_highlighter_blend(crate::annotation::HighlightBlend::Translucent);
+                a.begin(point(px(50.), px(60.)), area, false);
+            });
+            for x in [50., 75., 100.] {
+                s.pointer_move("screen", point(px(x), px(70.)), false);
+                let (_, image) = s.filtered_preview("screen").unwrap();
+                assert_eq!(
+                    image.as_bytes(0).unwrap(),
+                    expected.as_bytes(0).unwrap(),
+                    "{kind:?} at {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual performance measurement; no timing assertion"]
+    fn benchmark_magnifier_drag_preview() {
+        use crate::annotation::ShapeKind;
+        let mut s = sized_session(2560, 1440);
+        let area = s.selection.bounds().unwrap();
+        s.edit_annotations(|a| {
+            a.toggle(ShapeKind::Pencil);
+            for row in 0..8 {
+                a.begin(point(px(40.), px(50. + row as f32 * 70.)), area, false);
+                for i in 1..300 {
+                    a.drag_to(
+                        point(
+                            px(40. + i as f32 * 6.),
+                            px(50. + row as f32 * 70. + (i % 9) as f32),
+                        ),
+                        area,
+                        false,
+                    );
+                }
+                a.end();
+            }
+            a.toggle(ShapeKind::Magnifier);
+            a.begin(point(px(100.), px(850.)), area, false);
+            a.drag_to(point(px(820.), px(1050.)), area, false);
+            a.end();
+        });
+        s.filtered_preview("screen").unwrap();
+        let mut times = Vec::new();
+        for _ in 0..30 {
+            let start = std::time::Instant::now();
+            s.edit_annotations(|a| a.move_selected_lens(point(px(1.), px(-1.))));
+            s.filtered_preview("screen").unwrap();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        eprintln!(
+            "lens 2560x1440 / 8 strokes / 1440x400 destination / 30 updates: median {:?}, max {:?}",
+            times[15], times[29]
+        );
     }
 }

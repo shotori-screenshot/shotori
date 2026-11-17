@@ -8,6 +8,7 @@ mod chrome;
 mod filter;
 mod magnifier;
 mod raster;
+pub(crate) use raster::MagnifierPreview;
 mod spotlight;
 pub(crate) use magnifier::{LensConnector, LensOption};
 pub(crate) use spotlight::SpotlightAdjustment;
