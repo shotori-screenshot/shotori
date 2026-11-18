@@ -1,231 +1,197 @@
 # AGENTS.md
 
-Guidance for coding agents working in this repository. Keep it
-high-signal: the rules below are traps we have actually fallen into, not
-a map of the code — read the code for the map. The reasoning behind each
-rule lives in the code comments next to the logic it guards.
+Guidance for coding agents working in this repository (`CLAUDE.md`
+imports this file so every harness shares one source of truth). Keep it
+high-signal: root rules are traps we have actually fallen into plus a
+task router into [`docs/agents/`](docs/agents/README.md). Detailed
+reasoning lives in code comments next to the logic it guards.
 
 ## Project Overview
 
-Shotori is a Wayland-native screenshot tool with built-in, on-device OCR
-(PP-OCRv6 via rapidocr-core), its UI hand-drawn with
-[gpui-kit](https://crates.io/crates/gpui-kit). It freezes every screen
-(one layer-shell overlay window per output), then a selection flows to
-one of four exits: clipboard, native save dialog, OCR, pin. One `shotori`
-crate plus `tools/vptr` (wlr virtual-pointer injector for interactive
-e2e tests; a workspace member, not part of the binary).
+Shotori is a Wayland-native screenshot tool built with
+[gpui-kit](https://crates.io/crates/gpui-kit) and on-device OCR
+(PP-OCRv5/v6 via `rapidocr-core`). It freezes every screen (one
+layer-shell overlay per output), supports rich in-canvas annotations,
+and routes a selection to six exits: **clipboard**, **save** (portal
+dialog or direct save), **OCR**, **QR scan**, **pin** (floating
+always-on-top crop), and **long-capture** (`scroll`).
 
-## Read First
+Cargo workspace: root `shotori` binary/lib crate plus dev-only Wayland
+tools `tools/vptr` (virtual pointer/keyboard injector) and
+`tools/scrollprobe` (screencopy/pointer repro harness).
 
-- `src/lib.rs` header — the module map and the dependency contract.
+## Read Before Editing (Progressive Disclosure)
 
-## Commands
+Load **only** the docs relevant to your task:
+
+| Task / Area | Read First |
+| --- | --- |
+| Any task / orientation | `src/lib.rs` header · [`docs/agents/README.md`](docs/agents/README.md) |
+| Module boundaries, CLI, actions, coordinates, adding settings/shortcuts | [`docs/agents/architecture.md`](docs/agents/architecture.md) |
+| Wayland screencopy, pixel formats, window snap IPC, exits & daemons | [`docs/agents/platform-and-exits.md`](docs/agents/platform-and-exits.md) |
+| Overlays, pins, settings window, Wayland layer-shell, themes, i18n | [`docs/agents/ui-and-wayland.md`](docs/agents/ui-and-wayland.md) · [`docs/theme.example.toml`](docs/theme.example.toml) |
+| Canvas annotations, toolbar options, rasterizer, undo/selection/focus | [`docs/agents/annotations.md`](docs/agents/annotations.md) · [`docs/annotation-parity.md`](docs/annotation-parity.md) |
+| Unit tests, `#[gpui_kit::test]`, headless pixel review, `SHOTORI_DEBUG_*`, perf | [`docs/agents/testing-and-verification.md`](docs/agents/testing-and-verification.md) · [`docs/headless-e2e.md`](docs/headless-e2e.md) |
+| Long-screenshot stitching, foreground matcher, scroll preview | [`docs/long-capture.md`](docs/long-capture.md) |
+| Custom ONNX / `rapidocr-core` model pipelines | [`docs/ocr-custom-model.md`](docs/ocr-custom-model.md) |
+| Parallel `jj` workspaces, CodeGraph, CI gate, config/doc sync | [`docs/agents/workflow.md`](docs/agents/workflow.md) · [`docs/settings.example.toml`](docs/settings.example.toml) |
+
+If `.codegraph/` exists at the workspace root, query CodeGraph
+(`codegraph_explore` MCP tool or `codegraph explore "<symbol or question>"`)
+before grepping or reading broad file trees.
+
+## Commands & CI Gate
 
 ```bash
-cargo build                  # root package only (NOT --workspace)
-cargo build --workspace      # includes tools/vptr
-cargo test                   # unit tests, no compositor needed
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features perf -- -D warnings  # CI lints the perf gate too
-cargo run --features perf -- --perf        # dev-only E2E perf harness
+cargo build                                                # root package only (NOT --workspace)
+cargo build --workspace                                    # includes tools/vptr + tools/scrollprobe
+cargo fmt --all --check                                    # CI gate 1
+cargo clippy --all-targets -- -D warnings                  # CI gate 2
+cargo clippy --all-targets --features perf -- -D warnings  # CI gate 3 (perf feature)
+cargo test                                                 # CI gate 4 (unit + headless widget tests)
+cargo run --release -- --bench                             # deterministic pixel/encode microbenchmarks
+cargo run --release --features perf -- --perf              # E2E latency & RSS harness
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly the fmt + both clippy +
-test steps above — match it locally before pushing. Fresh machines need
-`pkg-config libfontconfig1-dev libfreetype-dev libxkbcommon-dev
-libwayland-dev` (see CI).
+CI (`.github/workflows/ci.yml`) runs the exact `fmt` + both `clippy` +
+`test` commands above — run all four locally before finishing a task.
+Fresh Linux machines need `pkg-config libfontconfig1-dev libfreetype-dev
+libxkbcommon-dev libwayland-dev`.
 
 ## Architecture Invariants
 
-- Dependency direction, documented in `src/lib.rs`: `ui → model`,
-  `model → platform`, never back up. `actions.rs` is the shared
-  vocabulary between keybindings, toolbar buttons and overlay handlers —
-  everyone references it, it references no one. Don't reintroduce an
-  import cycle by defining actions elsewhere.
-- `model/` is pure logic and state, unit-tested without a compositor.
-  New interactive logic goes there, not into overlay assembly.
-- `ui/e2e.rs` owns the `SHOTORI_DEBUG_*` backdoors — they are the only
-  entry point for headless e2e; keep production assembly free of them.
+- **Strict dependency DAG** (`src/lib.rs`): `ui → model → platform`,
+  never back up (save for `platform::scroll_capture` driving
+  `model::scroll_sheet`). `actions.rs` and `render_image.rs` are leaf
+  modules referenced across layers; never introduce upward imports.
+- **Pure logic in `model/`**: state machines, placement math, smart
+  regions, scroll stitching, and settings persistence stay compositor-free
+  and unit-tested in `model/` (or `annotation/`), never buried in `ui/`
+  assembly.
+- **Debug backdoors stay isolated**: `ui/e2e.rs` owns `SHOTORI_DEBUG_*`
+  entry points; keep production assembly free of ad-hoc test branches.
 
 ## Hard Rules
 
 ### Windows & the Wayland compositor
 
-- **Overlays always use a bare `cx.open_window` with layer-shell
-  options — never `base::Root`/component `Root`.** Root's WindowState
-  plugin paints a themed background over layer-shell windows and its
-  border calls `set_client_inset(20)`, growing the window ("the
-  Root/CSD poisoning case").
+- **Overlays always use bare `cx.open_window` with `LayerShellOptions` —
+  never `base::Root` / `component::Root`.** `Root`'s `WindowState` paints
+  a themed background over layer-shell windows and its border calls
+  `set_client_inset(20)`, growing the surface ("the Root/CSD poisoning
+  case"). Only the regular `shotori settings` toplevel wraps in `Root`.
 - **Pin every layer-shell window to its output via `display_id`.**
   Without it the compositor picks an output and mixed-DPI multi-monitor
-  setups get an overlay on the wrong screen ("the 240Hz invisibility
-  case" — placement lottery, not rendering).
+  setups land overlays on the wrong screen ("the 240Hz invisibility case").
 - **`cx.displays()` is always empty during synchronous startup** (zed
   #46378). Open windows from a spawned async task after the first
   event-loop pass.
-- **A portal dialog cannot coexist with the overlays.** Layer-shell
-  surfaces with exclusive keyboard sit above a regular toplevel; unmap
-  the overlays first (the save flow does).
-- **`cx.quit()` does not unmap wayland surfaces.** Requests may sit
-  unflushed in the connection buffer. To keep surfaces alive past the
-  run loop (save dialog, tray): `QuitMode::Explicit`, remove every
-  window, then quit from a ~150 ms timer so the loop flushes.
-- **Implicit grab delivers the whole gesture — including the release —
-  to the window where the press happened**, with out-of-bounds local
-  coordinates possible after a cross-screen release. Handle pointer
-  events in window-level listeners, not element `on_mouse_down` (element
-  hit-testing silently drops out-of-bounds presses).
-- **Pointer position is desktop-global session state** (`session.
-  pointer_global`), reported by whichever window receives an event.
-  Per-window pointer caches go stale exactly when a state flip lands
-  chrome under a window the pointer never moved over.
+- **A portal dialog cannot coexist with overlays.** Layer-shell surfaces
+  with exclusive keyboard sit above regular toplevels; unmap overlays
+  before opening `rfd` save/file dialogs.
+- **`cx.quit()` does not unmap Wayland surfaces.** Requests may sit
+  unflushed in the socket buffer. When surfaces or handoffs must flush
+  cleanly (save dialog, tray): use `QuitMode::Explicit`, remove every
+  window, then quit from a ~150 ms timer.
+- **Implicit grab delivers the entire gesture — including release — to
+  the press window**, with out-of-bounds local coordinates after a
+  cross-screen drag. Handle pointer gestures in window-level listeners,
+  not element `on_mouse_down` (hit-testing drops out-of-bounds events).
+- **Pointer position is desktop-global session state**
+  (`session.pointer_global`), updated by whichever window receives an
+  event. Per-window pointer caches go stale when chrome appears under a
+  window the pointer has not moved over yet.
 
-### Multi-monitor geometry
+### Multi-monitor geometry & pixels
 
-- **`window.scale_factor()` misreports across monitors** (it can report
-  another output's). Compute the crop scale as captured physical width ÷
-  window logical width; that is naturally consistent with rendering.
-- **gpui display bounds coordinates = output logical position ÷
-  `wl_output` integer scale.** Display matching must use the same
-  division; match on position, not size (`wl_output.scale` is an
-  integer — ceil — so size matching is infeasible).
-- **Round each edge independently** (`round_px`); never derive opposite
-  edges as `round(l) + round(w)`. Divergent rounding between dim bands,
-  border and toolbar once produced a 1px raw-pixel bleed line ("the
-  white-line bug").
+- **`window.scale_factor()` misreports across monitors.** Always compute
+  crop/raster scale as `captured_physical_width / window_logical_width`.
+- **gpui display bounds = output logical position ÷ `wl_output` integer
+  scale.** Match displays on scaled position, never on size (`wl_output`
+  scale is `ceil`, making size matching infeasible on fractional DPI).
+- **Round each edge independently** (`round_px`); never compute opposite
+  edges as `round(l) + round(w)` ("the 1px white-line bleed bug").
+- **`RenderImage` expects BGRA** (Vulkan); PNG/annotation buffers use
+  RGBA. Route every `RenderImage` conversion through `src/render_image.rs`
+  (re-exported at `ui/image_util.rs`) — never hand-swap channels elsewhere.
+- **Single geometry source per concept.** Visual layout, cursor regions,
+  and hit-test rects must read the same constants (e.g.
+  `model/placement.rs` and `session.toolbar_bounds()`), never layout side
+  effects ("the grip/cursor alignment trap").
 
-### Rendering & pixels
+### gpui API & runtime pitfalls
 
-- **`RenderImage` wants BGRA** (Vulkan backend); in-memory RGBA must
-  swap bytes 0↔2. The PNG/annotation path is RGBA. `src/render_image.rs`
-  owns this contract (a leaf so model/ and annotation/ can call it;
-  `ui/image_util.rs` re-exports for ui call sites) — don't hand-build
-  image buffers elsewhere.
-- **Never compute a hit-test rect from layout side effects.** The
-  element and its hit-test rect must derive from the same constants
-  (the grip/cursor alignment trap). One geometry source per
-  concept, e.g. `session.toolbar_bounds()` for render, cursor and drag
-  clamp alike.
-
-### gpui API pitfalls
-
-- **`dispatch_action` inside a window stops at the end of the focus
-  path** — it does not bubble to `App::on_action`. Handle an action
-  where it is dispatched (overlay handler), not on an app-level
-  backstop.
-- **`handle.update()` on the window currently running an action handler
-  is a no-op** (gpui removes the window from the map during its update);
-  the current window must act through its own `window` reference.
-- **`window_handle.update` closures receive an `AnyView`** — touching
-  concrete view state from async requires the `Entity` handle's
-  `entity.update`.
-- **`#[cfg]` cannot hang in the middle of a method chain.** Absorb it
-  with `.children(Option)` (Option is an IntoIterator) or precompute an
-  `Option<AnyElement>`.
-- **Runtime keystrokes are not `&'static str`.** gpui-pre 0.3.10
-  narrowed `Keystroke::parse` and `KeyBinding::new` to literal-only and
-  dropped their OS argument, so a literal `secondary-` is now a hard
-  parse error. Runtime chords (settings.toml, the shortcut recorder, the
-  e2e injector) go through `actions::parse_keystroke` and
-  `KeyBinding::load`, which resolve `secondary-` from the host OS.
-  (`Box::leak`-ing a chord to satisfy the lifetime is the wrong fix.)
-- **Never panic through gpui's background executor.** Fallible lazy init
-  (the OCR engine) returns `Result` and leaves the `OnceLock` unset so
-  the next call retries; failures surface to the overlay instead of
-  bricking the process.
-- **`reqwest::blocking` cannot run in an async context** (gpui's
-  background executor is one) — downloads get a dedicated thread.
-- Notifications and clipboard offers run as re-exec'd child processes
-  (`--notify`, `--clipboard-daemon`): the child must outlive the parent,
-  and a plain background thread would be killed by `process::exit`.
+- **`dispatch_action` stops at the end of the window's focus path** — it
+  does not bubble to `App::on_action`. Handle actions on the window view.
+- **`handle.update()` on the window currently handling an action is a
+  no-op** (gpui temporarily removes the window from its map); mutate via
+  the handler's own `window` reference.
+- **`window_handle.update` yields `AnyView`** — mutate concrete view
+  state from async tasks via `entity.update`.
+- **`#[cfg]` cannot hang mid-method-chain.** Absorb platform branches
+  via `.children(Option)` or a precomputed `Option<AnyElement>`.
+- **Runtime keystrokes go through `actions::parse_keystroke` and
+  `KeyBinding::load`.** `gpui-pre` 0.3.10 restricted `Keystroke::parse`
+  and `KeyBinding::new` to `'static` literals without `secondary-` OS
+  resolution; never `Box::leak` runtime strings to fake `'static`.
+- **Never panic on gpui's background executor.** Fallible lazy init (OCR
+  engine) returns `Result` and leaves `OnceLock` unset so retries work.
+- **`reqwest::blocking` panics inside async executors** — run model
+  downloads on a dedicated OS thread (`std::thread::spawn`).
+- **Outliving work runs as re-exec'd child processes** (`--notify`,
+  `--clipboard-daemon`), matched on `argv[1]` before `clap` runs so
+  `process::exit` in the parent never kills active notifications or
+  Wayland clipboard offers.
 
 ### Dependencies
 
-- The `image` crate version must match the one gpui-pre builds
-  `RenderImage` from — don't bump it independently.
-- `reqwest` stays on 0.12 (rapidocr-core's line); 0.13 would compile a
-  second hyper/tokio/rustls tree for one GET.
+- Keep `image` locked to the exact minor version `gpui-pre` builds
+  `RenderImage` from.
+- Keep `reqwest` on `0.12` (matches `rapidocr-core`; `0.13` duplicates
+  the entire HTTP/TLS dependency tree).
 
 ## Code Style
 
-- English everywhere: doc comments, inline comments, test names (the
-  repo is published internationally). The one exception is UI strings:
-  they live in `locales/ui.yml` (rust-i18n, en + zh-CN, missing columns
-  fall back to English) and are resolved via `crate::i18n::t!` — write
-  the English text as a new yml column entry, never inline.
-- No god files. When a file accumulates distinct concerns — a window
-  shell plus its pages, a contract struct plus unrelated vocabularies —
-  split it into a directory module instead of extending it: root keeps
-  the core, each child takes one concern, `pub use` re-exports keep
-  external paths stable. Precedents: `ui/overlay`, `ui/settings`,
-  `model/settings`. Tests move with the code they cover and stay
-  in-file; pure code past ~1000 lines is the smell, not raw line count
-  (tests often are half of a healthy file).
-- Comments explain **why**, not what — the war stories stay. Don't strip
-  context when refactoring.
-- No `unwrap()`/`expect()` on runtime paths; no `let _ =` on fallible
-  operations. When the intent really is to drop a value (e.g. release a
-  lock), write `drop(...)` explicitly.
-- Tests live in-file next to the logic (`mod tests`). Prefer extending
-  existing files over creating new small ones; follow the existing
-  `mod.rs` organization.
+- **English everywhere**: doc comments, inline comments, identifiers,
+  commit messages, test names. **The sole exception is user-facing UI
+  copy**, which MUST live in `locales/ui.yml` (`en` + `zh-CN`, fallback
+  `en`) and resolve via `crate::i18n::t!` — never inline UI strings.
+- **No god files**: when a file mixes a shell with pages or a core type
+  with large vocabularies (~1000+ lines of non-test code), split into
+  `foo.rs` + `foo/*.rs` children and keep external paths stable with
+  `pub use` (`ui/overlay`, `ui/settings`, `model/settings`, `annotation`).
+- **Comments explain *why*, not *what*** — preserve war stories,
+  measured numbers, and rejected alternatives next to the code.
+- **Zero runtime panics / silent drops**: no `unwrap()`/`expect()` on
+  runtime paths; no `let _ =` on fallible operations (use explicit
+  `drop(...)` when intentionally releasing a guard/value).
+- **In-file unit tests**: keep `mod tests` next to the logic it covers;
+  prefer extending existing modules over proliferating tiny test files.
 
-## Testing
+## Testing Summary
 
-- `cargo test` covers pure logic (model/, annotation geometry, args) —
-  no compositor required. New interactive logic should be extractable
-  and tested there.
-- `#[gpui_kit::test]` was once unusable — its proc macro recursed
-  infinitely inside `gpui_macros` and crashed rustc with SIGSEGV ("my
-  code segfaulted the compiler"). On the pinned gpui-kit 0.8 it works:
-  ten in-tree uses drive real widgets headlessly (`src/ui/text_input.rs`,
-  `src/ui/text_editor.rs`, `src/model/session.rs`). If a future bump
-  makes rustc die while expanding it, that is the regression to report —
-  do not silently fall back to `unwrap`-and-pray logic tests.
-- **To look at the UI yourself, use `docs/headless-e2e.md`** — a private
-  headless wlroots session (sway, `WLR_BACKENDS=headless`), the app inside
-  it, `grim` inside it. Never spawn shotori windows on the maintainer's
-  live desktop to see them: that steals focus and switches their
-  workspaces. Write the PNG inside the repo (`target/headless/`) — the
-  sandbox `/tmp` is a private tmpfs the agent cannot read back. The
-  session must be started from the compositor's own session
-  (`niri msg action spawn`), because the sandbox masks `/dev/dri` and
-  Vulkan has no software fallback. A headless seat has **no input at
-  all** (`capabilities: 0`: neither pointer nor keyboard injection
-  reaches the app), so drive it through the `SHOTORI_DEBUG_*` backdoors —
-  add one rather than faking clicks.
-- Headless e2e drives the real pipeline through the `ui/e2e.rs`
-  backdoors: `SHOTORI_DEBUG_TARGET=<output>` (restrict to one overlay —
-  several firing fight each other), `SHOTORI_DEBUG_SELECTION=x,y,w,h`,
-  `SHOTORI_DEBUG_ACTION=copy|quit|save|ocr|ocrsetup` (fires ~1.5 s after
-  startup), `SHOTORI_DEBUG_SAVE_PATH=<file>` (skips the dialog),
-  `SHOTORI_DEBUG_SETTINGS_PAGE=<section>` (opens the settings window on
-  that page — the sidebar cannot be clicked headlessly). Read
-  back with `wl-paste --type image/png`; compare captures with `grim`.
-- Don't hardcode pixel coordinates in probe assertions — prove the
-  overlay is up first, then probe relative geometry (a rounding change
-  once turned every hardcoded check false-negative). Capture animations
-  with a burst of frames; a single frame misses 0.3 s windows.
-- Failure paths (offline, corrupt files, retry) are mandatory testing
-  for lazy-loading designs; success-path e2e is not enough.
-- `SHOTORI_BOOT=1` prints a startup phase timing trace.
+- **Never open windows on the maintainer's live desktop** — it steals
+  focus and switches workspaces. For pixel inspection, always run a
+  private headless sway session via `niri msg action spawn` writing to
+  `target/headless/` with isolated `HOME`/`XDG_*` dirs
+  ([`docs/headless-e2e.md`](docs/headless-e2e.md)).
+- Use pure `#[test]` for model/geometry/config logic,
+  `#[gpui_kit::test]` for widget focus/menus/events without a compositor,
+  and `SHOTORI_DEBUG_*` backdoors for headless pixel verification. Full
+  tier guide and env var table:
+  [`docs/agents/testing-and-verification.md`](docs/agents/testing-and-verification.md).
+- Always test failure paths (corrupt TOML, missing files, offline/cancel,
+  fractional scales, empty/1px bounds) alongside happy paths.
 
-## Documentation Duties
+## Documentation Duties & Rules Hygiene
 
-- `README.md` / `README.zh-CN.md` are maintained by the maintainer —
-  agents do not edit them. When a change alters user-facing behavior,
-  say so in the PR/commit message instead.
-- Non-obvious findings (decisions, rejected paths, traps) are documented
-  as English comments next to the code they explain, at the moment the
-  code is written — not in a separate log that drifts out of reach.
-- `docs/theme.example.toml` documents the user-facing theme file format;
-  keep it in sync with the loader.
-
-## Rules Hygiene
-
-A new rule here must be non-obvious (an agent familiar with Rust would
-still get it wrong), encountered more than once or expensive enough once,
-and actionable. Architectural description does not belong in this file —
-it goes stale; point to `src/lib.rs` instead. Keep the story with the
-code (a comment), not duplicated here.
+- **Never edit `README.md` or `README.zh-CN.md`** (maintainer-owned;
+  note user-visible changes in commit/PR descriptions instead).
+- Keep [`docs/settings.example.toml`](docs/settings.example.toml),
+  [`docs/theme.example.toml`](docs/theme.example.toml), `locales/ui.yml`,
+  and [`docs/agents/`](docs/agents/README.md) in sync whenever settings,
+  theme keys, shortcuts, `SHOTORI_DEBUG_*` knobs, or architecture seams
+  change.
+- Root `AGENTS.md` accepts only non-obvious, high-cost, actionable traps.
+  Put subsystem maps, extension checklists, and reference tables in
+  `docs/agents/` or inline rustdoc comments next to the code.
