@@ -857,6 +857,7 @@ mod color_surface_tests {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = SettingsWindow::new(window, cx);
             view.settings = Settings::default();
+            view.sidebar_collapsed = false;
             view.path = Some(path.clone());
             view.error = None;
             view
@@ -919,6 +920,7 @@ mod color_surface_tests {
         let (view, cx) = cx.add_window_view(|window, cx| {
             let mut view = SettingsWindow::new(window, cx);
             view.settings = Settings::default();
+            view.sidebar_collapsed = false;
             view.path = Some(path.clone());
             view.appearance.path = Some(theme_path.clone());
             view.error = None;

@@ -126,6 +126,8 @@ pub(crate) struct AnnotationSettings {
     pub text_size: u8,
     /// Initial sequence badge diameter (`16..=64`, default `32`).
     pub number_size: u8,
+    /// Fill sequence badges by default (`true` = solid circle, `false` = outline ring).
+    pub number_fill: bool,
     pub number_format: NumberFormat,
     pub arrow_style: ArrowStyle,
     /// Smooth freehand pencil strokes (`true` by default).
@@ -164,6 +166,7 @@ impl Default for AnnotationSettings {
             eraser_size: 32,
             text_size: 24,
             number_size: 32,
+            number_fill: true,
             number_format: NumberFormat::Decimal,
             arrow_style: ArrowStyle::Open,
             smooth_pencil: true,
@@ -194,6 +197,7 @@ pub(super) struct AnnotationFile {
     eraser_size: Option<i64>,
     text_size: Option<i64>,
     number_size: Option<i64>,
+    number_fill: Option<bool>,
     number_format: Option<String>,
     arrow_style: Option<String>,
     smooth_pencil: Option<bool>,
@@ -366,6 +370,7 @@ impl AnnotationFile {
                 path,
                 errors,
             ),
+            number_fill: self.number_fill.unwrap_or(d.number_fill),
             number_format,
             arrow_style,
             smooth_pencil: self.smooth_pencil.unwrap_or(d.smooth_pencil),
@@ -462,6 +467,7 @@ impl AnnotationSettings {
             "number_size".into(),
             toml::Value::from(i64::from(self.number_size)),
         );
+        t.insert("number_fill".into(), toml::Value::from(self.number_fill));
         t.insert(
             "number_format".into(),
             toml::Value::from(number_format_id(self.number_format)),

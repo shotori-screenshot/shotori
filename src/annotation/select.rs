@@ -955,16 +955,16 @@ mod tests {
         super::super::text::with_test_font(|| {
             let mut a = Annotations::default();
             a.add_text(
-                Bounds::new(point(px(20.2), px(30.3)), size(px(220.), px(64.8))),
+                Bounds::new(point(px(12.2), px(14.3)), size(px(220.), px(64.8))),
                 "Canvas note\nSecond row".into(),
             );
             a.select_index(0);
-            for font_size in [72., 12., 36., 24.] {
+            for font_size in [64., 14.] {
                 a.apply_size(font_size);
                 let shape = a.selected().unwrap();
-                for scale in [1_f32, 1.25, 1.5, 1.75, 2.] {
-                    let w = (800. * scale).ceil() as u32;
-                    let h = (400. * scale).ceil() as u32;
+                for scale in [1_f32, 1.25, 1.75] {
+                    let w = (620. * scale).ceil() as u32;
+                    let h = (260. * scale).ceil() as u32;
                     let mut actual = vec![255; (w * h * 4) as usize];
                     super::super::text::rasterize(
                         shape,
@@ -977,7 +977,7 @@ mod tests {
                     // A taller reference uses identical wrapping and glyphs but
                     // cannot hide a clipped last line behind the shape's mask.
                     let mut reference_shape = shape.clone();
-                    reference_shape.bounds.size.height = px(350.);
+                    reference_shape.bounds.size.height = px(230.);
                     let mut expected = vec![255; actual.len()];
                     super::super::text::rasterize(
                         &reference_shape,

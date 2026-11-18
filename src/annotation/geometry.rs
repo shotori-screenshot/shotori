@@ -1,6 +1,6 @@
 //! Filled and patterned geometry shares polygons across preview, export and picking.
 use super::{Annotations, HistoryEntry, LineStyle, Shape, ShapeKind, ShapeParameters};
-use gpui_kit::{Pixels, Point, point, px};
+use gpui_kit::{Path, Pixels, Point, point, px};
 
 /// Ellipse angles use clockwise radians in the mark's unrotated coordinate system.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -380,6 +380,22 @@ pub(super) fn polygons(shape: &Shape) -> Vec<Vec<Point<Pixels>>> {
     super::line::patterned_geometry(&contour, stroke, shape.line_style())
 }
 
+/// Paint the fill mesh together so internal edges share one antialiasing pass.
+pub(super) fn filled_path(shape: &Shape, offset: Point<Pixels>) -> Option<Path<Pixels>> {
+    let triangles = polygons(shape);
+    let start = triangles.first()?.first()?;
+    let mut path = Path::new(*start + offset);
+    for triangle in triangles {
+        if let [a, b, c] = triangle.as_slice() {
+            path.push_triangle(
+                (*a + offset, *b + offset, *c + offset),
+                (point(0., 1.), point(0., 1.), point(0., 1.)),
+            );
+        }
+    }
+    Some(path)
+}
+
 fn positive_sweep(angle: f32) -> f32 {
     let sweep = angle.rem_euclid(std::f32::consts::TAU);
     if sweep < 0.001 {
@@ -428,6 +444,125 @@ fn tessellate_fill(contour: &[Point<Pixels>]) -> Vec<Vec<Point<Pixels>>> {
 mod tests {
     use super::*;
     use gpui_kit::{Bounds, size};
+
+    fn filled_geometries() -> Vec<Shape> {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(180.)));
+        let mut shapes = Vec::new();
+        for (kind, sweep, inner) in [
+            (ShapeKind::Rectangle, std::f32::consts::TAU, 0.),
+            (ShapeKind::Ellipse, std::f32::consts::TAU, 0.),
+            (ShapeKind::Ellipse, std::f32::consts::TAU, 0.5),
+            (ShapeKind::Ellipse, 2., 0.),
+            (ShapeKind::Ellipse, 4.5, 0.5),
+        ] {
+            for rotation in [0., 0.37] {
+                let mut marks = Annotations::default();
+                marks.toggle(kind);
+                marks.set_geometry_fill(true);
+                marks.begin(point(px(40.25), px(44.5)), area, false);
+                marks.drag_to(point(px(160.25), px(124.5)), area, false);
+                marks.end();
+                let mut shape = marks.shapes.remove(0);
+                shape.color = 0xD91C26FF;
+                if let ShapeParameters::Geometry {
+                    radius, transform, ..
+                } = &mut shape.parameters
+                {
+                    *radius = 18.;
+                    *transform = GeometryTransform {
+                        rotation,
+                        start: 0.,
+                        sweep,
+                        inner,
+                    };
+                }
+                shapes.push(shape);
+            }
+        }
+        shapes
+    }
+
+    #[test]
+    fn filled_preview_batches_the_export_mesh_into_one_path() {
+        let offset = point(px(17.25), px(-3.5));
+        for shape in filled_geometries() {
+            let paths = super::super::line::paths(&shape, offset);
+            assert_eq!(paths.len(), 1, "{:?}", shape.parameters);
+            let expected: Vec<_> = polygons(&shape).into_iter().flatten().collect();
+            assert!(expected.len() > 3);
+            assert_eq!(paths[0].vertices.len(), expected.len());
+            for (vertex, expected) in paths[0].vertices.iter().zip(expected) {
+                assert_eq!(vertex.xy_position, expected + offset);
+                assert_eq!(vertex.st_position, point(0., 1.));
+            }
+        }
+    }
+
+    #[test]
+    fn filled_export_has_solid_interiors_and_preserves_holes_at_fractional_scales() {
+        for shape in filled_geometries() {
+            for scale in [1., 1.25, 2.] {
+                let w = (200. * scale) as u32;
+                let h = (180. * scale) as u32;
+                let mut pixels = vec![255; (w * h * 4) as usize];
+                super::super::line::rasterize(
+                    &shape,
+                    &mut pixels,
+                    w,
+                    h,
+                    point(px(0.), px(0.)),
+                    scale,
+                );
+                for y in 0..h {
+                    for x in 0..w {
+                        let local = shape.rotated_point(
+                            point(px((x as f32 + 0.5) / scale), px((y as f32 + 0.5) / scale)),
+                            true,
+                        ) - shape.bounds.center();
+                        let dx = f32::from(local.x);
+                        let dy = f32::from(local.y);
+                        let inside = if shape.kind == ShapeKind::Rectangle {
+                            let qx = dx.abs() - 42.;
+                            let qy = dy.abs() - 22.;
+                            let distance = qx.max(0.).hypot(qy.max(0.)) + qx.max(qy).min(0.) - 18.;
+                            if distance.abs() < 2. {
+                                continue;
+                            }
+                            distance < 0.
+                        } else {
+                            let radius = (dx / 60.).hypot(dy / 40.);
+                            let t = shape.geometry_transform();
+                            if (radius - 1.).abs() < 0.1 || (radius - t.inner).abs() < 0.1 {
+                                continue;
+                            }
+                            let angle =
+                                (dy / 40.).atan2(dx / 60.).rem_euclid(std::f32::consts::TAU);
+                            if t.sweep < std::f32::consts::TAU
+                                && (angle < 0.15
+                                    || std::f32::consts::TAU - angle < 0.15
+                                    || (angle - t.sweep).abs() < 0.15)
+                            {
+                                continue;
+                            }
+                            radius < 1. && radius > t.inner && angle < t.sweep
+                        };
+                        let expected = if inside {
+                            [0xD9, 0x1C, 0x26, 255]
+                        } else {
+                            [255; 4]
+                        };
+                        let offset = ((y * w + x) * 4) as usize;
+                        assert_eq!(
+                            pixels[offset..offset + 4],
+                            expected,
+                            "{:?}, scale {scale}, ({x}, {y})",
+                            shape.parameters,
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn corner_radius_never_changes_the_stroke_slider_or_wheel_target() {

@@ -21,7 +21,7 @@ pub(super) const SECTION_SEARCH_ITEMS: [(Section, &str, IconName, &str); 8] = [
         Section::Annotation,
         "settings.preferences.annotation",
         IconName::Pencil,
-        "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap bold outline number spotlight magnifier pencil radius fill 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 粗体 描边 序号 聚光灯 铅笔 圆角 填充",
+        "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap bold outline number badge spotlight magnifier pencil radius fill 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 粗体 描边 序号 徽章 空心 聚光灯 铅笔 圆角 填充",
     ),
     (
         Section::Export,

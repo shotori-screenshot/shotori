@@ -299,6 +299,32 @@ pub(super) fn annot_options(
         ));
     }
     if edit_kind == Some(ShapeKind::Number) {
+        let active = annotations.number_fill();
+        let fill_session = session.clone();
+        options = options.child(
+            control(
+                "number-fill".into(),
+                crate::i18n::t!("toolbar.number_fill").into_owned(),
+                settings_focus.clone(),
+                move |_, cx| {
+                    fill_session.update(cx, |s, cx| {
+                        s.edit_annotations(|a| a.set_number_fill(!active));
+                        cx.notify();
+                    });
+                },
+            )
+            .selected(active)
+            .child(
+                svg()
+                    .data(if active {
+                        b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><path fill-rule='evenodd' d='M9 2A7 7 0 1 1 9 16A7 7 0 1 1 9 2ZM9.75 5.6L8.65 5.6L6.9 6.8L6.9 8.05L8.35 7.1L8.35 12.5L9.75 12.5Z'/></svg>" as &[u8]
+                    } else {
+                        b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><circle cx='9' cy='9' r='6.25' fill='none' stroke='black' stroke-width='1.5'/><path d='M9.75 5.6H8.65L6.9 6.8V8.05L8.35 7.1V12.5H9.75Z'/></svg>"
+                    })
+                    .size(px(18.))
+                    .text_color(rgba(theme::c().toolbar_text)),
+            ),
+        );
         options = options.child(super::line_options::number_menu(
             annotations.number_format(),
             session,

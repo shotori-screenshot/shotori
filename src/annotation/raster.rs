@@ -5,6 +5,107 @@
 use super::{Annotations, Shape, ShapeKind, filter, line, magnifier, number, spotlight, text};
 use gpui_kit::{Pixels, Point};
 
+/// Reuses the sampling layer and display prefix while one committed lens changes.
+/// Later marks still composite in order, including filters and spotlights over the lens.
+pub(crate) struct MagnifierPreview {
+    shapes: Vec<Shape>,
+    index: usize,
+    marked: Vec<u8>,
+    before: Vec<u8>,
+    dimensions: (u32, u32),
+    origin: Point<Pixels>,
+    scale: f32,
+}
+
+impl MagnifierPreview {
+    pub(crate) fn new(
+        shapes: &[Shape],
+        index: usize,
+        original: &[u8],
+        dimensions: (u32, u32),
+        origin: Point<Pixels>,
+        scale: f32,
+    ) -> Self {
+        let (w, h) = dimensions;
+        let mut before = original.to_vec();
+        spotlight::rasterize(
+            shapes.iter().filter(|s| s.kind == ShapeKind::Spotlight),
+            &mut before,
+            w,
+            h,
+            origin,
+            scale,
+        );
+        let mut marked = before.clone();
+        Annotations::rasterize_ordinary(shapes.iter(), &mut marked, w, h, origin, scale);
+        rasterize_sampled(
+            shapes[..index].iter(),
+            &mut before,
+            original,
+            &marked,
+            dimensions,
+            origin,
+            scale,
+        );
+        Self {
+            shapes: shapes.to_vec(),
+            index,
+            marked,
+            before,
+            dimensions,
+            origin,
+            scale,
+        }
+    }
+
+    pub(crate) fn matches(&self, shapes: &[Shape]) -> bool {
+        shapes.len() == self.shapes.len()
+            && shapes
+                .get(self.index)
+                .is_some_and(|s| s.kind == ShapeKind::Magnifier)
+            && shapes
+                .iter()
+                .zip(&self.shapes)
+                .enumerate()
+                .all(|(index, (a, b))| index == self.index || a == b)
+    }
+
+    pub(crate) fn render(&self, shapes: &[Shape], original: &[u8], pixels: &mut Vec<u8>) {
+        debug_assert!(self.matches(shapes));
+        pixels.clone_from(&self.before);
+        rasterize_sampled(
+            shapes[self.index..].iter(),
+            pixels,
+            original,
+            &self.marked,
+            self.dimensions,
+            self.origin,
+            self.scale,
+        );
+    }
+}
+
+/// Display ordering is shared by full export and the cached preview suffix.
+fn rasterize_sampled<'a>(
+    shapes: impl Iterator<Item = &'a Shape>,
+    pixels: &mut [u8],
+    original: &[u8],
+    marked: &[u8],
+    dimensions: (u32, u32),
+    origin: Point<Pixels>,
+    scale: f32,
+) {
+    let (w, h) = dimensions;
+    for shape in shapes {
+        if let Some(lens) = shape.lens() {
+            let source = if lens.annotations { marked } else { original };
+            magnifier::rasterize(shape, pixels, source, w, h, origin, scale);
+        } else {
+            Annotations::rasterize_ordinary(std::iter::once(shape), pixels, w, h, origin, scale);
+        }
+    }
+}
+
 impl Shape {
     fn rasterize_ellipse(
         &self,
@@ -110,14 +211,15 @@ impl Annotations {
             // order. Marks added over a lens must remain above that lens.
             let mut marked = rgba.to_vec();
             Self::rasterize_ordinary(shapes.iter().copied(), &mut marked, w, h, origin, scale);
-            for shape in shapes {
-                if let Some(lens) = shape.lens() {
-                    let source = if lens.annotations { &marked } else { &original };
-                    magnifier::rasterize(shape, rgba, source, w, h, origin, scale);
-                } else {
-                    Self::rasterize_ordinary(std::iter::once(shape), rgba, w, h, origin, scale);
-                }
-            }
+            rasterize_sampled(
+                shapes.into_iter(),
+                rgba,
+                &original,
+                &marked,
+                (w, h),
+                origin,
+                scale,
+            );
         } else {
             Self::rasterize_ordinary(shapes.into_iter(), rgba, w, h, origin, scale);
         }
@@ -249,6 +351,99 @@ mod tests {
             assert_eq!(at(center, center), a.color().0.to_be_bytes());
             assert_eq!(at(center + 1, center)[3], 0);
             assert_eq!(at(center + 5, center + 5), [255; 4]);
+        }
+    }
+
+    #[test]
+    fn cached_lens_edits_match_export_with_other_lenses_filters_and_gaps() {
+        use crate::annotation::{
+            ShapeParameters,
+            magnifier::{Lens, LensConnector},
+        };
+        let make = |kind, bounds| Shape {
+            kind,
+            bounds,
+            color: 0xe12141ff,
+            points: Vec::new(),
+            number: None,
+            text: None,
+            text_style: Default::default(),
+            parameters: ShapeParameters::new(kind, 3.),
+        };
+        let rect = |x, y, w, h| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        let shapes = vec![
+            make(ShapeKind::Rectangle, rect(5., 10., 100., 60.)),
+            make(ShapeKind::Magnifier, rect(10., 15., 30., 20.)),
+            make(ShapeKind::Blur, rect(30., 20., 25., 30.)),
+            make(ShapeKind::Mosaic, rect(20., 10., 12., 40.)),
+            make(ShapeKind::Magnifier, rect(60., 40., 25., 25.)),
+            make(ShapeKind::Spotlight, rect(0., 0., 90., 70.)),
+        ];
+        for scale in [1., 1.25, 2.] {
+            let (w, h) = ((140. * scale) as u32, (100. * scale) as u32);
+            let original: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    [
+                        (i % 251) as u8,
+                        (i / w % 241) as u8,
+                        (i % 173) as u8,
+                        if i % w < 4 { 0 } else { 255 },
+                    ]
+                })
+                .collect();
+            let origin = point(px(-8.5), px(-4.25));
+            for index in [1, 4] {
+                let cached =
+                    MagnifierPreview::new(&shapes, index, &original, (w, h), origin, scale);
+                let mut edited = shapes.clone();
+                for step in 0..16 {
+                    edited[index].bounds = rect(3.25 + step as f32, 8.5, 30. + step as f32, 22.);
+                    edited[index].color = 0x325bd19f;
+                    edited[index].parameters = ShapeParameters::Magnifier(Lens {
+                        offset: point(px(24. + step as f32), px(18.)),
+                        zoom: 1.25 + step as f32 / 8.,
+                        smooth: step & 1 != 0,
+                        ellipse: step & 2 != 0,
+                        annotations: step & 4 != 0,
+                        shadow: step & 8 != 0,
+                        connector: [
+                            LensConnector::Center,
+                            LensConnector::CenterDot,
+                            LensConnector::Border,
+                            LensConnector::None,
+                        ][step % 4],
+                        ..Default::default()
+                    });
+                    assert!(cached.matches(&edited));
+                    let mut actual = Vec::new();
+                    cached.render(&edited, &original, &mut actual);
+                    let mut expected = original.clone();
+                    Annotations::rasterize_shapes(
+                        edited.iter(),
+                        &mut expected,
+                        w,
+                        h,
+                        origin,
+                        scale,
+                    );
+                    assert!(
+                        actual == expected,
+                        "lens {index}, step {step}, scale {scale}"
+                    );
+                }
+                edited[0].color = 0x123456ff;
+                assert!(
+                    !cached.matches(&edited),
+                    "ordinary edits invalidate sampling"
+                );
+                assert!(
+                    !cached.matches(&shapes[..shapes.len() - 1]),
+                    "deletion invalidates display order"
+                );
+                let mut reordered = shapes.clone();
+                reordered.swap(2, 3);
+                assert!(!cached.matches(&reordered));
+            }
         }
     }
 

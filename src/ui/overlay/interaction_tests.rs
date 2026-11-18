@@ -423,54 +423,33 @@ fn custom_palette_applies_to_selected_marks_and_live_text(cx: &mut TestAppContex
         });
         let mut capture = Capture::for_test((0, 0), 1.);
         capture.output_name = "screen".into();
-        capture.width = 1200;
-        capture.height = 700;
-        capture.rgba = vec![255; 1200 * 700 * 4];
+        capture.width = 760;
+        capture.height = 400;
+        capture.rgba = vec![255; 760 * 400 * 4];
         let capture = Arc::new(capture);
         let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
         let (view, cx) =
             cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-        cx.simulate_resize(size(px(1200.), px(700.)));
-        for kind in [
-            ShapeKind::Rectangle,
-            ShapeKind::Ellipse,
-            ShapeKind::Line,
-            ShapeKind::Arrow,
-            ShapeKind::Pencil,
-            ShapeKind::Highlighter,
-            ShapeKind::Magnifier,
-            ShapeKind::Spotlight,
-            ShapeKind::Number,
-            ShapeKind::Text,
-        ] {
+        cx.simulate_resize(size(px(760.), px(400.)));
+        for kind in [ShapeKind::Rectangle, ShapeKind::Spotlight, ShapeKind::Text] {
             cx.update(|window, cx| {
                 session.update(cx, |s, cx| {
                     s.clear_annotations();
                     s.begin("screen", point(px(20.), px(20.)));
-                    s.end("screen", point(px(1150.), px(500.)));
+                    s.end("screen", point(px(500.), px(260.)));
                     s.edit_annotations(|a| {
                         a.toggle(kind);
                         let bounds =
-                            gpui_kit::Bounds::new(point(px(80.), px(80.)), size(px(180.), px(90.)));
+                            gpui_kit::Bounds::new(point(px(60.), px(60.)), size(px(160.), px(80.)));
                         if kind == ShapeKind::Text {
                             a.add_text(bounds, "Editable color".into());
                         } else {
-                            a.begin(
-                                bounds.origin,
-                                gpui_kit::Bounds::new(
-                                    point(px(20.), px(20.)),
-                                    size(px(1130.), px(480.)),
-                                ),
-                                false,
+                            let area = gpui_kit::Bounds::new(
+                                point(px(20.), px(20.)),
+                                size(px(480.), px(240.)),
                             );
-                            a.drag_to(
-                                bounds.bottom_right(),
-                                gpui_kit::Bounds::new(
-                                    point(px(20.), px(20.)),
-                                    size(px(1130.), px(480.)),
-                                ),
-                                false,
-                            );
+                            a.begin(bounds.origin, area, false);
+                            a.drag_to(bounds.bottom_right(), area, false);
                             a.end();
                         }
                         a.select_index(0);

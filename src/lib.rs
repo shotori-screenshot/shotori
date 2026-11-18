@@ -34,11 +34,12 @@
 //! ├─ annotation/             in-canvas annotations: shapes / arrow / number /
 //! │                          pencil / highlighter / mosaic+blur / magnifier /
 //! │                          spotlight / eraser / text
-//! └─ clipboard / notify / ocr / save_dialog / tray / i18n
+//! ├─ render_image.rs         leaf RGBA8 → BGRA RenderImage conversion
+//! └─ clipboard / notify / ocr / qr / save_dialog / tray / i18n
 //!      the post-selection exits & desktop surfaces: clipboard (resident
-//!      daemon), notifications (D-Bus), OCR engine, native save dialog,
-//!      StatusNotifierItem tray — plus the UI string tables (rust-i18n,
-//!      shared engine with gpui-component)
+//!      daemon), notifications (D-Bus), OCR engine, QR scanner, native save
+//!      dialog, StatusNotifierItem tray — plus the UI string tables
+//!      (rust-i18n, shared engine with gpui-component)
 //! ```
 //!
 //! Dependency direction: `ui → model`, `model → platform` (session holds

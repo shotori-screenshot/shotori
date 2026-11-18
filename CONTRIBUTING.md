@@ -52,6 +52,9 @@ change per commit.
 
 ## Finding your way around
 
+- [`AGENTS.md`](AGENTS.md) and [`docs/agents/README.md`](docs/agents/README.md)
+  — engineering invariants, Wayland/gpui traps, and subsystem specs for
+  contributors and coding agents alike.
 - [`src/lib.rs`](src/lib.rs) header — the module map and the
   dependency contract: `ui → model → platform`, never back up.
   `actions.rs` is the shared vocabulary between keybindings, toolbar
@@ -63,8 +66,10 @@ change per commit.
 
 ## Code conventions
 
-- English everywhere: doc comments, inline comments, UI strings, test
-  names.
+- English everywhere: doc comments, inline comments, identifiers, test
+  names. User-facing UI strings are the sole exception: add them to
+  `locales/ui.yml` (`en` + `zh-CN`) and resolve via `crate::i18n::t!`,
+  never inline.
 - Comments explain **why**, not what — especially traps and rejected
   alternatives, next to the code they concern.
 - No `unwrap()`/`expect()` on runtime paths; no `let _ =` on fallible
