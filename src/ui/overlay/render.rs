@@ -134,6 +134,9 @@ impl Render for Overlay {
             } else {
                 Vec::new()
             };
+        let has_selected_marks = !selected_shapes.is_empty();
+        let pointer_local = shared.pointer_in(&self.capture.output_name);
+        let active_handle_anchor = shared.handle_drag_anchor().map(|(_, anchor)| anchor);
         let lens_draft = shared.local_lens_draft_outline(&self.capture.output_name);
         let marquee = shared.marquee_bounds_local(&self.capture.output_name);
         let annotation_hover = shared.annotation_hover_bounds(&self.capture.output_name);
@@ -770,7 +773,11 @@ impl Render for Overlay {
             // ①½ Annotation selection chrome (stroke + handles),
             // above the marks, below the selection border.
             .children(annotation_hover.map(annotation_hover_chrome))
-            .child(annotation_chrome(selected_shapes))
+            .child(annotation_chrome(
+                selected_shapes,
+                pointer_local,
+                active_handle_anchor,
+            ))
             // ①⅝ Marquee in flight: the drag-selection rectangle, above
             // the marks it sweeps and below the selection border.
             .children(marquee.map(marquee_chrome))
@@ -782,10 +789,12 @@ impl Render for Overlay {
             .child(selection_backdrop(backdrop))
             // ②¼ Resize handles (above the border; the toolbar paints later
             // and stays on top). Drawn whenever the selection is finalized
-            // or being edited — not during a fresh drag.
+            // or being edited — not during a fresh drag; softened while an
+            // annotation mark is selected so the mark's handles lead (#33).
             .child(selection_handles(
                 backdrop,
                 selection.is_selected() || selection.is_editing(),
+                has_selected_marks,
                 self.cursor.clone(),
                 self.text_editing.is_none() && self.ocr_setup.is_none(),
             ))
@@ -1047,6 +1056,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             return;
                         }
                         let previous_annotation = s.hovered_annotation();
+                        let previous_radius_handle = s.revealed_radius_handle();
                         let changed = s.pointer_move_with(
                             &this.capture.output_name,
                             event.position,
@@ -1059,6 +1069,7 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                         if changed
                             || hovered
                             || previous_annotation != s.hovered_annotation()
+                            || previous_radius_handle != s.revealed_radius_handle()
                             || s.eraser_ring_follows_pointer()
                         {
                             cx.notify();

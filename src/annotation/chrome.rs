@@ -14,6 +14,33 @@ use super::{Shape, ShapeKind};
 /// frame with visible height/width.
 const FRAME_PAD: f32 = 3.;
 
+/// Minimum side length (logical px) before a region's 1D edge-midpoint
+/// stretch handle appears along that axis. Thin shapes keep only their
+/// four corners so midpoint dots do not crowd the corners (issue #33).
+const MIN_EDGE_HANDLE_SPAN: f32 = 48.;
+
+/// Minimum side length (logical px) before a rectangle's inset corner-radius
+/// handles are active; smaller boxes adjust radius via the toolbar slider so
+/// the 12 px inset dots never collide with the center move zone.
+const MIN_RADIUS_HANDLE_SPAN: f32 = 36.;
+
+/// Pointer proximity (logical px) to a rectangle corner or its inset radius
+/// anchor that reveals that single corner's radius handle (issue #33).
+const RADIUS_REVEAL_DISTANCE: f32 = 36.;
+
+/// Visual hierarchy tier for an editable annotation handle (issue #33).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandleRole {
+    /// Primary geometry anchor: region corners, line/arrow endpoints,
+    /// polyline vertices, and sequence leader-arrow tips.
+    Primary,
+    /// 1D edge-stretch midpoint on region shapes.
+    Edge,
+    /// Shape-parameter handle: rectangle corner radius, ellipse sweep/inner
+    /// ring, or line/arrow curve bend point.
+    Modifier,
+}
+
 impl Shape {
     /// Visible ink bounds, including stroke caps and arrowhead wings.
     pub(crate) fn ink_bounds(&self) -> Bounds<Pixels> {
@@ -129,6 +156,105 @@ impl Shape {
         }
     }
 
+    /// Role of handle `anchor` in [`Shape::handle_points`].
+    pub(crate) fn handle_role(&self, anchor: usize) -> HandleRole {
+        match self.kind {
+            ShapeKind::Rectangle | ShapeKind::Ellipse => match anchor {
+                0..=3 => HandleRole::Primary,
+                4..=7 => HandleRole::Edge,
+                _ => HandleRole::Modifier,
+            },
+            ShapeKind::Mosaic | ShapeKind::Blur | ShapeKind::Highlighter => match anchor {
+                0..=3 => HandleRole::Primary,
+                _ => HandleRole::Edge,
+            },
+            ShapeKind::Line | ShapeKind::Arrow if anchor == 2 => HandleRole::Modifier,
+            _ => HandleRole::Primary,
+        }
+    }
+
+    fn handle_enabled(&self, anchor: usize, active_anchor: Option<usize>) -> bool {
+        if active_anchor == Some(anchor) {
+            return true;
+        }
+        match self.kind {
+            ShapeKind::Rectangle
+            | ShapeKind::Ellipse
+            | ShapeKind::Mosaic
+            | ShapeKind::Blur
+            | ShapeKind::Highlighter => match anchor {
+                4 | 6 => self.bounds.size.width >= px(MIN_EDGE_HANDLE_SPAN),
+                5 | 7 => self.bounds.size.height >= px(MIN_EDGE_HANDLE_SPAN),
+                8..=11 if self.kind == ShapeKind::Rectangle => {
+                    self.bounds.size.width >= px(MIN_RADIUS_HANDLE_SPAN)
+                        && self.bounds.size.height >= px(MIN_RADIUS_HANDLE_SPAN)
+                }
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
+    /// Which inset corner-radius handle (`8..=11`) on a selected rectangle
+    /// should be revealed for `pointer` (in the same coordinate space as
+    /// `self`) or an in-flight `active_anchor` drag. At rest (`None`), all
+    /// four radius dots stay hidden so only primary/edge handles show.
+    pub(crate) fn revealed_radius_anchor(
+        &self,
+        pointer: Option<Point<Pixels>>,
+        active_anchor: Option<usize>,
+    ) -> Option<usize> {
+        if self.kind != ShapeKind::Rectangle {
+            return None;
+        }
+        if let Some(anchor) = active_anchor.filter(|a| (8..=11).contains(a)) {
+            return Some(anchor);
+        }
+        if active_anchor.is_some()
+            || self.bounds.size.width < px(MIN_RADIUS_HANDLE_SPAN)
+            || self.bounds.size.height < px(MIN_RADIUS_HANDLE_SPAN)
+        {
+            return None;
+        }
+        let ptr = pointer?;
+        let pts = self.handle_points();
+        if pts.len() < 12 {
+            return None;
+        }
+        (0..4usize)
+            .map(|corner| {
+                let d_corner =
+                    f32::from(ptr.x - pts[corner].x).hypot(f32::from(ptr.y - pts[corner].y));
+                let d_radius = f32::from(ptr.x - pts[8 + corner].x)
+                    .hypot(f32::from(ptr.y - pts[8 + corner].y));
+                (8 + corner, d_corner.min(d_radius))
+            })
+            .filter(|(_, dist)| *dist <= RADIUS_REVEAL_DISTANCE)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(anchor, _)| anchor)
+    }
+
+    /// Handles to paint in the selection HUD for `pointer` (same coordinate
+    /// space as `self`) and any active handle drag `active_anchor`.
+    pub(crate) fn visible_handles(
+        &self,
+        pointer: Option<Point<Pixels>>,
+        active_anchor: Option<usize>,
+    ) -> Vec<(Point<Pixels>, HandleRole)> {
+        let pts = self.handle_points();
+        let revealed_radius = self.revealed_radius_anchor(pointer, active_anchor);
+        pts.into_iter()
+            .enumerate()
+            .filter(|&(ix, _)| {
+                self.handle_enabled(ix, active_anchor)
+                    && !(self.kind == ShapeKind::Rectangle
+                        && (8..=11).contains(&ix)
+                        && revealed_radius != Some(ix))
+            })
+            .map(|(ix, p)| (p, self.handle_role(ix)))
+            .collect()
+    }
+
     /// Whether `p` grabs one of the handles; returns its anchor index
     /// (same indexing as [`Shape::handle_points`]). The grab radius
     /// comfortably exceeds the painted dot's radius (`HANDLE_VIS / 2`,
@@ -136,13 +262,34 @@ impl Shape {
     /// catch — what you see and what you can grab are separate budgets.
     pub(crate) fn handle_at(&self, p: Point<Pixels>) -> Option<usize> {
         const GRAB_RADIUS: f32 = 10.;
-        self.handle_points()
-            .iter()
+        const RADIUS_HANDLE_GRAB: f32 = 7.5;
+        const CORNER_PRIORITY_RADIUS: f32 = 8.;
+        let pts = self.handle_points();
+        if self.kind == ShapeKind::Rectangle
+            && let Some((ix, _)) = pts
+                .iter()
+                .take(4)
+                .enumerate()
+                .map(|(ix, h)| (ix, f32::from(p.x - h.x).hypot(f32::from(p.y - h.y))))
+                .filter(|(_, d)| *d <= CORNER_PRIORITY_RADIUS)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+        {
+            return Some(ix);
+        }
+        pts.iter()
             .enumerate()
-            .map(|(ix, h)| (ix, f32::from(p.x - h.x).hypot(f32::from(p.y - h.y))))
-            .filter(|(_, distance)| *distance <= GRAB_RADIUS)
+            .filter(|&(ix, _)| self.handle_enabled(ix, None))
+            .map(|(ix, h)| {
+                let limit = if self.kind == ShapeKind::Rectangle && (8..=11).contains(&ix) {
+                    RADIUS_HANDLE_GRAB
+                } else {
+                    GRAB_RADIUS
+                };
+                (ix, f32::from(p.x - h.x).hypot(f32::from(p.y - h.y)), limit)
+            })
+            .filter(|(_, distance, limit)| distance <= limit)
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(ix, _)| ix)
+            .map(|(ix, _, _)| ix)
             .or_else(|| self.rotation_hit(p).then_some(super::ROTATION_HANDLE))
     }
 
@@ -357,5 +504,69 @@ mod tests {
             s.selection_box(),
             Bounds::new(point(px(7.), px(17.)), size(px(86.), px(66.)))
         );
+    }
+
+    #[test]
+    fn rectangle_handles_hide_radius_at_rest_reveal_single_corner_and_drop_thin_midpoints() {
+        let mut rect = shape(ShapeKind::Rectangle, &[]);
+        rect.bounds = Bounds::new(point(px(100.), px(100.)), size(px(120.), px(80.)));
+
+        // At rest (no pointer near a corner): 4 primary corners + 4 edge midpoints, 0 radius dots.
+        let idle = rect.visible_handles(None, None);
+        assert_eq!(idle.len(), 8);
+        assert_eq!(
+            idle.iter()
+                .filter(|(_, r)| *r == HandleRole::Primary)
+                .count(),
+            4
+        );
+        assert_eq!(
+            idle.iter().filter(|(_, r)| *r == HandleRole::Edge).count(),
+            4
+        );
+        assert_eq!(
+            idle.iter()
+                .filter(|(_, r)| *r == HandleRole::Modifier)
+                .count(),
+            0
+        );
+
+        // Hovering near top-left corner reveals ONLY top-left's radius handle (anchor 8).
+        assert_eq!(
+            rect.revealed_radius_anchor(Some(point(px(108.), px(108.))), None),
+            Some(8)
+        );
+        let hovered = rect.visible_handles(Some(point(px(108.), px(108.))), None);
+        assert_eq!(hovered.len(), 9);
+        assert_eq!(
+            hovered
+                .iter()
+                .filter(|(_, r)| *r == HandleRole::Modifier)
+                .count(),
+            1
+        );
+
+        // Corner click priority: aiming near (105, 105) grabs corner 0, while
+        // aiming at the inset radius dot (112, 112) grabs radius handle 8.
+        assert_eq!(rect.handle_at(point(px(105.), px(105.))), Some(0));
+        assert_eq!(rect.handle_at(point(px(112.), px(112.))), Some(8));
+
+        // Active radius drag keeps that handle visible even when the pointer moves far away.
+        let dragging = rect.visible_handles(Some(point(px(300.), px(300.))), Some(10));
+        assert_eq!(
+            dragging
+                .iter()
+                .filter(|(_, r)| *r == HandleRole::Modifier)
+                .count(),
+            1
+        );
+
+        // Thin horizontal banner (120×28): vertical edge midpoints (left/right) and
+        // inset radius handles drop out so corners and body move stay uncluttered.
+        rect.bounds = Bounds::new(point(px(100.), px(100.)), size(px(120.), px(28.)));
+        let thin = rect.visible_handles(Some(point(px(105.), px(105.))), None);
+        assert_eq!(thin.len(), 6); // 4 corners + top/bottom midpoints only
+        assert_eq!(rect.handle_at(point(px(100.), px(114.))), None);
+        assert_eq!(rect.handle_at(point(px(112.), px(112.))), None);
     }
 }

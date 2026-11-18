@@ -18,7 +18,7 @@ before editing `src/annotation*`, `src/model/session/annotations.rs`,
 | `annotation/gesture.rs` | Pointer press/drag/release state machine, move/handle drags, uncommitted-gesture cancellation |
 | `annotation/select.rs` | Hit-testing (`ShapeHover`), single & `Shift` multi-select, marquee sweep, group movement & crop clamping |
 | `annotation/history.rs` | Undo/redo stacks, grouped deletions, optional sequence-badge renumbering (`renumber_on_delete`) |
-| `annotation/chrome.rs` | Selection frames, handle outlines, ellipse contours for overlay HUD |
+| `annotation/chrome.rs` | Selection frames, tiered handle roles (`Primary` / `Edge` / `Modifier`) & progressive corner-radius reveal, ellipse contours for overlay HUD |
 | `annotation/line.rs` | Straight/curved lines, arrows (7 silhouettes), polylines, smoothed pencil, `lyon_tessellation` stroke/draft paths & coverage |
 | `annotation/highlighter.rs` | Brush & rectangle highlighter, `Multiply` vs `Translucent` blending, `HighlighterCache` |
 | `annotation/filter.rs` | Mosaic & Gaussian/box blur (rectangle & brush coverage), reversible intensity/diameter |

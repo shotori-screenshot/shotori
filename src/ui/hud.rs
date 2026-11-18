@@ -81,51 +81,59 @@ pub(crate) fn handle_cursor(h: Handle) -> CursorStyle {
 /// accent-orange circle, [`HANDLE_VIS`] px across, no outline. Owner of
 /// the REGION selection's handle look (the dim backdrop and the solid
 /// border it sits on — issue #18 deliberately kept it solid: a white
-/// chip there read as clutter). The dot is what you SEE — what you can
-/// GRAB stays the larger band ([`HANDLE_HIT`] here,
-/// `Shape::handle_at` for shapes). Annotation handles use a larger
-/// two-tone fill — see [`paint_shape_handle_dot`].
-fn paint_handle_dot(window: &mut Window, p: Point<Pixels>) {
-    let half = HANDLE_VIS / 2.;
+/// chip there read as clutter). When `deemphasized` is true (a mark is
+/// selected inside the crop, issue #33), the region's 8 dots recede to
+/// a quieter 5 px / 45% alpha so they stay legible in peripheral vision
+/// without competing with the selected mark's handles.
+fn paint_handle_dot(window: &mut Window, p: Point<Pixels>, deemphasized: bool) {
+    let diameter = if deemphasized { 5. } else { HANDLE_VIS };
+    let half = diameter / 2.;
     let b = Bounds::new(
         point(p.x - px(half), p.y - px(half)),
-        size(px(HANDLE_VIS), px(HANDLE_VIS)),
+        size(px(diameter), px(diameter)),
     );
+    let color = if deemphasized {
+        (theme::c().accent & 0xffff_ff00) | 0x73
+    } else {
+        theme::c().accent
+    };
     // Corner radius = half the edge turns the quad into a circle.
-    window.paint_quad(fill(b, rgba(theme::c().accent)).corner_radii(half));
+    window.paint_quad(fill(b, rgba(color)).corner_radii(half));
 }
 
-/// One ANNOTATION handle dot centered on `p` (window-local): a white
-/// core inside an accent ring. Shape handles sit ON the ink, and a solid accent
-/// dot vanishes on same-hue ink — an arrow's tip dot landed dead on
-/// the red arrowhead, orange-on-red (user-reported right after the
-/// select-tool flip). White guarantees a visible core on any
-/// annotation color — the eraser ring's contrast rule — and the ring
-/// keeps the dot reading as chrome from the accent family. So the two
-/// chrome families stay legible each on their own ground: region =
-/// solid accent on dim, object = accent-and-white on ink.
-fn paint_shape_handle_dot(window: &mut Window, p: Point<Pixels>) {
-    const ANNOTATION_HANDLE_DIAMETER: f32 = 8.;
-    let half = ANNOTATION_HANDLE_DIAMETER / 2.;
-    let ring = px(1.5);
+/// Paint one ANNOTATION handle dot centered on `p` (window-local), styled
+/// by its [`crate::annotation::HandleRole`] (issue #33):
+/// - `Primary` (corners / endpoints / vertices): 8 px white core inside a
+///   1.5 px accent ring — always legible on any ink color.
+/// - `Edge` (1D edge-stretch midpoints): compact 5.5 px white-core dot so
+///   corners visually dominate.
+/// - `Modifier` (corner radius / ellipse sweep / curve bend): 6 px accent
+///   core inside a crisp 1.5 px white halo ring — inverted two-tone marks
+///   shape-parameter handles as distinct from bounding-box resize dots.
+fn paint_shape_handle_dot(
+    window: &mut Window,
+    p: Point<Pixels>,
+    role: crate::annotation::HandleRole,
+) {
+    use crate::annotation::HandleRole;
+    let (diameter, ring, outer, inner) = match role {
+        HandleRole::Primary => (8., px(1.5), theme::c().accent, 0xffff_ffff),
+        HandleRole::Edge => (5.5, px(1.25), theme::c().accent, 0xffff_ffff),
+        HandleRole::Modifier => (6., px(1.5), 0xffff_ffff, theme::c().accent),
+    };
+    let half = diameter / 2.;
     let b = Bounds::new(
         point(p.x - px(half), p.y - px(half)),
-        size(
-            px(ANNOTATION_HANDLE_DIAMETER),
-            px(ANNOTATION_HANDLE_DIAMETER),
-        ),
+        size(px(diameter), px(diameter)),
     );
-    window.paint_quad(fill(b, rgba(theme::c().accent)).corner_radii(half));
+    window.paint_quad(fill(b, rgba(outer)).corner_radii(half));
     window.paint_quad(
         fill(
             Bounds::new(
                 point(p.x - px(half) + ring, p.y - px(half) + ring),
-                size(
-                    px(ANNOTATION_HANDLE_DIAMETER) - ring * 2.,
-                    px(ANNOTATION_HANDLE_DIAMETER) - ring * 2.,
-                ),
+                size(px(diameter) - ring * 2., px(diameter) - ring * 2.),
             ),
-            rgba(0xffffffff),
+            rgba(inner),
         )
         .corner_radii(half - f32::from(ring)),
     );
@@ -145,6 +153,7 @@ fn paint_shape_handle_dot(window: &mut Window, p: Point<Pixels>) {
 pub(crate) fn selection_handles(
     sel: Option<Bounds<Pixels>>,
     visible: bool,
+    deemphasized: bool,
     cursor: std::rc::Rc<std::cell::Cell<CursorStyle>>,
     cursor_active: bool,
 ) -> impl IntoElement {
@@ -175,7 +184,7 @@ pub(crate) fn selection_handles(
                 (cx, bt),
                 (r, bt),
             ] {
-                paint_handle_dot(window, point(px(x), px(y)));
+                paint_handle_dot(window, point(px(x), px(y)), deemphasized);
             }
         },
     )
@@ -288,7 +297,11 @@ pub(crate) fn lens_draft_chrome(shape: crate::annotation::Shape) -> impl IntoEle
 /// anchors: a multi-selection moves and deletes as a group, so per-member
 /// handles would edit one shape out of it. Geometry comes from the marks
 /// and is shared with hover feedback and hit testing.
-pub(crate) fn annotation_chrome(selected: Vec<crate::annotation::Shape>) -> impl IntoElement {
+pub(crate) fn annotation_chrome(
+    selected: Vec<crate::annotation::Shape>,
+    pointer_local: Option<Point<Pixels>>,
+    active_anchor: Option<usize>,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |viewport, (), window, _| {
@@ -301,11 +314,8 @@ pub(crate) fn annotation_chrome(selected: Vec<crate::annotation::Shape>) -> impl
                 if !single {
                     continue;
                 }
-                // One size, two fills: a shape's resize affordance wears
-                // the same diameter the selection border does, but the
-                // two-tone fill — see [`paint_shape_handle_dot`].
-                for p in shape.handle_points() {
-                    paint_shape_handle_dot(window, p + viewport.origin);
+                for (p, role) in shape.visible_handles(pointer_local, active_anchor) {
+                    paint_shape_handle_dot(window, p + viewport.origin, role);
                 }
             }
         },
@@ -723,6 +733,7 @@ mod tests {
                 .child(super::selection_handles(
                     self.selection,
                     self.visible,
+                    false,
                     cursor,
                     false,
                 ))
@@ -803,5 +814,45 @@ mod tests {
             window.painted_quads()
         });
         assert!(quads.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn deemphasized_selection_handles_shrink_and_soften_alpha(cx: &mut gpui_kit::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| {
+            struct QuietHarness;
+            impl gpui_kit::Render for QuietHarness {
+                fn render(
+                    &mut self,
+                    _: &mut gpui_kit::Window,
+                    _: &mut gpui_kit::Context<Self>,
+                ) -> impl gpui_kit::IntoElement {
+                    use gpui_kit::{ParentElement, Styled};
+                    let cursor = std::rc::Rc::new(std::cell::Cell::new(CursorStyle::Arrow));
+                    gpui_kit::div()
+                        .relative()
+                        .size_full()
+                        .child(super::selection_handles(
+                            Some(bounds(100., 100., 80., 60.)),
+                            true,
+                            true,
+                            cursor,
+                            false,
+                        ))
+                }
+            }
+            QuietHarness
+        });
+        cx.update(|window, _| window.resize(ws(400., 400.)));
+        cx.simulate_scale_factor_change(1.);
+        let quads = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.painted_quads()
+        });
+        assert_eq!(quads.len(), 8);
+        let expected_bg: Background = rgba((super::theme::c().accent & 0xffff_ff00) | 0x73).into();
+        for q in &quads {
+            assert_eq!((q.bounds.size.width.0, q.bounds.size.height.0), (5., 5.));
+            assert_eq!(q.background, expected_bg);
+        }
     }
 }

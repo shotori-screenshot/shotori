@@ -32,6 +32,7 @@ mod select;
 pub(crate) use number::NumberCache;
 pub(crate) use select::ShapeHover;
 
+pub(crate) use chrome::HandleRole;
 use chrome::ellipse_contour;
 use gpui_kit::{Bounds, Path, PathBuilder, Pixels, Point, point, px, size};
 

@@ -719,6 +719,17 @@ impl ScreenshotSession {
         Some((shape.kind, anchor))
     }
 
+    /// Which rectangle corner-radius handle (`8..=11`), if any, is currently
+    /// revealed on the sole selected annotation by pointer proximity or drag.
+    pub(crate) fn revealed_radius_handle(&self) -> Option<usize> {
+        if self.annotations.selected_count() != 1 {
+            return None;
+        }
+        let shape = self.annotations.selected()?;
+        let active = self.handle_drag.as_ref().map(|d| d.anchor);
+        shape.revealed_radius_anchor(self.pointer_global, active)
+    }
+
     pub(crate) fn local_annotations(&self, name: &str) -> Vec<crate::annotation::Shape> {
         let origin = self.screen(name).bounds().origin;
         self.annotations
