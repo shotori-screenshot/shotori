@@ -255,6 +255,25 @@ fn draw_ordinary_shape(
     if shape.kind == ShapeKind::Magnifier {
         return;
     }
+    if shape.geometry_fill_mode() == super::GeometryFill::Translucent {
+        let color = shape.color.to_be_bytes();
+        let fill_polys = super::geometry::translucent_fill_polygons(shape);
+        line::coverage_polygons(fill_polys, w, h, origin, scale, |offset, cov| {
+            let pixel = &mut rgba[offset..offset + 4];
+            if pixel[3] == 0 {
+                return;
+            }
+            let alpha = cov * color[3] as f32 / 255. * (52. / 255.);
+            for c in 0..3 {
+                pixel[c] = (pixel[c] as f32 * (1. - alpha) + color[c] as f32 * alpha).round() as u8;
+            }
+        });
+        let outline_polys = super::geometry::outline_polygons(shape);
+        line::coverage_polygons(outline_polys, w, h, origin, scale, |offset, cov| {
+            super::highlighter::blend_pixel(shape, &mut rgba[offset..offset + 4], cov);
+        });
+        return;
+    }
     if shape.has_custom_geometry() {
         line::rasterize(shape, rgba, w, h, origin, scale);
         return;

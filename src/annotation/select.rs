@@ -60,9 +60,13 @@ impl Annotations {
             .rev()
             .copied()
             .find(|&ix| {
-                self.shapes
-                    .get(ix)
-                    .is_some_and(|shape| shape.selection_box().contains(&p))
+                self.shapes.get(ix).is_some_and(|shape| {
+                    if shape.rotation() != 0. {
+                        point_in_polygon(p, &shape.frame_corners())
+                    } else {
+                        shape.selection_box().contains(&p)
+                    }
+                })
             })
             .or_else(|| match self.tool {
                 None | Some(ShapeKind::Select) => self.hit_test(p),
@@ -230,9 +234,9 @@ impl Annotations {
             .or(self.tool.filter(|k| *k != ShapeKind::Select))
     }
 
-    /// The slider's write path: apply `v` to the selected shape (one
-    /// merged history entry per drag — a whole drag undoes as one
-    /// step) or to the tool preset when nothing is selected.
+    /// The slider's write path: apply `v` to every selected shape in the same
+    /// size family (one merged `Edit`/`EditMany` entry per drag) or to the
+    /// active tool preset when nothing is selected.
     pub(crate) fn apply_size(&mut self, v: f32) {
         if self.editing_text().is_some() {
             self.set_size_of(ShapeKind::Text, v);
@@ -250,75 +254,79 @@ impl Annotations {
             self.filter_brush_size = v;
             self.filter_area = super::FilterArea::Brush { diameter: v };
         }
-        let Some(ix) = self.selected_index() else {
+        let Some(primary_ix) = self.selected_index() else {
             if !brush_size {
                 self.set_tool_size(v);
             }
             return;
         };
-        let kind = self.shapes[ix].kind;
+        let primary_kind = self.shapes[primary_ix].kind;
         let v = v.clamp(spec.min, spec.max);
         if !brush_size {
-            self.set_size_of(kind, v);
+            self.set_size_of(primary_kind, v);
         }
-        let write = |shapes: &mut Vec<Shape>| {
-            if let Some(shape) = shapes.get_mut(ix) {
-                if brush_size {
-                    if let super::ShapeParameters::Filter { area, .. } = &mut shape.parameters {
-                        *area = super::FilterArea::Brush { diameter: v };
-                    }
-                } else {
-                    resize_shape(shape, v);
+        self.edit_selected_drag(|before| {
+            let mut next = before.clone();
+            if brush_size {
+                if let super::ShapeParameters::Filter {
+                    area: area @ super::FilterArea::Brush { .. },
+                    ..
+                } = &mut next.parameters
+                {
+                    *area = super::FilterArea::Brush { diameter: v };
                 }
+            } else if !matches!(next.kind, ShapeKind::EraserRect | ShapeKind::Select)
+                && super::size_spec(next.kind) == spec
+            {
+                resize_shape(&mut next, v);
             }
-        };
-        // merge into the previous entry while the same drag continues
-        // (same shape); any interruption — selection change, undo, a
-        // new stroke — breaks the chain check and starts a fresh entry
-        let mergeable = self.size_drag_active
-            && matches!(self.history.last(), Some(HistoryEntry::Edit { ix: e, .. }) if *e == ix);
-        if mergeable {
-            write(&mut self.shapes);
-            if let Some(HistoryEntry::Edit { after, .. }) = self.history.last_mut() {
-                *after = self.shapes[ix].clone();
-            }
-        } else {
-            let before = self.shapes[ix].clone();
-            write(&mut self.shapes);
-            let after = self.shapes[ix].clone();
-            if after != before {
-                self.history.push(HistoryEntry::Edit { ix, before, after });
-                self.redo.clear();
-                self.size_drag_active = true;
-            }
-        }
+            next
+        });
     }
 
     fn bounded_size(&self, requested: f32, brush: bool) -> f32 {
-        let (Some(before), Some(area)) = (self.selected(), self.resize_bounds) else {
+        let (Some(primary), Some(area)) = (self.selected(), self.resize_bounds) else {
             return requested;
         };
         let current = self.current_edit_size();
-        if requested <= current || before.kind == ShapeKind::Spotlight {
+        if requested <= current || primary.kind == ShapeKind::Spotlight {
+            return requested;
+        }
+        let spec = self.current_size_spec();
+        let targets: Vec<&Shape> = self
+            .selected_shapes()
+            .into_iter()
+            .filter(|s| {
+                if brush {
+                    matches!(s.filter_area(), Some(super::FilterArea::Brush { .. }))
+                } else {
+                    !matches!(s.kind, ShapeKind::EraserRect | ShapeKind::Select)
+                        && super::size_spec(s.kind) == spec
+                }
+            })
+            .collect();
+        if targets.is_empty() {
             return requested;
         }
         // Preserve already clipped marks after a crop change without allowing
         // a subsequent size edit to extend their clipping.
-        let limit = area.union(&before.ink_bounds());
         let fits = |value| {
-            let mut candidate = before.clone();
-            if brush {
-                if let super::ShapeParameters::Filter { area, .. } = &mut candidate.parameters {
-                    *area = super::FilterArea::Brush { diameter: value };
+            targets.iter().all(|before| {
+                let limit = area.union(&before.ink_bounds());
+                let mut candidate = (*before).clone();
+                if brush {
+                    if let super::ShapeParameters::Filter { area, .. } = &mut candidate.parameters {
+                        *area = super::FilterArea::Brush { diameter: value };
+                    }
+                } else {
+                    resize_shape(&mut candidate, value);
                 }
-            } else {
-                resize_shape(&mut candidate, value);
-            }
-            let bounds = candidate.ink_bounds();
-            bounds.left() >= limit.left()
-                && bounds.top() >= limit.top()
-                && bounds.right() <= limit.right()
-                && bounds.bottom() <= limit.bottom()
+                let bounds = candidate.ink_bounds();
+                bounds.left() >= limit.left()
+                    && bounds.top() >= limit.top()
+                    && bounds.right() <= limit.right()
+                    && bounds.bottom() <= limit.bottom()
+            })
         };
         if fits(requested) {
             return requested;
@@ -333,7 +341,7 @@ impl Annotations {
             }
         }
         // Integral controls must not accumulate subpixel growth at a blocked edge.
-        if before.kind == ShapeKind::Magnifier {
+        if primary.kind == ShapeKind::Magnifier {
             low
         } else {
             low.floor().max(current)
@@ -347,10 +355,22 @@ impl Annotations {
         self.resize_bounds = previous;
     }
 
-    /// Close the slider drag: the next `apply_size` starts a new
-    /// history entry. Called on `SliderEvent::Release`.
+    /// Close the slider drag: the next `apply_size` starts a new history entry,
+    /// and a drag that returned to its exact starting value leaves no entry.
     pub(crate) fn end_size_drag(&mut self) {
-        self.size_drag_active = false;
+        if !std::mem::replace(&mut self.size_drag_active, false) {
+            return;
+        }
+        let noop = match self.history.last() {
+            Some(HistoryEntry::Edit { before, after, .. }) => before == after,
+            Some(HistoryEntry::EditMany { edits }) => {
+                edits.iter().all(|(_, before, after)| before == after)
+            }
+            _ => false,
+        };
+        if noop {
+            self.history.pop();
+        }
     }
 
     /// Re-place shape `ix` as the press-time snapshot translated by
@@ -375,6 +395,7 @@ impl Annotations {
 
     /// Re-derive shape `ix` from the press snapshot with handle
     /// `anchor` placed at `p` — snapshot semantics like [`place_shape`].
+    #[cfg(test)]
     pub(crate) fn place_handle(
         &mut self,
         ix: usize,
@@ -382,6 +403,20 @@ impl Annotations {
         before: &Shape,
         p: Point<Pixels>,
         area: Bounds<Pixels>,
+    ) {
+        self.place_handle_with(ix, anchor, before, p, area, false);
+    }
+
+    /// Handle placement with optional Shift constraint (45° snap for endpoints
+    /// and 1:1 aspect ratio for corner handles).
+    pub(crate) fn place_handle_with(
+        &mut self,
+        ix: usize,
+        anchor: usize,
+        before: &Shape,
+        p: Point<Pixels>,
+        area: Bounds<Pixels>,
+        constrain: bool,
     ) {
         let Some(start) = before.handle_points().get(anchor).copied() else {
             return;
@@ -397,9 +432,33 @@ impl Annotations {
                 && b.top() >= limit.top()
                 && b.bottom() <= limit.bottom()
         };
+        let target = if constrain {
+            constrain_handle_point(before, anchor, p, limit)
+        } else {
+            p
+        };
+        let ray_origin = if constrain && anchor < 4 && before.kind.is_region() {
+            region_opposite_world(before, anchor)
+        } else {
+            start
+        };
         if let Some(shape) = self.shapes.get_mut(ix) {
             *shape = before.clone();
-            shape.set_handle(anchor, p);
+            // Dragging an already-curved bend handle back onto the chord midpoint
+            // snaps it back to a true 2-point straight segment; starting from a
+            // straight line keeps full precision with zero deadzone.
+            if anchor == 2
+                && matches!(before.kind, ShapeKind::Line | ShapeKind::Arrow)
+                && before.points.len() == 3
+                && super::gesture::distance(target, (before.points[0] + before.points[1]) / 2.)
+                    <= 3.
+            {
+                shape.points.truncate(2);
+                if fits(shape) {
+                    return;
+                }
+            }
+            shape.set_handle(anchor, target);
             if fits(shape) {
                 return;
             }
@@ -407,7 +466,7 @@ impl Annotations {
             for _ in 0..20 {
                 let fraction = (low + high) / 2.;
                 *shape = before.clone();
-                shape.set_handle(anchor, start + (p - start) * fraction);
+                shape.set_handle(anchor, ray_origin + (target - ray_origin) * fraction);
                 if fits(shape) {
                     low = fraction;
                 } else {
@@ -415,8 +474,32 @@ impl Annotations {
                 }
             }
             *shape = before.clone();
-            shape.set_handle(anchor, start + (p - start) * low);
+            shape.set_handle(anchor, ray_origin + (target - ray_origin) * low);
         }
+    }
+
+    /// Double-clicking the bend handle of a curved Line/Arrow resets it back
+    /// to a true 2-point straight segment as one undo step.
+    pub(crate) fn straighten_curved_handle(&mut self, p: Point<Pixels>) -> bool {
+        if self.selected.len() != 1 {
+            return false;
+        }
+        let Some(ix) = self.selected_index() else {
+            return false;
+        };
+        let Some(shape) = self.shapes.get(ix) else {
+            return false;
+        };
+        if !matches!(shape.kind, ShapeKind::Line | ShapeKind::Arrow)
+            || shape.points.len() != 3
+            || shape.handle_at(p) != Some(2)
+        {
+            return false;
+        }
+        let before = shape.clone();
+        self.shapes[ix].points.truncate(2);
+        self.commit_move(ix, before);
+        true
     }
 
     /// Finish an in-place edit drag (move or handle): record the Edit
@@ -617,9 +700,17 @@ pub(super) fn shape_hit(shape: &Shape, p: Point<Pixels>) -> bool {
                     .number_arrow()
                     .is_some_and(|arrow| shape_erased(&arrow, p, PICK_TOLERANCE))
         }
-        // solid regions: anywhere inside the bounds
-        ShapeKind::Text | ShapeKind::Mosaic | ShapeKind::Blur => {
-            inflate(&shape.bounds, px(HIT_TOLERANCE)).contains(&p)
+        // solid or elliptical regions
+        ShapeKind::Text => {
+            let local_p = shape.rotated_point(p, true);
+            inflate(&shape.bounds, px(HIT_TOLERANCE)).contains(&local_p)
+        }
+        ShapeKind::Mosaic | ShapeKind::Blur => {
+            if shape.filter_area() == Some(super::FilterArea::Ellipse) {
+                region_touched(shape.bounds, true, p, HIT_TOLERANCE)
+            } else {
+                inflate(&shape.bounds, px(HIT_TOLERANCE)).contains(&p)
+            }
         }
         _ => false,
     }
@@ -686,9 +777,17 @@ pub(super) fn shape_erased(shape: &Shape, p: Point<Pixels>, radius: f32) -> bool
                         .is_some_and(|arrow| shape_erased(&arrow, p, radius))
             }
         }
-        // Solid regions: the whole bounds is ink.
-        ShapeKind::Text | ShapeKind::Mosaic | ShapeKind::Blur => {
-            inflate(&shape.bounds, px(radius)).contains(&p)
+        // Solid or elliptical regions.
+        ShapeKind::Text => {
+            let local_p = shape.rotated_point(p, true);
+            inflate(&shape.bounds, px(radius)).contains(&local_p)
+        }
+        ShapeKind::Mosaic | ShapeKind::Blur => {
+            if shape.filter_area() == Some(super::FilterArea::Ellipse) {
+                region_touched(shape.bounds, true, p, radius)
+            } else {
+                inflate(&shape.bounds, px(radius)).contains(&p)
+            }
         }
         _ => false,
     }
@@ -817,7 +916,55 @@ pub(super) fn point_in_polygon(p: Point<Pixels>, poly: &[Point<Pixels>]) -> bool
 /// footprint, so a human aiming the final click at the first
 /// vertex gets a closed polygon while endpoints that merely sit
 /// nearby keep the open-stroke hit region.
-const CLOSURE_SLOP: f32 = 7.;
+pub(super) const CLOSURE_SLOP: f32 = 7.;
+
+fn region_opposite_local(b: Bounds<Pixels>, anchor: usize) -> Point<Pixels> {
+    match anchor {
+        0 => b.bottom_right(),
+        1 => point(b.left(), b.bottom()),
+        2 => b.origin,
+        _ => point(b.right(), b.top()),
+    }
+}
+
+fn region_opposite_world(shape: &Shape, anchor: usize) -> Point<Pixels> {
+    shape.rotated_point(region_opposite_local(shape.bounds, anchor), false)
+}
+
+fn constrain_handle_point(
+    before: &Shape,
+    anchor: usize,
+    p: Point<Pixels>,
+    limit: Bounds<Pixels>,
+) -> Point<Pixels> {
+    match before.kind {
+        ShapeKind::Line | ShapeKind::Arrow if anchor <= 1 && before.points.len() >= 2 => {
+            super::gesture::line_endpoint(before.points[1 - anchor], p, limit, true)
+        }
+        ShapeKind::Polyline if anchor < before.points.len() && before.points.len() >= 2 => {
+            let other = if anchor > 0 {
+                before.points[anchor - 1]
+            } else {
+                before.points[1]
+            };
+            super::gesture::line_endpoint(other, p, limit, true)
+        }
+        ShapeKind::Number if anchor == 0 => {
+            super::gesture::line_endpoint(before.bounds.center(), p, limit, true)
+        }
+        _ if anchor < 4 && before.kind.is_region() => {
+            let local_p = before.rotated_point(p, true);
+            let opposite = region_opposite_local(before.bounds, anchor);
+            let dx = f32::from(local_p.x - opposite.x);
+            let dy = f32::from(local_p.y - opposite.y);
+            let side = dx.abs().max(dy.abs());
+            let sx = if dx < 0. { -side } else { side };
+            let sy = if dy < 0. { -side } else { side };
+            before.rotated_point(point(opposite.x + px(sx), opposite.y + px(sy)), false)
+        }
+        _ => p,
+    }
+}
 
 /// Whether a placed polyline reads as a closed polygon. The shape
 /// model carries no closed flag — closing is structural: the ring

@@ -1,5 +1,5 @@
 //! Spotlight masks preserve the union of highlighted regions.
-use super::{Annotations, HistoryEntry, Shape, ShapeKind, ShapeParameters};
+use super::{Annotations, Shape, ShapeKind, ShapeParameters};
 use gpui_kit::{Bounds, Pixels, Point, point, px, size};
 
 /// The outline is painted inside the highlighted region, never outside the crop.
@@ -35,15 +35,12 @@ impl Annotations {
     }
 
     pub(crate) fn set_spotlight_outline(&mut self, enabled: bool) {
-        self.end_size_drag();
         self.spotlight_outline.enabled = enabled;
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Spotlight { outline, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Spotlight { outline, .. } = &mut shape.parameters {
                 outline.enabled = enabled;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn set_spotlight_outline_width(&mut self, value: f32) {
@@ -52,31 +49,13 @@ impl Annotations {
         }
         let value = value.clamp(1., 20.);
         self.spotlight_outline.width = value;
-        let Some(ix) = self.selected_index() else {
-            return;
-        };
-        let before = self.shapes[ix].clone();
-        let ShapeParameters::Spotlight { outline, .. } = &mut self.shapes[ix].parameters else {
-            return;
-        };
-        outline.width = value;
-        if self.shapes[ix] == before {
-            return;
-        }
-        if self.size_drag_active
-            && let Some(HistoryEntry::Edit {
-                ix: previous,
-                after,
-                ..
-            }) = self.history.last_mut()
-            && *previous == ix
-        {
-            *after = self.shapes[ix].clone();
-        } else {
-            self.commit_move(ix, before);
-        }
-        self.redo.clear();
-        self.size_drag_active = true;
+        self.edit_selected_drag(|before| {
+            let mut next = before.clone();
+            if let ShapeParameters::Spotlight { outline, .. } = &mut next.parameters {
+                outline.width = value;
+            }
+            next
+        });
     }
 
     /// Wheel modifiers target independent spotlight properties; each notch is reversible.
@@ -167,23 +146,103 @@ pub(super) fn rasterize<'a>(
     origin: Point<Pixels>,
     scale: f32,
 ) {
+    struct PixelRegion {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        row_min: u32,
+        row_max: u32,
+        ellipse: Option<(f32, f32, f32, f32)>,
+    }
+
     let shapes: Vec<_> = shapes.collect();
     if shapes.is_empty() {
         return;
     }
-    let opacity = shapes.iter().map(|s| s.size()).fold(0_f32, f32::max) / 100.;
+    let keep = 1. - shapes.iter().map(|s| s.size()).fold(0_f32, f32::max) / 100.;
+    let mut lut = [0_u8; 256];
+    for (v, out) in lut.iter_mut().enumerate() {
+        *out = (v as f32 * keep).round() as u8;
+    }
+    let ox = f32::from(origin.x);
+    let oy = f32::from(origin.y);
+    let regions: Vec<PixelRegion> = shapes
+        .into_iter()
+        .filter_map(|s| {
+            let ShapeParameters::Spotlight { ellipse, .. } = s.parameters else {
+                return None;
+            };
+            let bw = f32::from(s.bounds.size.width);
+            let bh = f32::from(s.bounds.size.height);
+            if bw <= 0. || bh <= 0. {
+                return None;
+            }
+            let x0 = (f32::from(s.bounds.left()) - ox) * scale;
+            let y0 = (f32::from(s.bounds.top()) - oy) * scale;
+            let x1 = (f32::from(s.bounds.right()) - ox) * scale;
+            let y1 = (f32::from(s.bounds.bottom()) - oy) * scale;
+            let row_min = y0.floor().clamp(0., h as f32) as u32;
+            let row_max = y1.ceil().clamp(0., h as f32) as u32;
+            let ellipse = ellipse.then(|| {
+                let rx = (x1 - x0) / 2.;
+                let ry = (y1 - y0) / 2.;
+                (
+                    (x0 + x1) / 2.,
+                    (y0 + y1) / 2.,
+                    1. / (rx * rx),
+                    1. / (ry * ry),
+                )
+            });
+            Some(PixelRegion {
+                x0,
+                y0,
+                x1,
+                y1,
+                row_min,
+                row_max,
+                ellipse,
+            })
+        })
+        .collect();
+
     for y in 0..h {
-        for x in 0..w {
-            let p = origin + point(px((x as f32 + 0.5) / scale), px((y as f32 + 0.5) / scale));
-            if shapes.iter().any(|s| contains(s, p)) {
+        let row_offset = (y * w * 4) as usize;
+        let row_slice = &mut rgba[row_offset..row_offset + (w * 4) as usize];
+        let active_any = regions.iter().any(|r| y >= r.row_min && y < r.row_max);
+        if !active_any {
+            for px in row_slice.as_chunks_mut::<4>().0 {
+                if px[3] != 0 {
+                    px[0] = lut[px[0] as usize];
+                    px[1] = lut[px[1] as usize];
+                    px[2] = lut[px[2] as usize];
+                }
+            }
+            continue;
+        }
+        let py = y as f32 + 0.5;
+        for (x, px) in row_slice.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            if px[3] == 0 {
                 continue;
             }
-            let at = ((y * w + x) * 4) as usize;
-            if rgba[at + 3] == 0 {
-                continue;
-            }
-            for c in 0..3 {
-                rgba[at + c] = (rgba[at + c] as f32 * (1. - opacity)).round() as u8;
+            let px_x = x as f32 + 0.5;
+            let lit = regions.iter().any(|r| {
+                if px_x < r.x0 || px_x > r.x1 || py < r.y0 || py > r.y1 {
+                    return false;
+                }
+                match r.ellipse {
+                    None => true,
+                    Some((cx, cy, inv_rx2, inv_ry2)) => {
+                        let dx = px_x - cx;
+                        let dy = py - cy;
+                        dx * dx * inv_rx2 + dy * dy * inv_ry2 <= 1.
+                    }
+                }
+            });
+            if !lit {
+                px[0] = lut[px[0] as usize];
+                px[1] = lut[px[1] as usize];
+                px[2] = lut[px[2] as usize];
             }
         }
     }

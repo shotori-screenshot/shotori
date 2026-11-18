@@ -17,14 +17,11 @@ impl Annotations {
 
     pub(crate) fn set_number_fill(&mut self, value: bool) {
         self.number_fill = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Badge { fill, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Badge { fill, .. } = &mut shape.parameters {
                 *fill = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn number_format(&self) -> NumberFormat {
@@ -36,14 +33,11 @@ impl Annotations {
 
     pub(crate) fn set_number_format(&mut self, value: NumberFormat) {
         self.number_format = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Badge { format, .. } = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Badge { format, .. } = &mut shape.parameters {
                 *format = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn number_value(&self) -> u32 {

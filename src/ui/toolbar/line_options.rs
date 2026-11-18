@@ -1,6 +1,6 @@
 //! Icon-only line choices shared by annotation and magnifier parameter bars.
 use super::*;
-use crate::annotation::{ArrowStyle, LensConnector, LineStyle};
+use crate::annotation::{ArrowStyle, GeometryFill, LensConnector, LineStyle};
 
 const SOLID: &str = "<path d='M3 12H33'/>";
 const DASHED: &str = "<path d='M3 12H33' stroke-dasharray='7 5'/>";
@@ -12,6 +12,44 @@ const CENTER_DOT: &str =
     "<circle cx='6' cy='12' r='2.5' fill='black' stroke='none'/><path d='M8 12H29'/>";
 const BORDER: &str = "<path d='M5 5V19M5 12H29'/>";
 const NONE: &str = "<path d='M11 6L23 18M23 6L11 18'/>";
+
+pub(super) fn geometry_fill_menu(
+    value: GeometryFill,
+    session: &Entity<ScreenshotSession>,
+    focus: &FocusHandle,
+) -> impl IntoElement {
+    let session = session.clone();
+    choice_menu(
+        "geometry-fill",
+        "toolbar.geometry_fill",
+        value,
+        &[
+            (
+                GeometryFill::None,
+                "toolbar.geometry_outline",
+                "<rect x='7' y='4' width='22' height='16' rx='2'/>",
+            ),
+            (
+                GeometryFill::Translucent,
+                "toolbar.geometry_translucent",
+                "<rect x='7' y='4' width='22' height='16' rx='2' fill='black' fill-opacity='0.28'/><rect x='7' y='4' width='22' height='16' rx='2'/>",
+            ),
+            (
+                GeometryFill::Solid,
+                "toolbar.geometry_solid",
+                "<rect x='7' y='4' width='22' height='16' rx='2' fill='black'/>",
+            ),
+        ],
+        focus,
+        preview,
+        move |value, cx| {
+            session.update(cx, |s, cx| {
+                s.edit_annotations(|a| a.set_geometry_fill_mode(value));
+                cx.notify();
+            });
+        },
+    )
+}
 
 pub(super) fn connector_menu(
     value: LensConnector,
@@ -298,6 +336,11 @@ pub(super) fn line_end_menus(
                     EndMarker::Bar,
                     "toolbar.endpoint_bar",
                     "<path d='M4 12H31M31 5V19'/>",
+                ),
+                (
+                    EndMarker::Dot,
+                    "toolbar.endpoint_dot",
+                    "<path d='M4 12H27'/><circle cx='29' cy='12' r='3.5' fill='black' stroke='none'/>",
                 ),
             ],
             focus,

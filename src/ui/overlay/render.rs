@@ -5,11 +5,13 @@
 
 use super::Overlay;
 use crate::actions::{
-    ClearAnnotations, CopySelection, DeleteAnnotation, EscapeOverlay, FinishPolyline, Nudge,
-    OcrSelection, OpenSettings, PinSelection, QrSelection, QuitOverlay, RedoAnnotation,
-    SaveSelection, ScrollSelection, SelectScreen, ToggleArrow, ToggleEllipse, ToggleEraser,
-    ToggleHighlighter, ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil,
-    TogglePolyline, ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText, UndoAnnotation,
+    BringForward, BringToFront, ClearAnnotations, CopySelection, DeleteAnnotation,
+    DuplicateAnnotation, EscapeOverlay, FinishPolyline, Nudge, OcrSelection, OpenSettings,
+    PinSelection, PopPolylineVertex, QrSelection, QuitOverlay, RedoAnnotation, SaveSelection,
+    ScrollSelection, SelectScreen, SendBackward, SendToBack, StepSizeDown, StepSizeUp, ToggleArrow,
+    ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMagnifier, ToggleMosaic,
+    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleSpotlight,
+    ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
@@ -298,6 +300,72 @@ impl Render for Overlay {
                 this.session.update(cx, |s, cx| {
                     s.edit_annotations(|a| a.finish_polyline());
                     cx.notify();
+                });
+            }))
+            .on_action(cx.listener(|this, _: &PopPolylineVertex, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.pop_polyline_vertex() {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &DuplicateAnnotation, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.duplicate_selected_annotations() {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &BringForward, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.reorder_selected_annotations(crate::annotation::LayerOrder::BringForward) {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &SendBackward, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.reorder_selected_annotations(crate::annotation::LayerOrder::SendBackward) {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &BringToFront, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.reorder_selected_annotations(crate::annotation::LayerOrder::BringToFront) {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &SendToBack, window, cx| {
+                window.focus(&this.focus_handle, cx);
+                this.session.update(cx, |s, cx| {
+                    if s.reorder_selected_annotations(crate::annotation::LayerOrder::SendToBack) {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &StepSizeDown, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    let mut changed = false;
+                    s.edit_annotations(|a| changed = a.step_size(false));
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_action(cx.listener(|this, _: &StepSizeUp, _, cx| {
+                this.session.update(cx, |s, cx| {
+                    let mut changed = false;
+                    s.edit_annotations(|a| changed = a.step_size(true));
+                    if changed {
+                        cx.notify();
+                    }
                 });
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
@@ -896,6 +964,22 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                         this.start_text(event.position, window, cx);
                         return;
                     }
+                    // Double-click on a curved Line/Arrow bend handle straightens it.
+                    if event.click_count == 2 {
+                        let straightened = this.session.update(cx, |s, cx| {
+                            let ok = s.straighten_at_double_click(
+                                &this.capture.output_name,
+                                event.position,
+                            );
+                            if ok {
+                                cx.notify();
+                            }
+                            ok
+                        });
+                        if straightened {
+                            return;
+                        }
+                    }
                     // Double-click on a badge opens the value editor
                     // (issue #2); select-tool only — the gate lives in
                     // `number_at_double_click`, same reasoning as the
@@ -963,10 +1047,11 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             return;
                         }
                         let previous_annotation = s.hovered_annotation();
-                        let changed = s.pointer_move(
+                        let changed = s.pointer_move_with(
                             &this.capture.output_name,
                             event.position,
                             event.modifiers.shift,
+                            event.modifiers.alt,
                         );
                         let hovered = s.hover_at(&this.capture.output_name, event.position);
                         // the eraser ring follows the pointer: moves
@@ -999,10 +1084,11 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             return;
                         }
                         let finish = event.click_count >= 2 && s.annotations().is_pressed();
-                        s.pointer_up(
+                        s.pointer_up_with(
                             &this.capture.output_name,
                             event.position,
                             event.modifiers.shift,
+                            event.modifiers.alt,
                         );
                         if finish {
                             s.edit_annotations(|a| a.finish_polyline());

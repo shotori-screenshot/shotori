@@ -158,7 +158,7 @@ pub(crate) fn arrow_geometry(
         left.extend([wings[0], tip, wings[1]]);
         left.extend(right.into_iter().rev());
         if arrow == ArrowStyle::Filled {
-            return vec![left];
+            return super::geometry::tessellate_fill(&left);
         }
         left.push(left[0]);
         return patterned_geometry(&left, width.min(head * 0.15), style);
@@ -434,6 +434,10 @@ fn append_marker(
         EndMarker::Open => result.extend(polygons(&[base + half, tip, base - half], width)),
         EndMarker::Triangle => result.push(vec![base + half, tip, base - half]),
         EndMarker::Bar => result.extend(polygons(&[tip + half, tip - half], width)),
+        EndMarker::Dot => {
+            let diameter = (width * 3.2).max(8.).min(length * 0.6);
+            result.extend(polygons(&[tip], diameter));
+        }
     }
 }
 
@@ -462,7 +466,7 @@ fn curve_points(shape: &super::Shape) -> std::borrow::Cow<'_, [Point<Pixels>]> {
 }
 
 pub(super) fn paths(shape: &super::Shape, offset: Point<Pixels>) -> Vec<Path<Pixels>> {
-    if shape.geometry_fill() {
+    if shape.geometry_fill_mode() == super::GeometryFill::Solid {
         return super::geometry::filled_path(shape, offset)
             .into_iter()
             .collect();
@@ -527,10 +531,21 @@ pub(super) fn coverage(
     h: u32,
     origin: Point<Pixels>,
     scale: f32,
+    paint_pixel: impl FnMut(usize, f32),
+) {
+    coverage_polygons(shape_geometry(shape), w, h, origin, scale, paint_pixel);
+}
+
+pub(super) fn coverage_polygons(
+    logical_polygons: Vec<Vec<Point<Pixels>>>,
+    w: u32,
+    h: u32,
+    origin: Point<Pixels>,
+    scale: f32,
     mut paint_pixel: impl FnMut(usize, f32),
 ) {
     // Build in logical units before scaling so the minimum head size scales too.
-    let polygons = shape_geometry(shape)
+    let polygons = logical_polygons
         .into_iter()
         .map(|polygon| {
             polygon
@@ -1159,5 +1174,66 @@ mod tests {
             );
             assert_eq!(paths(&shape, point(px(0.), px(0.))).len(), 2);
         }
+    }
+
+    #[test]
+    fn curved_filled_arrow_does_not_fill_across_its_concave_chord() {
+        let shape = super::super::Shape {
+            kind: super::super::ShapeKind::Arrow,
+            number: None,
+            text: None,
+            text_style: Default::default(),
+            bounds: gpui_kit::Bounds::default(),
+            // U-shaped bend: start (20, 40), end (180, 40), apex at (100, 130).
+            points: vec![
+                point(px(20.), px(40.)),
+                point(px(180.), px(40.)),
+                point(px(100.), px(130.)),
+            ],
+            parameters: crate::annotation::ShapeParameters::Stroke {
+                ends: Default::default(),
+                width: 8.,
+                style: super::super::LineStyle::Solid,
+                arrow: super::super::ArrowStyle::Filled,
+            },
+            color: 0xff0000ff,
+        };
+        let mut pixels = vec![255; 200 * 160 * 4];
+        rasterize(&shape, &mut pixels, 200, 160, point(px(0.), px(0.)), 1.);
+        // Apex on the curve is inked, while the hollow chord interior at (100, 70) stays white.
+        let apex = (130 * 200 + 100) * 4;
+        let hollow = (70 * 200 + 100) * 4;
+        assert_eq!(&pixels[apex..apex + 4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[hollow..hollow + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn dot_end_markers_paint_round_caps_at_both_ends() {
+        let shape = super::super::Shape {
+            kind: super::super::ShapeKind::Line,
+            number: None,
+            text: None,
+            text_style: Default::default(),
+            bounds: gpui_kit::Bounds::default(),
+            points: vec![point(px(20.), px(40.)), point(px(80.), px(40.))],
+            parameters: crate::annotation::ShapeParameters::Stroke {
+                ends: super::super::LineEnds {
+                    start: super::super::EndMarker::Dot,
+                    end: super::super::EndMarker::Dot,
+                    square_caps: false,
+                    sharp_joins: false,
+                },
+                width: 2.,
+                style: super::super::LineStyle::Solid,
+                arrow: super::super::ArrowStyle::default(),
+            },
+            color: 0xff0000ff,
+        };
+        let mut pixels = vec![255; 100 * 80 * 4];
+        rasterize(&shape, &mut pixels, 100, 80, point(px(0.), px(0.)), 1.);
+        // A 2px shaft alone cannot reach y=37 (3px above centerline), while the 8px dot marker does.
+        assert_eq!(&pixels[(37 * 100 + 20) * 4..][..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[(37 * 100 + 80) * 4..][..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[(37 * 100 + 50) * 4..][..4], &[255, 255, 255, 255]);
     }
 }

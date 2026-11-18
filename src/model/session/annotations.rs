@@ -80,6 +80,54 @@ impl ScreenshotSession {
         });
     }
 
+    /// Duplicate every selected mark within the active crop as one undo step.
+    pub(crate) fn duplicate_selected_annotations(&mut self) -> bool {
+        if self.blocked || !self.selection.is_selected() {
+            return false;
+        }
+        self.cancel_annotation_gesture();
+        let Some(area) = self.selection.bounds() else {
+            return false;
+        };
+        self.finish_nudge();
+        self.annotations.duplicate_selected(area)
+    }
+
+    /// Reorder every selected mark in the layer stack as one undo step.
+    pub(crate) fn reorder_selected_annotations(
+        &mut self,
+        order: crate::annotation::LayerOrder,
+    ) -> bool {
+        if self.blocked || !self.selection.is_selected() {
+            return false;
+        }
+        self.cancel_annotation_gesture();
+        self.finish_nudge();
+        self.annotations.reorder_selected(order)
+    }
+
+    /// Pop the most recently confirmed polyline vertex on Backspace.
+    pub(crate) fn pop_polyline_vertex(&mut self) -> bool {
+        if self.blocked || !self.selection.is_selected() {
+            return false;
+        }
+        self.annotations.pop_polyline_vertex()
+    }
+
+    /// Double-clicking the bend handle of a selected curved Line/Arrow
+    /// straightens it back to 2 endpoints as one undo step.
+    pub(crate) fn straighten_at_double_click(&mut self, name: &str, local: Point<Pixels>) -> bool {
+        if self.blocked
+            || !self.annotations.parks_click_select()
+            || self.selection.bounds().is_none()
+        {
+            return false;
+        }
+        let p = local + self.screen(name).bounds().origin;
+        self.finish_nudge();
+        self.annotations.straighten_curved_handle(p)
+    }
+
     /// Live badge editing is allowed while ordinary canvas gestures are blocked.
     /// The editor retains the original value for a single commit or cancellation.
     pub(crate) fn preview_number_edit(&mut self, ix: usize, value: u32) {
@@ -252,7 +300,7 @@ impl ScreenshotSession {
                     // is still selected
                     self.annotations.toggle_index(ix);
                 }
-                self.pending_click = Some((ix, p, shift));
+                self.pending_click = Some((ix, p, shift, alt));
                 return;
             }
             if self.annotations.enabled() {
@@ -312,6 +360,16 @@ impl ScreenshotSession {
     }
 
     pub(crate) fn pointer_move(&mut self, name: &str, local: Point<Pixels>, square: bool) -> bool {
+        self.pointer_move_with(name, local, square, false)
+    }
+
+    pub(crate) fn pointer_move_with(
+        &mut self,
+        name: &str,
+        local: Point<Pixels>,
+        square: bool,
+        alt: bool,
+    ) -> bool {
         if self.blocked {
             return false;
         }
@@ -367,16 +425,17 @@ impl ScreenshotSession {
                         );
                         return true;
                     }
-                    self.annotations.place_handle(
+                    self.annotations.place_handle_with(
                         drag.ix,
                         drag.anchor,
                         &drag.before,
                         clamped_p,
                         selection,
+                        square,
                     );
                     return true;
                 }
-                if let Some((ix, press, shift)) = self.pending_click {
+                if let Some((ix, press, shift, press_alt)) = self.pending_click {
                     let dx = f32::from(p.x - press.x);
                     let dy = f32::from(p.y - press.y);
                     if dx * dx + dy * dy <= CLICK_SLOP * CLICK_SLOP {
@@ -393,21 +452,36 @@ impl ScreenshotSession {
                         }
                         self.annotations.select_index(ix);
                     }
-                    // dragging a shape with a live selection moves the
-                    // WHOLE selection — one snapshot per member, primary
-                    // last (`selected_indices` order)
-                    let before: Vec<(usize, crate::annotation::Shape)> = self
-                        .annotations
-                        .selected_indices()
-                        .iter()
-                        .filter_map(|ix| self.annotations.shape(*ix).map(|s| (*ix, s.clone())))
-                        .collect();
-                    if !before.is_empty() {
-                        self.moving = Some(MoveDrag { before, press });
+                    if (press_alt || alt) && !shift {
+                        if let Some((cloned, before)) = self.annotations.begin_clone_drag() {
+                            self.moving = Some(MoveDrag {
+                                before,
+                                press,
+                                cloned: Some(cloned),
+                            });
+                        }
+                    } else {
+                        // dragging a shape with a live selection moves the
+                        // WHOLE selection — one snapshot per member, primary
+                        // last (`selected_indices` order)
+                        let before: Vec<(usize, crate::annotation::Shape)> = self
+                            .annotations
+                            .selected_indices()
+                            .iter()
+                            .filter_map(|ix| self.annotations.shape(*ix).map(|s| (*ix, s.clone())))
+                            .collect();
+                        if !before.is_empty() {
+                            self.moving = Some(MoveDrag {
+                                before,
+                                press,
+                                cloned: None,
+                            });
+                        }
                     }
                 }
                 if let Some(drag) = &self.moving {
-                    if let [(ix, before)] = drag.before.as_slice()
+                    if drag.cloned.is_none()
+                        && let [(ix, before)] = drag.before.as_slice()
                         && before.kind == crate::annotation::ShapeKind::Magnifier
                         && !before.bounds.contains(&drag.press)
                         && let Some(bounds) = before
@@ -430,7 +504,7 @@ impl ScreenshotSession {
                     return true;
                 }
                 if self.annotations.enabled() {
-                    return self.annotations.drag_to(p, selection, square);
+                    return self.annotations.drag_to_with(p, selection, square, alt);
                 }
             }
             false
@@ -446,13 +520,23 @@ impl ScreenshotSession {
     }
 
     pub(crate) fn pointer_up(&mut self, name: &str, local: Point<Pixels>, square: bool) {
+        self.pointer_up_with(name, local, square, false);
+    }
+
+    pub(crate) fn pointer_up_with(
+        &mut self,
+        name: &str,
+        local: Point<Pixels>,
+        square: bool,
+        alt: bool,
+    ) {
         if self.blocked {
             return;
         }
         self.pointer_global = Some(self.to_global(name, local));
         if self.marquee.is_some() {
             // track the final position before resolving the rectangle
-            self.pointer_move(name, local, square);
+            self.pointer_move_with(name, local, square, alt);
             let Some(marquee) = self.marquee.take() else {
                 return;
             };
@@ -480,7 +564,7 @@ impl ScreenshotSession {
             return;
         }
         if self.moving.is_some() || self.handle_drag.is_some() || self.pending_click.is_some() {
-            self.pointer_move(name, local, square);
+            self.pointer_move_with(name, local, square, alt);
         }
         if self.annotations.enabled()
             || self.moving.is_some()
@@ -489,15 +573,19 @@ impl ScreenshotSession {
         {
             // a press-release without drag = click-select (a Shift+press
             // already toggled on the way down)
-            if let Some((ix, _, shift)) = self.pending_click.take() {
+            if let Some((ix, _, shift, _)) = self.pending_click.take() {
                 if !shift {
                     self.annotations.select_index(ix);
                 }
                 return;
             }
-            // release of a move drag: one Edit/EditMany when it moved
+            // release of a move drag: one Edit/EditMany or AddMany (for Alt-clone)
             if let Some(drag) = self.moving.take() {
-                self.annotations.commit_moves(&drag.before);
+                if let Some(cloned) = drag.cloned {
+                    self.annotations.commit_clone_drag(cloned);
+                } else {
+                    self.annotations.commit_moves(&drag.before);
+                }
                 return;
             }
             // release of a handle drag: one Edit entry when it changed
@@ -506,13 +594,13 @@ impl ScreenshotSession {
                 return;
             }
             if self.annotations.enabled() {
-                self.pointer_move(name, local, square);
+                self.pointer_move_with(name, local, square, alt);
                 self.annotations.end();
                 return;
             }
         }
         if self.selection.is_editing() {
-            self.pointer_move(name, local, square);
+            self.pointer_move_with(name, local, square, alt);
             self.selection.end_edit();
             self.follow_selection_host();
             self.press = None;
@@ -586,10 +674,14 @@ impl ScreenshotSession {
             return true;
         }
         // Escape interrupts an in-flight edit drag (move or handle):
-        // restore the snapshot
+        // restore the snapshot or drop uncommitted Alt-drag clones
         if let Some(drag) = self.moving.take() {
-            self.annotations
-                .place_shapes(&drag.before, point(px(0.), px(0.)));
+            if let Some(cloned) = drag.cloned {
+                self.annotations.cancel_clone_drag(cloned);
+            } else {
+                self.annotations
+                    .place_shapes(&drag.before, point(px(0.), px(0.)));
+            }
             return true;
         }
         if let Some(drag) = self.handle_drag.take() {
@@ -740,11 +832,15 @@ impl ScreenshotSession {
         (!self.annotations.is_selected(ix)).then_some(ix)
     }
 
-    pub(crate) fn annotation_hover_bounds(&self, name: &str) -> Option<Bounds<Pixels>> {
+    pub(crate) fn annotation_hover_bounds(&self, name: &str) -> Option<[Point<Pixels>; 4]> {
         let ix = self.hovered_annotation()?;
-        let mut bounds = self.annotations.shape(ix)?.selection_box();
-        bounds.origin -= self.screen(name).bounds().origin;
-        Some(bounds)
+        let origin = self.screen(name).bounds().origin;
+        Some(
+            self.annotations
+                .shape(ix)?
+                .frame_corners()
+                .map(|p| p - origin),
+        )
     }
 
     /// The live loupe target, window-local for `name`'s output. None

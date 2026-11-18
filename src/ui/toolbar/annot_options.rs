@@ -155,29 +155,32 @@ pub(super) fn annot_options(
             settings_focus,
             |a, kind| a.set_filter_effect(kind),
         ));
-        let brush = matches!(
-            annotations.filter_area(),
-            crate::annotation::FilterArea::Brush { .. }
-        );
+        let area_kind = annotations.filter_area_kind();
+        let brush = area_kind == crate::annotation::FilterAreaKind::Brush;
         options = options.child(icon_choice_menu(
             "filter-area",
             "toolbar.region_shape",
-            brush,
+            area_kind,
             &[
                 (
-                    false,
+                    crate::annotation::FilterAreaKind::Rectangle,
                     "toolbar.filter_rectangle",
                     OptionIcon::BuiltIn(IconName::Square),
                 ),
                 (
-                    true,
+                    crate::annotation::FilterAreaKind::Ellipse,
+                    "toolbar.filter_ellipse",
+                    OptionIcon::BuiltIn(IconName::Circle),
+                ),
+                (
+                    crate::annotation::FilterAreaKind::Brush,
                     "toolbar.filter_brush",
                     OptionIcon::BuiltIn(IconName::Pencil),
                 ),
             ],
             session,
             settings_focus,
-            |a, brush| a.set_filter_area(brush),
+            |a, area_kind| a.set_filter_area_kind(area_kind),
         ));
         if brush {
             options = options.child(icon_choice_menu(
@@ -238,28 +241,11 @@ pub(super) fn annot_options(
     }
 
     if matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)) {
-        let active = annotations.geometry_fill();
-        let fill_session = session.clone();
-        options = options.child(
-            control(
-                "geometry-fill".into(),
-                crate::i18n::t!("toolbar.geometry_fill").into_owned(),
-                settings_focus.clone(),
-                move |_, cx| {
-                    fill_session.update(cx, |s, cx| {
-                        s.edit_annotations(|a| a.set_geometry_fill(!active));
-                        cx.notify();
-                    });
-                },
-            )
-            .selected(active)
-            .child(
-                svg()
-                    .data(b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'><rect x='3' y='3' width='12' height='12' rx='1'/></svg>")
-                    .size(px(18.))
-                    .text_color(rgba(theme::c().toolbar_text)),
-            ),
-        );
+        options = options.child(super::line_options::geometry_fill_menu(
+            annotations.geometry_fill_mode(),
+            session,
+            settings_focus,
+        ));
     }
     if edit_kind == Some(ShapeKind::Highlighter) {
         options = options.child(super::line_options::highlighter_menus(
@@ -417,7 +403,7 @@ pub(super) fn annot_options(
         return options;
     }
     options = options.child(separator()).child(div().flex_1());
-    let active_ix = annotations.color_index();
+    let active_ix = annotations.active_swatch_index();
     for (ix, color) in crate::model::settings::current()
         .annotation_colors()
         .iter()
@@ -425,7 +411,7 @@ pub(super) fn annot_options(
         .enumerate()
     {
         let name = crate::model::settings::PALETTE_NAMES[ix];
-        if ix == active_ix
+        if active_ix == Some(ix)
             && let Some(picker) = &swatch_picker
         {
             // The SELECTED swatch becomes the inline color

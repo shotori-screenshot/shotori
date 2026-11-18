@@ -172,14 +172,11 @@ impl Annotations {
 
     pub(crate) fn set_lens_connector(&mut self, value: LensConnector) {
         self.lens.connector = value;
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Magnifier(lens) = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Magnifier(lens) = &mut shape.parameters {
                 lens.connector = value;
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 
     pub(crate) fn set_lens_option(&mut self, option: LensOption, enabled: bool) {
@@ -190,14 +187,11 @@ impl Annotations {
             LensOption::Shadow => lens.shadow = enabled,
         };
         apply(&mut self.lens);
-        self.end_size_drag();
-        if let Some(ix) = self.selected_index() {
-            let before = self.shapes[ix].clone();
-            if let ShapeParameters::Magnifier(lens) = &mut self.shapes[ix].parameters {
+        self.edit_selected(|shape| {
+            if let ShapeParameters::Magnifier(lens) = &mut shape.parameters {
                 apply(lens);
             }
-            self.commit_move(ix, before);
-        }
+        });
     }
 }
 
@@ -294,7 +288,7 @@ pub(super) fn rasterize(
             );
             dot.parameters = ShapeParameters::Geometry {
                 width: 0.,
-                fill: true,
+                fill: crate::annotation::GeometryFill::Solid,
                 radius: 0.,
                 transform: Default::default(),
                 style: super::LineStyle::Solid,
@@ -655,7 +649,7 @@ mod tests {
         ink.kind = ShapeKind::Rectangle;
         ink.parameters = ShapeParameters::Geometry {
             width: 2.,
-            fill: true,
+            fill: crate::annotation::GeometryFill::Solid,
             radius: 0.,
             transform: Default::default(),
             style: super::super::LineStyle::Solid,
@@ -701,7 +695,7 @@ mod tests {
         ink.bounds.origin += point(px(40.), px(0.));
         ink.parameters = ShapeParameters::Geometry {
             width: 2.,
-            fill: true,
+            fill: crate::annotation::GeometryFill::Solid,
             radius: 0.,
             transform: Default::default(),
             style: super::super::LineStyle::Solid,
