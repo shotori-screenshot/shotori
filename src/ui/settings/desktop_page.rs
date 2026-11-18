@@ -302,6 +302,7 @@ impl SettingsWindow {
     /// Live miniature preview of a floating pin window reflecting border,
     /// shadow halo, and initial opacity in real time.
     fn pin_preview_row(&self, p: &PinSettings, cx: &App) -> Div {
+        let s = super::palette::surfaces(cx);
         let palette = theme::c();
         let opacity = (f32::from(p.opacity) / 100.).clamp(0.2, 1.0);
         let shadows = if p.shadow {
@@ -330,6 +331,7 @@ impl SettingsWindow {
             .gap_1p5()
             .px_3()
             .py_1p5()
+            .rounded(px(6.))
             .bg(rgba(palette.toolbar_bg))
             .text_xs()
             .text_color(rgba(palette.toolbar_text))
@@ -344,11 +346,11 @@ impl SettingsWindow {
             .items_center()
             .justify_center()
             .px_5()
-            .py_2p5()
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().background)
+            .py_3()
+            .rounded(px(11.))
+            .bg(s.well_bg)
             .border_1()
-            .border_color(cx.theme().border.opacity(0.6))
+            .border_color(s.hairline)
             .child(
                 mini_pin
                     .child(
@@ -376,6 +378,7 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let s = super::palette::surfaces(cx);
         let n = self.settings.notify();
         let p = self.settings.pin();
         let notify_off = !n.enabled;
@@ -399,10 +402,42 @@ impl SettingsWindow {
             )
             .disabled(notify_off);
 
+        let primary = cx.theme().primary;
+        let on_primary = cx.theme().primary_foreground;
+        let ring = cx.theme().ring;
+        let unselected_bg = s.well_bg;
+        let selected_bg = s.selected_card_bg;
+        let hairline = s.hairline;
         let event_chip =
             |id: &'static str, label_key: &'static str, active: bool, toggle: fn(&mut Settings)| {
                 let entity = cx.entity();
                 let label = crate::i18n::t!(label_key).to_string();
+                let badge = if active {
+                    div()
+                        .size_3p5()
+                        .rounded_full()
+                        .bg(primary)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Check)
+                                .size(px(9.))
+                                .text_color(on_primary),
+                        )
+                } else {
+                    div()
+                        .size_3p5()
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::Minus)
+                                .size_3()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                };
                 Button::new(id)
                     .accessibility_label(label.clone())
                     .disabled(notify_off)
@@ -410,37 +445,18 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .px_2p5()
+                    .px_3()
                     .h_7()
-                    .rounded(cx.theme().radius)
+                    .rounded_full()
                     .border_1()
-                    .border_color(if active {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(if active {
-                        cx.theme().accent
-                    } else {
-                        cx.theme().background
-                    })
+                    .border_color(if active { primary } else { hairline })
+                    .bg(if active { selected_bg } else { unselected_bg })
                     .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(cx.theme().foreground)
-                    .hover(|s| s.border_color(cx.theme().primary))
-                    .focus_visible(|s| s.border_color(cx.theme().ring))
-                    .child(
-                        Icon::new(if active {
-                            IconName::Check
-                        } else {
-                            IconName::Minus
-                        })
-                        .size_3()
-                        .text_color(if active {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().muted_foreground
-                        }),
-                    )
+                    .hover(move |st| st.border_color(primary))
+                    .focus_visible(move |st| st.border_color(ring))
+                    .child(badge)
                     .child(label)
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| {
@@ -553,7 +569,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(page_header(

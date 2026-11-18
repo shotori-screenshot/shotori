@@ -48,7 +48,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{SelectEvent, SelectState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, Root, TITLE_BAR_HEIGHT, TitleBar};
+use gpui_kit::component::{ActiveTheme, Icon, Root, TitleBar};
 use gpui_kit::*;
 
 use crate::model::settings::{OcrModel, Settings, ToolbarItem};
@@ -82,7 +82,7 @@ const WINDOW_H: f32 = 780.;
 /// Reading measure. Rows stretch with the window; nothing that has to be
 /// READ (prose, paths, a label plus its explanation) goes past this.
 const CONTENT_MAX: f32 = 60.;
-const SIDEBAR_W: f32 = 14.5;
+const SIDEBAR_W: f32 = 15.25;
 /// One page of the settings window. The sidebar switches `section`;
 /// each page owns the state it needs on [`SettingsWindow`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -654,13 +654,14 @@ impl SettingsWindow {
 
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = palette::surfaces(cx);
         div()
             .id("settings-root")
             .relative()
             .size_full()
             .flex()
-            .flex_col()
-            .bg(cx.theme().background)
+            .flex_row()
+            .bg(s.canvas_bg)
             .text_color(cx.theme().foreground)
             .track_focus(&self.focus)
             .key_context("ShotoriSettings")
@@ -715,27 +716,18 @@ impl Render for SettingsWindow {
                 this.search.focus_handle(cx).focus(window, cx);
                 cx.notify();
             }))
-            .child(self.header(window, cx))
+            .child(self.sidebar(window, cx))
             .child(
-                // Navigation column and the page share the height below
-                // the header; min_h_0 lets the page scroll in a short
-                // window instead of overflowing the column. Save errors
-                // remain visible above the page while its form scrolls.
                 div()
                     .flex()
+                    .flex_col()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
-                    .items_stretch()
-                    .child(self.sidebar(window, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .children(self.save_error(cx))
-                            .child(self.page(window, cx)),
-                    ),
+                    .bg(s.canvas_bg)
+                    .child(self.content_header(window, cx))
+                    .children(self.save_error(cx))
+                    .child(self.page(window, cx)),
             )
             .children(resize_handles(window))
     }

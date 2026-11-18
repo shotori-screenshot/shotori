@@ -3,6 +3,7 @@ use super::*;
 
 impl SettingsWindow {
     pub(super) fn theme_choices(&self, window: &Window, cx: &Context<Self>) -> Div {
+        let s = super::palette::surfaces(cx);
         let mut choices = vec![
             (
                 "shotori-light",
@@ -31,7 +32,9 @@ impl SettingsWindow {
         } else {
             3
         };
-        let mut grid = div().grid().grid_cols(columns).gap_2().w_full();
+        let primary = cx.theme().primary;
+        let ring = cx.theme().ring;
+        let mut grid = div().grid().grid_cols(columns).gap_2p5().w_full();
         for (base, label) in choices {
             let selected = configured == base;
             let file = ThemeFile {
@@ -39,31 +42,47 @@ impl SettingsWindow {
                 ..Default::default()
             };
             let (palette, _) = file.palette();
-            // Sample foreground and accent on their real surface. Hover and
-            // selected fills are interaction states, not standalone swatches.
+            // Miniature 2-pane window swatch: left sidebar strip + main body
+            // with sample glyph and capsule accent pill.
             let preview = div()
                 .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .size_10()
+                .w(px(46.))
+                .h(px(36.))
                 .flex_shrink_0()
-                .rounded(cx.theme().radius)
+                .overflow_hidden()
+                .rounded(px(8.))
                 .border_1()
                 .border_color(rgba(palette.toolbar_border))
-                .bg(rgba(palette.toolbar_bg))
                 .child(
-                    Icon::new(IconName::Type)
-                        .size_4()
-                        .text_color(rgba(palette.toolbar_text)),
+                    div()
+                        .w(px(12.))
+                        .h_full()
+                        .bg(rgba(palette.chip_bg | 0xFF))
+                        .border_r_1()
+                        .border_color(rgba(theme::alpha(palette.toolbar_border, 0x66))),
                 )
                 .child(
                     div()
-                        .w_5()
-                        .h(rems(0.125))
-                        .rounded_full()
-                        .bg(rgba(palette.accent)),
+                        .flex_1()
+                        .h_full()
+                        .bg(rgba(palette.toolbar_bg))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::Type)
+                                .size_3p5()
+                                .text_color(rgba(palette.toolbar_text)),
+                        )
+                        .child(
+                            div()
+                                .w_4()
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(rgba(palette.accent)),
+                        ),
                 );
             let swatch_dots = div().flex().items_center().gap_1().children(
                 [palette.accent, palette.chip_bg, palette.toolbar_selected]
@@ -77,6 +96,7 @@ impl SettingsWindow {
                             .border_color(rgba(palette.toolbar_border))
                     }),
             );
+            let hover_bg = s.selected_card_bg;
             grid = grid.child(
                 Button::new(SharedString::from(format!("theme-choice-{base}")))
                     .accessibility_label(label.clone())
@@ -85,28 +105,30 @@ impl SettingsWindow {
                     .items_center()
                     .justify_start()
                     .h_auto()
-                    .min_h(rems(4.))
+                    .min_h(rems(4.25))
                     .gap_3()
-                    .p_2p5()
+                    .p_3()
                     .w_full()
                     .min_w_0()
                     .border_1()
-                    .border_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .rounded(cx.theme().radius)
+                    .border_color(if selected { primary } else { s.hairline })
+                    .rounded(px(12.))
                     .bg(if selected {
-                        cx.theme().accent
+                        s.selected_card_bg
                     } else {
-                        cx.theme().group_box
+                        s.card_bg
+                    })
+                    .shadow(if selected {
+                        s.selected_shadow.clone()
+                    } else {
+                        s.card_shadow.clone()
                     })
                     .text_color(cx.theme().foreground)
                     .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
                     .line_height(relative(1.35))
-                    .hover(|s| s.border_color(cx.theme().primary))
-                    .focus_visible(|s| s.border_color(cx.theme().ring).bg(cx.theme().accent))
+                    .hover(move |st| st.border_color(primary).bg(hover_bg))
+                    .focus_visible(move |st| st.border_color(ring).bg(hover_bg))
                     .child(preview)
                     .child(
                         div()
@@ -119,16 +141,7 @@ impl SettingsWindow {
                             .child(div().w_full().truncate().child(label))
                             .child(swatch_dots),
                     )
-                    .child(
-                        div()
-                            .size_4()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_shrink_0()
-                            .text_color(cx.theme().primary)
-                            .children(selected.then(|| Icon::new(IconName::Check).size_3p5())),
-                    )
+                    .child(super::style_cards::selection_circle(selected, &s, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.appearance_set_base(base, window, cx);
                     })),

@@ -19,6 +19,8 @@ impl SettingsWindow {
     /// About: the identity card — hero logo, name and version, what
     /// this is, where it lives, who helped, and copyable support info.
     pub(super) fn page_about(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
         let entity = cx.entity();
         let link = |label: String, icon: IconName, url: String, entity: &gpui_kit::Entity<Self>| {
             let entity = entity.clone();
@@ -27,16 +29,18 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .px_3()
+                .px_3p5()
                 .h_8()
-                .rounded(cx.theme().radius)
-                .text_sm()
+                .rounded_full()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground)
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().group_box)
-                .hover(|s| s.bg(cx.theme().secondary_hover))
-                .focus_visible(|s| s.border_color(cx.theme().ring))
+                .border_color(s.hairline)
+                .bg(s.card_bg)
+                .shadow(s.card_shadow.clone())
+                .hover(move |st| st.bg(pill_hover))
+                .focus_visible(|st| st.border_color(cx.theme().ring))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |_, _| {
                         open_external(url.clone());
@@ -62,16 +66,18 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .gap_1p5()
-                .px_3()
+                .px_3p5()
                 .h_8()
-                .rounded(cx.theme().radius)
-                .text_sm()
+                .rounded_full()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground)
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().group_box)
-                .hover(|s| s.bg(cx.theme().secondary_hover))
-                .focus_visible(|s| s.border_color(cx.theme().ring))
+                .border_color(s.hairline)
+                .bg(s.card_bg)
+                .shadow(s.card_shadow.clone())
+                .hover(move |st| st.bg(pill_hover))
+                .focus_visible(|st| st.border_color(cx.theme().ring))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
                         this.copy_diagnostic_report(true, cx);
@@ -98,15 +104,20 @@ impl SettingsWindow {
         let tech_item = |icon: IconName, text: String| {
             div()
                 .flex()
-                .items_start()
-                .gap_2p5()
+                .items_center()
+                .gap_3()
                 .w_full()
                 .child(
                     div()
-                        .pt_0p5()
+                        .size_7()
+                        .rounded(px(8.))
+                        .bg(cx.theme().primary.opacity(0.12))
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .flex_shrink_0()
                         .text_color(cx.theme().primary)
-                        .child(Icon::new(icon).size_4()),
+                        .child(Icon::new(icon).size_3p5()),
                 )
                 .child(
                     div()
@@ -124,10 +135,19 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .items_center()
-            .gap_3()
+            .gap_3p5()
             .w_full()
             .max_w(rems(34.))
-            .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size_24())
+            .child(
+                div()
+                    .p_3()
+                    .rounded(px(24.))
+                    .bg(s.card_bg)
+                    .border_1()
+                    .border_color(s.hairline)
+                    .shadow(s.card_shadow.clone())
+                    .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size_24()),
+            )
             .child(
                 div()
                     .flex()
@@ -136,20 +156,21 @@ impl SettingsWindow {
                     .child(
                         div()
                             .text_2xl()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::BOLD)
                             .text_color(cx.theme().foreground)
                             .child("Shotori"),
                     )
                     .child(
                         div()
-                            .px_2()
+                            .px_2p5()
                             .py_0p5()
                             .rounded_full()
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().group_box)
+                            .border_color(cx.theme().primary.opacity(0.35))
+                            .bg(s.selected_card_bg)
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(cx.theme().primary)
                             .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                     ),
             )
@@ -188,19 +209,20 @@ impl SettingsWindow {
                 div()
                     .w_full()
                     .mt_2()
-                    .p_4()
+                    .p(px(18.))
                     .flex()
                     .flex_col()
-                    .gap_2p5()
-                    .rounded(cx.theme().radius)
+                    .gap_3()
+                    .rounded(px(14.))
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().group_box)
+                    .border_color(s.hairline)
+                    .bg(s.card_bg)
+                    .shadow(s.card_shadow)
                     .child(
                         div()
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
+                            .text_color(cx.theme().muted_foreground)
                             .child(crate::i18n::t!("settings.about.tech_title").to_string()),
                     )
                     .child(tech_item(

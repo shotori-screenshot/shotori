@@ -268,22 +268,32 @@ impl SettingsWindow {
         );
 
         // Session diagnostics
+        let s = super::palette::surfaces(cx);
         let (wayland, desktop, snap_backend) = session_diagnostics_summary();
         let unset_label = crate::i18n::t!("settings.advanced.diag.unset").to_string();
         let diag_badge = |text: String, active: bool| {
             div()
-                .px_2p5()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_3()
                 .py_1()
-                .rounded(cx.theme().radius)
+                .rounded_full()
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
+                .border_color(s.hairline)
+                .bg(s.well_bg)
                 .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(if active {
                     cx.theme().foreground
                 } else {
                     cx.theme().muted_foreground
                 })
+                .child(div().size_1p5().rounded_full().bg(if active {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground.opacity(0.6)
+                }))
                 .child(text)
         };
         let copy_diag_label = if self.advanced_page.copied_diag_flash {
@@ -319,11 +329,12 @@ impl SettingsWindow {
                     Button::new("advanced-factory-reset-confirm")
                         .accessibility_label(confirm_lbl.clone())
                         .h_8()
-                        .px_3()
-                        .rounded(cx.theme().radius)
+                        .px_3p5()
+                        .rounded_full()
                         .bg(cx.theme().danger)
                         .text_color(cx.theme().danger_foreground)
-                        .text_sm()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
                         .on_click(move |_, window, cx| {
                             entity_confirm
                                 .update(cx, |this, cx| this.factory_reset_all(window, cx));
@@ -508,27 +519,18 @@ impl SettingsWindow {
             ));
         }
         actions = actions.child(
-            Button::new(SharedString::from(name))
-                .accessibility_label(format!(
-                    "{}: {name}",
-                    crate::i18n::t!("settings.general.file.open")
-                ))
-                .flex()
-                .items_center()
-                .h_8()
-                .px_3()
-                .flex_shrink_0()
-                .rounded(cx.theme().radius)
-                .text_sm()
-                .text_color(cx.theme().foreground)
-                .border_1()
-                .border_color(cx.theme().border)
-                .hover(|s| s.bg(cx.theme().secondary_hover))
-                .focus_visible(|s| s.border_color(cx.theme().ring))
-                .child(crate::i18n::t!("settings.general.file.open").to_string())
-                .on_click(move |_, _, cx| {
+            super::layout::action_button(
+                cx,
+                name,
+                crate::i18n::t!("settings.general.file.open").to_string(),
+                move |_, _, cx| {
                     entity.update(cx, |this, cx| this.open_config(file, cx));
-                }),
+                },
+            )
+            .accessibility_label(format!(
+                "{}: {name}",
+                crate::i18n::t!("settings.general.file.open")
+            )),
         );
 
         super::layout::compact_row(cx, name, None, Some(desc), actions).into_any_element()

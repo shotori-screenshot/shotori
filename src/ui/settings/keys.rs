@@ -125,7 +125,7 @@ impl SettingsWindow {
         let mut body = super::layout::content_column().child(
             div()
                 .flex()
-                .items_start()
+                .items_center()
                 .justify_between()
                 .gap_4()
                 .child(page_header(
@@ -177,15 +177,20 @@ impl SettingsWindow {
         }
 
         // Built-in fixed canvas shortcuts & gestures reference card.
+        let s = super::palette::surfaces(cx);
         let static_cap = |text: String| {
             div()
-                .px_2p5()
+                .px_3()
                 .py_1()
-                .rounded(cx.theme().radius)
+                .rounded(px(9.))
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
+                .border_color(s.hairline)
+                .bg(s.well_bg)
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(1.), s.hairline).blur_radius(px(0.)),
+                ])
                 .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
                 .child(text)
         };
@@ -265,6 +270,8 @@ impl SettingsWindow {
                 .to_string(),
             )
         };
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
         let cap_id = SharedString::from(format!("key-cap-{id}"));
         let mut cap = Button::new(cap_id)
             .accessibility_label(key_label(id))
@@ -278,25 +285,30 @@ impl SettingsWindow {
             .py_1()
             .when(recording, |cap| cap.min_w(rems(11.)))
             .px_3()
-            .rounded(cx.theme().radius)
-            .text_sm()
+            .rounded(px(9.))
+            .text_xs()
             .font_weight(FontWeight::MEDIUM)
             .border_1()
             .border_color(if recording {
-                cx.theme().ring
+                cx.theme().primary
             } else if customized {
                 cx.theme().primary.opacity(0.65)
             } else {
-                cx.theme().border
+                s.hairline
             })
             .bg(if recording {
-                cx.theme().accent
+                s.selected_card_bg
             } else {
-                cx.theme().background
+                s.well_bg
+            })
+            .shadow(if recording {
+                s.selected_shadow
+            } else {
+                vec![BoxShadow::new(px(0.), px(1.), s.hairline).blur_radius(px(0.))]
             })
             .text_color(cx.theme().foreground)
-            .focus_visible(|s| s.border_color(cx.theme().ring))
-            .hover(|s| s.bg(cx.theme().secondary_hover));
+            .focus_visible(|st| st.border_color(cx.theme().ring))
+            .hover(move |st| st.bg(pill_hover));
         if recording {
             cap = cap.track_focus(&self.record_focus);
         }
@@ -313,18 +325,16 @@ impl SettingsWindow {
         let reset_single = (customized && !recording).then(|| {
             let entity = entity.clone();
             let id_owned = id.to_owned();
+            let fg = cx.theme().foreground;
             let reset_tip = crate::i18n::t!("settings.keys_page.reset_single").to_string();
             Button::new(SharedString::from(format!("key-reset-{id}")))
                 .accessibility_label(format!("{reset_tip}: {}", key_label(id)))
                 .size_7()
                 .flex_shrink_0()
-                .rounded(cx.theme().radius)
+                .rounded_full()
                 .text_color(cx.theme().muted_foreground)
-                .hover(|s| {
-                    s.bg(cx.theme().secondary_hover)
-                        .text_color(cx.theme().foreground)
-                })
-                .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+                .hover(move |st| st.bg(pill_hover).text_color(fg))
+                .focus_visible(|st| st.border_1().border_color(cx.theme().ring))
                 .tooltip(move |_, cx| cx.new(|_| Tooltip::new(reset_tip.clone())).into())
                 .child(Icon::new(IconName::Undo2).size_3p5())
                 .on_click(move |_, _, cx| {

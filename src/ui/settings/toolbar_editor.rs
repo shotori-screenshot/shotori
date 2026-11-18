@@ -6,7 +6,8 @@
 //! model (`Settings::apply_drop`); everything here is presentation
 //! and gesture plumbing around it.
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use crate::model::settings::{Settings, ToolbarCluster, ToolbarItem};
@@ -52,9 +53,9 @@ impl Render for DragGhost {
             .flex()
             .items_center()
             .gap(px(6.))
-            .px(px(8.))
-            .h(px(28.))
-            .rounded(px(6.))
+            .px_3()
+            .h(px(30.))
+            .rounded_full()
             .bg(rgba(t.toolbar_bg))
             .border_1()
             .border_color(rgba(t.accent))
@@ -362,7 +363,7 @@ impl SettingsWindow {
                 }
             })
             .drag_over::<DraggedItem>(|s, _, _, _| s.border_color(rgba(theme::c().accent)))
-            .rounded(px(6.))
+            .rounded(px(10.))
             .border_1()
             .border_color(cx.theme().transparent)
             .child(chips)
@@ -370,22 +371,27 @@ impl SettingsWindow {
 
     fn palette_chip(&self, item: ToolbarItem, cx: &Context<Self>) -> Button {
         let entity = cx.entity();
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
         let payload = DraggedItem { item, from: None };
         Button::new(SharedString::from(format!("pv-chip-{}", item.id())))
             .accessibility_label(item_name(item))
             .flex()
             .items_center()
             .gap_2()
-            .h_9()
-            .px_3()
+            .h_8()
+            .px_3p5()
             .w(rems(10.5))
             .max_w_full()
-            .rounded(cx.theme().radius)
-            .text_sm()
-            .bg(cx.theme().secondary)
+            .rounded_full()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .border_1()
+            .border_color(s.hairline)
+            .bg(s.well_bg)
             .text_color(cx.theme().foreground)
-            .hover(|s| s.bg(cx.theme().secondary_hover))
-            .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+            .hover(move |st| st.bg(pill_hover))
+            .focus_visible(|st| st.border_color(cx.theme().ring))
             .on_drag(payload, ghost_constructor)
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| {
@@ -393,7 +399,7 @@ impl SettingsWindow {
                 });
             })
             .child(icon_visual(item))
-            .child(item_name(item))
+            .child(div().flex_1().min_w_0().truncate().child(item_name(item)))
     }
 
     /// Attach the toolbar drag-and-drop page-level fallback and rail scrub
@@ -425,47 +431,59 @@ impl SettingsWindow {
 
     /// The interactive drag-and-drop toolbar layout card (preview bar + palette).
     pub(super) fn toolbar_editor_card(&self, cx: &mut Context<Self>) -> Div {
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
         let is_factory_row = self.settings.row() == crate::model::settings::DEFAULT_ROW;
         let reset_label = crate::i18n::t!("settings.toolbar_page.reset").to_string();
         let reset_btn = Button::new("toolbar-layout-reset")
             .accessibility_label(reset_label.clone())
             .disabled(is_factory_row)
-            .styles(|s| s.disabled(|d| d.opacity(0.45)))
-            .px_3()
+            .styles(|st| st.disabled(|d| d.opacity(0.45)))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_3p5()
             .h_8()
             .flex_shrink_0()
-            .rounded(cx.theme().radius)
+            .rounded_full()
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .text_sm()
+            .border_color(s.hairline)
+            .bg(s.pill_bg)
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
             .text_color(cx.theme().foreground)
-            .hover(|s| s.bg(cx.theme().secondary_hover))
-            .focus_visible(|s| s.border_color(cx.theme().ring))
+            .hover(move |st| st.bg(pill_hover))
+            .focus_visible(|st| st.border_color(cx.theme().ring))
             .on_click({
                 let entity = cx.entity();
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| this.reset_toolbar(cx));
                 }
             })
+            .child(
+                Icon::new(IconName::Undo2)
+                    .size_3p5()
+                    .text_color(cx.theme().muted_foreground),
+            )
             .child(reset_label);
 
         div()
             .flex()
             .flex_col()
             .gap_4()
-            .p_4()
+            .p(px(18.))
             .w_full()
             .min_w_0()
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
-            .bg(cx.theme().group_box)
+            .border_color(s.hairline)
+            .rounded(px(14.))
+            .bg(s.card_bg)
+            .shadow(s.card_shadow)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap_2p5()
                     .child(
                         div()
                             .flex()
@@ -479,16 +497,26 @@ impl SettingsWindow {
                             ))
                             .child(reset_btn),
                     )
-                    .child(self.preview_strip(cx)),
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .p_3()
+                            .rounded(px(11.))
+                            .bg(s.well_bg)
+                            .border_1()
+                            .border_color(s.hairline)
+                            .child(self.preview_strip(cx)),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .pt_3()
+                    .gap_2p5()
+                    .pt_3p5()
                     .border_t_1()
-                    .border_color(cx.theme().border.opacity(0.6))
+                    .border_color(s.divider)
                     .child(group_heading(
                         cx,
                         "settings.toolbar_page.group.palette",

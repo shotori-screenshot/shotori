@@ -125,6 +125,7 @@ impl SettingsWindow {
             cx,
         );
 
+        let s = super::palette::surfaces(cx);
         let override_banner = custom_active.then(|| {
             let entity = cx.entity();
             div()
@@ -132,12 +133,12 @@ impl SettingsWindow {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .px_3p5()
+                .px_4()
                 .py_2p5()
-                .rounded(cx.theme().radius)
+                .rounded(px(12.))
                 .border_1()
-                .border_color(cx.theme().primary.opacity(0.5))
-                .bg(cx.theme().accent)
+                .border_color(cx.theme().primary.opacity(0.4))
+                .bg(s.selected_card_bg)
                 .text_xs()
                 .text_color(cx.theme().foreground)
                 .child(crate::i18n::t!("settings.ocr_page.custom.overridden").to_string())
@@ -179,7 +180,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(page_header(
@@ -257,12 +258,15 @@ impl SettingsWindow {
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
+        let primary = cx.theme().primary;
         let columns = if window.viewport_size().width < window.rem_size() * 38. {
             1
         } else {
             2
         };
-        let mut grid = div().grid().grid_cols(columns).gap_2p5().w_full();
+        let mut grid = div().grid().grid_cols(columns).gap_3().w_full();
         for model in OcrModel::ALL {
             let selected = !disabled && model == selected_model;
             let ready = crate::ocr::set_ready(model, upright);
@@ -304,7 +308,7 @@ impl SettingsWindow {
                             .justify_between()
                             .gap_2()
                             .child(
-                                div().text_xs().text_color(cx.theme().primary).child(
+                                div().text_xs().text_color(primary).child(
                                     crate::i18n::t!(
                                         "settings.ocr_page.downloading_status",
                                         idx = idx,
@@ -319,14 +323,16 @@ impl SettingsWindow {
                                     "ocr-cancel-dl-{}",
                                     model.id()
                                 )))
-                                .px_2()
+                                .px_2p5()
                                 .h_6()
-                                .rounded(cx.theme().radius)
+                                .rounded_full()
                                 .border_1()
-                                .border_color(cx.theme().border)
+                                .border_color(s.hairline)
+                                .bg(s.pill_bg)
                                 .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(cx.theme().foreground)
-                                .hover(|s| s.bg(cx.theme().secondary_hover))
+                                .hover(move |st| st.bg(pill_hover))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
@@ -343,24 +349,22 @@ impl SettingsWindow {
                             .w_full()
                             .h_1()
                             .rounded_full()
-                            .bg(cx.theme().border)
+                            .bg(s.well_bg)
                             .overflow_hidden()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(pct))
-                                    .rounded_full()
-                                    .bg(cx.theme().primary),
-                            ),
+                            .child(div().h_full().w(relative(pct)).rounded_full().bg(primary)),
                     )
             } else if ready {
                 div()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .pt_0p5()
+                    .px_2p5()
+                    .py_0p5()
+                    .rounded_full()
+                    .bg(primary.opacity(0.12))
                     .text_xs()
-                    .text_color(cx.theme().primary)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(primary)
                     .child(Icon::new(IconName::Check).size_3())
                     .child(crate::i18n::t!("settings.ocr_page.ready").to_string())
             } else {
@@ -385,15 +389,16 @@ impl SettingsWindow {
                         Button::new(SharedString::from(format!("ocr-dl-{}", model.id())))
                             .accessibility_label(format!("{dl_label}: {}", model.label()))
                             .disabled(disabled)
-                            .px_2p5()
+                            .px_3()
                             .h_6()
-                            .rounded(cx.theme().radius)
+                            .rounded_full()
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().background)
+                            .border_color(s.hairline)
+                            .bg(s.pill_bg)
                             .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().foreground)
-                            .hover(|s| s.bg(cx.theme().secondary_hover))
+                            .hover(move |st| st.bg(pill_hover))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
@@ -423,22 +428,13 @@ impl SettingsWindow {
                         .child(
                             div()
                                 .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(cx.theme().foreground)
                                 .min_w_0()
                                 .truncate()
                                 .child(model.label()),
                         )
-                        .child(
-                            div()
-                                .size_4()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .flex_shrink_0()
-                                .text_color(cx.theme().primary)
-                                .children(selected.then(|| Icon::new(IconName::Check).size_3p5())),
-                        ),
+                        .child(super::style_cards::selection_circle(selected, &s, cx)),
                 )
                 .child(
                     div()
@@ -455,28 +451,30 @@ impl SettingsWindow {
                 }));
 
             let entity = cx.entity();
+            let hover_bg = s.selected_card_bg;
             let mut card = div()
                 .id(SharedString::from(format!("ocr-model-card-{}", model.id())))
                 .flex()
                 .flex_col()
-                .p_3()
+                .p(px(14.))
                 .w_full()
                 .min_w_0()
-                .rounded(cx.theme().radius)
+                .rounded(px(13.))
                 .border_1()
-                .border_color(if selected {
-                    cx.theme().primary
-                } else {
-                    cx.theme().border
-                })
+                .border_color(if selected { primary } else { s.hairline })
                 .bg(if selected {
-                    cx.theme().accent
+                    s.selected_card_bg
                 } else {
-                    cx.theme().group_box
+                    s.card_bg
+                })
+                .shadow(if selected {
+                    s.selected_shadow.clone()
+                } else {
+                    s.card_shadow.clone()
                 })
                 .when(!disabled, |d| {
                     d.cursor_pointer()
-                        .hover(|s| s.border_color(cx.theme().primary))
+                        .hover(move |st| st.border_color(primary).bg(hover_bg))
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |this, cx| this.select_ocr_model(model, cx));
                         })
@@ -505,11 +503,12 @@ impl SettingsWindow {
                         Button::new("ocr-cache-clear-confirm")
                             .accessibility_label(confirm_lbl.clone())
                             .h_8()
-                            .px_3()
-                            .rounded(cx.theme().radius)
+                            .px_3p5()
+                            .rounded_full()
                             .bg(cx.theme().danger)
                             .text_color(cx.theme().danger_foreground)
-                            .text_sm()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
                             .on_click(move |_, _, cx| {
                                 entity_confirm.update(cx, |this, cx| {
                                     this.ocr_page.confirm_clear_cache = false;
@@ -762,23 +761,7 @@ fn ghost_button(
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
-    let theme = cx.theme();
-    Button::new(SharedString::from(id))
-        .accessibility_label(label.clone())
-        .flex()
-        .items_center()
-        .h_8()
-        .px_3()
-        .flex_shrink_0()
-        .rounded(theme.radius)
-        .text_sm()
-        .text_color(theme.foreground)
-        .border_1()
-        .border_color(theme.border)
-        .hover(|s| s.bg(theme.secondary_hover))
-        .focus_visible(|s| s.border_color(theme.ring))
-        .child(label)
-        .on_click(on_click)
+    super::layout::action_button(cx, id, label, on_click)
 }
 
 fn custom_config_path(

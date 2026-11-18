@@ -328,7 +328,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(page_header(

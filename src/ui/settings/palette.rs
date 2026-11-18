@@ -1,9 +1,135 @@
 //! Project the resolved capture palette onto semantic editor colors.
 //! Contrast adjustments keep custom colors readable on their active surfaces.
-use gpui_kit::component::{Theme, ThemeColor, ThemeMode};
-use gpui_kit::{App, Hsla, Rgba, rgba};
+use gpui_kit::component::{ActiveTheme, Theme, ThemeColor, ThemeMode};
+use gpui_kit::{App, BoxShadow, Hsla, Rgba, px, rgba};
 
 use crate::ui::theme;
+
+/// Layered 3-tier tonal surfaces, hairlines, and elevation tokens for
+/// `SettingsWindow`, derived from the active palette without changing
+/// component base tokens.
+pub(super) struct SettingsSurfaces {
+    pub(super) sidebar_bg: Hsla,
+    pub(super) sidebar_text: Hsla,
+    pub(super) canvas_bg: Hsla,
+    pub(super) card_bg: Hsla,
+    pub(super) selected_card_bg: Hsla,
+    pub(super) well_bg: Hsla,
+    pub(super) hairline: Hsla,
+    pub(super) divider: Hsla,
+    pub(super) pill_bg: Hsla,
+    pub(super) pill_hover: Hsla,
+    pub(super) card_shadow: Vec<BoxShadow>,
+    pub(super) selected_shadow: Vec<BoxShadow>,
+}
+
+pub(super) fn surfaces(cx: &App) -> SettingsSurfaces {
+    let t = cx.theme();
+    let dark = t.is_dark();
+    let white = color(0xFFFF_FFFF);
+    let black = color(0x0000_00FF);
+
+    let canvas_bg = if dark {
+        t.background.blend(black.opacity(0.18))
+    } else if relative_luminance(t.background) > 0.92 {
+        t.background.blend(black.opacity(0.032))
+    } else {
+        t.background
+    };
+
+    let card_bg = if dark {
+        t.background.blend(white.opacity(0.045))
+    } else {
+        t.group_box.blend(white.opacity(0.82))
+    };
+
+    let sidebar_bg = if dark {
+        if (relative_luminance(t.sidebar) - relative_luminance(canvas_bg)).abs() < 0.012
+            || relative_luminance(t.sidebar) >= relative_luminance(canvas_bg)
+        {
+            let darker = canvas_bg.blend(black.opacity(0.22));
+            if (relative_luminance(darker) - relative_luminance(canvas_bg)).abs() < 0.004 {
+                canvas_bg.blend(white.opacity(0.025))
+            } else {
+                darker
+            }
+        } else {
+            t.sidebar
+        }
+    } else {
+        // Avoid dark sidebars (e.g. high-contrast compat) or identical sidebar/canvas tones.
+        let sidebar_ok = relative_luminance(t.sidebar) > 0.60
+            && (relative_luminance(t.sidebar) - relative_luminance(canvas_bg)).abs() >= 0.015
+            && relative_luminance(t.sidebar) < relative_luminance(card_bg);
+        if sidebar_ok {
+            t.sidebar
+        } else {
+            canvas_bg.blend(black.opacity(0.036))
+        }
+    };
+
+    let sidebar_text = if contrast(t.sidebar_foreground, sidebar_bg) >= 4.5 {
+        t.sidebar_foreground
+    } else {
+        readable_color(t.foreground, sidebar_bg, 4.5)
+    };
+
+    let well_bg = if dark {
+        canvas_bg.blend(black.opacity(0.20))
+    } else {
+        canvas_bg.blend(black.opacity(0.035))
+    };
+
+    let hairline = t.border.opacity(if dark { 0.46 } else { 0.62 });
+    let divider = t.border.opacity(if dark { 0.28 } else { 0.38 });
+    let pill_bg = if dark {
+        t.background.blend(white.opacity(0.06))
+    } else {
+        card_bg
+    };
+    let pill_hover = if dark {
+        t.secondary_hover.blend(white.opacity(0.05))
+    } else {
+        t.secondary_hover
+    };
+
+    let card_shadow = if dark {
+        vec![
+            BoxShadow::new(px(0.), px(1.), rgba(0x0000_0024).into()).blur_radius(px(3.)),
+            BoxShadow::new(px(0.), px(4.), rgba(0x0000_0028).into()).blur_radius(px(12.)),
+        ]
+    } else {
+        vec![
+            BoxShadow::new(px(0.), px(1.), rgba(0x0000_000A).into()).blur_radius(px(2.)),
+            BoxShadow::new(px(0.), px(4.), rgba(0x0000_000D).into()).blur_radius(px(12.)),
+        ]
+    };
+
+    let selected_card_bg = card_bg.blend(t.primary.opacity(if dark { 0.14 } else { 0.10 }));
+    let selected_shadow = vec![
+        BoxShadow::new(
+            px(0.),
+            px(2.),
+            t.primary.opacity(if dark { 0.22 } else { 0.16 }),
+        )
+        .blur_radius(px(10.)),
+    ];
+
+    SettingsSurfaces {
+        sidebar_bg,
+        sidebar_text,
+        canvas_bg,
+        card_bg,
+        selected_card_bg,
+        well_bg,
+        hairline,
+        divider,
+        pill_bg,
+        pill_hover,
+        card_shadow,
+        selected_shadow,
+    }
+}
 
 pub(super) fn apply(cx: &mut App, palette: &theme::Theme) {
     let mode = if palette.is_dark() {
@@ -15,7 +141,11 @@ pub(super) fn apply(cx: &mut App, palette: &theme::Theme) {
         Theme::change(mode, None, cx);
     }
     let colors = editor_colors(palette);
-    Theme::update(cx, |theme| theme.colors = colors);
+    Theme::update(cx, |theme| {
+        theme.colors = colors;
+        theme.radius = px(10.);
+        theme.radius_lg = px(14.);
+    });
     Theme::sync_base(cx);
 }
 
@@ -134,20 +264,21 @@ fn readable_color(mut candidate: Hsla, background: Hsla, min_contrast: f32) -> H
     target
 }
 
-fn contrast(a: Hsla, b: Hsla) -> f32 {
-    let luminance = |color: Hsla| {
-        let color: Rgba = color.into();
-        let linear = |channel: f32| {
-            if channel <= 0.04045 {
-                channel / 12.92
-            } else {
-                ((channel + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+fn relative_luminance(color: Hsla) -> f32 {
+    let color: Rgba = color.into();
+    let linear = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
     };
-    let a = luminance(a);
-    let b = luminance(b);
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+}
+
+fn contrast(a: Hsla, b: Hsla) -> f32 {
+    let a = relative_luminance(a);
+    let b = relative_luminance(b);
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
@@ -233,6 +364,45 @@ mod tests {
                     } else {
                         ThemeMode::Light
                     }
+                );
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn settings_surfaces_preserve_three_tier_hierarchy_and_legibility(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            let palettes = load::BUILT_INS
+                .iter()
+                .map(|preset| load::built_in(preset.name).unwrap())
+                .chain([
+                    CaptureTheme::light(),
+                    CaptureTheme::dark(),
+                    CaptureTheme::capsule_light(),
+                    CaptureTheme::capsule_dark(),
+                ]);
+            for palette in palettes {
+                apply(cx, &palette);
+                let s = super::surfaces(cx);
+                let active = Theme::global(cx);
+                assert_ne!(s.sidebar_bg, s.canvas_bg);
+                assert_ne!(s.canvas_bg, s.card_bg);
+                assert!(
+                    contrast(active.foreground, s.card_bg) >= 6.5,
+                    "foreground contrast on card_bg too low: {}",
+                    contrast(active.foreground, s.card_bg)
+                );
+                assert!(
+                    contrast(active.muted_foreground, s.card_bg) >= 4.2,
+                    "muted contrast on card_bg too low: {}",
+                    contrast(active.muted_foreground, s.card_bg)
+                );
+                assert!(
+                    contrast(s.sidebar_text, s.sidebar_bg) >= 4.5,
+                    "sidebar text contrast too low: {}",
+                    contrast(s.sidebar_text, s.sidebar_bg)
                 );
             }
         });

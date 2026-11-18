@@ -84,7 +84,11 @@ pub(super) fn settings_switch(
                             SwitchThumb::new(checked)
                                 .size_full()
                                 .rounded_full()
-                                .bg(cx.theme().switch_thumb),
+                                .bg(cx.theme().switch_thumb)
+                                .shadow(vec![
+                                    BoxShadow::new(px(0.), px(1.), rgba(0x0000_0030).into())
+                                        .blur_radius(px(2.)),
+                                ]),
                         ),
                 )
                 .when(focused, |track| {
@@ -111,9 +115,10 @@ pub(super) fn content_column() -> Div {
         .w_full()
         .max_w(rems(CONTENT_MAX))
         .mx_auto()
-        .px_6()
-        .py_5()
-        .gap_5()
+        .px_8()
+        .pt_1()
+        .pb_8()
+        .gap_6()
 }
 
 /// Page title with an optional inline [`super::help_tooltip`] mark.
@@ -132,8 +137,8 @@ pub(super) fn page_header(
         .gap_2()
         .child(
             div()
-                .text_xl()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_2xl()
+                .font_weight(FontWeight::BOLD)
                 .text_color(cx.theme().foreground)
                 .child(crate::i18n::t!(title_key).to_string()),
         )
@@ -153,12 +158,12 @@ fn group_heading(cx: &App, caption: Option<&str>, action: Option<AnyElement>) ->
             .justify_between()
             .gap_3()
             .w_full()
-            .px_0p5()
+            .px_1()
             .children(caption.map(|text| {
                 div()
-                    .text_sm()
+                    .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground)
+                    .text_color(cx.theme().muted_foreground)
                     .child(text.to_owned())
             }))
             .children(action),
@@ -199,25 +204,23 @@ pub(super) fn card_group_with_action(
     action: Option<AnyElement>,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> Div {
-    let divider_color = cx.theme().border.opacity(0.6);
+    let s = super::palette::surfaces(cx);
     let mut body = div()
         .flex()
         .flex_col()
         .w_full()
         .min_w_0()
-        .rounded(cx.theme().radius)
+        .rounded(px(14.))
         .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().group_box);
+        .border_color(s.hairline)
+        .bg(s.card_bg)
+        .shadow(s.card_shadow)
+        .overflow_hidden();
     for (ix, row) in rows.into_iter().enumerate() {
-        body = body.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .px_4()
-                .when(ix > 0, |d| d.border_t_1().border_color(divider_color))
-                .child(row),
-        );
+        if ix > 0 {
+            body = body.child(div().mx(px(18.)).h(px(1.)).bg(s.divider));
+        }
+        body = body.child(div().w_full().min_w_0().px(px(18.)).py_0p5().child(row));
     }
     div()
         .flex()
@@ -277,6 +280,7 @@ fn form_row(
         .items_center()
         .gap_1()
         .text_sm()
+        .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().foreground)
         .child(label.into());
     if let Some(key) = hint {
@@ -304,7 +308,7 @@ fn form_row(
         .flex_wrap()
         .items_center()
         .gap_4()
-        .py_2p5()
+        .py_3()
         .w_full()
         .min_w_0()
         .child(label)
@@ -350,6 +354,7 @@ pub(super) fn slider_control_disabled(
     cx: &App,
 ) -> Div {
     use gpui_kit::component::slider::Slider as ThemedSlider;
+    let s = super::palette::surfaces(cx);
     div()
         .flex()
         .items_center()
@@ -366,9 +371,16 @@ pub(super) fn slider_control_disabled(
         )
         .child(
             div()
-                .min_w(rems(3.5))
-                .text_right()
-                .text_sm()
+                .min_w(rems(3.75))
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(s.well_bg)
+                .border_1()
+                .border_color(s.hairline)
+                .text_center()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
                 .child(readout),
         )
@@ -393,7 +405,7 @@ pub(super) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Bordered compact action button used across file/folder/cache rows.
+/// Bordered capsule action pill used across file/folder/cache rows.
 pub(super) fn action_button(
     cx: &App,
     id: &'static str,
@@ -401,21 +413,24 @@ pub(super) fn action_button(
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui_kit::base::Button {
     let theme = cx.theme();
+    let s = super::palette::surfaces(cx);
     gpui_kit::base::Button::new(SharedString::from(id))
         .accessibility_label(label.clone())
-        .styles(|s| s.disabled(|d| d.opacity(0.45)))
+        .styles(|st| st.disabled(|d| d.opacity(0.45)))
         .flex()
         .items_center()
         .h_8()
-        .px_3()
+        .px_3p5()
         .flex_shrink_0()
-        .rounded(theme.radius)
-        .text_sm()
+        .rounded_full()
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
         .text_color(theme.foreground)
+        .bg(s.pill_bg)
         .border_1()
-        .border_color(theme.border)
-        .hover(|s| s.bg(theme.secondary_hover))
-        .focus_visible(|s| s.border_color(theme.ring))
+        .border_color(s.hairline)
+        .hover(move |st| st.bg(s.pill_hover))
+        .focus_visible(|st| st.border_color(theme.ring))
         .child(label)
         .on_click(on_click)
 }

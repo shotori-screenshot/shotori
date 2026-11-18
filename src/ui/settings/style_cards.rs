@@ -6,6 +6,7 @@ use crate::model::settings::UiStyle;
 
 impl SettingsWindow {
     pub(super) fn style_choices(&self, window: &Window, cx: &Context<Self>) -> Div {
+        let s = super::palette::surfaces(cx);
         let active_style = self.settings.ui_style();
         let columns = if window.viewport_size().width < window.rem_size() * 40. {
             1
@@ -18,74 +19,96 @@ impl SettingsWindow {
             let title = crate::i18n::t!(style.title_key()).to_string();
             let body = crate::i18n::t!(style.body_key()).to_string();
             let diagram = style_diagram(style);
-            grid = grid.child(
-                Button::new(SharedString::from(format!("style-choice-{}", style.id())))
-                    .debug_selector(move || format!("style-choice-{}", style.id()))
-                    .accessibility_label(title.clone())
-                    .selected(selected)
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .h_auto()
-                    .min_h(rems(5.25))
-                    .gap_3()
-                    .p_3()
-                    .w_full()
-                    .min_w_0()
-                    .border_1()
-                    .border_color(if selected {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .rounded(cx.theme().radius)
-                    .bg(if selected {
-                        cx.theme().accent
-                    } else {
-                        cx.theme().group_box
-                    })
-                    .text_color(cx.theme().foreground)
-                    .hover(|s| s.border_color(cx.theme().primary))
-                    .focus_visible(|s| s.border_color(cx.theme().ring).bg(cx.theme().accent))
-                    .child(diagram)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .line_height(relative(1.35))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(body),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .size_3p5()
-                            .flex_shrink_0()
-                            .children(selected.then(|| Icon::new(IconName::Check).size_3p5())),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.settings.ui_style() != style {
-                            this.settings.set_ui_style(style);
-                            this.persist(cx);
-                        }
-                    })),
-            );
+            let primary = cx.theme().primary;
+            let ring = cx.theme().ring;
+            let hover_bg = s.selected_card_bg;
+            let card = Button::new(SharedString::from(format!("style-choice-{}", style.id())))
+                .debug_selector(move || format!("style-choice-{}", style.id()))
+                .accessibility_label(title.clone())
+                .selected(selected)
+                .flex()
+                .items_center()
+                .justify_start()
+                .h_auto()
+                .min_h(rems(5.5))
+                .gap(px(14.))
+                .p(px(14.))
+                .w_full()
+                .min_w_0()
+                .border_1()
+                .border_color(if selected { primary } else { s.hairline })
+                .rounded(px(14.))
+                .bg(if selected {
+                    s.selected_card_bg
+                } else {
+                    s.card_bg
+                })
+                .shadow(if selected {
+                    s.selected_shadow.clone()
+                } else {
+                    s.card_shadow.clone()
+                })
+                .text_color(cx.theme().foreground)
+                .hover(move |st| st.border_color(primary).bg(hover_bg))
+                .focus_visible(move |st| st.border_color(ring).bg(hover_bg))
+                .child(diagram)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .line_height(relative(1.4))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(body),
+                        ),
+                )
+                .child(selection_circle(selected, &s, cx))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.settings.ui_style() != style {
+                        this.settings.set_ui_style(style);
+                        this.persist(cx);
+                    }
+                }));
+            grid = grid.child(card);
         }
         grid
     }
+}
+
+pub(super) fn selection_circle(
+    selected: bool,
+    s: &super::palette::SettingsSurfaces,
+    cx: &App,
+) -> Div {
+    let mut circle = div()
+        .size_5()
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center();
+    if selected {
+        circle = circle.bg(cx.theme().primary).child(
+            Icon::new(IconName::Check)
+                .size_3()
+                .text_color(cx.theme().primary_foreground),
+        );
+    } else {
+        circle = circle.border_1().border_color(s.hairline).bg(s.well_bg);
+    }
+    circle
 }
 
 /// Miniature schematic of each UI style's selection frame, handle, badge and
@@ -100,7 +123,7 @@ fn style_diagram(style: UiStyle) -> Div {
         .h(px(66.))
         .flex_shrink_0()
         .overflow_hidden()
-        .rounded(px(8.))
+        .rounded(px(10.))
         .bg(rgba(well_bg))
         .border_1()
         .border_color(rgba(theme::alpha(t.toolbar_border, 0x88)));

@@ -44,6 +44,8 @@ impl SettingsWindow {
             })
         };
 
+        let s = super::palette::surfaces(cx);
+
         let has_color_overrides = ColorKey::ALL
             .iter()
             .any(|key| self.appearance.file.color(*key).is_some());
@@ -51,10 +53,13 @@ impl SettingsWindow {
         let palette_badge = has_color_overrides.then(|| {
             div()
                 .text_xs()
-                .px_2()
+                .font_weight(FontWeight::MEDIUM)
+                .px_2p5()
                 .py_0p5()
-                .rounded(cx.theme().radius)
-                .bg(cx.theme().accent)
+                .rounded_full()
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.35))
+                .bg(s.selected_card_bg)
                 .text_color(cx.theme().primary)
                 .child(crate::i18n::t!("settings.appearance.custom_active").to_string())
                 .into_any_element()
@@ -101,12 +106,13 @@ impl SettingsWindow {
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .px_3()
-                .py_2()
-                .rounded(cx.theme().radius)
+                .px_4()
+                .py_2p5()
+                .rounded(px(14.))
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().group_box)
+                .border_color(s.hairline)
+                .bg(s.card_bg)
+                .shadow(s.card_shadow)
                 .child(
                     Button::new("custom-colors")
                         .flex_1()
@@ -118,7 +124,7 @@ impl SettingsWindow {
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(cx.theme().foreground)
-                        .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+                        .focus_visible(|st| st.border_1().border_color(cx.theme().ring))
                         .child(
                             Icon::new(if self.custom_colors {
                                 IconName::ChevronDown
@@ -235,7 +241,7 @@ impl SettingsWindow {
                             .accessibility_label(format!("{}: {}", hint, key.label()))
                             .size_6()
                             .flex_shrink_0()
-                            .rounded(cx.theme().radius)
+                            .rounded_full()
                             .text_color(cx.theme().muted_foreground)
                             .hover(|s| {
                                 s.bg(cx.theme().secondary_hover)
@@ -266,6 +272,7 @@ impl SettingsWindow {
 /// The kit owns track/thumb geometry, hit-testing and drag feedback.
 fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
     let value = state.read(cx).value().start();
+    let s = super::palette::surfaces(cx);
     div()
         .flex()
         .items_center()
@@ -280,9 +287,16 @@ fn opacity_slider(state: &Entity<SliderState>, cx: &App) -> Div {
         )
         .child(
             div()
-                .min_w(rems(3.5))
-                .text_right()
-                .text_sm()
+                .min_w(rems(3.75))
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(s.well_bg)
+                .border_1()
+                .border_color(s.hairline)
+                .text_center()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("{:.0}%", value * 100.)),
         )

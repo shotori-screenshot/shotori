@@ -423,6 +423,9 @@ impl SettingsWindow {
         cx: &Context<Self>,
         apply: impl Fn(&mut Settings, usize) + Clone + 'static,
     ) -> Div {
+        let s = super::palette::surfaces(cx);
+        let primary = cx.theme().primary;
+        let ring = cx.theme().ring;
         let colors = self.settings.annotation_colors();
         let mut row = div().flex().items_center().gap_1p5();
         for (ix, &color) in colors.iter().enumerate() {
@@ -438,20 +441,30 @@ impl SettingsWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(24.))
+                    .size(px(26.))
+                    .p(px(2.))
                     .rounded_full()
-                    .bg(rgba(color))
                     .border_2()
                     .border_color(if is_selected {
                         cx.theme().foreground
                     } else {
-                        cx.theme().foreground.opacity(0.28)
+                        cx.theme().transparent
                     })
-                    .hover(|s| s.border_color(cx.theme().primary))
-                    .focus_visible(|s| s.border_color(cx.theme().ring))
-                    .children(
-                        is_selected
-                            .then(|| Icon::new(IconName::Check).size_3().text_color(check_color)),
+                    .hover(move |st| st.border_color(primary))
+                    .focus_visible(move |st| st.border_color(ring))
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded_full()
+                            .bg(rgba(color))
+                            .border_1()
+                            .border_color(s.hairline)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .children(is_selected.then(|| {
+                                Icon::new(IconName::Check).size_3().text_color(check_color)
+                            })),
                     )
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| {
@@ -555,20 +568,14 @@ impl SettingsWindow {
         let mut palette_row = div().flex().items_center().gap_1p5();
         for (ix, picker) in self.annotation_page.swatches.iter().enumerate() {
             let label = crate::i18n::t!("settings.annotation.swatch_n", n = ix + 1).to_string();
-            palette_row = palette_row.child(
-                div()
-                    .rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().foreground.opacity(0.22))
-                    .child(ColorPicker::new(picker, label)),
-            );
+            palette_row = palette_row.child(ColorPicker::new(picker, label).capsule_ring(true));
         }
 
         let body = super::layout::content_column()
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(page_header(

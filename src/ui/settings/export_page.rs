@@ -4,14 +4,15 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::Switch;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use crate::model::settings::{
@@ -421,21 +422,33 @@ impl SettingsWindow {
             }
         };
 
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
+
         let token_chip = |id: &'static str, label_key: &'static str, token: &'static str| {
             let entity = cx.entity();
             let label = crate::i18n::t!(label_key).to_string();
             Button::new(id)
                 .accessibility_label(label.clone())
-                .px_2p5()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_3()
                 .h_7()
-                .rounded(cx.theme().radius)
+                .rounded_full()
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
+                .border_color(s.hairline)
+                .bg(s.well_bg)
                 .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().foreground)
-                .hover(|s| s.bg(cx.theme().secondary_hover))
-                .focus_visible(|s| s.border_color(cx.theme().ring))
+                .hover(move |st| st.bg(pill_hover))
+                .focus_visible(|st| st.border_color(cx.theme().ring))
+                .child(
+                    Icon::new(IconName::Plus)
+                        .size_3()
+                        .text_color(cx.theme().muted_foreground),
+                )
                 .child(label)
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
@@ -474,22 +487,22 @@ impl SettingsWindow {
             ));
         if template_customized {
             let entity = cx.entity();
+            let fg = cx.theme().foreground;
             let reset_lbl = crate::i18n::t!("settings.export.token.reset").to_string();
             token_bar = token_bar.child(
                 Button::new("export-token-reset")
                     .accessibility_label(reset_lbl.clone())
-                    .px_2p5()
+                    .px_3()
                     .h_7()
-                    .rounded(cx.theme().radius)
+                    .rounded_full()
                     .border_1()
-                    .border_color(cx.theme().border)
+                    .border_color(s.hairline)
+                    .bg(s.pill_bg)
                     .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
-                    .hover(|s| {
-                        s.bg(cx.theme().secondary_hover)
-                            .text_color(cx.theme().foreground)
-                    })
-                    .focus_visible(|s| s.border_color(cx.theme().ring))
+                    .hover(move |st| st.bg(pill_hover).text_color(fg))
+                    .focus_visible(|st| st.border_color(cx.theme().ring))
                     .child(reset_lbl)
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |this, cx| {
@@ -520,6 +533,7 @@ impl SettingsWindow {
                             .items_center()
                             .gap_1()
                             .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(cx.theme().foreground)
                             .child(
                                 crate::i18n::t!("settings.export.filename_template.title")
@@ -532,15 +546,15 @@ impl SettingsWindow {
                     )
                     .child(
                         div()
-                            .px_2()
-                            .py_0p5()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().background)
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(s.well_bg)
                             .border_1()
                             .border_color(if template_is_err {
                                 cx.theme().danger
                             } else {
-                                cx.theme().border
+                                s.hairline
                             })
                             .text_xs()
                             .text_color(if template_is_err {
@@ -610,7 +624,7 @@ impl SettingsWindow {
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(page_header(
