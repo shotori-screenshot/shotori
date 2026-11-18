@@ -15,7 +15,7 @@ and focus:
 | Floating `Pin` | `ui/pin.rs` | `wlr-layer-shell` (`Layer::Top`, on-demand keyboard) | **NEVER** | **REQUIRED** (shared scene across registered `PinOutput`s) | Neon focus halo renders **only** on the focused pin while its surface holds focus; ghost pins exclude their body from `set_input_region` |
 | `PinHistoryWindow` | `ui/pin_history.rs` | Regular XDG toplevel (`940×640` default, client `TitleBar`) | **YES** (`gpui_kit::component::Root`) | Compositor-placed | Launched via `shotori pin --history` / detached child so `Root` never touches layer-shell pin surfaces |
 | Long-capture `ScrollBar` | `ui/scroll_bar.rs` | `wlr-layer-shell` (region frame + preview deck) | **NEVER** | **REQUIRED** | If no side strip fits on the capture output, docks preview on `other_output_than(display)` so `wlr-screencopy` never captures its own HUD |
-| `SettingsWindow` | `ui/settings.rs` | Regular XDG toplevel (`1120×780` default, unified sidebar + client drag headers) | **YES** (`gpui_kit::component::Root`) | Compositor-placed | `Root` provides `WindowState` for managed tooltips on the collapsed sidebar; harmless on a regular toplevel |
+| `SettingsWindow` | `ui/settings.rs` | Regular XDG toplevel (`1120×780` default, floating-island sidebar + client drag headers) | **YES** (`gpui_kit::component::Root`) | Compositor-placed | `Root` provides `WindowState` for managed tooltips on the collapsed sidebar; harmless on a regular toplevel |
 
 ### Startup & Teardown Rules
 

@@ -115,10 +115,10 @@ pub(super) fn content_column() -> Div {
         .w_full()
         .max_w(rems(CONTENT_MAX))
         .mx_auto()
-        .px_8()
-        .pt_1()
+        .px_7()
+        .pt_0()
         .pb_8()
-        .gap_6()
+        .gap_5()
 }
 
 /// Page title with an optional inline [`super::help_tooltip`] mark.
@@ -210,7 +210,7 @@ pub(super) fn card_group_with_action(
         .flex_col()
         .w_full()
         .min_w_0()
-        .rounded(px(14.))
+        .rounded(px(16.))
         .border_1()
         .border_color(s.hairline)
         .bg(s.card_bg)

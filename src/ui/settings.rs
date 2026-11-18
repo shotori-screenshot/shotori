@@ -81,8 +81,8 @@ const WINDOW_W: f32 = 1120.;
 const WINDOW_H: f32 = 780.;
 /// Reading measure. Rows stretch with the window; nothing that has to be
 /// READ (prose, paths, a label plus its explanation) goes past this.
-const CONTENT_MAX: f32 = 60.;
-const SIDEBAR_W: f32 = 15.25;
+const CONTENT_MAX: f32 = 56.;
+const SIDEBAR_W: f32 = 14.5;
 /// One page of the settings window. The sidebar switches `section`;
 /// each page owns the state it needs on [`SettingsWindow`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

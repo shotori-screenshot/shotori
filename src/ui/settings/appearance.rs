@@ -108,7 +108,7 @@ impl SettingsWindow {
                 .gap_3()
                 .px_4()
                 .py_2p5()
-                .rounded(px(14.))
+                .rounded(px(16.))
                 .border_1()
                 .border_color(s.hairline)
                 .bg(s.card_bg)

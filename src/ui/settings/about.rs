@@ -213,7 +213,7 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .rounded(px(14.))
+                    .rounded(px(16.))
                     .border_1()
                     .border_color(s.hairline)
                     .bg(s.card_bg)

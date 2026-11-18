@@ -805,13 +805,17 @@ impl Render for PreviewPanel {
                 .bg(rgba(t.capsule_surface()))
                 .border_1()
                 .border_color(rgba(t.capsule_border()))
-                .shadow(theme::capsule_floating_shadow())
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(2.), rgba(0x00000028).into()).blur_radius(px(2.5)),
+                ])
         } else {
             bar.rounded(px(10.))
                 .bg(rgba(t.toolbar_bg))
                 .border_1()
                 .border_color(rgba(t.toolbar_border))
-                .shadow_md()
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(2.), rgba(0x0000001F).into()).blur_radius(px(2.)),
+                ])
         };
         let bar = bar
             .child(deck_button(

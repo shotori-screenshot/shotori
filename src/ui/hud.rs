@@ -49,15 +49,19 @@ pub(crate) fn selection_backdrop(style: UiStyle, sel: Option<Bounds<Pixels>>) ->
                     ));
                 }
                 UiStyle::Capsule => {
-                    // Dual-contrast capsule crop frame: crisp luminous white border on
-                    // `border`, plus an outward 1px dark shadow hairline so the crop
-                    // edge stays razor-sharp over both white and black wallpapers.
-                    window.paint_quad(outline(border, rgba(0xFFFFFFEB), BorderStyle::default()));
+                    // Dual-contrast capsule crop frame: active theme accent border on
+                    // `border`, plus an outward 1px dark contrast hairline so bright
+                    // accents stay crisp over light wallpapers.
+                    window.paint_quad(outline(
+                        border,
+                        rgba(theme::c().accent),
+                        BorderStyle::default(),
+                    ));
                     let outer = Bounds::new(
                         point(border.origin.x - px(1.), border.origin.y - px(1.)),
                         size(border.size.width + px(2.), border.size.height + px(2.)),
                     );
-                    window.paint_quad(outline(outer, rgba(0x00000059), BorderStyle::default()));
+                    window.paint_quad(outline(outer, rgba(0x00000040), BorderStyle::default()));
                 }
             }
         },
@@ -298,7 +302,7 @@ pub(crate) fn crosshair_guides(
 ) -> impl IntoElement {
     let color = match style {
         UiStyle::Classic => rgba((theme::c().accent & 0xffffff00) | 0xb3),
-        UiStyle::Capsule => rgba(0xFFFFFF85),
+        UiStyle::Capsule => rgba((theme::c().accent & 0xffffff00) | 0x99),
     };
     canvas(
         |_, _, _| (),
@@ -954,6 +958,38 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn capsule_selection_border_tracks_active_theme_accent(cx: &mut gpui_kit::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| BackdropHarness {
+            style: super::UiStyle::Capsule,
+            selection: Some(bounds(15., 21., 60., 50.)),
+        });
+        cx.update(|window, _| window.resize(ws(120., 100.)));
+        cx.simulate_scale_factor_change(1.);
+        let quads = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.painted_quads()
+        });
+        let border = quads
+            .iter()
+            .find(|q| {
+                q.border_widths.top.0 > 0.
+                    && (q.bounds.right().0 - q.bounds.left().0 - 60.).abs() < 1.5
+            })
+            .expect("capsule selection border quad should render");
+        let expected: gpui_kit::Hsla = rgba(super::theme::c().accent).into();
+        let hardcoded_white: gpui_kit::Hsla = rgba(0xFFFFFFEB).into();
+        assert_eq!(border.border_color, expected);
+        assert_ne!(border.border_color, hardcoded_white);
+        for accent in [
+            super::theme::Theme::capsule_dark().accent,
+            super::theme::Theme::capsule_light().accent,
+            super::theme::Theme::catppuccin_mocha().accent,
+        ] {
+            assert_ne!(accent, 0xFFFFFFEB);
         }
     }
 

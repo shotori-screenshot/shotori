@@ -434,7 +434,7 @@ impl SettingsWindow {
                                 .truncate()
                                 .child(model.label()),
                         )
-                        .child(super::style_cards::selection_circle(selected, &s, cx)),
+                        .child(super::style_cards::selection_circle(selected, cx)),
                 )
                 .child(
                     div()
@@ -459,7 +459,7 @@ impl SettingsWindow {
                 .p(px(14.))
                 .w_full()
                 .min_w_0()
-                .rounded(px(13.))
+                .rounded(px(16.))
                 .border_1()
                 .border_color(if selected { primary } else { s.hairline })
                 .bg(if selected {

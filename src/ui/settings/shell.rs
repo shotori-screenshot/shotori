@@ -6,24 +6,9 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 
-const SIDEBAR_COLLAPSED_W: f32 = 64.;
-const SIDEBAR_HEADER_H: f32 = 52.;
-const CONTENT_HEADER_H: f32 = 44.;
-
-/// Signature tint for each settings section's rounded-square icon badge.
-fn section_tint(section: Section, cx: &App) -> Hsla {
-    match section {
-        Section::Appearance => rgba(0x0A84_FFFF).into(),
-        Section::Capture => rgba(0x0284_C7FF).into(),
-        Section::Annotation => rgba(0xD977_06FF).into(),
-        Section::Export => rgba(0x16A3_4AFF).into(),
-        Section::Desktop => rgba(0xE11D_48FF).into(),
-        Section::Keys => rgba(0x9333_EAFF).into(),
-        Section::Ocr => rgba(0x4F46_E5FF).into(),
-        Section::Advanced => rgba(0x6474_8BFF).into(),
-        Section::About => cx.theme().primary,
-    }
-}
+const SIDEBAR_COLLAPSED_W: f32 = 60.;
+const SIDEBAR_HEADER_H: f32 = 48.;
+const CONTENT_HEADER_H: f32 = 40.;
 
 /// Interactive window-move header strip matching client-decorated drag/zoom/menu.
 fn drag_bar(id: &'static str, window: &mut Window, cx: &mut App) -> Stateful<Div> {
@@ -286,7 +271,8 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .justify_end()
-            .px_3p5()
+            .pt_2()
+            .pr_3()
             .children(window_controls(window, s.pill_hover, cx))
     }
 
@@ -300,22 +286,23 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.section == target;
-        let tint = section_tint(target, cx);
         let dark = cx.theme().is_dark();
+        let accent = cx.theme().primary;
         let pill_hover = s.pill_hover;
-        let active_bg = s.card_bg;
-        let active_border = s.hairline;
+        let active_bg = s.selected_card_bg;
+        let active_border = accent.opacity(if dark { 0.28 } else { 0.22 });
+        let inactive_icon = cx.theme().muted_foreground;
         let id = SharedString::from(format!("nav-item-{}", section_id(target)));
 
         if collapsed {
             let tip_label = label.clone();
-            let mut btn = Button::new(id)
+            let btn = Button::new(id)
                 .accessibility_label(label)
-                .size(px(40.))
+                .size(px(38.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(11.))
+                .rounded(px(10.))
                 .border_1()
                 .border_color(if active {
                     active_border
@@ -334,13 +321,10 @@ impl SettingsWindow {
                     this.select_section(target, cx);
                 }))
                 .child(Icon::new(icon).size_4().text_color(if active {
-                    tint
+                    accent
                 } else {
-                    s.sidebar_text.opacity(0.85)
+                    inactive_icon
                 }));
-            if active {
-                btn = btn.shadow(s.card_shadow.clone());
-            }
             return div()
                 .flex()
                 .justify_center()
@@ -349,29 +333,11 @@ impl SettingsWindow {
                 .into_any_element();
         }
 
-        let badge = div()
-            .size(px(24.))
-            .flex_shrink_0()
-            .rounded(px(6.5))
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(if active {
-                tint
-            } else {
-                tint.opacity(if dark { 0.18 } else { 0.13 })
-            })
-            .child(Icon::new(icon).size_3p5().text_color(if active {
-                rgba(0xFFFF_FFFF).into()
-            } else {
-                tint
-            }));
-
-        let mut btn = Button::new(id)
+        Button::new(id)
             .accessibility_label(label.clone())
             .w_full()
             .h(px(36.))
-            .px_2()
+            .px_3()
             .flex()
             .items_center()
             .justify_start()
@@ -404,15 +370,17 @@ impl SettingsWindow {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_section(target, cx);
             }))
-            .child(badge)
-            .child(div().flex_1().min_w_0().truncate().child(label));
-        if active {
-            btn = btn.shadow(s.card_shadow.clone());
-        }
-        btn.into_any_element()
+            .child(
+                Icon::new(icon)
+                    .size_4()
+                    .flex_shrink_0()
+                    .text_color(if active { accent } else { inactive_icon }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .into_any_element()
     }
 
-    pub(super) fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let s = super::palette::surfaces(cx);
         let collapsed = self.sidebar_collapsed || self.compact;
         let query = self.search.read(cx).value().to_lowercase();
@@ -442,7 +410,7 @@ impl SettingsWindow {
                 Button::new("settings-brand-button")
                     .accessibility_label(toggle_label.clone())
                     .size_9()
-                    .rounded(px(10.))
+                    .rounded(px(11.))
                     .hover(move |st| st.bg(pill_hover))
                     .focus_visible(|st| st.border_1().border_color(cx.theme().ring))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
@@ -473,7 +441,7 @@ impl SettingsWindow {
             drag_bar("sidebar-drag-header", window, cx)
                 .h(px(SIDEBAR_HEADER_H))
                 .flex_shrink_0()
-                .px_3()
+                .px_3p5()
                 .flex()
                 .items_center()
                 .justify_between()
@@ -486,7 +454,7 @@ impl SettingsWindow {
                         .min_w_0()
                         .child(
                             img(ImageSource::Render(SIDEBAR_LOGO.clone()))
-                                .size_6()
+                                .size(px(22.))
                                 .flex_shrink_0()
                                 .rounded(px(6.)),
                         )
@@ -495,27 +463,21 @@ impl SettingsWindow {
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(cx.theme().foreground)
-                                .child("Shotori"),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
                                 .truncate()
-                                .child(format!("· {}", crate::i18n::t!("settings.title"))),
+                                .child("Shotori"),
                         ),
                 )
                 .child(brand_toggle)
         };
 
         let search_box = (!collapsed).then(|| {
-            div().px_3().pb_2p5().flex_shrink_0().child(
+            div().px_2p5().pb_2().flex_shrink_0().child(
                 Input::new(&self.search)
                     .small()
                     .cleanable(true)
-                    .rounded_full()
+                    .rounded(px(10.))
                     .bg(s.well_bg)
-                    .border_color(s.hairline)
+                    .border_color(s.divider)
                     .prefix(
                         Icon::new(IconName::Search)
                             .size_3p5()
@@ -565,32 +527,33 @@ impl SettingsWindow {
 
         let footer = div()
             .flex_shrink_0()
-            .px_2p5()
-            .py_2p5()
-            .border_t_1()
-            .border_color(s.divider)
-            .child(about);
+            .flex()
+            .flex_col()
+            .child(div().mx_3().h(px(1.)).bg(s.divider))
+            .child(div().px_2p5().py_2().child(about));
 
-        let mut sidebar = div()
+        let mut island = div()
             .id("settings-navigation")
             .flex()
             .flex_col()
             .h_full()
-            .flex_shrink_0()
+            .rounded(px(18.))
             .bg(s.sidebar_bg)
-            .border_r_1()
+            .border_1()
             .border_color(s.hairline)
+            .shadow(s.card_shadow.clone())
+            .overflow_hidden()
             .child(top_bar)
             .children(search_box)
             .child(nav_list)
             .child(footer);
 
-        sidebar = if collapsed {
-            sidebar.w(px(SIDEBAR_COLLAPSED_W))
+        island = if collapsed {
+            island.w(px(SIDEBAR_COLLAPSED_W))
         } else {
-            sidebar.w(rems(SIDEBAR_W))
+            island.w(rems(SIDEBAR_W))
         };
-        sidebar
+        div().h_full().py_3().pl_3().flex_shrink_0().child(island)
     }
 
     pub(super) fn save_error(&self, cx: &mut Context<Self>) -> Option<Div> {

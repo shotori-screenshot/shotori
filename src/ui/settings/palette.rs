@@ -30,78 +30,69 @@ pub(super) fn surfaces(cx: &App) -> SettingsSurfaces {
     let black = color(0x0000_00FF);
 
     let canvas_bg = if dark {
-        t.background.blend(black.opacity(0.18))
-    } else if relative_luminance(t.background) > 0.92 {
-        t.background.blend(black.opacity(0.032))
+        if relative_luminance(t.background) > 0.012 {
+            t.background.blend(black.opacity(0.30))
+        } else {
+            color(0x0909_0CFF)
+        }
+    } else if relative_luminance(t.background) > 0.88 {
+        t.background.blend(black.opacity(0.052))
     } else {
-        t.background
+        t.background.blend(black.opacity(0.038))
     };
 
     let card_bg = if dark {
-        t.background.blend(white.opacity(0.045))
+        t.background.blend(white.opacity(0.052))
     } else {
-        t.group_box.blend(white.opacity(0.82))
+        t.group_box.blend(white.opacity(0.90))
     };
 
+    // Floating navigation island sits cleanly elevated above `canvas_bg`
+    // rather than sunken into a dark side strip.
     let sidebar_bg = if dark {
-        if (relative_luminance(t.sidebar) - relative_luminance(canvas_bg)).abs() < 0.012
-            || relative_luminance(t.sidebar) >= relative_luminance(canvas_bg)
-        {
-            let darker = canvas_bg.blend(black.opacity(0.22));
-            if (relative_luminance(darker) - relative_luminance(canvas_bg)).abs() < 0.004 {
-                canvas_bg.blend(white.opacity(0.025))
-            } else {
-                darker
-            }
-        } else {
-            t.sidebar
-        }
+        t.background.blend(white.opacity(0.026))
     } else {
-        // Avoid dark sidebars (e.g. high-contrast compat) or identical sidebar/canvas tones.
-        let sidebar_ok = relative_luminance(t.sidebar) > 0.60
-            && (relative_luminance(t.sidebar) - relative_luminance(canvas_bg)).abs() >= 0.015
-            && relative_luminance(t.sidebar) < relative_luminance(card_bg);
-        if sidebar_ok {
-            t.sidebar
-        } else {
-            canvas_bg.blend(black.opacity(0.036))
-        }
+        card_bg.blend(canvas_bg.opacity(0.28))
     };
 
-    let sidebar_text = if contrast(t.sidebar_foreground, sidebar_bg) >= 4.5 {
-        t.sidebar_foreground
+    let sidebar_text = if contrast(t.foreground, sidebar_bg) >= 6.0 {
+        t.foreground
     } else {
-        readable_color(t.foreground, sidebar_bg, 4.5)
+        readable_color(t.foreground, sidebar_bg, 6.0)
     };
 
     let well_bg = if dark {
-        canvas_bg.blend(black.opacity(0.20))
+        card_bg.blend(black.opacity(0.24))
     } else {
-        canvas_bg.blend(black.opacity(0.035))
+        card_bg.blend(black.opacity(0.042))
     };
 
-    let hairline = t.border.opacity(if dark { 0.46 } else { 0.62 });
-    let divider = t.border.opacity(if dark { 0.28 } else { 0.38 });
+    let hairline = t.border.opacity(if dark { 0.42 } else { 0.55 });
+    let divider = t.border.opacity(if dark { 0.24 } else { 0.34 });
     let pill_bg = if dark {
         t.background.blend(white.opacity(0.06))
     } else {
         card_bg
     };
     let pill_hover = if dark {
-        t.secondary_hover.blend(white.opacity(0.05))
+        t.secondary_hover.blend(white.opacity(0.06))
     } else {
         t.secondary_hover
     };
 
     let card_shadow = if dark {
         vec![
-            BoxShadow::new(px(0.), px(1.), rgba(0x0000_0024).into()).blur_radius(px(3.)),
-            BoxShadow::new(px(0.), px(4.), rgba(0x0000_0028).into()).blur_radius(px(12.)),
+            BoxShadow::new(px(0.), px(1.), rgba(0x0000_0028).into()).blur_radius(px(2.)),
+            BoxShadow::new(px(0.), px(4.), rgba(0x0000_0030).into())
+                .blur_radius(px(7.))
+                .spread_radius(px(-1.)),
         ]
     } else {
         vec![
-            BoxShadow::new(px(0.), px(1.), rgba(0x0000_000A).into()).blur_radius(px(2.)),
-            BoxShadow::new(px(0.), px(4.), rgba(0x0000_000D).into()).blur_radius(px(12.)),
+            BoxShadow::new(px(0.), px(1.), rgba(0x0000_000A).into()).blur_radius(px(1.5)),
+            BoxShadow::new(px(0.), px(4.), rgba(0x0000_0010).into())
+                .blur_radius(px(7.))
+                .spread_radius(px(-1.)),
         ]
     };
 
@@ -112,7 +103,7 @@ pub(super) fn surfaces(cx: &App) -> SettingsSurfaces {
             px(2.),
             t.primary.opacity(if dark { 0.22 } else { 0.16 }),
         )
-        .blur_radius(px(10.)),
+        .blur_radius(px(6.)),
     ];
 
     SettingsSurfaces {
@@ -143,6 +134,7 @@ pub(super) fn apply(cx: &mut App, palette: &theme::Theme) {
     let colors = editor_colors(palette);
     Theme::update(cx, |theme| {
         theme.colors = colors;
+        theme.tokens = colors.into();
         theme.radius = px(10.);
         theme.radius_lg = px(14.);
     });
@@ -353,6 +345,9 @@ mod tests {
                 assert_eq!(active.background, color(palette.toolbar_bg));
                 assert_eq!(active.sidebar, color(palette.chip_bg).alpha(1.));
                 assert_eq!(active.border, color(palette.toolbar_border));
+                assert_eq!(active.tokens.background.color, active.background);
+                assert_eq!(active.tokens.accent.color, active.accent);
+                assert_eq!(active.tokens.primary.color, active.primary);
                 assert_eq!(active.is_dark(), palette.is_dark());
                 let base = gpui_kit::base::Theme::global(cx);
                 assert_eq!(base.tokens.colors.background, active.background);

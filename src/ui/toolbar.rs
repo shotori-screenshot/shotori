@@ -620,6 +620,7 @@ pub(crate) fn selection_toolbar(
         UiStyle::Capsule => root.items_center(),
     };
     root.child(row::ToolbarRow::new(
+        style,
         "toolbar-actions-scroll",
         rect.size.width,
         bar_for(style)
@@ -634,6 +635,7 @@ pub(crate) fn selection_toolbar(
     ))
     .children(edit_kind.is_some().then(|| {
         row::ToolbarRow::new(
+            style,
             "annotation-options-scroll",
             rect.size.width,
             annot_options(
@@ -934,9 +936,33 @@ pub(crate) fn preview_control_for(
     .child(meta.icon.svg())
 }
 
+/// Corner radius of the outer floating bar — shared between the scroll
+/// wrapper's shadow silhouette (`ToolbarRow`) and the bar fill container.
+pub(crate) fn bar_radius_for(style: UiStyle) -> Pixels {
+    match style {
+        UiStyle::Classic => px(8.),
+        UiStyle::Capsule => px(14.),
+    }
+}
+
+/// Outer elevation shadow painted outside any `overflow_x_scroll` clip mask.
+pub(crate) fn bar_shadow_for(style: UiStyle) -> Vec<BoxShadow> {
+    match style {
+        UiStyle::Classic => vec![
+            BoxShadow::new(px(0.), px(2.), rgba(0x0000001A).into()).blur_radius(px(3.)),
+            BoxShadow::new(px(0.), px(1.), rgba(0x00000012).into()).blur_radius(px(1.5)),
+        ],
+        UiStyle::Capsule => theme::capsule_floating_shadow(),
+    }
+}
+
 /// The bar container — shared with the settings editor's preview.
+/// Callers inside horizontal scroll containers attach `bar_shadow_for` on
+/// the outer non-scrolling wrapper so rectangular scroll masks never slice
+/// drop shadows outside rounded corners.
 pub(crate) fn bar_for(style: UiStyle) -> Div {
     let t = theme::c();
+    let radius = bar_radius_for(style);
     match style {
         UiStyle::Classic => div()
             .text_color(rgba(t.toolbar_text))
@@ -945,11 +971,10 @@ pub(crate) fn bar_for(style: UiStyle) -> Div {
             .gap(px(2.))
             .h(px(ROW_H))
             .px(px(BAR_PAD))
-            .rounded(px(8.))
+            .rounded(radius)
             .bg(rgba(t.toolbar_bg))
             .border_1()
-            .border_color(rgba(t.toolbar_border))
-            .shadow_md(),
+            .border_color(rgba(t.toolbar_border)),
         UiStyle::Capsule => div()
             .text_color(rgba(t.toolbar_text))
             .flex()
@@ -957,11 +982,10 @@ pub(crate) fn bar_for(style: UiStyle) -> Div {
             .gap(px(CAPSULE_BTN_GAP))
             .h(px(CAPSULE_ROW_H))
             .px(px(CAPSULE_BAR_PAD))
-            .rounded(px(14.))
+            .rounded(radius)
             .bg(rgba(t.capsule_surface()))
             .border_1()
-            .border_color(rgba(t.capsule_border()))
-            .shadow(theme::capsule_floating_shadow()),
+            .border_color(rgba(t.capsule_border())),
     }
 }
 

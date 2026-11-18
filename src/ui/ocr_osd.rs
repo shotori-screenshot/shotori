@@ -13,10 +13,10 @@ use gpui_kit::*;
 
 use crate::ui::theme;
 
-/// The chip's logical surface size; the visible pill is content-sized and
-/// centered inside — the slack keeps longer locale strings from clipping.
-const OSD_W: f32 = 180.;
-const OSD_H: f32 = 48.;
+/// The chip's logical surface size; extra breathing room avoids clipping the
+/// floating drop shadow at the layer-surface edges.
+const OSD_W: f32 = 220.;
+const OSD_H: f32 = 80.;
 
 pub(crate) struct OcrOsd;
 

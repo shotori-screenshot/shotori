@@ -554,9 +554,9 @@ impl Theme {
 pub(crate) fn capsule_floating_shadow() -> Vec<gpui_kit::BoxShadow> {
     use gpui_kit::{BoxShadow, px, rgba};
     vec![
-        BoxShadow::new(px(0.), px(2.), rgba(0x0000002E).into()).blur_radius(px(6.)),
-        BoxShadow::new(px(0.), px(10.), rgba(0x00000045).into())
-            .blur_radius(px(26.))
+        BoxShadow::new(px(0.), px(1.5), rgba(0x00000022).into()).blur_radius(px(3.)),
+        BoxShadow::new(px(0.), px(6.), rgba(0x00000036).into())
+            .blur_radius(px(10.))
             .spread_radius(px(-2.)),
     ]
 }

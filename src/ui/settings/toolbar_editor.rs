@@ -476,7 +476,7 @@ impl SettingsWindow {
             .min_w_0()
             .border_1()
             .border_color(s.hairline)
-            .rounded(px(14.))
+            .rounded(px(16.))
             .bg(s.card_bg)
             .shadow(s.card_shadow)
             .child(

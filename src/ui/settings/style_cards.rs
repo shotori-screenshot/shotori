@@ -37,7 +37,7 @@ impl SettingsWindow {
                 .min_w_0()
                 .border_1()
                 .border_color(if selected { primary } else { s.hairline })
-                .rounded(px(14.))
+                .rounded(px(16.))
                 .bg(if selected {
                     s.selected_card_bg
                 } else {
@@ -74,7 +74,7 @@ impl SettingsWindow {
                                 .child(body),
                         ),
                 )
-                .child(selection_circle(selected, &s, cx))
+                .child(selection_circle(selected, cx))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.settings.ui_style() != style {
                         this.settings.set_ui_style(style);
@@ -87,11 +87,7 @@ impl SettingsWindow {
     }
 }
 
-pub(super) fn selection_circle(
-    selected: bool,
-    s: &super::palette::SettingsSurfaces,
-    cx: &App,
-) -> Div {
+pub(super) fn selection_circle(selected: bool, cx: &App) -> Div {
     let mut circle = div()
         .size_5()
         .flex_shrink_0()
@@ -105,8 +101,6 @@ pub(super) fn selection_circle(
                 .size_3()
                 .text_color(cx.theme().primary_foreground),
         );
-    } else {
-        circle = circle.border_1().border_color(s.hairline).bg(s.well_bg);
     }
     circle
 }
@@ -195,7 +189,7 @@ fn style_diagram(style: UiStyle) -> Div {
                 );
         }
         UiStyle::Capsule => {
-            // Centered frosted capsule badge + white hairline + white-ring handle + pill bar
+            // Centered frosted capsule badge + theme accent hairline + white-ring handle + pill bar
             stage = stage
                 .child(
                     div()
@@ -218,7 +212,7 @@ fn style_diagram(style: UiStyle) -> Div {
                         .h(px(25.))
                         .bg(rgba(crop_bg))
                         .border_1()
-                        .border_color(rgba(0xFFFFFFE6)),
+                        .border_color(rgba(t.accent)),
                 )
                 .child(
                     div()

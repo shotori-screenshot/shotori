@@ -112,7 +112,7 @@ impl SettingsWindow {
                     .min_w_0()
                     .border_1()
                     .border_color(if selected { primary } else { s.hairline })
-                    .rounded(px(12.))
+                    .rounded(px(14.))
                     .bg(if selected {
                         s.selected_card_bg
                     } else {
@@ -141,7 +141,7 @@ impl SettingsWindow {
                             .child(div().w_full().truncate().child(label))
                             .child(swatch_dots),
                     )
-                    .child(super::style_cards::selection_circle(selected, &s, cx))
+                    .child(super::style_cards::selection_circle(selected, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.appearance_set_base(base, window, cx);
                     })),

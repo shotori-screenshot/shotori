@@ -1750,7 +1750,7 @@ fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
             use gpui_kit::component::ActiveTheme;
             window.draw(cx).clear(cx);
             let color = *cx.theme().tokens.accent;
-            let choices = window
+            let mut choices = window
                 .painted_quads()
                 .into_iter()
                 .filter(|quad| {
@@ -1760,9 +1760,11 @@ fn font_menu_preserves_committed_text_selection(cx: &mut TestAppContext) {
                     fill.a = color.a;
                     fill == color && quad.bounds.size.width.0 > 100.
                 })
+                .map(|quad| quad.bounds)
                 .collect::<Vec<_>>();
+            choices.dedup();
             assert_eq!(choices.len(), 1, "one highlighted font result");
-            let center = choices[0].bounds.center();
+            let center = choices[0].center();
             point(px(center.x.0), px(center.y.0)) / window.scale_factor()
         });
         cx.simulate_event(gpui_kit::ScrollEvent {
