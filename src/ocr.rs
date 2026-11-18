@@ -402,6 +402,54 @@ pub fn model_dir_display() -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
+/// Count and byte total of downloaded OCR model assets in the cache directory.
+pub fn cache_stats() -> (usize, u64) {
+    let Ok(dir) = model_dir() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata()
+            && meta.is_file()
+        {
+            count += 1;
+            bytes = bytes.saturating_add(meta.len());
+        }
+    }
+    (count, bytes)
+}
+
+/// Remove cached model files (leaving `.download.lock` intact).
+pub fn clear_model_cache() -> anyhow::Result<usize> {
+    let dir = model_dir()?;
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if entry.metadata().is_ok_and(|m| m.is_file()) {
+            std::fs::remove_file(entry.path())
+                .with_context(|| format!("removing {}", entry.path().display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Filename of the 1-based asset `idx` (progress readout).
 /// Zero means the download has not started; invalid indices return `?`.
 pub fn asset_name(idx: u8) -> &'static str {
@@ -464,6 +512,15 @@ impl DownloadProgress {
         }
     }
 
+    /// A progress carrier for an explicit `(model, assume_upright)` pair
+    /// (used by the Settings OCR page before process restart).
+    pub fn for_model(model: OcrModel, assume_upright: bool) -> Self {
+        Self {
+            file_count: assets_needed_for(model, assume_upright).len() as u8,
+            ..Self::default()
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.status.load(Ordering::Relaxed) == 0
     }
@@ -479,6 +536,19 @@ impl DownloadProgress {
 /// in async contexts). Unique temporary files are removed on cancellation or
 /// error; only complete, checksum-verified files become installed models.
 pub fn spawn_download(progress: std::sync::Arc<DownloadProgress>) {
+    spawn_download_assets(selected_assets(), progress);
+}
+
+/// Spawn a background download for an explicit `(model, assume_upright)` set.
+pub fn spawn_download_for(
+    model: OcrModel,
+    assume_upright: bool,
+    progress: std::sync::Arc<DownloadProgress>,
+) {
+    spawn_download_assets(assets_needed_for(model, assume_upright), progress);
+}
+
+fn spawn_download_assets(assets: Vec<ModelAssetSpec>, progress: std::sync::Arc<DownloadProgress>) {
     // The thread gets its own Arc; the caller's (and the UI's) stays valid
     // for cancellation even if the thread fails to spawn
     let thread_progress = std::sync::Arc::clone(&progress);
@@ -486,7 +556,7 @@ pub fn spawn_download(progress: std::sync::Arc<DownloadProgress>) {
         .name("shotori-ocr-download".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let result = download_models(&thread_progress);
+            let result = download_models_for(&assets, &thread_progress);
             match result {
                 Ok(()) => thread_progress.status.store(1, Ordering::Relaxed),
                 Err(e) => {
@@ -548,7 +618,10 @@ fn cache_lock(
     }
 }
 
-fn download_models(progress: &DownloadProgress) -> anyhow::Result<()> {
+fn download_models_for(
+    assets: &[ModelAssetSpec],
+    progress: &DownloadProgress,
+) -> anyhow::Result<()> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("shotori")
         .connect_timeout(Duration::from_secs(10))
@@ -562,7 +635,7 @@ fn download_models(progress: &DownloadProgress) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(600))
         .build()
         .context("building HTTP client")?;
-    download_models_in(&model_dir()?, &selected_assets(), progress, &client)
+    download_models_in(&model_dir()?, assets, progress, &client)
 }
 
 fn download_models_in(

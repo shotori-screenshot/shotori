@@ -1,14 +1,15 @@
 //! Annotation settings page: editing defaults, 7-color palette editor, initial
-//! swatch choices, and per-tool sizes & styles.
+//! swatch choices, and per-tool sizes & styles grouped by tool family.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::Switch;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use crate::annotation::text::TextWrap;
@@ -91,6 +92,7 @@ impl SearchableListItem for TextWrapItem {
 pub(super) struct AnnotationPageState {
     swatches: [Entity<ColorPickerState>; PALETTE],
     stroke_width: Entity<SliderState>,
+    geometry_radius: Entity<SliderState>,
     arrow_style: Entity<SelectState<SearchableVec<ArrowStyleItem>>>,
     highlighter_width: Entity<SliderState>,
     highlighter_blend: Entity<SelectState<SearchableVec<HighlightBlendItem>>>,
@@ -161,6 +163,11 @@ impl AnnotationPageState {
         let stroke_width = u8_slider(1, 20, annot.stroke_width, cx, &mut subs, |s, v| {
             let changed = s.annotation().stroke_width != v;
             s.annotation_mut().stroke_width = v;
+            changed
+        });
+        let geometry_radius = u8_slider(0, 48, annot.geometry_radius, cx, &mut subs, |s, v| {
+            let changed = s.annotation().geometry_radius != v;
+            s.annotation_mut().geometry_radius = v;
             changed
         });
         let highlighter_width = u8_slider(8, 60, annot.highlighter_width, cx, &mut subs, |s, v| {
@@ -287,6 +294,7 @@ impl AnnotationPageState {
         Self {
             swatches,
             stroke_width,
+            geometry_radius,
             arrow_style,
             highlighter_width,
             highlighter_blend,
@@ -311,6 +319,9 @@ impl AnnotationPageState {
         let a = settings.annotation();
         self.stroke_width.update(cx, |s, cx| {
             s.set_value(f32::from(a.stroke_width), window, cx)
+        });
+        self.geometry_radius.update(cx, |s, cx| {
+            s.set_value(f32::from(a.geometry_radius), window, cx)
         });
         self.highlighter_width.update(cx, |s, cx| {
             s.set_value(f32::from(a.highlighter_width), window, cx)
@@ -360,6 +371,19 @@ impl AnnotationPageState {
     }
 }
 
+/// High-contrast glyph color (`#111` or `#FFF`) over an `0xRRGGBBAA` swatch.
+fn ink_over_swatch(rgba_u32: u32) -> Rgba {
+    let r = (rgba_u32 >> 24) & 0xFF;
+    let g = (rgba_u32 >> 16) & 0xFF;
+    let b = (rgba_u32 >> 8) & 0xFF;
+    let luma = (77 * r + 150 * g + 29 * b) >> 8;
+    if luma > 150 {
+        rgba(0x1111_11FF)
+    } else {
+        rgba(0xFFFF_FFFF)
+    }
+}
+
 impl SettingsWindow {
     fn reset_annotation_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.reset_annotation_defaults();
@@ -406,19 +430,29 @@ impl SettingsWindow {
             let entity = cx.entity();
             let apply = apply.clone();
             let label = crate::i18n::t!("settings.annotation.swatch_n", n = ix + 1).to_string();
+            let check_color = ink_over_swatch(color);
             row = row.child(
                 Button::new(SharedString::from(format!("{prefix}-{ix}")))
                     .accessibility_label(label)
-                    .size(px(22.))
+                    .selected(is_selected)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.))
                     .rounded_full()
                     .bg(rgba(color))
                     .border_2()
                     .border_color(if is_selected {
-                        cx.theme().primary
+                        cx.theme().foreground
                     } else {
-                        cx.theme().border
+                        cx.theme().foreground.opacity(0.28)
                     })
+                    .hover(|s| s.border_color(cx.theme().primary))
                     .focus_visible(|s| s.border_color(cx.theme().ring))
+                    .children(
+                        is_selected
+                            .then(|| Icon::new(IconName::Check).size_3().text_color(check_color)),
+                    )
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |this, cx| {
                             apply(&mut this.settings, ix);
@@ -435,6 +469,8 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let annot = self.settings.annotation();
+
         let auto_select = self.bool_annot_switch(
             "annotation-auto-select",
             self.settings.annotation_auto_select(),
@@ -453,15 +489,63 @@ impl SettingsWindow {
         );
         let smooth_pencil = self.bool_annot_switch(
             "annotation-smooth-pencil",
-            self.settings.annotation().smooth_pencil,
+            annot.smooth_pencil,
             "settings.annotation.smooth_pencil.title",
             window,
             cx,
             |s, v| s.annotation_mut().smooth_pencil = v,
         );
+        let geometry_fill = self.bool_annot_switch(
+            "annotation-geometry-fill",
+            annot.geometry_fill,
+            "settings.annotation.geometry_fill.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().geometry_fill = v,
+        );
+        let text_bold = self.bool_annot_switch(
+            "annotation-text-bold",
+            annot.text_bold,
+            "settings.annotation.text_bold.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().text_bold = v,
+        );
+        let text_outline = self.bool_annot_switch(
+            "annotation-text-outline",
+            annot.text_outline,
+            "settings.annotation.text_outline.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().text_outline = v,
+        );
+        let spotlight_ellipse = self.bool_annot_switch(
+            "annotation-spotlight-ellipse",
+            annot.spotlight_ellipse,
+            "settings.annotation.spotlight_ellipse.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().spotlight_ellipse = v,
+        );
+        let magnifier_ellipse = self.bool_annot_switch(
+            "annotation-magnifier-ellipse",
+            annot.magnifier_ellipse,
+            "settings.annotation.magnifier_ellipse.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().magnifier_ellipse = v,
+        );
+        let magnifier_shadow = self.bool_annot_switch(
+            "annotation-magnifier-shadow",
+            annot.magnifier_shadow,
+            "settings.annotation.magnifier_shadow.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().magnifier_shadow = v,
+        );
         let number_fill = self.bool_annot_switch(
             "annotation-number-fill",
-            self.settings.annotation().number_fill,
+            annot.number_fill,
             "settings.annotation.number_fill.title",
             window,
             cx,
@@ -471,10 +555,14 @@ impl SettingsWindow {
         let mut palette_row = div().flex().items_center().gap_1p5();
         for (ix, picker) in self.annotation_page.swatches.iter().enumerate() {
             let label = crate::i18n::t!("settings.annotation.swatch_n", n = ix + 1).to_string();
-            palette_row = palette_row.child(ColorPicker::new(picker, label));
+            palette_row = palette_row.child(
+                div()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().foreground.opacity(0.22))
+                    .child(ColorPicker::new(picker, label)),
+            );
         }
-
-        let annot = self.settings.annotation();
 
         let body = super::layout::content_column()
             .child(
@@ -568,7 +656,7 @@ impl SettingsWindow {
             ))
             .child(card_group(
                 cx,
-                Some(crate::i18n::t!("settings.annotation.group.tools").as_ref()),
+                Some(crate::i18n::t!("settings.annotation.group.shapes").as_ref()),
                 vec![
                     card_row(
                         cx,
@@ -590,6 +678,30 @@ impl SettingsWindow {
                     ),
                     card_row(
                         cx,
+                        crate::i18n::t!("settings.annotation.geometry_radius.title").to_string(),
+                        None,
+                        None,
+                        super::layout::slider_control(
+                            &self.annotation_page.geometry_radius,
+                            format!("{} px", annot.geometry_radius),
+                            cx,
+                        ),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.geometry_fill.title").to_string(),
+                        None,
+                        None,
+                        geometry_fill,
+                    ),
+                ],
+            ))
+            .child(card_group(
+                cx,
+                Some(crate::i18n::t!("settings.annotation.group.highlighter").as_ref()),
+                vec![
+                    card_row(
+                        cx,
                         crate::i18n::t!("settings.annotation.highlighter_width.title").to_string(),
                         None,
                         None,
@@ -606,6 +718,12 @@ impl SettingsWindow {
                         None,
                         Select::new(&self.annotation_page.highlighter_blend).w_full(),
                     ),
+                ],
+            ))
+            .child(card_group(
+                cx,
+                Some(crate::i18n::t!("settings.annotation.group.text_badge").as_ref()),
+                vec![
                     card_row(
                         cx,
                         crate::i18n::t!("settings.annotation.text_size.title").to_string(),
@@ -623,6 +741,20 @@ impl SettingsWindow {
                         Some("settings.general.text_wrap.body"),
                         None,
                         Select::new(&self.annotation_page.text_wrap).w_full(),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.text_bold.title").to_string(),
+                        None,
+                        None,
+                        text_bold,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.text_outline.title").to_string(),
+                        Some("settings.annotation.text_outline.body"),
+                        None,
+                        text_outline,
                     ),
                     card_row(
                         cx,
@@ -649,6 +781,12 @@ impl SettingsWindow {
                         None,
                         number_fill,
                     ),
+                ],
+            ))
+            .child(card_group(
+                cx,
+                Some(crate::i18n::t!("settings.annotation.group.effects").as_ref()),
+                vec![
                     card_row(
                         cx,
                         crate::i18n::t!("settings.annotation.mosaic_strength.title").to_string(),
@@ -682,6 +820,13 @@ impl SettingsWindow {
                             cx,
                         ),
                     ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.spotlight_ellipse.title").to_string(),
+                        None,
+                        None,
+                        spotlight_ellipse,
+                    ),
                     card_row(
                         cx,
                         crate::i18n::t!("settings.annotation.magnifier_zoom.title").to_string(),
@@ -692,6 +837,20 @@ impl SettingsWindow {
                             format!("{}×", annot.magnifier_zoom),
                             cx,
                         ),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.magnifier_ellipse.title").to_string(),
+                        None,
+                        None,
+                        magnifier_ellipse,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.magnifier_shadow.title").to_string(),
+                        None,
+                        None,
+                        magnifier_shadow,
                     ),
                 ],
             ));

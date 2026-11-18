@@ -72,6 +72,8 @@ impl Render for PinSurface {
         let pin_cfg = crate::model::settings::current().pin();
         let show_border = pin_cfg.show_border;
         let show_shadow = pin_cfg.shadow;
+        let pin_opacity = (f32::from(pin_cfg.opacity) / 100.).clamp(0.2, 1.0);
+        let double_click_action = pin_cfg.double_click;
         let pins: Vec<_> = self
             .board
             .read(cx)
@@ -99,11 +101,12 @@ impl Render for PinSurface {
                     .top(local.y - frame)
                     .w(pin.rect.size.width + frame * 2.)
                     .h(pin.rect.size.height + frame * 2.)
+                    .opacity(pin_opacity)
                     .overflow_hidden();
                 if show_border {
                     container = container
                         .border_1()
-                        .border_color(rgba(crate::ui::theme::c().accent));
+                        .border_color(rgba(crate::ui::theme::c().pin_border));
                 }
                 Some(
                     container
@@ -131,6 +134,35 @@ impl Render for PinSurface {
                                 window.focus(&this.focus_handle, cx);
                                 this.board.update(cx, |board, cx| {
                                     board.raise(id);
+                                    board.menu = None;
+                                    cx.notify();
+                                });
+                                if event.click_count == 2 {
+                                    use crate::model::settings::PinDoubleClick as Dc;
+                                    match double_click_action {
+                                        Dc::None => {}
+                                        Dc::Close => {
+                                            this.close_selected(window, cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        Dc::CopyAndClose => {
+                                            this.copy_selected(cx);
+                                            this.close_selected(window, cx);
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                        Dc::ResetZoom => {
+                                            this.board.update(cx, |board, cx| {
+                                                board.reset_zoom(id);
+                                                cx.notify();
+                                            });
+                                            cx.stop_propagation();
+                                            return;
+                                        }
+                                    }
+                                }
+                                this.board.update(cx, |board, cx| {
                                     // raise(id) moves `id` to the back, so the back
                                     // exists here — but an input-path unwrap violates
                                     // the no-panic rule; bail on the impossible empty.
@@ -139,7 +171,6 @@ impl Render for PinSurface {
                                         id,
                                         event.position + output.origin - pin.rect.origin,
                                     ));
-                                    board.menu = None;
                                     cx.notify();
                                 });
                                 cx.stop_propagation();

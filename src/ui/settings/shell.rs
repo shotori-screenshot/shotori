@@ -4,9 +4,83 @@ use gpui_kit::base::InteractiveElementExt;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::tooltip::Tooltip;
 
-/// One title-bar control (34px wide, full height), styled like the
-/// component's cluster: the quiet secondary hover for minimize /
-/// maximize, the theme's danger tint for close.
+pub(super) const SECTION_SEARCH_ITEMS: [(Section, &str, IconName, &str); 8] = [
+    (
+        Section::Appearance,
+        "settings.preferences.appearance",
+        IconName::Palette,
+        "theme color language reduce motion animation palette catppuccin dracula gruvbox nord rose pine tokyo night solarized github 主题 配色 语言 外观 动画 过渡",
+    ),
+    (
+        Section::Capture,
+        "settings.preferences.capture",
+        IconName::Scan,
+        "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long qr double click right cancel 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 保留 二维码 双击 右键",
+    ),
+    (
+        Section::Annotation,
+        "settings.preferences.annotation",
+        IconName::Pencil,
+        "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap bold outline number badge spotlight magnifier pencil radius fill 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 粗体 描边 序号 徽章 空心 聚光灯 铅笔 圆角 填充",
+    ),
+    (
+        Section::Export,
+        "settings.preferences.export",
+        IconName::Save,
+        "save export folder directory path auto direct dialog filename template format png jpeg jpg webp quality compression clipboard backup 保存 导出 目录 文件夹 路径 直存 弹窗 文件名 模板 格式 质量 压缩 剪贴板 备份",
+    ),
+    (
+        Section::Desktop,
+        "settings.preferences.desktop",
+        IconName::Bell,
+        "notification notify toast test thumbnail timeout pin zoom opacity double click border shadow edge snap qr 通知 气泡 测试 缩略图 超时 贴图 悬浮 缩放 透明度 双击 边框 阴影 边缘 吸附 二维码",
+    ),
+    (
+        Section::Keys,
+        "settings.keys_page.title",
+        IconName::Keyboard,
+        "shortcuts keys keybindings undo redo clear delete tools qr ctrl shift alt enter esc wheel 快捷键 按键 撤销 重做 清空 删除 二维码 滚轮 方向键",
+    ),
+    (
+        Section::Ocr,
+        "settings.ocr_page.title",
+        IconName::ScanText,
+        "ocr model text upright join lines cache download ppocrv6 ppocrv5 文字 识别 模型 方向 合并 换行 缓存 下载",
+    ),
+    (
+        Section::Advanced,
+        "settings.preferences.advanced",
+        IconName::Settings2,
+        "advanced config files toml reload cache diagnostics wayland factory reset 高级 配置 文件 重载 缓存 诊断 恢复出厂",
+    ),
+];
+
+pub(super) fn section_matches_query(
+    target: Section,
+    key: &'static str,
+    keywords: &str,
+    q: &str,
+) -> bool {
+    let q = q.trim();
+    if q.is_empty() {
+        return true;
+    }
+    let label = crate::i18n::t!(key).to_lowercase();
+    if format!("{label} {keywords}").to_lowercase().contains(q) {
+        return true;
+    }
+    // Let typing a concrete keystroke or shortcut action name match Keys too.
+    if target == Section::Keys {
+        for &(id, _) in crate::actions::CONFIGURABLE_KEYS {
+            if id.contains(q) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// One title-bar control (34px wide, full height).
 fn window_control(
     id: &'static str,
     icon: IconName,
@@ -35,8 +109,6 @@ fn window_control(
         .items_center()
         .text_color(theme.foreground)
         .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
-        // Keep the bar's drag handler from treating a control press as
-        // the start of a window move.
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -56,22 +128,22 @@ pub(super) fn reset_button(
 ) -> Button {
     Button::new("section-reset")
         .accessibility_label(crate::i18n::t!(label).to_string())
+        .styles(|s| s.disabled(|d| d.opacity(0.45)))
         .px_3()
         .h_8()
         .flex_shrink_0()
         .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().group_box)
         .text_sm()
         .text_color(cx.theme().foreground)
         .hover(|s| s.bg(cx.theme().secondary_hover))
-        .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+        .focus_visible(|s| s.border_color(cx.theme().ring))
         .on_click(on_click)
         .child(crate::i18n::t!(label).to_string())
 }
 
-/// The title bar's control cluster for a server-decorated window that
-/// has no system bar (see [`SettingsWindow::header`]). Only the
-/// controls the compositor advertises through `wm_capabilities` are
-/// offered; close is always ours.
 fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
     let supported = window.window_controls();
     let mut controls = div()
@@ -113,13 +185,6 @@ fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
 }
 
 impl SettingsWindow {
-    /// The self-drawn title bar: brand mark plus window title on the
-    /// left, the window controls on the right. The app owns it because
-    /// the window asks for client-side decorations; the branding lives
-    /// here (not in the sidebar header) so it never moves or shrinks
-    /// when the navigation rail collapses. `TitleBar` supplies the drag
-    /// / double-click-zoom behavior and the component's control cluster
-    /// wherever the compositor honors client decorations.
     pub(super) fn header(&self, window: &Window, cx: &mut Context<Self>) -> TitleBar {
         let toggle_label = if self.sidebar_collapsed {
             crate::i18n::t!("settings.nav.expand")
@@ -127,8 +192,6 @@ impl SettingsWindow {
             crate::i18n::t!("settings.nav.collapse")
         }
         .to_string();
-        // TitleBar owns double-click-to-zoom. Stop both presses and clicks at
-        // the icon so a double activation cannot bubble into window chrome.
         let brand = div()
             .id("settings-brand-toggle")
             .debug_selector(|| "settings-brand-toggle".into())
@@ -151,9 +214,6 @@ impl SettingsWindow {
                     .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
                     .tooltip(move |_, cx| cx.new(|_| Tooltip::new(toggle_label.clone())).into())
-                    // Same optical nudge as `help_tooltip`: the CJK
-                    // title text beside it rides ~2px low in its line
-                    // box, box-centering reads visibly high.
                     .child(
                         img(ImageSource::Render(SIDEBAR_LOGO.clone()))
                             .size_5()
@@ -173,13 +233,6 @@ impl SettingsWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(crate::i18n::t!("settings.title").to_string()),
             );
-        // `TitleBar` hides its own control cluster when the compositor
-        // claims server-side decorations — it must not duplicate a
-        // system title bar. But some compositors claim that while
-        // drawing nothing (niri with `prefer-no-csd`), so OUR bar is the
-        // only chrome the window ever gets and has to carry the
-        // controls itself. In client-decorated mode the component's
-        // cluster handles it (outside the drag region, same as here).
         let own_controls = matches!(window.window_decorations(), Decorations::Server)
             .then(|| window_controls(window, cx));
         TitleBar::new().child(leading).children(own_controls)
@@ -195,64 +248,11 @@ impl SettingsWindow {
         let query = self.search.read(cx).value().to_lowercase();
         let mut menu = SidebarMenu::new();
         let mut count = 0;
-        for (target, key, icon, keywords) in [
-            (
-                Section::Appearance,
-                "settings.preferences.appearance",
-                IconName::Palette,
-                "theme color language reduce motion animation 主题 配色 语言 外观 动画 过渡",
-            ),
-            (
-                Section::Capture,
-                "settings.preferences.capture",
-                IconName::Scan,
-                "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long qr 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 保留 二维码",
-            ),
-            (
-                Section::Annotation,
-                "settings.preferences.annotation",
-                IconName::Pencil,
-                "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap number badge fill outline spotlight magnifier pencil 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 序号 徽章 填充 空心 聚光灯 铅笔",
-            ),
-            (
-                Section::Export,
-                "settings.preferences.export",
-                IconName::Save,
-                "save export folder directory path auto direct dialog filename template format png jpeg jpg webp quality compression clipboard 保存 导出 目录 文件夹 路径 直存 弹窗 文件名 模板 格式 质量 压缩 剪贴板",
-            ),
-            (
-                Section::Desktop,
-                "settings.preferences.desktop",
-                IconName::Bell,
-                "notification notify toast thumbnail timeout pin zoom border shadow edge snap qr 通知 气泡 缩略图 超时 贴图 悬浮 缩放 边框 阴影 边缘 吸附 二维码",
-            ),
-            (
-                Section::Keys,
-                "settings.keys_page.title",
-                IconName::Keyboard,
-                "shortcuts keys keybindings undo redo clear delete tools qr 快捷键 按键 撤销 重做 清空 删除 二维码",
-            ),
-            (
-                Section::Ocr,
-                "settings.ocr_page.title",
-                IconName::ScanText,
-                "ocr model text upright join lines cache 文字 识别 模型 方向 合并 换行 缓存",
-            ),
-            (
-                Section::Advanced,
-                "settings.preferences.advanced",
-                IconName::Settings2,
-                "advanced config files toml 高级 配置 文件",
-            ),
-        ] {
-            let label = crate::i18n::t!(key).to_string();
-            if !query.trim().is_empty()
-                && !format!("{label} {keywords}")
-                    .to_lowercase()
-                    .contains(query.trim())
-            {
+        for (target, key, icon, keywords) in SECTION_SEARCH_ITEMS {
+            if !section_matches_query(target, key, keywords, &query) {
                 continue;
             }
+            let label = crate::i18n::t!(key).to_string();
             count += 1;
             menu = menu.child(
                 SidebarMenuItem::new(label)
@@ -404,10 +404,6 @@ impl SettingsWindow {
     }
 }
 
-/// Some compositors advertise server decorations while drawing no frame.
-/// Root's WindowBorder deliberately does nothing in that mode, so provide
-/// narrow application-owned edge targets without adding another CSD inset.
-/// Native client decorations continue to use the kit's own resize handling.
 pub(super) fn resize_handles(window: &Window) -> Vec<AnyElement> {
     if !matches!(window.window_decorations(), Decorations::Server)
         || !window.is_resizable()
@@ -416,7 +412,6 @@ pub(super) fn resize_handles(window: &Window) -> Vec<AnyElement> {
     {
         return Vec::new();
     }
-    // Physical hit slop is a window-system boundary, independent of UI zoom.
     let band = px(5.);
     let corner = px(12.);
     [

@@ -93,7 +93,9 @@ gpui_kit::assets::icon_assets!(
         // The settings pages' inline help mark (hover tooltip hint).
         CircleQuestionMark,
         Bell,
-        FolderOpen
+        FolderOpen,
+        Undo2,
+        ExternalLink
     ]
 );
 
@@ -1014,6 +1016,8 @@ mod tests {
             IconName::WindowClose,
             IconName::Bell,
             IconName::FolderOpen,
+            IconName::Undo2,
+            IconName::ExternalLink,
         ] {
             assert!(
                 super::ToolbarSource.load(&icon.path()).unwrap().is_some(),

@@ -558,17 +558,24 @@ impl Annotations {
                 .highlighter_color_index
                 .min(crate::model::settings::PALETTE - 1),
             spotlight_opacity: f32::from(cfg.spotlight_opacity),
+            spotlight_ellipse: cfg.spotlight_ellipse,
             lens: magnifier::Lens {
                 zoom: f32::from(cfg.magnifier_zoom),
+                ellipse: cfg.magnifier_ellipse,
+                shadow: cfg.magnifier_shadow,
                 ..magnifier::Lens::default()
             },
             arrow_style: cfg.arrow_style,
             number_arrow_style: cfg.arrow_style,
+            geometry_fill: cfg.geometry_fill,
+            geometry_radius: f32::from(cfg.geometry_radius),
             highlighter: highlighter::HighlighterOptions {
                 blend: cfg.highlighter_blend,
                 ..highlighter::HighlighterOptions::default()
             },
             text_style: text::TextStyle {
+                bold: cfg.text_bold,
+                outline: cfg.text_outline.then_some(0xFFFF_FFFF),
                 wrap: cfg.text_wrap,
                 ..Default::default()
             },

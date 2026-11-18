@@ -1,8 +1,9 @@
 //! The About page: the identity card — hero logo, name and version,
-//! what this is, where it lives, who helped.
+//! what this is, where it lives, who helped, and one-click environment info.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use super::{SettingsWindow, open_external, page_body, png_render_image};
@@ -16,16 +17,16 @@ static ABOUT_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
 
 impl SettingsWindow {
     /// About: the identity card — hero logo, name and version, what
-    /// this is, where it lives, who helped. One calm centered column;
-    /// everything a support conversation needs.
+    /// this is, where it lives, who helped, and copyable support info.
     pub(super) fn page_about(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let entity = cx.entity();
-        // ghost link button — same vocabulary as the config-file
-        // buttons, each handing a URL to the session
-        let link = |label: String, url: String, entity: &gpui_kit::Entity<Self>| {
+        let link = |label: String, icon: IconName, url: String, entity: &gpui_kit::Entity<Self>| {
             let entity = entity.clone();
             Button::new(SharedString::from(url.clone()))
                 .accessibility_label(label.clone())
+                .flex()
+                .items_center()
+                .gap_1p5()
                 .px_3()
                 .h_8()
                 .rounded(cx.theme().radius)
@@ -33,6 +34,7 @@ impl SettingsWindow {
                 .text_color(cx.theme().foreground)
                 .border_1()
                 .border_color(cx.theme().border)
+                .bg(cx.theme().group_box)
                 .hover(|s| s.bg(cx.theme().secondary_hover))
                 .focus_visible(|s| s.border_color(cx.theme().ring))
                 .on_click(move |_, _, cx| {
@@ -40,42 +42,125 @@ impl SettingsWindow {
                         open_external(url.clone());
                     });
                 })
+                .child(
+                    Icon::new(icon)
+                        .size_3p5()
+                        .text_color(cx.theme().muted_foreground),
+                )
                 .child(label)
         };
+
+        let copy_label = if self.about_copied_flash {
+            crate::i18n::t!("settings.about.copied").to_string()
+        } else {
+            crate::i18n::t!("settings.about.copy_info").to_string()
+        };
+        let copy_btn = {
+            let entity = entity.clone();
+            Button::new("about-copy-sysinfo")
+                .accessibility_label(copy_label.clone())
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_3()
+                .h_8()
+                .rounded(cx.theme().radius)
+                .text_sm()
+                .text_color(cx.theme().foreground)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().group_box)
+                .hover(|s| s.bg(cx.theme().secondary_hover))
+                .focus_visible(|s| s.border_color(cx.theme().ring))
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.copy_diagnostic_report(true, cx);
+                    });
+                })
+                .child(
+                    Icon::new(if self.about_copied_flash {
+                        IconName::Check
+                    } else {
+                        IconName::Copy
+                    })
+                    .size_3p5()
+                    .text_color(if self.about_copied_flash {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
+                    }),
+                )
+                .child(copy_label)
+        };
+
         let repository = env!("CARGO_PKG_REPOSITORY");
-        // `.pt(48).p(PAGE_PAD)` used to cancel itself (p sets the top
-        // too), so the hero sat flush under the header. The page is now
-        // the shared scrolling body with one centered column capped at a
-        // comfortable measure.
+
+        let tech_item = |icon: IconName, text: String| {
+            div()
+                .flex()
+                .items_start()
+                .gap_2p5()
+                .w_full()
+                .child(
+                    div()
+                        .pt_0p5()
+                        .flex_shrink_0()
+                        .text_color(cx.theme().primary)
+                        .child(Icon::new(icon).size_4()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .line_height(relative(1.5))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text),
+                )
+        };
+
         let body = div()
             .p_6()
             .flex()
             .flex_col()
             .items_center()
-            .gap_2()
+            .gap_3()
             .w_full()
-            .max_w(rems(28.))
+            .max_w(rems(34.))
             .child(img(ImageSource::Render(ABOUT_LOGO.clone())).size_24())
             .child(
                 div()
-                    .text_2xl()
-                    .text_color(cx.theme().foreground)
-                    .child("Shotori"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child("Shotori"),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().group_box)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                    ),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().foreground)
                     .w_full()
-                    .max_w(rems(28.))
+                    .max_w(rems(30.))
                     .text_center()
-                    .line_height(relative(1.5))
+                    .line_height(relative(1.55))
                     .child(crate::i18n::t!("settings.about.tagline").to_string()),
             )
             .child(
@@ -83,39 +168,62 @@ impl SettingsWindow {
                     .flex()
                     .flex_wrap()
                     .justify_center()
-                    .gap(px(6.))
-                    .pt(px(6.))
+                    .gap_2()
+                    .pt_1()
                     .child(link(
                         crate::i18n::t!("settings.about.repository").to_string(),
+                        IconName::ExternalLink,
                         repository.to_string(),
                         &entity,
                     ))
                     .child(link(
                         crate::i18n::t!("settings.about.issues").to_string(),
+                        IconName::Info,
                         format!("{repository}/issues"),
                         &entity,
+                    ))
+                    .child(copy_btn),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .mt_2()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2p5()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().group_box)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(crate::i18n::t!("settings.about.tech_title").to_string()),
+                    )
+                    .child(tech_item(
+                        IconName::Palette,
+                        crate::i18n::t!("settings.about.tech_ui").to_string(),
+                    ))
+                    .child(tech_item(
+                        IconName::ScanText,
+                        crate::i18n::t!("settings.about.tech_ocr").to_string(),
+                    ))
+                    .child(tech_item(
+                        IconName::Sparkles,
+                        crate::i18n::t!("settings.about.tech_themes").to_string(),
                     )),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .pt_1()
                     .child(crate::i18n::t!("settings.about.license").to_string()),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .w_full()
-                    .max_w(rems(28.))
-                    .text_center()
-                    .line_height(relative(1.5))
-                    .pt(px(6.))
-                    .child(crate::i18n::t!("settings.about.credits").to_string()),
             );
-        // Auto margins consume spare height but never become negative, so
-        // short windows keep the top of the identity block reachable by scroll.
+
         page_body("page-about")
             .items_center()
             .child(body.my_auto().flex_shrink_0())

@@ -132,6 +132,9 @@ pub struct ExportSettings {
     pub jpeg_quality: u8,
     /// Also copy the image to the clipboard whenever saving to disk.
     pub copy_on_save: bool,
+    /// Automatically write a backup copy into `save_dir` whenever copying to
+    /// the clipboard.
+    pub save_on_copy: bool,
 }
 
 impl Default for ExportSettings {
@@ -145,6 +148,7 @@ impl Default for ExportSettings {
             png_compression: PngCompression::Balanced,
             jpeg_quality: 90,
             copy_on_save: false,
+            save_on_copy: false,
         }
     }
 }
@@ -227,6 +231,7 @@ pub(super) struct ExportFile {
     png_compression: Option<String>,
     jpeg_quality: Option<i64>,
     copy_on_save: Option<bool>,
+    save_on_copy: Option<bool>,
 }
 
 impl ExportFile {
@@ -307,6 +312,7 @@ impl ExportFile {
             png_compression,
             jpeg_quality,
             copy_on_save: self.copy_on_save.unwrap_or(defaults.copy_on_save),
+            save_on_copy: self.save_on_copy.unwrap_or(defaults.save_on_copy),
         }
     }
 }
@@ -353,6 +359,7 @@ impl ExportSettings {
             toml::Value::from(i64::from(self.jpeg_quality)),
         );
         export.insert("copy_on_save".into(), toml::Value::from(self.copy_on_save));
+        export.insert("save_on_copy".into(), toml::Value::from(self.save_on_copy));
         Ok(())
     }
 }
@@ -391,6 +398,12 @@ pub fn write_last_save_dir(dir: &Path) {
     }
     if let Err(e) = std::fs::write(&state_file, dir.to_string_lossy().as_bytes()) {
         eprintln!("[shotori] state write {}: {e}", state_file.display());
+    }
+}
+
+pub fn clear_last_save_dir() {
+    if let Some(state_file) = last_dir_state_path() {
+        drop(std::fs::remove_file(state_file));
     }
 }
 
