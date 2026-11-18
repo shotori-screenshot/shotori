@@ -70,6 +70,7 @@ Always run headless settings checks with isolated `HOME`,
 | `SHOTORI_DEBUG_SHEET_LOG` | `/abs/path/sheet.log` | Logs every pushed frame and stitch decision in `model::scroll_sheet` |
 | `SHOTORI_SCROLL_TEST_ARTIFACTS` | `/abs/path/dir` | Writes diagnostic PNGs from `model/scroll_sheet/scene_tests.rs` |
 | `SHOTORI_NOTIFY_TIMEOUT_SECS` | `<seconds>` | Overrides notification child auto-exit timeout (`src/notify.rs`) |
+| `SHOTORI_PIN_HISTORY_DIR` | `/abs/path/dir` | Overrides the persistent pin history store directory (`$XDG_DATA_HOME/shotori/pin-history`) for isolated E2E runs |
 
 ## 3. Mandatory Verification Gates by Change Type
 

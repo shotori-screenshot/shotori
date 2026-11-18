@@ -474,6 +474,94 @@ fn over(dst: &mut [u8], color: [u8; 4]) {
     dst[3] = (alpha * 255.).round() as u8;
 }
 
+/// Render clipboard plain text into a crisp, HiDPI-aware RGBA8 card for
+/// floating pins (`shotori pin --clipboard` / `Ctrl+V`).
+///
+/// Wraps lines up to `560` logical px, caps vertical height at `900` logical
+/// px so huge log dumps never allocate unbounded textures, and draws onto an
+/// opaque themed surface (`bg`) so text pins export cleanly to PNG/JPEG.
+pub(crate) fn render_text_card(
+    raw_text: &str,
+    scale: f32,
+    bg: u32,
+    fg: u32,
+) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let trimmed = raw_text.trim_end_matches(['\r', '\n']);
+    anyhow::ensure!(
+        !trimmed.trim().is_empty(),
+        "clipboard text is empty or whitespace-only"
+    );
+    // Cap input length so multi-megabyte clipboard buffers never stall shaping.
+    let capped: String = trimmed.chars().take(4096).collect();
+    let scale = scale.clamp(1.0, 4.0);
+    let pad = (16.0 * scale).round();
+    let font_px = (15.0 * scale).round().max(12.0);
+    let line_h = (font_px * 1.45).round();
+    let max_content_w = (560.0 * scale).round();
+    let max_content_h = (900.0 * scale).round();
+
+    let (measured_w, measured_h, glyphs, gw, gh) = FONTS.with_borrow_mut(|(fonts, cache)| {
+        let mut buffer = Buffer::new(fonts, Metrics::new(font_px, line_h));
+        buffer.set_size(Some(max_content_w), Some(max_content_h));
+        buffer.set_wrap(cosmic_text::Wrap::WordOrGlyph);
+        let attrs = Attrs::new().family(Family::SansSerif);
+        buffer.set_text(&capped, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+
+        let mut max_line_w = 0.0_f32;
+        let mut total_h = 0.0_f32;
+        for run in buffer.layout_runs() {
+            max_line_w = max_line_w.max(run.line_w);
+            total_h = total_h.max(run.line_top + run.line_height);
+        }
+        let content_w = max_line_w.ceil().clamp(64.0 * scale, max_content_w);
+        let content_h = total_h.ceil().clamp(line_h, max_content_h);
+        let card_w = ((content_w + pad * 2.0).round() as usize).max(1);
+        let card_h = ((content_h + pad * 2.0).round() as usize).max(1);
+
+        let bg_bytes = [
+            ((bg >> 24) & 0xFF) as u8,
+            ((bg >> 16) & 0xFF) as u8,
+            ((bg >> 8) & 0xFF) as u8,
+            255,
+        ];
+        let mut out = vec![0u8; card_w * card_h * 4];
+        for px_dst in out.as_chunks_mut::<4>().0 {
+            px_dst.copy_from_slice(&bg_bytes);
+        }
+
+        let [fr, fg_c, fb, fa] = fg.to_be_bytes();
+        let ox = pad as i32;
+        let oy = pad as i32;
+        buffer.draw(
+            fonts,
+            cache,
+            Color::rgba(fr, fg_c, fb, fa.max(240)),
+            |x, y, pw, ph, color| {
+                if color.a() == 0 {
+                    return;
+                }
+                let r0 = (y + oy).max(0);
+                let r1 = (y + oy + ph as i32).min(card_h as i32);
+                let c0 = (x + ox).max(0);
+                let c1 = (x + ox + pw as i32).min(card_w as i32);
+                for row in r0..r1 {
+                    for col in c0..c1 {
+                        let offset = (row as usize * card_w + col as usize) * 4;
+                        over(
+                            &mut out[offset..offset + 4],
+                            [color.r(), color.g(), color.b(), color.a()],
+                        );
+                    }
+                }
+            },
+        );
+        (card_w as u32, card_h as u32, out, content_w, content_h)
+    });
+    let _ = (gw, gh);
+    Ok((measured_w, measured_h, glyphs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,5 +679,24 @@ mod tests {
             }
             assert_eq!(rows, [true, true]);
         }
+    }
+
+    #[test]
+    fn render_text_card_produces_non_empty_opaque_card_and_rejects_blank() {
+        with_test_font(|| {
+            assert!(render_text_card("   \n\t ", 1.0, 0x1E1E2EFF, 0xFFFFFFFF).is_err());
+            let (w, h, rgba) =
+                render_text_card("Pinned note\nLine 2", 1.25, 0x1E1E2EFF, 0xFFFFFFFF).unwrap();
+            assert!(w >= 80 && h >= 40);
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            assert!(rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+            assert!(
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|p| p[0] != 0x1E || p[1] != 0x1E || p[2] != 0x2E),
+                "glyphs must paint foreground pixels onto the card"
+            );
+        });
     }
 }

@@ -52,7 +52,7 @@ entry points rather than one monolithic background daemon:
 | --- | --- | --- |
 | `shotori` / `shotori gui` | `clap` → `main.rs` | **Run-and-exit capture session.** Loads `settings.toml`, `theme.toml`, and locale once at startup (`init`), freezes screens via `wlr-screencopy`, opens one layer-shell `Overlay` per output, runs one exit, and terminates. No live config reload is needed or wanted. |
 | `shotori full \| ocr \| qr \| outputs` | `clap` → `commands.rs` | Non-interactive CLI pipelines (capture/decode/stdout/file/clipboard) that exit on completion. |
-| `shotori pin` (or Pin exit) | `clap` / in-process transition | Keeps layer-shell pin surfaces alive across outputs (`ui/pin`) until the last pin closes. |
+| `shotori pin` (or Pin exit) | `clap` / in-process transition | Keeps layer-shell pin surfaces alive across outputs (`ui/pin`) until the last pin closes; also dispatches `--clipboard`, `--restore`, `--unlock`, `--toggle-hide`, `--close-all`, and the regular-toplevel `shotori pin --history` manager (`ui/pin_history`). |
 | `shotori settings` | `clap` or `launch_detached("settings")` | **Regular Wayland toplevel** (`ui/settings`). Writes every toggle/edit straight through to `settings.toml` / `theme.toml`; the next capture session picks changes up. |
 | `shotori tray` | `clap` → `tray.rs` | Resident `StatusNotifierItem` process (`gpui-tray`). Spawns fresh `shotori` child sessions via `launch_detached` and reaps them on a helper thread to prevent zombies. |
 | `shotori --notify ...` | `argv[1]` pre-`clap` in `main.rs` | Re-exec'd child owning D-Bus notification lifetime + action callbacks ("View image", "Open text") after the parent overlay exits. Calls `i18n::init_child()`. |

@@ -13,11 +13,11 @@ use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
 use crate::model::settings::{
-    NotifySettings, PinDoubleClick, PinSettings, PinZoomModifier, Settings,
+    NotifySettings, PinDoubleClick, PinOpacityModifier, PinSettings, PinZoomModifier, Settings,
 };
 use crate::ui::theme;
 
-use super::{SettingsWindow, card_group, card_row, page_body, page_header};
+use super::{SettingsWindow, card_row, page_body, page_header};
 
 #[derive(Clone)]
 pub(super) struct PinZoomModifierItem(PinZoomModifier);
@@ -49,12 +49,29 @@ impl SearchableListItem for PinDoubleClickItem {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct PinOpacityModifierItem(PinOpacityModifier);
+
+impl SearchableListItem for PinOpacityModifierItem {
+    type Value = PinOpacityModifier;
+
+    fn title(&self) -> SharedString {
+        self.0.label().into_owned().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
 pub(super) struct DesktopPageState {
     notify_timeout_slider: Entity<SliderState>,
     pin_opacity_slider: Entity<SliderState>,
     pin_double_click_select: Entity<SelectState<SearchableVec<PinDoubleClickItem>>>,
     pin_zoom_modifier_select: Entity<SelectState<SearchableVec<PinZoomModifierItem>>>,
+    pin_opacity_modifier_select: Entity<SelectState<SearchableVec<PinOpacityModifierItem>>>,
     pin_zoom_step_slider: Entity<SliderState>,
+    pin_max_history_slider: Entity<SliderState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -146,6 +163,29 @@ impl DesktopPageState {
             }),
         );
 
+        let opacity_mod_current = settings.pin().opacity_modifier;
+        let pin_opacity_modifier_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(PinOpacityModifier::ALL.map(PinOpacityModifierItem).to_vec()),
+                PinOpacityModifier::ALL
+                    .iter()
+                    .position(|m| *m == opacity_mod_current)
+                    .map(IndexPath::new),
+                window,
+                cx,
+            )
+        });
+        subs.push(
+            cx.subscribe(&pin_opacity_modifier_select, |this, _, event, cx| {
+                if let SelectEvent::Confirm(Some(modif)) = event
+                    && this.settings.pin().opacity_modifier != *modif
+                {
+                    this.settings.pin_mut().opacity_modifier = *modif;
+                    this.persist(cx);
+                }
+            }),
+        );
+
         let pin_zoom_step_slider = cx.new(|_| {
             SliderState::new()
                 .max(50.)
@@ -163,12 +203,31 @@ impl DesktopPageState {
             }
         }));
 
+        let pin_max_history_slider = cx.new(|_| {
+            SliderState::new()
+                .max(200.)
+                .min(0.)
+                .step(5.)
+                .default_value(f32::from(settings.pin().max_history))
+        });
+        subs.push(cx.subscribe(&pin_max_history_slider, |this, _, event, cx| {
+            if let SliderEvent::Change(SliderValue::Single(value)) = event {
+                let cap = value.round().clamp(0., 200.) as u16;
+                if this.settings.pin().max_history != cap {
+                    this.settings.pin_mut().max_history = cap;
+                    this.persist(cx);
+                }
+            }
+        }));
+
         Self {
             notify_timeout_slider,
             pin_opacity_slider,
             pin_double_click_select,
             pin_zoom_modifier_select,
+            pin_opacity_modifier_select,
             pin_zoom_step_slider,
+            pin_max_history_slider,
             _subscriptions: subs,
         }
     }
@@ -192,8 +251,17 @@ impl DesktopPageState {
             .map(IndexPath::new);
         self.pin_zoom_modifier_select
             .update(cx, |s, cx| s.set_selected_index(modif_ix, window, cx));
+        let op_modif_ix = PinOpacityModifier::ALL
+            .iter()
+            .position(|m| *m == settings.pin().opacity_modifier)
+            .map(IndexPath::new);
+        self.pin_opacity_modifier_select
+            .update(cx, |s, cx| s.set_selected_index(op_modif_ix, window, cx));
         self.pin_zoom_step_slider.update(cx, |s, cx| {
             s.set_value(f32::from(settings.pin().zoom_step), window, cx)
+        });
+        self.pin_max_history_slider.update(cx, |s, cx| {
+            s.set_value(f32::from(settings.pin().max_history), window, cx)
         });
     }
 }
@@ -437,6 +505,14 @@ impl SettingsWindow {
             cx,
             |s, v| s.pin_mut().snap_to_edge = v,
         );
+        let pin_snap_siblings = self.bool_desktop_switch(
+            "pin-snap-to-pins",
+            p.snap_to_pins,
+            "settings.pin.snap_to_pins.title",
+            window,
+            cx,
+            |s, v| s.pin_mut().snap_to_pins = v,
+        );
         let pin_border = self.bool_desktop_switch(
             "pin-show-border",
             p.show_border,
@@ -453,6 +529,22 @@ impl SettingsWindow {
             cx,
             |s, v| s.pin_mut().shadow = v,
         );
+
+        let open_history_btn = super::layout::action_button(
+            cx,
+            "pin-open-history",
+            crate::i18n::t!("settings.pin.open_history_btn").to_string(),
+            |_, _, _| {
+                crate::launch_detached_args(&["pin", "--history"]);
+            },
+        )
+        .into_any_element();
+
+        let history_readout = if p.max_history == 0 {
+            crate::i18n::t!("settings.pin.max_history.disabled").to_string()
+        } else {
+            crate::i18n::t!("settings.pin.max_history.count", count = p.max_history).to_string()
+        };
 
         let timeout_readout =
             crate::i18n::t!("settings.notify.timeout_secs.unit", secs = n.timeout_secs).to_string();
@@ -527,9 +619,10 @@ impl SettingsWindow {
                     ),
                 ],
             ))
-            .child(card_group(
+            .child(super::layout::card_group_with_action(
                 cx,
                 Some(crate::i18n::t!("settings.pin.group").as_ref()),
+                Some(open_history_btn),
                 vec![
                     self.pin_preview_row(p, cx),
                     card_row(
@@ -559,6 +652,13 @@ impl SettingsWindow {
                     ),
                     card_row(
                         cx,
+                        crate::i18n::t!("settings.pin.opacity_modifier_row.title").to_string(),
+                        None,
+                        None,
+                        Select::new(&self.desktop_page.pin_opacity_modifier_select).w_full(),
+                    ),
+                    card_row(
+                        cx,
                         crate::i18n::t!("settings.pin.zoom_step.title").to_string(),
                         None,
                         None,
@@ -568,12 +668,30 @@ impl SettingsWindow {
                             cx,
                         ),
                     ),
+                    card_row(
+                        cx,
+                        crate::i18n::t!("settings.pin.max_history.title").to_string(),
+                        None,
+                        None,
+                        super::layout::slider_control(
+                            &self.desktop_page.pin_max_history_slider,
+                            history_readout,
+                            cx,
+                        ),
+                    ),
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.pin.snap_to_edge.title").to_string(),
                         Some("settings.pin.snap_to_edge.body"),
                         None,
                         pin_snap,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.pin.snap_to_pins.title").to_string(),
+                        Some("settings.pin.snap_to_pins.body"),
+                        None,
+                        pin_snap_siblings,
                     ),
                     super::layout::compact_row(
                         cx,

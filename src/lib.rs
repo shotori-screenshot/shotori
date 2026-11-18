@@ -10,6 +10,7 @@
 //! │  ├─ session               state shared by all overlays (multi-monitor
 //! │  │                        selections, hover, click-snap, cropping)
 //! │  ├─ export                crop → PNG → disk/clipboard bytes
+//! │  ├─ pin / pin_history     pure pin transforms/snapping & bounded disk history
 //! │  ├─ placement             chrome geometry (label, toolbar, scroll deck)
 //! │  ├─ regiondetect          pixel-based smart-selection candidates
 //! │  ├─ scroll_sheet          long-screenshot stitching & preview window
@@ -26,6 +27,7 @@
 //! │  │                        layer-shell surfaces
 //! │  ├─ hud / toolbar         selection visuals & buttons
 //! │  ├─ pin                   always-on-top floating crops across outputs
+//! │  ├─ pin_history           regular toplevel Pin History manager (`shotori pin --history`)
 //! │  ├─ scroll_bar            long-screenshot region frame & preview deck
 //! │  ├─ ocr_setup             first-run OCR model dialog
 //! │  ├─ settings              the settings toplevel (`shotori settings`)
@@ -118,6 +120,12 @@ pub fn boot_mark(label: &str) {
 /// sessions; the overlay's settings button uses it to hand off to the
 /// settings window before the capture process exits.
 pub fn launch_detached(subcommand: &str) {
+    launch_detached_args(&[subcommand]);
+}
+
+/// Generalized detached re-exec supporting multi-argument CLI invocations
+/// (e.g. `shotori pin --history`, `shotori pin --clipboard`, `shotori pin --restore-id <id>`).
+pub fn launch_detached_args(args: &[&str]) {
     use std::process::Command;
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -126,22 +134,19 @@ pub fn launch_detached(subcommand: &str) {
             return;
         }
     };
-    match Command::new(exe).arg(subcommand).spawn() {
+    let summary = args.join(" ");
+    match Command::new(exe).args(args).spawn() {
         Ok(mut child) => {
-            // Reap in a detached thread: the tray is a resident process,
-            // so every launched session would otherwise pile up as a
-            // zombie when it exits. If this process dies first, the
-            // child is reparented to init, which reaps it — the thread
-            // dying with the process is harmless here (unlike the
-            // notify/clipboard children, whose WORK must outlive the
-            // parent; a reaper thread has nothing to outlive).
+            // Reap in a detached thread: the tray and pin windows are resident
+            // processes, so every launched helper would otherwise pile up as a
+            // zombie when it exits.
             std::thread::spawn(move || {
                 if let Err(e) = child.wait() {
                     eprintln!("[shotori] reaping detached child failed: {e}");
                 }
             });
-            println!("[shotori] launched `{subcommand}`");
+            println!("[shotori] launched `{summary}`");
         }
-        Err(e) => eprintln!("[shotori] failed to launch `{subcommand}`: {e}"),
+        Err(e) => eprintln!("[shotori] failed to launch `{summary}`: {e}"),
     }
 }

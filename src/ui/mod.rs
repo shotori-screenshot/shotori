@@ -30,6 +30,7 @@ pub mod ocr_osd;
 pub mod ocr_setup;
 pub mod overlay;
 pub mod pin;
+pub mod pin_history;
 pub mod scroll_bar;
 pub mod settings;
 pub mod theme;

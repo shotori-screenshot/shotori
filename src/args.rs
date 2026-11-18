@@ -378,7 +378,21 @@ impl QrArgs {
 #[command(
     group(
         ArgGroup::new("source")
-            .args(["image", "full", "screen", "output", "region", "window"])
+            .args([
+                "image",
+                "clipboard",
+                "history",
+                "restore",
+                "restore_id",
+                "unlock",
+                "toggle_hide",
+                "close_all",
+                "full",
+                "screen",
+                "output",
+                "region",
+                "window",
+            ])
             .required(true)
             .multiple(true)
     ),
@@ -386,12 +400,62 @@ impl QrArgs {
         ArgGroup::new("capture_target")
             .args(["full", "screen", "output", "region", "window"])
             .multiple(false)
+    ),
+    group(
+        ArgGroup::new("pin_action")
+            .args([
+                "history",
+                "restore",
+                "restore_id",
+                "unlock",
+                "toggle_hide",
+                "close_all",
+            ])
+            .multiple(false)
+            .conflicts_with_all([
+                "image",
+                "clipboard",
+                "full",
+                "screen",
+                "output",
+                "region",
+                "window",
+                "at",
+            ])
     )
 )]
 pub struct PinArgs {
     /// Image file to pin (`-` for stdin)
     #[arg(value_name = "IMAGE")]
     pub image: Option<PathBuf>,
+
+    /// Pin image or plain text currently in the Wayland clipboard
+    #[arg(short, long, conflicts_with_all = ["image", "full", "screen", "region", "window"])]
+    pub clipboard: bool,
+
+    /// Open the visual Pin History window
+    #[arg(long)]
+    pub history: bool,
+
+    /// Restore the most recently closed or recorded pin onto the desktop
+    #[arg(long)]
+    pub restore: bool,
+
+    /// Restore a specific pin snapshot by its history ID
+    #[arg(long, value_name = "ID")]
+    pub restore_id: Option<String>,
+
+    /// Unlock all click-through (ghost) pins on the active desktop
+    #[arg(long)]
+    pub unlock: bool,
+
+    /// Hide or show all active pins on the desktop
+    #[arg(long)]
+    pub toggle_hide: bool,
+
+    /// Close all active pins on the desktop
+    #[arg(long)]
+    pub close_all: bool,
 
     /// Capture and pin every connected screen
     #[arg(short, long, conflicts_with = "image")]
@@ -401,7 +465,7 @@ pub struct PinArgs {
     #[arg(short, long, conflicts_with = "image")]
     pub screen: bool,
 
-    /// Output name: captures that output, or centers IMAGE on it when IMAGE is given
+    /// Output name: captures that output, or centers IMAGE / --clipboard on it
     #[arg(short, long, value_name = "NAME")]
     pub output: Option<String>,
 
@@ -425,7 +489,7 @@ pub struct PinArgs {
         long,
         default_value_t = 0.0,
         value_parser = parse_delay,
-        conflicts_with = "image"
+        conflicts_with_all = ["image", "clipboard", "history", "restore", "restore_id", "unlock", "toggle_hide", "close_all"]
     )]
     pub delay: f32,
 
@@ -435,9 +499,9 @@ pub struct PinArgs {
 }
 
 impl PinArgs {
-    /// Screen capture target when `image` is omitted.
+    /// Screen capture target when `image` and `--clipboard` are omitted.
     pub fn capture_target(&self) -> Option<SelectionTarget> {
-        if self.image.is_some() {
+        if self.image.is_some() || self.clipboard {
             return None;
         }
         if self.full {
@@ -887,6 +951,29 @@ mod tests {
         // Non-output capture flags still conflict with IMAGE
         assert!(Cli::try_parse_from(["shotori", "pin", "diagram.png", "--screen"]).is_err());
         assert!(Cli::try_parse_from(["shotori", "pin", "--full", "--screen"]).is_err());
+
+        // Clipboard, history, restore, and management flags
+        assert!(matches!(
+            cli(&["pin", "-c", "-o", "DP-1"]).command,
+            Some(Command::Pin(PinArgs {
+                clipboard: true,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            cli(&["pin", "--history"]).command,
+            Some(Command::Pin(PinArgs { history: true, .. }))
+        ));
+        assert!(matches!(
+            cli(&["pin", "--restore"]).command,
+            Some(Command::Pin(PinArgs { restore: true, .. }))
+        ));
+        assert!(matches!(
+            cli(&["pin", "--unlock"]).command,
+            Some(Command::Pin(PinArgs { unlock: true, .. }))
+        ));
+        assert!(Cli::try_parse_from(["shotori", "pin", "--history", "--unlock"]).is_err());
+        assert!(Cli::try_parse_from(["shotori", "pin", "--clipboard", "--screen"]).is_err());
     }
 
     #[test]

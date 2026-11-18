@@ -527,7 +527,6 @@ impl Annotations {
             .as_ref()
             .is_some_and(|d| d.shape.kind == ShapeKind::Text)
     }
-    #[cfg(test)]
     pub(crate) fn add_text(&mut self, bounds: Bounds<Pixels>, value: String) {
         if value.trim().is_empty() {
             return;

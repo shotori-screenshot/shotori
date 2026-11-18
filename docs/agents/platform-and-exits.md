@@ -67,6 +67,9 @@ All backends return `SnapRect` in **desktop-global logical coordinates**.
   (`text/plain;charset=utf-8`) spawn `shotori --clipboard-daemon <mime>`
   via `Command::new(current_exe())` (never `fork()` inside a
   multithreaded GPUI/Vulkan process) and pipe bytes over `stdin`.
+- `read_clipboard` reads `image/*` or UTF-8 `text/plain*` offers via
+  `zwlr_data_control_device_v1` + `std::io::pipe` (capped at `128 MiB`) to
+  power `shotori pin --clipboard` and `Ctrl+V` paste-as-pin.
 - Error reporting distinguishes missing `WAYLAND_DISPLAY` from a
   compositor lacking `zwlr_data_control_manager_v1`.
 

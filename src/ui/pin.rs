@@ -1,5 +1,13 @@
 //! Pinned images share one ordered scene across all output surfaces.
 //! Clicking a pin raises it without recreating any native windows.
+//!
+//! Submodules keep responsibilities crisp:
+//! - [`ops`]: Copy, Save, OCR, QR, Clipboard paste, restore, transforms,
+//!   opacity, ghost click-through, collapse, nudge, and pin cycling
+//! - [`annotate`]: in-pin secondary annotation state & floating toolbar
+//! - [`menu`]: flagship context menu & transient HUD pill
+//! - [`render`]: Wayland input-region management & GPUI element tree
+//! - [`transport`]: single-owner Unix-socket IPC (`SHTRPIN2`)
 
 use std::sync::{Arc, OnceLock};
 
@@ -8,21 +16,33 @@ use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOpti
 use gpui_kit::*;
 
 pub use crate::actions::{ClosePin, CopyPin, DismissPinMenu, OpenPinMenu, ResetPinZoom};
+use crate::annotation::Annotations;
+use crate::model::pin::{
+    CollapsedPin, apply_color_effects, center_square_crop, clamp_to, expand_bounds,
+};
+pub use crate::model::pin::{MIN_VISIBLE, clamp_origin, snap_pin_origin};
+use crate::model::pin_history::PinHistoryStore;
 use crate::ui::image_util;
 
-/// Magnetic snap radius (logical px) when `pin.snap_to_edge` is enabled.
-const EDGE_SNAP_PX: f32 = 10.;
 /// Zoom range: from a postage stamp to deep-pixel-peeping.
 const ZOOM_MIN: f32 = 0.05;
 const ZOOM_MAX: f32 = 24.;
-/// At least this much of the pin must stay on-screen while dragging.
-const MIN_VISIBLE: f32 = 24.;
-/// Context-menu geometry (logical px): one column, three items
-/// (Copy / Reset zoom / Close). Height = items + two inter-item gaps
-/// + top/bottom padding, all 4px — keep in sync with the menu styles.
-const MENU_W: f32 = 160.;
-const MENU_ITEM_H: f32 = 32.;
-const MENU_H: f32 = 3. * MENU_ITEM_H + 4. * 4.;
+/// Side length of the corner lock button kept interactive on a click-through pin.
+pub(super) const GHOST_CHIP_SIDE: f32 = 18.;
+
+/// Top-right unlock button bounds for a ghost (click-through) pin.
+pub(super) fn ghost_chip_bounds(pin_rect: Bounds<Pixels>) -> Bounds<Pixels> {
+    let side = px(GHOST_CHIP_SIDE)
+        .min(pin_rect.size.width)
+        .min(pin_rect.size.height);
+    Bounds::new(
+        point(
+            (pin_rect.right() - side).max(pin_rect.left()),
+            pin_rect.top(),
+        ),
+        size(side, side),
+    )
+}
 
 /// One output the pin can live on: global logical bounds + the
 /// display the layer surface binds to + true physical-to-logical scale
@@ -44,8 +64,6 @@ static OUTPUTS: OnceLock<std::sync::Mutex<Vec<PinOutput>>> = OnceLock::new();
 pub fn register_output(bounds: Bounds<Pixels>, display_id: Option<DisplayId>, scale: f32) {
     OUTPUTS
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
-        // Poisoning-tolerant (same as theme::c): a panicking thread must not
-        // permanently brick output registration for every later pin.
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(PinOutput {
@@ -77,10 +95,7 @@ pub(crate) fn display_containing(p: Point<Pixels>) -> Option<DisplayId> {
 }
 
 /// The first output that is NOT `display`: chrome that must leave its
-/// capture output entirely (the scroll preview panel when no side
-/// strip fits — wlr-screencopy would capture it over the region
-/// otherwise) docks there instead. Returns the display, its GLOBAL
-/// logical bounds, and its physical-to-logical scale.
+/// capture output entirely docks there instead.
 pub(crate) fn other_output_than(
     display: Option<DisplayId>,
 ) -> Option<(DisplayId, Bounds<Pixels>, f32)> {
@@ -90,8 +105,7 @@ pub(crate) fn other_output_than(
     })
 }
 
-/// Scroll lines (pixel deltas pre-normalized by the caller) → the next
-/// zoom factor, clamped to the range.
+/// Scroll lines → next zoom factor, clamped to `[ZOOM_MIN, ZOOM_MAX]`.
 fn next_zoom_with(zoom: f32, lines: f32, step_pct: u8) -> f32 {
     let step = 1.0 + f32::from(step_pct.clamp(5, 50)) / 100.0;
     (zoom * step.powf(lines)).clamp(ZOOM_MIN, ZOOM_MAX)
@@ -113,119 +127,188 @@ fn zoomed_size(base: Size<Pixels>, zoom: f32) -> Size<Pixels> {
     )
 }
 
-/// Clamp that never panics: when lo > hi (a degenerate output size),
-/// pin to lo. Same posture as selection::clamp_to — f32::clamp panics on inverted bounds.
-fn clamp_to(v: f32, lo: f32, hi: f32) -> f32 {
-    if lo > hi { lo } else { v.clamp(lo, hi) }
-}
-
-/// Keep the pin grabbable: at least `MIN_VISIBLE` stays inside the
-/// desktop on each axis (parking it mostly off an edge is fine).
-fn clamp_to_output(
-    origin: Point<Pixels>,
-    pin: Size<Pixels>,
-    desk: Bounds<Pixels>,
-) -> Point<Pixels> {
-    let (w, h) = (f32::from(pin.width), f32::from(pin.height));
-    let (vw, vh) = (
-        w.min(MIN_VISIBLE).min(f32::from(desk.size.width)),
-        h.min(MIN_VISIBLE).min(f32::from(desk.size.height)),
-    );
-    let (dl, dt) = (f32::from(desk.left()), f32::from(desk.top()));
-    let (dr, db) = (f32::from(desk.right()), f32::from(desk.bottom()));
-    point(
-        px(clamp_to(f32::from(origin.x), dl - (w - vw), dr - vw)),
-        px(clamp_to(f32::from(origin.y), dt - (h - vh), db - vh)),
-    )
-}
-
-/// Magnetically align `origin` to any output's edges within [`EDGE_SNAP_PX`].
-fn snap_origin_to_edges(
+/// Compatibility wrapper preserved for output-only edge-snap unit tests.
+pub fn snap_origin_to_edges(
     origin: Point<Pixels>,
     pin: Size<Pixels>,
     outputs: &[Bounds<Pixels>],
 ) -> Point<Pixels> {
-    let mut x = f32::from(origin.x);
-    let mut y = f32::from(origin.y);
-    let (w, h) = (f32::from(pin.width), f32::from(pin.height));
-    let mut best_dx = EDGE_SNAP_PX + 1.0;
-    let mut best_dy = EDGE_SNAP_PX + 1.0;
-    let mut snapped_x = None;
-    let mut snapped_y = None;
+    snap_pin_origin(origin, pin, outputs, &[], true, false)
+}
 
-    for out in outputs {
-        if out.size.width <= px(0.) || out.size.height <= px(0.) {
-            continue;
+/// Active pointer drag of a pin across desktop-global coordinates.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PinDrag {
+    pub id: u64,
+    pub grab: Point<Pixels>,
+    pub press_global: Point<Pixels>,
+    pub moved: bool,
+}
+
+/// Snapshot kept in memory so `Ctrl+Shift+T` restores recently closed pins
+/// immediately even when disk history is disabled (`max_history = 0`).
+pub(super) struct ClosedPin {
+    pub w: u32,
+    pub h: u32,
+    pub rgba: Vec<u8>,
+    pub base: Size<Pixels>,
+    pub rect: Bounds<Pixels>,
+    pub opacity: u8,
+    pub history_id: Option<String>,
+    pub label: Option<String>,
+}
+
+/// One floating pin inside the shared [`PinBoard`] scene.
+pub(super) struct Pin {
+    pub id: u64,
+    /// Upright base RGBA8 buffer `(w, h, rgba)` prior to live annotations & color filters.
+    pub base_crop: Arc<(u32, u32, Vec<u8>)>,
+    /// Secondary annotations in base-local logical space `(0, 0 .. base.width, base.height)`.
+    pub annotations: Annotations,
+    /// Cached composited RGBA8 `(w, h, rgba)` = `base_crop` + committed annotations + color filters.
+    pub composited_crop: Arc<(u32, u32, Vec<u8>)>,
+    pub image: Arc<RenderImage>,
+    pub thumb_image: Arc<RenderImage>,
+    pub base: Size<Pixels>,
+    pub rect: Bounds<Pixels>,
+    pub opacity: u8,
+    pub grayscale: bool,
+    pub invert: bool,
+    pub ghost: bool,
+    pub collapsed: Option<CollapsedPin>,
+    pub hud: Option<(u64, String)>,
+    pub history_id: Option<String>,
+    pub label: Option<String>,
+    pub dirty_raster: bool,
+}
+
+impl Pin {
+    fn from_spec(
+        id: u64,
+        spec: PinSpec,
+        base: Size<Pixels>,
+        rect: Bounds<Pixels>,
+        opacity: u8,
+        history_id: Option<String>,
+    ) -> Self {
+        let PinSpec {
+            w, h, rgba, label, ..
+        } = spec;
+        let base_crop = Arc::new((w, h, rgba.clone()));
+        let (tw, th, thumb_rgba) = center_square_crop(w, h, &rgba);
+        let image = image_util::rgba_to_render_image(rgba.clone(), w, h);
+        let thumb_image = image_util::rgba_to_render_image(thumb_rgba, tw, th);
+        let composited_crop = Arc::new((w, h, rgba));
+        Self {
+            id,
+            base_crop,
+            annotations: Annotations::from_settings(),
+            composited_crop,
+            image,
+            thumb_image,
+            base,
+            rect,
+            opacity: opacity.clamp(20, 100),
+            grayscale: false,
+            invert: false,
+            ghost: false,
+            collapsed: None,
+            hud: None,
+            history_id,
+            label,
+            dirty_raster: false,
         }
-        let (ol, ot, or, ob) = (
-            f32::from(out.left()),
-            f32::from(out.top()),
-            f32::from(out.right()),
-            f32::from(out.bottom()),
+    }
+
+    pub(super) fn physical_scale(&self) -> f32 {
+        (self.base_crop.0 as f32 / f32::from(self.base.width).max(1.)).max(0.1)
+    }
+
+    /// Map a desktop-global logical point onto this pin's base-local logical space.
+    pub(super) fn global_to_base(&self, global: Point<Pixels>) -> Point<Pixels> {
+        let zoom = (f32::from(self.rect.size.width) / f32::from(self.base.width).max(1.)).max(0.01);
+        let bx = clamp_to(
+            f32::from(global.x - self.rect.origin.x) / zoom,
+            0.,
+            f32::from(self.base.width),
         );
-        let v_overlap = y + h > ot - EDGE_SNAP_PX && y < ob + EDGE_SNAP_PX;
-        let h_overlap = x + w > ol - EDGE_SNAP_PX && x < or + EDGE_SNAP_PX;
-        if v_overlap {
-            for target_x in [ol, or - w] {
-                let d = (x - target_x).abs();
-                if d <= EDGE_SNAP_PX && d < best_dx {
-                    best_dx = d;
-                    snapped_x = Some(target_x);
-                }
-            }
-        }
-        if h_overlap {
-            for target_y in [ot, ob - h] {
-                let d = (y - target_y).abs();
-                if d <= EDGE_SNAP_PX && d < best_dy {
-                    best_dy = d;
-                    snapped_y = Some(target_y);
-                }
-            }
-        }
+        let by = clamp_to(
+            f32::from(global.y - self.rect.origin.y) / zoom,
+            0.,
+            f32::from(self.base.height),
+        );
+        point(px(bx), px(by))
     }
-    if let Some(sx) = snapped_x {
-        x = sx;
-    }
-    if let Some(sy) = snapped_y {
-        y = sy;
-    }
-    point(px(x), px(y))
-}
 
-/// Choose the nearest position with a grabbable area on an actual output,
-/// rather than treating the gaps inside the desktop bounding box as visible.
-fn clamp_origin(
-    origin: Point<Pixels>,
-    pin: Size<Pixels>,
-    outputs: &[Bounds<Pixels>],
-) -> Point<Pixels> {
-    let distance = |p: &Point<Pixels>| f32::from(p.x - origin.x).hypot(f32::from(p.y - origin.y));
-    outputs
-        .iter()
-        .filter(|output| output.size.width > px(0.) && output.size.height > px(0.))
-        .map(|output| clamp_to_output(origin, pin, *output))
-        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
-        .unwrap_or(origin)
-}
+    /// Bake committed annotations permanently onto `base_crop` and reset `annotations`
+    /// (used right before a 90° rotation or mirror flip).
+    pub(super) fn bake_annotations_into_base(&mut self) {
+        if self.annotations.committed().is_empty() {
+            return;
+        }
+        let (w, h, ref orig) = *self.base_crop;
+        let mut baked = orig.clone();
+        let scale = self.physical_scale();
+        Annotations::rasterize_shapes(
+            self.annotations.committed().iter(),
+            &mut baked,
+            w,
+            h,
+            point(px(0.), px(0.)),
+            scale,
+        );
+        self.base_crop = Arc::new((w, h, baked));
+        self.annotations.reset();
+    }
 
-/// All pins share one ordered scene and one surface per output. The last
-/// entry is selected and painted last on EVERY output.
-struct Pin {
-    id: u64,
-    image: Arc<RenderImage>,
-    base: Size<Pixels>,
-    rect: Bounds<Pixels>,
-    /// Device-pixel crop backing the menu's Copy: PNG-encoded on demand
-    /// (keeping the raw pixels beats re-capturing).
-    crop: Arc<(u32, u32, Vec<u8>)>,
+    /// Recompute `composited_crop`, `image`, and `thumb_image` from `base_crop`
+    /// + committed annotations + color effects.
+    pub(super) fn rebuild_visuals(&mut self) {
+        let (w, h, ref orig) = *self.base_crop;
+        let mut pixels = orig.clone();
+        if !self.annotations.committed().is_empty() {
+            let scale = self.physical_scale();
+            Annotations::rasterize_shapes(
+                self.annotations.committed().iter(),
+                &mut pixels,
+                w,
+                h,
+                point(px(0.), px(0.)),
+                scale,
+            );
+        }
+        apply_color_effects(&mut pixels, self.grayscale, self.invert);
+        let (tw, th, thumb_rgba) = center_square_crop(w, h, &pixels);
+        self.image = image_util::rgba_to_render_image(pixels.clone(), w, h);
+        self.thumb_image = image_util::rgba_to_render_image(thumb_rgba, tw, th);
+        self.composited_crop = Arc::new((w, h, pixels));
+    }
+
+    /// Fast live-draft preview during pointer drag in annotation mode.
+    pub(super) fn rebuild_live_preview(&mut self) {
+        let (w, h, ref orig) = *self.base_crop;
+        let mut pixels = orig.clone();
+        let scale = self.physical_scale();
+        self.annotations
+            .rasterize(&mut pixels, w, h, point(px(0.), px(0.)), scale);
+        apply_color_effects(&mut pixels, self.grayscale, self.invert);
+        self.image = image_util::rgba_to_render_image(pixels, w, h);
+    }
 }
 
 struct PinBoard {
     pins: Vec<Pin>,
     next_id: u64,
-    drag: Option<(u64, Point<Pixels>)>,
+    drag: Option<PinDrag>,
     menu: Option<(u64, Point<Pixels>)>,
+    annotating: Option<u64>,
+    annot_gesture: Option<annotate::PinAnnotGesture>,
+    text_prompt: Option<annotate::PinTextPrompt>,
+    closed_stack: Vec<ClosedPin>,
+    history_store: Option<PinHistoryStore>,
+    hidden: bool,
+    save_dialog_open: bool,
+    hud_seq: u64,
     windows: Vec<AnyWindowHandle>,
     outputs: Vec<Bounds<Pixels>>,
 }
@@ -237,47 +320,103 @@ impl PinBoard {
             next_id: 0,
             drag: None,
             menu: None,
+            annotating: None,
+            annot_gesture: None,
+            text_prompt: None,
+            closed_stack: Vec::new(),
+            history_store: None,
+            hidden: false,
+            save_dialog_open: false,
+            hud_seq: 0,
             windows: Vec::new(),
             outputs,
         }
     }
 
+    fn with_default_history(mut self) -> Self {
+        if let Ok(store) = PinHistoryStore::default_store() {
+            self.history_store = Some(store);
+        }
+        self
+    }
+
     fn add(&mut self, spec: PinSpec, cx: &mut Context<Self>) {
+        let record_new = spec.history_id.is_none();
+        self.add_internal(spec, None, record_new, cx);
+    }
+
+    pub(super) fn add_internal(
+        &mut self,
+        spec: PinSpec,
+        explicit_base: Option<Size<Pixels>>,
+        record_history: bool,
+        cx: &mut Context<Self>,
+    ) -> u64 {
         self.next_id += 1;
+        let id = self.next_id;
         let mut rect = spec.rect;
         rect.origin = clamp_origin(rect.origin, rect.size, &self.outputs);
-        self.pins.push(Pin {
-            id: self.next_id,
-            image: image_util::rgba_to_render_image(spec.rgba.clone(), spec.w, spec.h),
-            base: spec.rect.size,
-            rect,
-            crop: Arc::new((spec.w, spec.h, spec.rgba)),
-        });
+        let base = explicit_base.unwrap_or(spec.rect.size);
+        let pin_cfg = crate::model::settings::current().pin();
+        let opacity = spec.opacity.unwrap_or(pin_cfg.opacity).clamp(20, 100);
+
+        let history_id = if record_history {
+            self.history_store.as_ref().and_then(|store| {
+                match store.record(
+                    crate::model::pin_history::NewPinRecord {
+                        width: spec.w,
+                        height: spec.h,
+                        rgba: &spec.rgba,
+                        rect,
+                        opacity,
+                        label: spec.label.clone(),
+                    },
+                    pin_cfg.max_history,
+                ) {
+                    Ok(saved) => saved.map(|e| e.id),
+                    Err(e) => {
+                        eprintln!("[shotori] pin history record failed: {e:#}");
+                        None
+                    }
+                }
+            })
+        } else {
+            spec.history_id.clone()
+        };
+
+        self.pins
+            .push(Pin::from_spec(id, spec, base, rect, opacity, history_id));
+        self.hidden = false;
         self.menu = None;
         self.drag = None;
         cx.notify();
+        id
     }
 
-    /// The menu's pin while a menu is open; otherwise the topmost pin —
-    /// the one `Esc` closes and the keyboard menu addresses.
-    fn selected_id(&self) -> Option<u64> {
+    /// The menu's pin while a menu is open; otherwise the topmost interactive
+    /// pin (falling back to the last pin when every pin is in ghost mode).
+    pub(super) fn selected_id(&self) -> Option<u64> {
         self.menu
             .map(|(id, _)| id)
+            .or(self.annotating)
+            .or_else(|| self.pins.iter().rev().find(|p| !p.ghost).map(|p| p.id))
             .or_else(|| self.pins.last().map(|pin| pin.id))
     }
 
-    /// The raw crop of one pin, for Copy.
-    fn crop_of(&self, id: u64) -> Option<Arc<(u32, u32, Vec<u8>)>> {
+    /// Composited crop of one pin (includes transforms, filters, and annotations).
+    pub(super) fn crop_of(&self, id: u64) -> Option<Arc<(u32, u32, Vec<u8>)>> {
         self.pins
             .iter()
             .find(|pin| pin.id == id)
-            .map(|pin| pin.crop.clone())
+            .map(|pin| pin.composited_crop.clone())
     }
 
-    /// Back to 100%, keeping the visual center anchored (and the pin
-    /// grabbable) — the menu's "Reset zoom".
-    fn reset_zoom(&mut self, id: u64) {
+    /// Back to 100%, keeping the visual center anchored and grabbable.
+    pub(super) fn reset_zoom(&mut self, id: u64, cx: &mut Context<Self>) {
         if let Some(pin) = self.pins.iter_mut().find(|pin| pin.id == id) {
+            if let Some(saved) = pin.collapsed.take() {
+                pin.rect = expand_bounds(pin.rect, saved, &self.outputs);
+            }
             let center = point(
                 pin.rect.origin.x + pin.rect.size.width / 2.,
                 pin.rect.origin.y + pin.rect.size.height / 2.,
@@ -287,44 +426,96 @@ impl PinBoard {
                 center.y - pin.base.height / 2.,
             );
             pin.rect = Bounds::new(clamp_origin(origin, pin.base, &self.outputs), pin.base);
+            self.show_hud(id, "100%".into(), cx);
+            self.sync_pin_to_history(id);
         }
     }
 
-    fn raise(&mut self, id: u64) {
+    pub(super) fn raise(&mut self, id: u64) {
         if let Some(ix) = self.pins.iter().position(|pin| pin.id == id) {
             let pin = self.pins.remove(ix);
             self.pins.push(pin);
         }
     }
 
-    fn move_drag(&mut self, position: Point<Pixels>) {
-        if let Some((id, grab)) = self.drag
-            && let Some(pin) = self.pins.iter_mut().find(|pin| pin.id == id)
-        {
-            let mut raw = position - grab;
-            if crate::model::settings::current().pin().snap_to_edge {
-                raw = snap_origin_to_edges(raw, pin.rect.size, &self.outputs);
+    pub(super) fn move_drag(&mut self, position: Point<Pixels>, bypass_snap: bool) {
+        let Some(mut drag) = self.drag else {
+            return;
+        };
+        let travel = f32::from(position.x - drag.press_global.x)
+            .hypot(f32::from(position.y - drag.press_global.y));
+        if travel > 4.0 {
+            drag.moved = true;
+        }
+        self.drag = Some(drag);
+
+        let siblings: Vec<Bounds<Pixels>> = self
+            .pins
+            .iter()
+            .filter(|p| p.id != drag.id && !self.hidden)
+            .map(|p| p.rect)
+            .collect();
+        let cfg = crate::model::settings::current().pin();
+        if let Some(pin) = self.pins.iter_mut().find(|pin| pin.id == drag.id) {
+            let mut raw = position - drag.grab;
+            if !bypass_snap && (cfg.snap_to_edge || cfg.snap_to_pins) {
+                raw = snap_pin_origin(
+                    raw,
+                    pin.rect.size,
+                    &self.outputs,
+                    &siblings,
+                    cfg.snap_to_edge,
+                    cfg.snap_to_pins,
+                );
             }
             pin.rect.origin = clamp_origin(raw, pin.rect.size, &self.outputs);
         }
     }
 
-    /// Zoom anchored at the CURSOR: the image point under the pointer
-    /// stays under the pointer (map-style zoom — the friendly behavior),
-    /// then clamped so a grabbable slice remains on the desktop.
-    fn zoom_at(&mut self, id: u64, lines: f32, cursor: Point<Pixels>) {
-        if let Some(pin) = self.pins.iter_mut().find(|pin| pin.id == id) {
-            let z0 = f32::from(pin.rect.size.width) / f32::from(pin.base.width);
-            let z1 = next_zoom(z0, lines);
-            let size = zoomed_size(pin.base, z1);
-            // the image point (in base units) the cursor is over
-            let img = point(
-                (f32::from(cursor.x - pin.rect.origin.x) / z0).clamp(0., f32::from(pin.base.width)),
-                (f32::from(cursor.y - pin.rect.origin.y) / z0)
-                    .clamp(0., f32::from(pin.base.height)),
-            );
-            let origin = point(cursor.x - px(img.x * z1), cursor.y - px(img.y * z1));
-            pin.rect = Bounds::new(clamp_origin(origin, size, &self.outputs), size);
+    pub(super) fn finish_drag(&mut self, position: Point<Pixels>, bypass_snap: bool) {
+        self.move_drag(position, bypass_snap);
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        // A clean click (no drag travel) on a collapsed thumbnail expands it.
+        if !drag.moved
+            && let Some(pin) = self.pins.iter_mut().find(|p| p.id == drag.id)
+            && let Some(saved) = pin.collapsed.take()
+        {
+            pin.rect = expand_bounds(pin.rect, saved, &self.outputs);
+        }
+        self.sync_pin_to_history(drag.id);
+    }
+
+    /// Zoom anchored at `cursor`: the image point under the pointer stays under
+    /// the pointer, clamped so a grabbable slice remains on the desktop.
+    fn zoom_at(&mut self, id: u64, lines: f32, cursor: Point<Pixels>) -> Option<u32> {
+        let pin = self.pins.iter_mut().find(|pin| pin.id == id)?;
+        if pin.collapsed.is_some() {
+            return None;
+        }
+        let z0 = f32::from(pin.rect.size.width) / f32::from(pin.base.width).max(1.);
+        let z1 = next_zoom(z0, lines);
+        let size = zoomed_size(pin.base, z1);
+        let img = point(
+            (f32::from(cursor.x - pin.rect.origin.x) / z0).clamp(0., f32::from(pin.base.width)),
+            (f32::from(cursor.y - pin.rect.origin.y) / z0).clamp(0., f32::from(pin.base.height)),
+        );
+        let origin = point(cursor.x - px(img.x * z1), cursor.y - px(img.y * z1));
+        pin.rect = Bounds::new(clamp_origin(origin, size, &self.outputs), size);
+        Some((z1 * 100.).round() as u32)
+    }
+
+    pub(super) fn zoom_at_with_hud(
+        &mut self,
+        id: u64,
+        lines: f32,
+        cursor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pct) = self.zoom_at(id, lines, cursor) {
+            self.show_hud(id, format!("{pct}%"), cx);
+            self.sync_pin_to_history(id);
         }
     }
 }
@@ -347,10 +538,6 @@ impl PinSurface {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let subscription = cx.observe(&board, |_, _, cx| cx.notify());
-        // Wayland reports focus loss as a keyboard `leave`, which lands here
-        // as an activation change. Repaint on it so the frame's halo follows
-        // the window's real focus (see the shadow comment in render.rs)
-        // instead of freezing in whatever state the first frame drew.
         let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
         Self {
             board,
@@ -360,63 +547,6 @@ impl PinSurface {
             _activation: activation,
         }
     }
-
-    fn close_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.board.read(cx).selected_id() else {
-            return;
-        };
-        let empty = self.board.update(cx, |board, cx| {
-            board.pins.retain(|pin| pin.id != id);
-            if board.drag.is_some_and(|(drag_id, _)| drag_id == id) {
-                board.drag = None;
-            }
-            board.menu = None;
-            cx.notify();
-            board.pins.is_empty()
-        });
-        if empty {
-            let handles = self.board.read(cx).windows.clone();
-            let current = window.window_handle();
-            window.remove_window();
-            for handle in handles {
-                if handle != current {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                }
-            }
-        }
-    }
-
-    /// The menu's Copy: PNG-encode the selected pin's crop (fast tier —
-    /// it goes to the clipboard, not disk), hand it to the clipboard
-    /// daemon and fire the usual copied notification (with the
-    /// click-to-open action). Failures notify instead of breaking the pin.
-    fn copy_selected(&mut self, cx: &mut Context<Self>) {
-        let crop = self.board.update(cx, |board, cx| {
-            let id = board.selected_id()?;
-            board.menu = None;
-            cx.notify();
-            board.crop_of(id)
-        });
-        let Some(crop) = crop else {
-            return;
-        };
-        let (w, h, rgba) = crop.as_ref();
-        match crate::model::export::encode_png_fast(*w, *h, rgba) {
-            Ok(png) => {
-                if let Err(e) = crate::clipboard::copy_image(*w, *h, rgba, &png) {
-                    eprintln!("[shotori] pin copy failed: {e:#}");
-                    crate::notify::send(
-                        crate::i18n::t!("pin.notify.copy_failed.title").as_ref(),
-                        crate::i18n::t!("pin.notify.copy_failed.body").as_ref(),
-                    );
-                    return;
-                }
-                println!("[shotori] copied pinned {w}x{h} to clipboard");
-                crate::notify::copied(&png);
-            }
-            Err(e) => eprintln!("[shotori] PNG encoding failed: {e:#}"),
-        }
-    }
 }
 
 pub(crate) struct PinSpec {
@@ -424,6 +554,23 @@ pub(crate) struct PinSpec {
     pub h: u32,
     pub rgba: Vec<u8>,
     pub rect: Bounds<Pixels>,
+    pub opacity: Option<u8>,
+    pub history_id: Option<String>,
+    pub label: Option<String>,
+}
+
+impl PinSpec {
+    pub(crate) fn new(w: u32, h: u32, rgba: Vec<u8>, rect: Bounds<Pixels>) -> Self {
+        Self {
+            w,
+            h,
+            rgba,
+            rect,
+            opacity: None,
+            history_id: None,
+            label: None,
+        }
+    }
 }
 
 /// Build the scene once. Later requests add to this same scene rather than
@@ -431,7 +578,9 @@ pub(crate) struct PinSpec {
 fn open_board(spec: PinSpec, cx: &mut App) -> anyhow::Result<Entity<PinBoard>> {
     let outputs = outputs();
     anyhow::ensure!(!outputs.is_empty(), "no outputs registered");
-    let board = cx.new(|_| PinBoard::new(outputs.iter().map(|output| output.bounds).collect()));
+    let board = cx.new(|_| {
+        PinBoard::new(outputs.iter().map(|output| output.bounds).collect()).with_default_history()
+    });
     board.update(cx, |board, cx| board.add(spec, cx));
     let mut windows: Vec<AnyWindowHandle> = Vec::new();
     for output in outputs {
@@ -475,7 +624,7 @@ fn open_board(spec: PinSpec, cx: &mut App) -> anyhow::Result<Entity<PinBoard>> {
             Ok(handle) => windows.push(handle.into()),
             Err(error) => {
                 for handle in windows {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                    drop(handle.update(cx, |_, window, _| window.remove_window()));
                 }
                 return Err(error);
             }
@@ -485,21 +634,33 @@ fn open_board(spec: PinSpec, cx: &mut App) -> anyhow::Result<Entity<PinBoard>> {
     Ok(board)
 }
 
+mod annotate;
+mod menu;
+mod ops;
 #[cfg(target_os = "linux")]
 mod render;
-
 mod transport;
 
-/// IPC preparation runs away from the UI thread. The first process retains
-/// ownership; other screenshot sessions transfer their pixels and exit.
 #[cfg(target_os = "linux")]
-pub(crate) use transport::{Prepared, prepare};
+pub(crate) use transport::{ControlCommand, Prepared, prepare, send_control};
 
+#[cfg(not(target_os = "linux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlCommand {
+    UnlockAll,
+    ToggleVisibility,
+    CloseAll,
+    RestoreLast,
+}
 #[cfg(not(target_os = "linux"))]
 pub(crate) struct Prepared(PinSpec);
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn prepare(spec: PinSpec) -> anyhow::Result<Prepared> {
     Ok(Prepared(spec))
+}
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn send_control(_cmd: ControlCommand) -> anyhow::Result<bool> {
+    Ok(false)
 }
 
 pub(crate) fn open(prepared: Prepared, cx: &mut App) -> anyhow::Result<()> {
@@ -512,17 +673,50 @@ pub(crate) fn open(prepared: Prepared, cx: &mut App) -> anyhow::Result<()> {
             cx.spawn(async move |cx| {
                 while let Ok(request) = requests.recv().await {
                     let result = cx.update(|cx| {
-                        // Closing the last pin wins over a request still in transit.
                         anyhow::ensure!(
                             !board.read(cx).pins.is_empty(),
                             "pin session is closing; try again"
                         );
-                        board.update(cx, |board, cx| board.add(request.spec, cx));
-                        Ok(())
+                        match request.incoming {
+                            transport::Incoming::Add(spec) => {
+                                board.update(cx, |board, cx| board.add(spec, cx));
+                                Ok(())
+                            }
+                            transport::Incoming::Control(cmd) => match cmd {
+                                ControlCommand::UnlockAll => {
+                                    board.update(cx, |b, cx| b.unlock_all_ghosts(cx));
+                                    Ok(())
+                                }
+                                ControlCommand::ToggleVisibility => {
+                                    board.update(cx, |b, cx| b.toggle_visibility(cx));
+                                    Ok(())
+                                }
+                                ControlCommand::CloseAll => {
+                                    let handles = board.update(cx, |b, cx| {
+                                        let ids: Vec<u64> = b.pins.iter().map(|p| p.id).collect();
+                                        for id in ids {
+                                            b.remove_pin_by_id(id, cx);
+                                        }
+                                        b.windows.clone()
+                                    });
+                                    for handle in handles {
+                                        drop(handle.update(cx, |_, w, _| w.remove_window()));
+                                    }
+                                    Ok(())
+                                }
+                                ControlCommand::RestoreLast => {
+                                    let ok = board.update(cx, |b, cx| b.restore_last_closed(cx));
+                                    anyhow::ensure!(ok, "no closed pin available to restore");
+                                    Ok(())
+                                }
+                            },
+                        }
                     });
-                    let _ = request
-                        .reply
-                        .send(result.map_err(|error: anyhow::Error| error.to_string()));
+                    drop(
+                        request
+                            .reply
+                            .send(result.map_err(|error: anyhow::Error| error.to_string())),
+                    );
                 }
             })
             .detach();
@@ -534,12 +728,9 @@ pub(crate) fn open(prepared: Prepared, cx: &mut App) -> anyhow::Result<()> {
         open_board(prepared.0, cx).map(|_| ())
     }
 }
+
 #[cfg(test)]
 mod tests {
-    // NO `use super::*` here: chained globs (this → pin → gpui_kit::*)
-    // blow rustc's macro-expansion recursion inside #[test] (rustc
-    // 1.98, "recursion limit reached while expanding #[test]"). Import
-    // exactly what the tests touch instead.
     use super::{
         MIN_VISIBLE, ZOOM_MAX, ZOOM_MIN, clamp_origin, next_zoom, next_zoom_with, zoomed_size,
     };
@@ -605,25 +796,21 @@ mod tests {
     fn dragging_keeps_a_grabbable_slice_on_the_desktop() {
         let pin: gpui_kit::Size<Pixels> = size(px(100.), px(60.));
 
-        // fully inside stays put
         let p = clamp_origin(point(px(120.), px(80.)), pin, &[desk()]);
         assert_eq!((p.x, p.y), (px(120.), px(80.)));
 
-        // off the left/top edge only as far as the visible slice allows
         let p = clamp_origin(point(px(-5000.), px(-5000.)), pin, &[desk()]);
         assert_eq!(
             (p.x, p.y),
             (px(-100. - (100. - MIN_VISIBLE)), px(-(60. - MIN_VISIBLE)))
         );
 
-        // right/bottom edge keeps MIN_VISIBLE on the desktop
         let p = clamp_origin(point(px(9000.), px(9000.)), pin, &[desk()]);
         assert_eq!(
             (p.x, p.y),
             (px(1000. - MIN_VISIBLE), px(500. - MIN_VISIBLE))
         );
 
-        // a pin smaller than the slice simply stays fully visible
         let tiny: gpui_kit::Size<Pixels> = size(px(10.), px(8.));
         let p = clamp_origin(point(px(-500.), px(-500.)), tiny, &[desk()]);
         assert_eq!((p.x, p.y), (px(-100.), px(0.)));
@@ -645,12 +832,12 @@ mod interaction_tests {
     use gpui_kit::{AppContext, Bounds, Entity, MouseButton, TestAppContext, point, px, size};
 
     fn spec(x: f32, y: f32) -> PinSpec {
-        PinSpec {
-            w: 100,
-            h: 60,
-            rgba: vec![255; 100 * 60 * 4],
-            rect: Bounds::new(point(px(x), px(y)), size(px(100.), px(60.))),
-        }
+        PinSpec::new(
+            100,
+            60,
+            vec![255; 100 * 60 * 4],
+            Bounds::new(point(px(x), px(y)), size(px(100.), px(60.))),
+        )
     }
     fn board(cx: &mut TestAppContext) -> Entity<PinBoard> {
         cx.update(|cx| {
@@ -762,7 +949,6 @@ mod interaction_tests {
             vcx.simulate_resize(size(px(200.), px(200.)));
             vcx.update(|window, cx| window.draw(cx).clear(cx));
         }
-        // the frame div is grown by the 1px border on every side…
         assert_eq!(
             first.debug_bounds("pin-image-1").unwrap().origin,
             point(px(149.), px(19.))
@@ -775,8 +961,6 @@ mod interaction_tests {
             second.debug_bounds("pin-image-1").unwrap().size,
             size(px(102.), px(62.))
         );
-        // …so the CONTENT area — where the frozen bitmap lands — is the
-        // pin rect to the pixel (no border inset, no resampling)
         assert_eq!(
             second.debug_bounds("pin-img-1").unwrap().origin,
             point(px(-50.), px(20.))
@@ -792,7 +976,7 @@ mod interaction_tests {
             MouseButton::Left,
             Default::default(),
         );
-        second.update(|_, cx| assert_eq!(board.read(cx).drag.unwrap().0, 1));
+        second.update(|_, cx| assert_eq!(board.read(cx).drag.unwrap().id, 1));
         second.simulate_mouse_up(
             point(px(180.), px(150.)),
             MouseButton::Left,
@@ -840,9 +1024,6 @@ mod interaction_tests {
             }));
         }
         board.update(first, |board, _| board.windows = handles.clone());
-        // (Esc with no menu open closes the topmost pin — covered by
-        // `escape_without_menu_closes_the_topmost_pin`; here the menu
-        // interactions need the pin alive, so they come first.)
         first.simulate_mouse_down(
             point(px(190.), px(190.)),
             MouseButton::Right,
@@ -872,8 +1053,6 @@ mod interaction_tests {
         }
     }
 
-    /// Esc with no menu open closes the TOPMOST pin (the one a click
-    /// raised); closing the last pin tears down every output surface.
     #[gpui_kit::test]
     fn escape_without_menu_closes_the_topmost_pin(cx: &mut TestAppContext) {
         let board = board(cx);
@@ -916,8 +1095,6 @@ mod interaction_tests {
         }
         board.update(first, |board, _| board.windows = handles.clone());
 
-        // clicking the overlapping pin hits the TOPMOST one (id 2,
-        // painted last); raising it keeps [1, 2] with 2 on top
         first.simulate_click(point(px(80.), px(50.)), Default::default());
         first.update(|_, cx| {
             assert_eq!(
@@ -930,7 +1107,6 @@ mod interaction_tests {
                 vec![1, 2]
             );
         });
-        // one Esc: no menu open → only the topmost pin closes
         first.simulate_keystrokes("escape");
         first.run_until_parked();
         first.update(|_, cx| {
@@ -942,8 +1118,6 @@ mod interaction_tests {
             assert!(state.drag.is_none());
         });
         assert_eq!(first.windows().len(), 2, "one pin remains — surfaces stay");
-        // second Esc: the last pin — every surface closes (assert via
-        // the app context: the windows themselves are gone)
         first.simulate_keystrokes("escape");
         first.run_until_parked();
         other.update(|cx| assert!(board.read(cx).pins.is_empty()));
@@ -960,9 +1134,6 @@ mod interaction_tests {
             for _ in 0..20 {
                 let center = board.pins[0].rect.center();
                 board.zoom_at(1, -2., center);
-                // center-anchored shrinking drifts the rect, so the
-                // grabbable slice may land on EITHER output — assert
-                // the best-visible one keeps its grip
                 let rect = board.pins[0].rect;
                 let best = board
                     .outputs
@@ -971,8 +1142,6 @@ mod interaction_tests {
                         let visible = rect.intersect(output).size;
                         size(acc.width.max(visible.width), acc.height.max(visible.height))
                     });
-                // a hair of tolerance: the intersect() round-trip loses
-                // float ulps against the original size
                 let need_w = rect.size.width.min(px(super::MIN_VISIBLE));
                 let need_h = rect.size.height.min(px(super::MIN_VISIBLE));
                 assert!(best.width - need_w > px(-0.05));
@@ -981,9 +1150,6 @@ mod interaction_tests {
         });
     }
 
-    /// Zoom anchors on the cursor: the image point under the pointer
-    /// stays under the pointer in both directions (while the pin fits
-    /// the desktop; the grabbable clamp may shift it past that).
     #[gpui_kit::test]
     fn zoom_anchors_on_the_cursor_point(cx: &mut TestAppContext) {
         let board = board(cx);
@@ -1019,6 +1185,158 @@ mod interaction_tests {
                 }
                 assert!(after.contains(&cursor), "cursor left the pin");
             }
+        });
+    }
+
+    /// Flagship capabilities: rotate, flip, opacity, collapse/expand, ghost
+    /// click-through + corner unlock, nudge, closed-pin restore (`Ctrl+Shift+T`),
+    /// and in-pin secondary annotation with `Ctrl+Z` undo and `Esc` innermost exit.
+    #[gpui_kit::test]
+    fn flagship_transforms_ghost_collapse_restore_and_in_pin_annotation(cx: &mut TestAppContext) {
+        let board = board(cx);
+        board.update(cx, |board, cx| {
+            board.add(spec(20., 20.), cx);
+            board.add(spec(70., 50.), cx);
+        });
+        let (_, vcx) = cx.add_window_view(|window, cx| {
+            PinSurface::new(
+                board.clone(),
+                PinOutput {
+                    bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+                    display_id: None,
+                    scale: 1.0,
+                },
+                window,
+                cx,
+            )
+        });
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // 1. Rotate 90° CW swaps 100×60 → 60×100; Shift+R rotates back to 100×60.
+        vcx.simulate_keystrokes("r");
+        vcx.update(|_, cx| {
+            let top = board.read(cx).pins.last().unwrap().rect.size;
+            assert_eq!(top, size(px(60.), px(100.)));
+        });
+        vcx.simulate_keystrokes("shift-r");
+        vcx.update(|_, cx| {
+            let top = board.read(cx).pins.last().unwrap().rect.size;
+            assert_eq!(top, size(px(100.), px(60.)));
+        });
+
+        // 2. Opacity stepping (`[` / `]`) and arrow nudge (`shift-right`).
+        vcx.simulate_keystrokes("[");
+        vcx.simulate_keystrokes("shift-right");
+        vcx.update(|_, cx| {
+            let top = board.read(cx).pins.last().unwrap();
+            assert_eq!(top.opacity, 90);
+            assert_eq!(top.rect.origin, point(px(80.), px(50.)));
+        });
+
+        // 3. Collapse (`t`) shrinks to 56×56; clicking without drag expands back!
+        vcx.simulate_keystrokes("t");
+        vcx.update(|window, cx| {
+            let top = board.read(cx).pins.last().unwrap();
+            assert!(top.collapsed.is_some());
+            assert_eq!(top.rect.size, size(px(56.), px(56.)));
+            window.draw(cx).clear(cx);
+        });
+        vcx.simulate_click(point(px(90.), px(60.)), Default::default());
+        vcx.update(|window, cx| {
+            let top = board.read(cx).pins.last().unwrap();
+            assert!(top.collapsed.is_none());
+            assert_eq!(top.rect.size, size(px(100.), px(60.)));
+            window.draw(cx).clear(cx);
+        });
+
+        // 4. Ghost click-through (`l`) exposes the corner unlock button and clicking it unlocks.
+        vcx.simulate_keystrokes("l");
+        vcx.update(|window, cx| {
+            assert!(board.read(cx).pins.last().unwrap().ghost);
+            window.draw(cx).clear(cx);
+        });
+        let unlock_bounds = vcx.debug_bounds("pin-ghost-unlock-2").unwrap();
+        vcx.simulate_click(unlock_bounds.center(), Default::default());
+        vcx.update(|window, cx| {
+            assert!(!board.read(cx).pins.last().unwrap().ghost);
+            window.draw(cx).clear(cx);
+        });
+
+        // 5. In-pin annotation (`a`): draw a rectangle, undo (`ctrl-z`), redo (`ctrl-y`),
+        //    and verify `escape` exits annotation mode WITHOUT closing the pin!
+        vcx.simulate_keystrokes("a");
+        vcx.update(|window, cx| {
+            assert_eq!(board.read(cx).annotating, Some(2));
+            window.draw(cx).clear(cx);
+        });
+        assert!(vcx.debug_bounds("pin-annot-bar").is_some());
+        vcx.simulate_mouse_down(
+            point(px(90.), px(60.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.simulate_mouse_move(
+            point(px(140.), px(95.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.simulate_mouse_up(
+            point(px(140.), px(95.)),
+            MouseButton::Left,
+            Default::default(),
+        );
+        vcx.update(|_, cx| {
+            let top = board.read(cx).pins.last().unwrap();
+            assert_eq!(top.annotations.committed().len(), 1);
+            assert!(
+                top.composited_crop.2.iter().any(|&b| b != 255),
+                "committed annotation must composite into the pin's exported pixels"
+            );
+        });
+        vcx.simulate_keystrokes("ctrl-z");
+        vcx.update(|_, cx| {
+            assert_eq!(
+                board
+                    .read(cx)
+                    .pins
+                    .last()
+                    .unwrap()
+                    .annotations
+                    .committed()
+                    .len(),
+                0
+            );
+        });
+        vcx.simulate_keystrokes("ctrl-y");
+        vcx.update(|_, cx| {
+            assert_eq!(
+                board
+                    .read(cx)
+                    .pins
+                    .last()
+                    .unwrap()
+                    .annotations
+                    .committed()
+                    .len(),
+                1
+            );
+        });
+        // Escape leaves annotation mode while keeping both pins open.
+        vcx.simulate_keystrokes("escape");
+        vcx.update(|_, cx| {
+            assert!(board.read(cx).annotating.is_none());
+            assert_eq!(board.read(cx).pins.len(), 2);
+        });
+
+        // 6. Close top pin (`escape`) and restore it with `ctrl-shift-t`!
+        vcx.simulate_keystrokes("escape");
+        vcx.update(|_, cx| assert_eq!(board.read(cx).pins.len(), 1));
+        vcx.simulate_keystrokes("ctrl-shift-t");
+        vcx.update(|_, cx| {
+            let state = board.read(cx);
+            assert_eq!(state.pins.len(), 2);
+            assert_eq!(state.pins.last().unwrap().opacity, 90);
         });
     }
 

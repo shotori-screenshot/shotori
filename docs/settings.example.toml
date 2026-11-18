@@ -152,12 +152,17 @@ timeout_secs = 10 # 2..=30
 [pin]
 # Modifier required to wheel-zoom a floating pin: "none" | "ctrl" | "alt" | "shift".
 zoom_modifier = "none"
+# Modifier required to adjust a floating pin's opacity by wheel:
+# "ctrl" | "alt" | "shift" | "none" | "disabled".
+opacity_modifier = "ctrl"
 zoom_step = 12        # 5..=50 (% per wheel notch; 12 = 1.12x)
 opacity = 100         # 20..=100 (% initial pin opacity)
-double_click = "none" # "none" | "close" | "copy_close" | "reset_zoom"
+double_click = "none" # "none" | "close" | "copy_close" | "reset_zoom" | "collapse"
 show_border = true
 shadow = true
 snap_to_edge = false
+snap_to_pins = true
+max_history = 50      # 0..=200 (0 disables persistent pin history)
 
 [scroll]
 # Default growth direction for long screenshots: "vertical" | "horizontal".

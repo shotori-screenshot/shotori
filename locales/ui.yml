@@ -1126,6 +1126,9 @@ settings:
       reset_zoom:
         en: Reset zoom to 100%
         zh-CN: 重置缩放至 100%
+      collapse:
+        en: Collapse / expand thumbnail
+        zh-CN: 折叠/展开缩略图
     zoom_modifier:
       none:
         en: Wheel directly (no modifier)
@@ -1139,14 +1142,47 @@ settings:
       shift:
         en: Hold Shift + wheel
         zh-CN: 按住 Shift + 滚轮
+    opacity_modifier:
+      ctrl:
+        en: Hold Ctrl + wheel
+        zh-CN: 按住 Ctrl + 滚轮
+      alt:
+        en: Hold Alt + wheel
+        zh-CN: 按住 Alt + 滚轮
+      shift:
+        en: Hold Shift + wheel
+        zh-CN: 按住 Shift + 滚轮
+      none:
+        en: Wheel directly (no modifier)
+        zh-CN: 直接滚轮调节（无修饰键）
+      disabled:
+        en: Disabled
+        zh-CN: 关闭滚轮调透明度
     zoom_modifier_row:
       title:
         en: Wheel zoom shortcut
         zh-CN: 滚轮缩放触发方式
+    opacity_modifier_row:
+      title:
+        en: Wheel opacity shortcut
+        zh-CN: 滚轮透明度触发方式
     zoom_step:
       title:
         en: Zoom step per wheel notch
         zh-CN: 每次滚轮缩放步进
+    max_history:
+      title:
+        en: Saved pin history limit
+        zh-CN: 历史贴图保留上限
+      disabled:
+        en: Disabled
+        zh-CN: 已关闭
+      count:
+        en: "%{count} pins"
+        zh-CN: "%{count} 张"
+    open_history_btn:
+      en: Pin history…
+      zh-CN: 历史贴图…
     snap_to_edge:
       title:
         en: Snap to screen edges
@@ -1154,6 +1190,13 @@ settings:
       body:
         en: Magnetically align pins within 10 px of an output edge while dragging
         zh-CN: 拖动贴图靠近屏幕边缘 10 px 内时自动对齐吸附
+    snap_to_pins:
+      title:
+        en: Snap to other pins
+        zh-CN: 贴图间磁吸对齐
+      body:
+        en: Align dragged pins flush against or level with neighboring pins (hold Alt to bypass)
+        zh-CN: 拖动贴图靠近其他贴图时自动对齐拼接（按住 Alt 临时跳过吸附）
     show_border:
       title:
         en: Show border frame
@@ -1167,6 +1210,119 @@ pin:
     reset_zoom:
       en: Reset zoom
       zh-CN: 重置缩放
+    annotate:
+      en: Annotate pin
+      zh-CN: 二次标注
+    rotate_cw:
+      en: Rotate 90° clockwise
+      zh-CN: 顺时针旋转 90°
+    rotate_ccw:
+      en: Rotate 90° counter-clockwise
+      zh-CN: 逆时针旋转 90°
+    flip_h:
+      en: Flip horizontally
+      zh-CN: 水平翻转
+    flip_v:
+      en: Flip vertically
+      zh-CN: 垂直翻转
+    grayscale:
+      en: Grayscale
+      zh-CN: 灰度模式
+    invert:
+      en: Invert colors
+      zh-CN: 反色模式
+    collapse:
+      en: Collapse / expand thumbnail
+      zh-CN: 折叠/展开缩略图
+    click_through:
+      en: Click-through lock
+      zh-CN: 鼠标穿透锁定
+    ocr:
+      en: Recognize text (OCR)
+      zh-CN: 文字识别（OCR）
+    qr:
+      en: Scan QR code
+      zh-CN: 扫描二维码
+    paste:
+      en: Paste clipboard as pin
+      zh-CN: 粘贴剪贴板为贴图
+    history:
+      en: Pin history…
+      zh-CN: 历史贴图…
+    restore_closed:
+      en: Restore last closed pin
+      zh-CN: 恢复刚关闭的贴图
+    unlock_all:
+      en: Unlock click-through pins
+      zh-CN: 解锁所有鼠标穿透贴图
+  hud:
+    annotating:
+      en: Annotate · Esc to finish
+      zh-CN: 标注模式 · Esc 结束
+    restored:
+      en: Restored
+      zh-CN: 已恢复
+    flipped_h:
+      en: Flipped ↔
+      zh-CN: 已水平翻转
+    flipped_v:
+      en: Flipped ↕
+      zh-CN: 已垂直翻转
+    grayscale_on:
+      en: Grayscale
+      zh-CN: 灰度开启
+    grayscale_off:
+      en: Color
+      zh-CN: 彩色恢复
+    invert_on:
+      en: Inverted
+      zh-CN: 反色开启
+    invert_off:
+      en: Normal colors
+      zh-CN: 原色恢复
+    ghost_on:
+      en: Click-through · click 🔒 to unlock
+      zh-CN: 鼠标穿透 · 点击右上 🔒 解锁
+    ghost_off:
+      en: Interactive
+      zh-CN: 已解除穿透
+    copied:
+      en: Copied ✓
+      zh-CN: 已复制 ✓
+    saved:
+      en: Saved ✓
+      zh-CN: 已保存 ✓
+    ocr_done:
+      en: OCR copied ✓
+      zh-CN: 文字已复制 ✓
+    qr_copied:
+      en: QR copied ✓
+      zh-CN: 二维码已复制 ✓
+  history:
+    title:
+      en: Pin History
+      zh-CN: 历史贴图
+    subtitle:
+      en: "%{count} saved pin(s)"
+      zh-CN: "共缓存 %{count} 张历史贴图"
+    pin_clipboard:
+      en: Pin clipboard
+      zh-CN: 剪贴板贴图
+    open_folder:
+      en: Open folder
+      zh-CN: 打开目录
+    refresh:
+      en: Refresh
+      zh-CN: 刷新
+    clear_all:
+      en: Clear all
+      zh-CN: 清空全部
+    empty_title:
+      en: No pin history yet
+      zh-CN: 暂无历史贴图
+    empty_body:
+      en: Pinned screenshots and clipboard notes are cached here automatically so you can restore them anytime.
+      zh-CN: 每次生成的悬浮贴图与剪贴板贴图都会自动缓存在此，方便随时找回重贴。
   notify:
     copy_failed:
       title:
@@ -1175,6 +1331,16 @@ pin:
       body:
         en: Try again, or copy from the overlay instead.
         zh-CN: 请重试，或改在截图界面上复制。
+    ocr_missing_models:
+      en: Download OCR models in Settings → OCR first.
+      zh-CN: 请先在「设置 → 文字识别」中下载 OCR 模型。
+    paste_failed:
+      title:
+        en: Couldn’t paste from clipboard
+        zh-CN: 无法从剪贴板贴图
+      body:
+        en: Copy an image or text to the clipboard first, then try again.
+        zh-CN: 请先复制图片或文本到剪贴板后再试。
 scroll:
   status:
     following:
@@ -1745,6 +1911,18 @@ tray:
   screenshot:
     en: Screenshot
     zh-CN: 截图
+  pin_clipboard:
+    en: Pin from clipboard
+    zh-CN: 从剪贴板贴图
+  restore_pin:
+    en: Restore last pin
+    zh-CN: 恢复上一张贴图
+  pin_history:
+    en: Pin history…
+    zh-CN: 历史贴图…
+  unlock_pins:
+    en: Unlock click-through pins
+    zh-CN: 解锁鼠标穿透贴图
   settings:
     en: Settings…
     zh-CN: 设置…

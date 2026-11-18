@@ -95,7 +95,24 @@ gpui_kit::assets::icon_assets!(
         Bell,
         FolderOpen,
         Undo2,
-        ExternalLink
+        Redo2,
+        ExternalLink,
+        RotateCw,
+        RotateCcw,
+        FlipHorizontal2,
+        FlipVertical2,
+        Contrast,
+        Droplet,
+        Lock,
+        LockOpen,
+        Minimize2,
+        Maximize2,
+        ClipboardPaste,
+        Clock,
+        RefreshCw,
+        Images,
+        Eye,
+        EyeOff
     ]
 );
 

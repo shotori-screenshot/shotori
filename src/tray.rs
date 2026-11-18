@@ -17,7 +17,18 @@
 use gpui_kit::*;
 use gpui_tray::{Icon, Tray};
 
-actions!(tray, [TakeScreenshot, OpenSettings, QuitTray]);
+actions!(
+    tray,
+    [
+        TakeScreenshot,
+        PinFromClipboard,
+        RestoreLastPin,
+        OpenPinHistoryTray,
+        UnlockClickThroughPins,
+        OpenSettings,
+        QuitTray
+    ]
+);
 
 /// Keeps the [`Tray`] alive for the process lifetime (gpui-tray removes
 /// the native item on drop).
@@ -49,6 +60,10 @@ pub fn run() {
 fn setup(cx: &mut App) -> gpui_tray::Result<()> {
     cx.set_app_identity(crate::APP_ID, "Shotori");
     cx.on_action(take_screenshot)
+        .on_action(pin_from_clipboard)
+        .on_action(restore_last_pin)
+        .on_action(open_pin_history)
+        .on_action(unlock_pins)
         .on_action(open_settings)
         .on_action(quit_tray);
 
@@ -58,6 +73,20 @@ fn setup(cx: &mut App) -> gpui_tray::Result<()> {
         .menu(|_| {
             vec![
                 MenuItem::action(crate::i18n::t!("tray.screenshot").as_ref(), TakeScreenshot),
+                MenuItem::action(
+                    crate::i18n::t!("tray.pin_clipboard").as_ref(),
+                    PinFromClipboard,
+                ),
+                MenuItem::action(crate::i18n::t!("tray.restore_pin").as_ref(), RestoreLastPin),
+                MenuItem::action(
+                    crate::i18n::t!("tray.pin_history").as_ref(),
+                    OpenPinHistoryTray,
+                ),
+                MenuItem::action(
+                    crate::i18n::t!("tray.unlock_pins").as_ref(),
+                    UnlockClickThroughPins,
+                ),
+                MenuItem::separator(),
                 MenuItem::action(crate::i18n::t!("tray.settings").as_ref(), OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action(crate::i18n::t!("tray.quit").as_ref(), QuitTray),
@@ -79,6 +108,22 @@ fn launch(subcommand: &str) {
 
 fn take_screenshot(_: &TakeScreenshot, _: &mut App) {
     launch("gui");
+}
+
+fn pin_from_clipboard(_: &PinFromClipboard, _: &mut App) {
+    crate::launch_detached_args(&["pin", "--clipboard"]);
+}
+
+fn restore_last_pin(_: &RestoreLastPin, _: &mut App) {
+    crate::launch_detached_args(&["pin", "--restore"]);
+}
+
+fn open_pin_history(_: &OpenPinHistoryTray, _: &mut App) {
+    crate::launch_detached_args(&["pin", "--history"]);
+}
+
+fn unlock_pins(_: &UnlockClickThroughPins, _: &mut App) {
+    crate::launch_detached_args(&["pin", "--unlock"]);
 }
 
 fn open_settings(_: &OpenSettings, _: &mut App) {

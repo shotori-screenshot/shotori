@@ -198,12 +198,7 @@ pub(super) fn scroll_pin_exit(
             px((height as f32 / scale).max(1.0)),
         ),
     );
-    let spec = crate::ui::pin::PinSpec {
-        w: width,
-        h: height,
-        rgba: rgba.to_vec(),
-        rect: pin_bounds,
-    };
+    let spec = crate::ui::pin::PinSpec::new(width, height, rgba.to_vec(), pin_bounds);
     let prepared = cx
         .background_executor()
         .spawn(async move { crate::ui::pin::prepare(spec) });

@@ -167,12 +167,7 @@ impl Overlay {
             return;
         };
         let (w, h) = (crop.width, crop.height);
-        let spec = crate::ui::pin::PinSpec {
-            w,
-            h,
-            rgba: crop.rgba,
-            rect: crop.bounds,
-        };
+        let spec = crate::ui::pin::PinSpec::new(w, h, crop.rgba, crop.bounds);
         self.session.update(cx, |session, cx| {
             session.set_blocked(true);
             cx.notify();

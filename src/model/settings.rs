@@ -42,8 +42,9 @@ pub(crate) use annotation::{
     highlight_blend_label, number_format_label,
 };
 pub use capture::{
-    CaptureSettings, LoupeSize, NotifySettings, PinDoubleClick, PinSettings, PinZoomModifier,
-    ScrollAxisSetting, ScrollSettings, SizeLabelMode,
+    CaptureSettings, LoupeSize, NotifySettings, PinDoubleClick, PinOpacityModifier, PinSettings,
+    PinWheelAction, PinZoomModifier, ScrollAxisSetting, ScrollSettings, SizeLabelMode,
+    resolve_pin_wheel_action,
 };
 pub use export::{
     DEFAULT_FILENAME_TEMPLATE, DEFAULT_SAVE_DIR_DISPLAY, ExportFormat, ExportSettings,
@@ -1393,12 +1394,15 @@ mod tests {
         s.notify_mut().timeout_secs = 5;
 
         s.pin_mut().zoom_modifier = PinZoomModifier::Ctrl;
+        s.pin_mut().opacity_modifier = PinOpacityModifier::Alt;
         s.pin_mut().zoom_step = 20;
         s.pin_mut().opacity = 80;
-        s.pin_mut().double_click = PinDoubleClick::CopyAndClose;
+        s.pin_mut().double_click = PinDoubleClick::Collapse;
         s.pin_mut().show_border = false;
         s.pin_mut().shadow = false;
         s.pin_mut().snap_to_edge = true;
+        s.pin_mut().snap_to_pins = false;
+        s.pin_mut().max_history = 120;
 
         s.scroll_mut().default_axis = ScrollAxisSetting::Horizontal;
         s.scroll_mut().max_length = 45_000;
@@ -1422,13 +1426,13 @@ mod tests {
              [export]\nformat = \"bmp\"\njpeg_quality = 0\nfilename_template = \"../bad\"\n\
              [annotation]\nstroke_width = 99\ndefault_color_index = 20\ngeometry_radius = 99\n\
              [notify]\ntimeout_secs = 99\n\
-             [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\nopacity = 5\ndouble_click = \"explode\"\n\
+             [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\nopacity_modifier = \"hyper\"\nopacity = 5\ndouble_click = \"explode\"\nmax_history = 999\n\
              [scroll]\nmax_length = 100\ndefault_axis = \"diagonal\"\n",
         )
         .unwrap();
         let (degraded, errors) = Settings::load(Some(&path));
         assert_eq!(degraded, Settings::default());
-        assert_eq!(errors.len(), 15, "errors: {errors:?}");
+        assert_eq!(errors.len(), 17, "errors: {errors:?}");
     }
 
     #[test]

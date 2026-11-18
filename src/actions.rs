@@ -152,11 +152,69 @@ gpui_kit::actions!(
     ]
 );
 
-// Floating-pin window actions (`ShotoriPin` / `ShotoriPinMenu` contexts).
+// Floating-pin window actions (`ShotoriPin` / `ShotoriPinMenu` /
+// `ShotoriPinAnnotate` / `ShotoriPinHistory` contexts).
 gpui_kit::actions!(
     pin,
-    [ClosePin, DismissPinMenu, OpenPinMenu, CopyPin, ResetPinZoom]
+    [
+        ClosePin,
+        CloseAllPins,
+        DismissPinMenu,
+        OpenPinMenu,
+        CopyPin,
+        SavePin,
+        PastePin,
+        OcrPin,
+        QrPin,
+        ResetPinZoom,
+        RotatePinCw,
+        RotatePinCcw,
+        FlipPinHorizontal,
+        FlipPinVertical,
+        TogglePinGrayscale,
+        TogglePinInvert,
+        StepPinOpacityUp,
+        StepPinOpacityDown,
+        TogglePinGhost,
+        UnlockAllPins,
+        TogglePinCollapse,
+        TogglePinVisibility,
+        RestoreClosedPin,
+        OpenPinHistory,
+        NextPin,
+        PrevPin,
+        TogglePinAnnotate,
+        ExitPinAnnotate,
+        PinUndo,
+        PinRedo,
+        PinDeleteMark,
+        PinClearMarks,
+        PinSizeDown,
+        PinSizeUp,
+        PinToolSelect,
+        PinToolRect,
+        PinToolEllipse,
+        PinToolArrow,
+        PinToolLine,
+        PinToolPencil,
+        PinToolHighlighter,
+        PinToolMosaic,
+        PinToolBlur,
+        PinToolNumber,
+        PinToolText,
+        PinToolEraser,
+        ClosePinHistory,
+        RefreshPinHistory
+    ]
 );
+
+/// Keyboard translation of a floating pin in desktop logical pixels.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(no_json)]
+pub(crate) struct PinNudge {
+    pub(crate) dx: i32,
+    pub(crate) dy: i32,
+}
 
 /// Keyboard translation in desktop logical pixels.
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
@@ -192,14 +250,88 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         // Space freezes sampling without ending the session (the panel
         // button dispatches the same action)
         KeyBinding::new("space", ScrollPause, Some("ShotoriScroll")),
-        // pins are their own windows with their own context
+        // pins are their own windows with their own contexts
         KeyBinding::new("shift-f10", OpenPinMenu, Some("ShotoriPin")),
         // Esc in the menu only dismisses it; with no menu it closes the
         // topmost pin (the surface switches its key_context while a
-        // menu is open, which is how both bindings coexist)
+        // menu or annotation session is open)
         KeyBinding::new("escape", DismissPinMenu, Some("ShotoriPinMenu")),
-        KeyBinding::new("escape", ClosePin, Some("ShotoriPin")),
         KeyBinding::new("enter", ClosePin, Some("ShotoriPinMenu")),
+        KeyBinding::new("escape", ClosePin, Some("ShotoriPin")),
+        KeyBinding::new("delete", ClosePin, Some("ShotoriPin")),
+        KeyBinding::new("backspace", ClosePin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-c", CopyPin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-s", SavePin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-v", PastePin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-o", OcrPin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-q", QrPin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-shift-t", RestoreClosedPin, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-h", OpenPinHistory, Some("ShotoriPin")),
+        KeyBinding::new("0", ResetPinZoom, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-0", ResetPinZoom, Some("ShotoriPin")),
+        KeyBinding::new("r", RotatePinCw, Some("ShotoriPin")),
+        KeyBinding::new("shift-r", RotatePinCcw, Some("ShotoriPin")),
+        KeyBinding::new("h", FlipPinHorizontal, Some("ShotoriPin")),
+        KeyBinding::new("v", FlipPinVertical, Some("ShotoriPin")),
+        KeyBinding::new("g", TogglePinGrayscale, Some("ShotoriPin")),
+        KeyBinding::new("i", TogglePinInvert, Some("ShotoriPin")),
+        KeyBinding::new("[", StepPinOpacityDown, Some("ShotoriPin")),
+        KeyBinding::new("]", StepPinOpacityUp, Some("ShotoriPin")),
+        KeyBinding::new("t", TogglePinCollapse, Some("ShotoriPin")),
+        KeyBinding::new("l", TogglePinGhost, Some("ShotoriPin")),
+        KeyBinding::new("ctrl-l", TogglePinGhost, Some("ShotoriPin")),
+        KeyBinding::new("a", TogglePinAnnotate, Some("ShotoriPin")),
+        KeyBinding::new("space", TogglePinAnnotate, Some("ShotoriPin")),
+        KeyBinding::new("tab", NextPin, Some("ShotoriPin")),
+        KeyBinding::new("shift-tab", PrevPin, Some("ShotoriPin")),
+        KeyBinding::new("left", PinNudge { dx: -1, dy: 0 }, Some("ShotoriPin")),
+        KeyBinding::new("right", PinNudge { dx: 1, dy: 0 }, Some("ShotoriPin")),
+        KeyBinding::new("up", PinNudge { dx: 0, dy: -1 }, Some("ShotoriPin")),
+        KeyBinding::new("down", PinNudge { dx: 0, dy: 1 }, Some("ShotoriPin")),
+        KeyBinding::new(
+            "shift-left",
+            PinNudge { dx: -10, dy: 0 },
+            Some("ShotoriPin"),
+        ),
+        KeyBinding::new(
+            "shift-right",
+            PinNudge { dx: 10, dy: 0 },
+            Some("ShotoriPin"),
+        ),
+        KeyBinding::new("shift-up", PinNudge { dx: 0, dy: -10 }, Some("ShotoriPin")),
+        KeyBinding::new("shift-down", PinNudge { dx: 0, dy: 10 }, Some("ShotoriPin")),
+        // In-pin annotation mode: Esc exits annotation (innermost first), never closing the pin
+        KeyBinding::new("escape", ExitPinAnnotate, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("escape", ExitPinAnnotate, Some("ShotoriPinText")),
+        KeyBinding::new("ctrl-z", PinUndo, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("ctrl-y", PinRedo, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("ctrl-shift-z", PinRedo, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("delete", PinDeleteMark, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("backspace", PinDeleteMark, Some("ShotoriPinAnnotate")),
+        KeyBinding::new(
+            "ctrl-shift-delete",
+            PinClearMarks,
+            Some("ShotoriPinAnnotate"),
+        ),
+        KeyBinding::new("[", PinSizeDown, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("]", PinSizeUp, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("v", PinToolSelect, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("r", PinToolRect, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("e", PinToolEllipse, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("a", PinToolArrow, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("l", PinToolLine, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("b", PinToolPencil, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("h", PinToolHighlighter, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("m", PinToolMosaic, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("n", PinToolNumber, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("t", PinToolText, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("d", PinToolEraser, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("ctrl-c", CopyPin, Some("ShotoriPinAnnotate")),
+        KeyBinding::new("ctrl-s", SavePin, Some("ShotoriPinAnnotate")),
+        // Pin history toplevel window
+        KeyBinding::new("escape", ClosePinHistory, Some("ShotoriPinHistory")),
+        KeyBinding::new("f5", RefreshPinHistory, Some("ShotoriPinHistory")),
+        KeyBinding::new("ctrl-r", RefreshPinHistory, Some("ShotoriPinHistory")),
     ]);
     bind_fixed_annotation_keys(cx);
     // The configurable commands last: the keymap resolves

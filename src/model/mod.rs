@@ -16,6 +16,8 @@
 //!   `~/.config/shotori/settings.toml`
 
 pub mod export;
+pub mod pin;
+pub mod pin_history;
 pub mod placement;
 pub mod regiondetect;
 pub mod scroll_sheet;

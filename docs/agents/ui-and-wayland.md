@@ -12,7 +12,8 @@ and focus:
 | Surface | Module | Wayland Role | `Root` Wrapper? | `display_id` Pinning? | Notes |
 | --- | --- | --- | --- | --- | --- |
 | Capture `Overlay` | `ui/overlay.rs` | `wlr-layer-shell` (`Layer::Overlay`, exclusive keyboard) | **NEVER** (bare `cx.open_window`) | **REQUIRED** (one window per output) | Unmap before launching any `xdg-desktop-portal` file dialog |
-| Floating `Pin` | `ui/pin.rs` | `wlr-layer-shell` (`Layer::Top`, on-demand keyboard) | **NEVER** | **REQUIRED** (shared scene across registered `PinOutput`s) | Neon focus halo renders **only** on the focused pin while its surface holds focus |
+| Floating `Pin` | `ui/pin.rs` | `wlr-layer-shell` (`Layer::Top`, on-demand keyboard) | **NEVER** | **REQUIRED** (shared scene across registered `PinOutput`s) | Neon focus halo renders **only** on the focused pin while its surface holds focus; ghost pins exclude their body from `set_input_region` |
+| `PinHistoryWindow` | `ui/pin_history.rs` | Regular XDG toplevel (`940×640` default, client `TitleBar`) | **YES** (`gpui_kit::component::Root`) | Compositor-placed | Launched via `shotori pin --history` / detached child so `Root` never touches layer-shell pin surfaces |
 | Long-capture `ScrollBar` | `ui/scroll_bar.rs` | `wlr-layer-shell` (region frame + preview deck) | **NEVER** | **REQUIRED** | If no side strip fits on the capture output, docks preview on `other_output_than(display)` so `wlr-screencopy` never captures its own HUD |
 | `SettingsWindow` | `ui/settings.rs` | Regular XDG toplevel (`1120×780` default, client `TitleBar`) | **YES** (`gpui_kit::component::Root`) | Compositor-placed | `Root` provides `WindowState` for managed tooltips on the collapsed sidebar; harmless on a regular toplevel |
 

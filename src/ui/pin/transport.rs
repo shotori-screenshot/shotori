@@ -1,6 +1,11 @@
-//! Per-Wayland-session pin ownership. A locked file elects one owner; a
-//! private Unix socket transports bounded RGBA payloads. Acknowledgement
-//! happens only after the scene accepts the image, never just after a write.
+//! Per-Wayland-session pin ownership and control IPC.
+//!
+//! A locked file elects one owner; a private Unix socket transports bounded
+//! RGBA payloads (`Incoming::Add`) as well as lightweight session commands
+//! (`Incoming::Control`: unlock click-through pins, toggle visibility, close
+//! all, restore last closed). Acknowledgement happens only after the scene
+//! accepts and applies the request, never merely after a socket write.
+
 use super::PinSpec;
 use gpui_kit::{Bounds, point, px, size};
 use std::{
@@ -15,17 +20,58 @@ use std::{
     time::Duration,
 };
 
-const MAGIC: &[u8; 8] = b"SHTRPIN1";
+const MAGIC: &[u8; 8] = b"SHTRPIN2";
+const TAG_ADD: u8 = 0;
+const TAG_UNLOCK_ALL: u8 = 1;
+const TAG_TOGGLE_VISIBILITY: u8 = 2;
+const TAG_CLOSE_ALL: u8 = 3;
+const TAG_RESTORE_LAST: u8 = 4;
+
 const MAX_BYTES: usize = 512 * 1024 * 1024;
+const MAX_META_LEN: usize = 512;
 const TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ControlCommand {
+    UnlockAll,
+    ToggleVisibility,
+    CloseAll,
+    RestoreLast,
+}
+
+impl ControlCommand {
+    const fn to_tag(self) -> u8 {
+        match self {
+            Self::UnlockAll => TAG_UNLOCK_ALL,
+            Self::ToggleVisibility => TAG_TOGGLE_VISIBILITY,
+            Self::CloseAll => TAG_CLOSE_ALL,
+            Self::RestoreLast => TAG_RESTORE_LAST,
+        }
+    }
+
+    const fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            TAG_UNLOCK_ALL => Some(Self::UnlockAll),
+            TAG_TOGGLE_VISIBILITY => Some(Self::ToggleVisibility),
+            TAG_CLOSE_ALL => Some(Self::CloseAll),
+            TAG_RESTORE_LAST => Some(Self::RestoreLast),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) enum Prepared {
     Forwarded,
     Owner(PinSpec, Server),
 }
 
+pub(super) enum Incoming {
+    Add(PinSpec),
+    Control(ControlCommand),
+}
+
 pub(super) struct Request {
-    pub spec: PinSpec,
+    pub incoming: Incoming,
     pub reply: std::sync::mpsc::Sender<Result<(), String>>,
 }
 
@@ -35,9 +81,10 @@ struct Ownership {
     socket: PathBuf,
     _lock: File,
 }
+
 impl Drop for Ownership {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
+        drop(std::fs::remove_file(&self.socket));
     }
 }
 
@@ -49,7 +96,7 @@ pub(crate) struct Server {
 impl Server {
     pub(super) fn start(self) -> anyhow::Result<async_channel::Receiver<Request>> {
         self.listener.set_nonblocking(true)?;
-        let (tx, rx) = async_channel::bounded(1);
+        let (tx, rx) = async_channel::bounded(4);
         std::thread::Builder::new()
             .name("shotori-pins".into())
             .spawn(move || {
@@ -58,7 +105,7 @@ impl Server {
                     let mut stream = match self.listener.accept() {
                         Ok((stream, _)) => stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(50));
+                            std::thread::sleep(Duration::from_millis(40));
                             continue;
                         }
                         Err(_) => break,
@@ -66,12 +113,12 @@ impl Server {
                     let result = (|| -> anyhow::Result<()> {
                         stream.set_read_timeout(Some(TIMEOUT))?;
                         stream.set_write_timeout(Some(TIMEOUT))?;
-                        let spec = read_spec(&mut stream)?;
+                        let incoming = read_incoming(&mut stream)?;
                         let (reply, completed) = std::sync::mpsc::channel();
-                        tx.send_blocking(Request { spec, reply })?;
+                        tx.send_blocking(Request { incoming, reply })?;
                         completed.recv()?.map_err(anyhow::Error::msg)
                     })();
-                    let _ = stream.write_all(&[u8::from(result.is_ok())]);
+                    drop(stream.write_all(&[u8::from(result.is_ok())]));
                     if tx.is_closed() {
                         break;
                     }
@@ -107,6 +154,66 @@ pub(crate) fn prepare(spec: PinSpec) -> anyhow::Result<Prepared> {
     prepare_at(spec, &endpoint()?)
 }
 
+/// Send a control command to an active pin session if one owns the lock.
+/// Returns `Ok(false)` immediately when no pin process is running.
+pub(crate) fn send_control(cmd: ControlCommand) -> anyhow::Result<bool> {
+    send_control_at(cmd, &endpoint()?)
+}
+
+fn connect_to_owner(socket: &Path) -> anyhow::Result<UnixStream> {
+    let mut connection = None;
+    for _ in 0..40 {
+        match UnixStream::connect(socket) {
+            Ok(stream) => {
+                connection = Some(stream);
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let stream =
+        connection.ok_or_else(|| anyhow::anyhow!("pin owner is starting or closing; try again"))?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    stream.set_write_timeout(Some(TIMEOUT))?;
+    Ok(stream)
+}
+
+fn send_control_at(cmd: ControlCommand, socket: &Path) -> anyhow::Result<bool> {
+    let lock_path = socket.with_extension("lock");
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => {
+            // Nobody owns the pin scene on this display.
+            drop(lock);
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut stream = connect_to_owner(socket)?;
+            write_control(&mut stream, cmd)?;
+            let mut ack = [0];
+            stream.read_exact(&mut ack)?;
+            Ok(ack == [1])
+        }
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn prepare_at(spec: PinSpec, socket: &Path) -> anyhow::Result<Prepared> {
     validate(&spec)?;
     let lock = OpenOptions::new()
@@ -138,30 +245,7 @@ fn prepare_at(spec: PinSpec, socket: &Path) -> anyhow::Result<Prepared> {
             ))
         }
         Err(std::fs::TryLockError::WouldBlock) => {
-            // Allow the elected owner to finish binding. Retry only before
-            // sending a request: replaying an unacknowledged request can duplicate it.
-            let mut connection = None;
-            for _ in 0..40 {
-                match UnixStream::connect(socket) {
-                    Ok(stream) => {
-                        connection = Some(stream);
-                        break;
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                        ) =>
-                    {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            let mut stream = connection
-                .ok_or_else(|| anyhow::anyhow!("pin owner is starting or closing; try again"))?;
-            stream.set_read_timeout(Some(TIMEOUT))?;
-            stream.set_write_timeout(Some(TIMEOUT))?;
+            let mut stream = connect_to_owner(socket)?;
             write_spec(&mut stream, &spec)?;
             let mut ack = [0];
             stream.read_exact(&mut ack)?;
@@ -177,9 +261,6 @@ fn byte_len(w: u32, h: u32) -> anyhow::Result<usize> {
         .checked_mul(h as usize)
         .and_then(|len| len.checked_mul(4));
     anyhow::ensure!(w > 0 && h > 0, "invalid pin dimensions");
-    // The checked_mul chain is the length authority: None here means an
-    // overflow the ensure! above must have caught — surface it as an
-    // error instead of unwrapping.
     len.ok_or_else(|| anyhow::anyhow!("pin dimensions overflow"))
         .and_then(|len| {
             if len <= MAX_BYTES {
@@ -189,6 +270,7 @@ fn byte_len(w: u32, h: u32) -> anyhow::Result<usize> {
             }
         })
 }
+
 fn validate(spec: &PinSpec) -> anyhow::Result<()> {
     anyhow::ensure!(
         spec.rgba.len() == byte_len(spec.w, spec.h)?,
@@ -207,6 +289,7 @@ fn validate(spec: &PinSpec) -> anyhow::Result<()> {
     );
     Ok(())
 }
+
 fn geometry(spec: &PinSpec) -> [f32; 4] {
     [
         spec.rect.origin.x.into(),
@@ -215,44 +298,97 @@ fn geometry(spec: &PinSpec) -> [f32; 4] {
         spec.rect.size.height.into(),
     ]
 }
+
+fn write_opt_str(writer: &mut impl Write, s: Option<&str>) -> anyhow::Result<()> {
+    let bytes = s.unwrap_or("").as_bytes();
+    let capped = &bytes[..bytes.len().min(MAX_META_LEN)];
+    writer.write_all(&(capped.len() as u16).to_le_bytes())?;
+    writer.write_all(capped)?;
+    Ok(())
+}
+
+fn read_opt_str(reader: &mut impl Read) -> anyhow::Result<Option<String>> {
+    let mut len_buf = [0u8; 2];
+    reader.read_exact(&mut len_buf)?;
+    let len = u16::from_le_bytes(len_buf) as usize;
+    anyhow::ensure!(len <= MAX_META_LEN, "pin metadata exceeds maximum length");
+    if len == 0 {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    let s = String::from_utf8(buf)?;
+    Ok((!s.is_empty()).then_some(s))
+}
+
+fn write_control(writer: &mut impl Write, cmd: ControlCommand) -> anyhow::Result<()> {
+    writer.write_all(MAGIC)?;
+    writer.write_all(&[cmd.to_tag()])?;
+    Ok(())
+}
+
 fn write_spec(writer: &mut impl Write, spec: &PinSpec) -> anyhow::Result<()> {
     validate(spec)?;
     writer.write_all(MAGIC)?;
+    writer.write_all(&[TAG_ADD])?;
     writer.write_all(&spec.w.to_le_bytes())?;
     writer.write_all(&spec.h.to_le_bytes())?;
     for value in geometry(spec) {
         writer.write_all(&value.to_le_bytes())?;
     }
+    writer.write_all(&[spec.opacity.unwrap_or(0)])?;
+    write_opt_str(writer, spec.history_id.as_deref())?;
+    write_opt_str(writer, spec.label.as_deref())?;
     writer.write_all(&spec.rgba)?;
     Ok(())
 }
-fn read_spec(reader: &mut impl Read) -> anyhow::Result<PinSpec> {
-    let mut header = [0u8; 32];
-    reader.read_exact(&mut header)?;
-    anyhow::ensure!(&header[..8] == MAGIC, "incompatible pin protocol");
-    let w = u32::from_le_bytes(header[8..12].try_into()?);
-    let h = u32::from_le_bytes(header[12..16].try_into()?);
-    let mut geometry = [0.; 4];
-    for (ix, value) in geometry.iter_mut().enumerate() {
-        *value = f32::from_le_bytes(header[16 + ix * 4..20 + ix * 4].try_into()?);
+
+fn read_incoming(reader: &mut impl Read) -> anyhow::Result<Incoming> {
+    let mut prefix = [0u8; 9];
+    reader.read_exact(&mut prefix)?;
+    anyhow::ensure!(&prefix[..8] == MAGIC, "incompatible pin protocol");
+    let tag = prefix[8];
+    if tag == TAG_ADD {
+        let mut header = [0u8; 25];
+        reader.read_exact(&mut header)?;
+        let w = u32::from_le_bytes(header[0..4].try_into()?);
+        let h = u32::from_le_bytes(header[4..8].try_into()?);
+        let mut geom = [0.; 4];
+        for (ix, value) in geom.iter_mut().enumerate() {
+            *value = f32::from_le_bytes(header[8 + ix * 4..12 + ix * 4].try_into()?);
+        }
+        let raw_opacity = header[24];
+        let opacity = (20..=100).contains(&raw_opacity).then_some(raw_opacity);
+        let history_id = read_opt_str(reader)?;
+        let label = read_opt_str(reader)?;
+        let mut spec = PinSpec {
+            w,
+            h,
+            rgba: vec![0; byte_len(w, h)?],
+            rect: Bounds::new(
+                point(px(geom[0]), px(geom[1])),
+                size(px(geom[2]), px(geom[3])),
+            ),
+            opacity,
+            history_id,
+            label,
+        };
+        validate(&spec)?;
+        reader.read_exact(&mut spec.rgba)?;
+        Ok(Incoming::Add(spec))
+    } else if let Some(cmd) = ControlCommand::from_tag(tag) {
+        Ok(Incoming::Control(cmd))
+    } else {
+        anyhow::bail!("unknown pin IPC command tag {tag}");
     }
-    let mut spec = PinSpec {
-        w,
-        h,
-        rgba: vec![0; byte_len(w, h)?],
-        rect: Bounds::new(
-            point(px(geometry[0]), px(geometry[1])),
-            size(px(geometry[2]), px(geometry[3])),
-        ),
-    };
-    validate(&spec)?;
-    reader.read_exact(&mut spec.rgba)?;
-    Ok(spec)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PinSpec, Prepared, prepare_at, read_spec, write_spec};
+    use super::{
+        ControlCommand, Incoming, PinSpec, Prepared, prepare_at, read_incoming, send_control_at,
+        write_control, write_spec,
+    };
     use gpui_kit::{Bounds, point, px, size};
     use std::io::Cursor;
 
@@ -262,20 +398,44 @@ mod tests {
             h: 1,
             rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
             rect: Bounds::new(point(px(-12.5), px(20.)), size(px(1.6), px(0.8))),
+            opacity: Some(85),
+            history_id: Some("hist-01".into()),
+            label: Some("note".into()),
         }
     }
+
     #[test]
-    fn transport_preserves_pixels_and_fractional_global_geometry() {
+    fn transport_preserves_pixels_metadata_and_control_commands() {
         let mut encoded = Vec::new();
         write_spec(&mut encoded, &spec()).unwrap();
-        let decoded = read_spec(&mut Cursor::new(&encoded)).unwrap();
+        let Incoming::Add(decoded) = read_incoming(&mut Cursor::new(&encoded)).unwrap() else {
+            panic!("expected Add")
+        };
         assert_eq!(decoded.rgba, spec().rgba);
         assert_eq!(decoded.rect, spec().rect);
         assert_eq!((decoded.w, decoded.h), (2, 1));
-        assert!(read_spec(&mut Cursor::new(&encoded[..encoded.len() - 1])).is_err());
+        assert_eq!(decoded.opacity, Some(85));
+        assert_eq!(decoded.history_id.as_deref(), Some("hist-01"));
+        assert_eq!(decoded.label.as_deref(), Some("note"));
+        assert!(read_incoming(&mut Cursor::new(&encoded[..encoded.len() - 1])).is_err());
         encoded[0] = 0;
-        assert!(read_spec(&mut Cursor::new(encoded)).is_err());
+        assert!(read_incoming(&mut Cursor::new(encoded)).is_err());
+
+        for cmd in [
+            ControlCommand::UnlockAll,
+            ControlCommand::ToggleVisibility,
+            ControlCommand::CloseAll,
+            ControlCommand::RestoreLast,
+        ] {
+            let mut buf = Vec::new();
+            write_control(&mut buf, cmd).unwrap();
+            let Incoming::Control(back) = read_incoming(&mut Cursor::new(&buf)).unwrap() else {
+                panic!("expected Control")
+            };
+            assert_eq!(back, cmd);
+        }
     }
+
     #[test]
     fn rejects_invalid_dimensions_geometry_and_payloads() {
         let mut invalid = spec();
@@ -286,13 +446,19 @@ mod tests {
         assert!(write_spec(&mut Vec::new(), &invalid).is_err());
         let mut encoded = Vec::new();
         write_spec(&mut encoded, &spec()).unwrap();
-        encoded[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(read_spec(&mut Cursor::new(encoded)).is_err());
+        // Width starts at byte 9 (after 8-byte MAGIC + 1-byte TAG_ADD).
+        encoded[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_incoming(&mut Cursor::new(encoded)).is_err());
     }
+
     #[test]
-    fn one_owner_receives_other_sessions_and_acknowledges_acceptance() {
+    fn one_owner_receives_other_sessions_controls_and_acknowledges_acceptance() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("pins.sock");
+
+        // Before an owner exists, control commands report `Ok(false)` cleanly.
+        assert!(!send_control_at(ControlCommand::UnlockAll, &socket).unwrap());
+
         let Prepared::Owner(_, server) = prepare_at(spec(), &socket).unwrap() else {
             panic!("first session must own the scene")
         };
@@ -308,13 +474,29 @@ mod tests {
             .spawn()
             .unwrap();
         let request = requests.recv_blocking().unwrap();
-        assert_eq!(request.spec.rgba, spec().rgba);
+        let Incoming::Add(received) = request.incoming else {
+            panic!("expected Add")
+        };
+        assert_eq!(received.rgba, spec().rgba);
         assert!(
             client.try_wait().unwrap().is_none(),
             "sender must wait for scene acceptance"
         );
         request.reply.send(Ok(())).unwrap();
         assert!(client.wait().unwrap().success());
+
+        // Control command over the same live owner socket.
+        let sock_ctrl = socket.clone();
+        let ctrl_client =
+            std::thread::spawn(move || send_control_at(ControlCommand::UnlockAll, &sock_ctrl));
+        let ctrl_req = requests.recv_blocking().unwrap();
+        assert!(matches!(
+            ctrl_req.incoming,
+            Incoming::Control(ControlCommand::UnlockAll)
+        ));
+        ctrl_req.reply.send(Ok(())).unwrap();
+        assert!(ctrl_client.join().unwrap().unwrap());
+
         // A failed insertion is surfaced, not reported as successful transfer.
         let destination = socket.clone();
         let client = std::thread::spawn(move || prepare_at(spec(), &destination));
@@ -333,14 +515,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!socket.exists(), "owner must remove its socket on shutdown");
+        assert!(!send_control_at(ControlCommand::UnlockAll, &socket).unwrap());
         assert!(matches!(
             prepare_at(spec(), &socket).unwrap(),
             Prepared::Owner(..)
         ));
     }
+
     #[test]
     fn forward_from_a_separate_process() {
-        // Invoked by the owner test above; ordinary test runs have no endpoint.
         let Some(socket) = std::env::var_os("SHOTORI_TEST_PIN_SOCKET") else {
             return;
         };
@@ -349,6 +532,7 @@ mod tests {
             Prepared::Forwarded
         ));
     }
+
     #[test]
     fn stale_socket_is_recovered_only_by_the_lock_owner() {
         let directory = tempfile::tempdir().unwrap();

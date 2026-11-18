@@ -501,11 +501,63 @@ fn download_ocr_models_cli() -> anyhow::Result<()> {
     }
 }
 
-/// `shotori pin`: float an image file / stdin or screen capture as an
-/// always-on-top desktop pin. Forwards to an existing pin owner when one is
-/// already running on this Wayland session; otherwise becomes the owner and
-/// stays resident until the last pin closes.
+/// `shotori pin`: float an image file / stdin, clipboard payload, history
+/// entry, or screen capture as an always-on-top desktop pin — or dispatch
+/// history/session management flags (`--history`, `--restore`, `--unlock`,
+/// `--toggle-hide`, `--close-all`).
 pub fn run_pin(args: &PinArgs) -> i32 {
+    if args.history {
+        return crate::ui::pin_history::run();
+    }
+    if args.unlock {
+        return match crate::ui::pin::send_control(crate::ui::pin::ControlCommand::UnlockAll) {
+            Ok(true) => {
+                eprintln!("[shotori] unlocked click-through pins");
+                0
+            }
+            Ok(false) => {
+                eprintln!("[shotori] no active pins on this display");
+                0
+            }
+            Err(e) => {
+                eprintln!("[shotori] pin unlock failed: {e:#}");
+                1
+            }
+        };
+    }
+    if args.toggle_hide {
+        return match crate::ui::pin::send_control(crate::ui::pin::ControlCommand::ToggleVisibility)
+        {
+            Ok(true) => 0,
+            Ok(false) => {
+                eprintln!("[shotori] no active pins on this display");
+                0
+            }
+            Err(e) => {
+                eprintln!("[shotori] pin toggle-hide failed: {e:#}");
+                1
+            }
+        };
+    }
+    if args.close_all {
+        return match crate::ui::pin::send_control(crate::ui::pin::ControlCommand::CloseAll) {
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("[shotori] pin close-all failed: {e:#}");
+                1
+            }
+        };
+    }
+    if args.restore
+        && matches!(
+            crate::ui::pin::send_control(crate::ui::pin::ControlCommand::RestoreLast),
+            Ok(true)
+        )
+    {
+        eprintln!("[shotori] restored pin into active session");
+        return 0;
+    }
+
     let (spec, geometry_caps) = match build_pin_payload(args) {
         Ok(v) => v,
         Err(e) => {
@@ -571,35 +623,94 @@ pub fn run_pin(args: &PinArgs) -> i32 {
     exit_code.load(Ordering::Relaxed)
 }
 
+fn select_target_output_info<'a>(
+    infos: &'a [OutputInfo],
+    requested: Option<&String>,
+) -> anyhow::Result<&'a OutputInfo> {
+    if let Some(requested) = requested {
+        infos.iter().find(|o| o.name == *requested).ok_or_else(|| {
+            TargetError::UnknownOutput {
+                requested: requested.clone(),
+                available: infos.iter().map(|o| o.name.clone()).collect(),
+            }
+            .into()
+        })
+    } else {
+        let focused = windowsnap::query_snapshot().and_then(|s| s.focused_output);
+        Ok(focused
+            .as_deref()
+            .and_then(|name| infos.iter().find(|o| o.name == name))
+            .unwrap_or(&infos[0]))
+    }
+}
+
 fn build_pin_payload(args: &PinArgs) -> anyhow::Result<(crate::ui::pin::PinSpec, Vec<Capture>)> {
-    if let Some(path) = &args.image {
-        let (w, h, rgba) = load_rgba_path(path)?;
+    if args.restore || args.restore_id.is_some() {
+        let store = crate::model::pin_history::PinHistoryStore::default_store()?;
+        let target_id = match &args.restore_id {
+            Some(id) => id.clone(),
+            None => store
+                .latest()
+                .map(|e| e.id)
+                .context("pin history is empty; nothing to restore")?,
+        };
+        let (entry, rgba) = store.load_entry(&target_id)?;
         let infos = capture::probe_outputs()?;
-        let target_info = if let Some(requested) = &args.output {
-            infos.iter().find(|o| o.name == *requested).ok_or_else(|| {
-                TargetError::UnknownOutput {
-                    requested: requested.clone(),
-                    available: infos.iter().map(|o| o.name.clone()).collect(),
-                }
-            })?
-        } else {
-            let focused = windowsnap::query_snapshot().and_then(|s| s.focused_output);
-            focused
-                .as_deref()
-                .and_then(|name| infos.iter().find(|o| o.name == name))
-                .unwrap_or(&infos[0])
+        let caps = infos
+            .into_iter()
+            .map(OutputInfo::into_geometry_capture)
+            .collect();
+        let mut spec =
+            crate::ui::pin::PinSpec::new(entry.width, entry.height, rgba, entry.logical_bounds());
+        spec.opacity = Some(entry.opacity);
+        spec.history_id = Some(entry.id);
+        spec.label = entry.label;
+        return Ok((spec, caps));
+    }
+
+    if args.clipboard {
+        let infos = capture::probe_outputs()?;
+        let target_info = select_target_output_info(&infos, args.output.as_ref())?;
+        let scale = target_info.effective_scale().max(1.0);
+        let c = crate::ui::theme::c();
+        let (w, h, rgba, label) = match crate::clipboard::read_clipboard()? {
+            crate::clipboard::ClipboardData::Image { w, h, rgba } => (w, h, rgba, None),
+            crate::clipboard::ClipboardData::Text(text) => {
+                let first_line = Some(text.lines().next().unwrap_or("").to_owned());
+                let (w, h, rgba) = crate::annotation::text::render_text_card(
+                    &text,
+                    scale,
+                    c.toolbar_bg,
+                    c.toolbar_text,
+                )?;
+                (w, h, rgba, first_line)
+            }
         };
         let rect = compute_image_pin_bounds(w, h, target_info, args.at);
         let caps = infos
             .into_iter()
             .map(OutputInfo::into_geometry_capture)
             .collect();
-        return Ok((crate::ui::pin::PinSpec { w, h, rgba, rect }, caps));
+        let mut spec = crate::ui::pin::PinSpec::new(w, h, rgba, rect);
+        spec.label = label;
+        return Ok((spec, caps));
     }
 
-    let target = args
-        .capture_target()
-        .context("missing pin source (expected an image path or a capture target flag)")?;
+    if let Some(path) = &args.image {
+        let (w, h, rgba) = load_rgba_path(path)?;
+        let infos = capture::probe_outputs()?;
+        let target_info = select_target_output_info(&infos, args.output.as_ref())?;
+        let rect = compute_image_pin_bounds(w, h, target_info, args.at);
+        let caps = infos
+            .into_iter()
+            .map(OutputInfo::into_geometry_capture)
+            .collect();
+        return Ok((crate::ui::pin::PinSpec::new(w, h, rgba, rect), caps));
+    }
+
+    let target = args.capture_target().context(
+        "missing pin source (expected an image path, --clipboard, or a capture target flag)",
+    )?;
     sleep_delay(args.delay);
     let snapshot = if target.uses_compositor_ipc() {
         windowsnap::query_snapshot().unwrap_or_default()
@@ -638,12 +749,7 @@ fn build_pin_payload(args: &PinArgs) -> anyhow::Result<(crate::ui::pin::PinSpec,
         .collect();
     drop(session);
     Ok((
-        crate::ui::pin::PinSpec {
-            w: crop.width,
-            h: crop.height,
-            rgba: crop.rgba,
-            rect: crop.bounds,
-        },
+        crate::ui::pin::PinSpec::new(crop.width, crop.height, crop.rgba, crop.bounds),
         geometry_caps,
     ))
 }

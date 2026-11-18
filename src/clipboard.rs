@@ -10,6 +10,13 @@
 
 // ── Public surface (platform-neutral) ────────────────────────────────
 
+/// Decoded clipboard payload for `shotori pin --clipboard` / `Ctrl+V`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardData {
+    Image { w: u32, h: u32, rgba: Vec<u8> },
+    Text(String),
+}
+
 /// Put an image on the clipboard: the PNG bytes are handed to the
 /// resident daemon, which serves `image/png` to paste targets. The raw
 /// pixels are unused on Wayland (kept for a stable internal API).
@@ -20,6 +27,11 @@ pub fn copy_image(w: u32, h: u32, rgba: &[u8], png: &[u8]) -> anyhow::Result<()>
 /// Put plain text on the clipboard (the OCR output path).
 pub fn copy_text(text: String) -> anyhow::Result<()> {
     imp::copy_text(text)
+}
+
+/// Read an image (`image/*`) or UTF-8 text (`text/plain*`) from the clipboard.
+pub fn read_clipboard() -> anyhow::Result<ClipboardData> {
+    imp::read_clipboard()
 }
 
 // ── Linux: resident daemon over zwlr_data_control ────────────────────
@@ -61,6 +73,238 @@ mod imp {
 
     pub fn copy_text(text: String) -> anyhow::Result<()> {
         spawn_daemon(TEXT_MIME, text.as_bytes())
+    }
+
+    /// Maximum bytes read from a clipboard offer (128 MiB) so a hostile or
+    /// runaway clipboard owner cannot exhaust memory.
+    const MAX_CLIPBOARD_READ: u64 = 128 * 1024 * 1024;
+
+    const IMAGE_MIMES: &[&str] = &[
+        "image/png",
+        "image/webp",
+        "image/jpeg",
+        "image/bmp",
+        "image/tiff",
+    ];
+    const TEXT_MIMES: &[&str] = &[
+        "text/plain;charset=utf-8",
+        "UTF8_STRING",
+        "text/plain",
+        "STRING",
+    ];
+
+    pub fn read_clipboard() -> anyhow::Result<super::ClipboardData> {
+        let conn = Connection::connect_to_env().context(
+            "cannot connect to the Wayland display (is WAYLAND_DISPLAY set?), cannot read clipboard",
+        )?;
+        let mut queue = conn.new_event_queue();
+        let qh = queue.handle();
+        conn.display().get_registry(&qh, ());
+
+        let mut reader = ClipReader::default();
+        queue.roundtrip(&mut reader)?;
+
+        let seat = reader
+            .seat
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no wl_seat available"))?;
+        let manager = reader.manager.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "compositor does not support zwlr_data_control_manager_v1, cannot read clipboard"
+            )
+        })?;
+
+        let device = manager.get_data_device(&seat, &qh, ());
+        queue.roundtrip(&mut reader)?;
+
+        let cleanup = |reader: &mut ClipReader, device: ZwlrDataControlDeviceV1| {
+            for (offer, _) in reader.offers.drain(..) {
+                offer.destroy();
+            }
+            if let Some(sel) = reader.selection.take() {
+                sel.destroy();
+            }
+            device.destroy();
+        };
+
+        let Some(selection) = reader.selection.clone() else {
+            cleanup(&mut reader, device);
+            anyhow::bail!("clipboard is empty");
+        };
+        let offered_mimes: Vec<String> = reader
+            .offers
+            .iter()
+            .find(|(o, _)| o == &selection)
+            .map(|(_, m)| m.clone())
+            .unwrap_or_default();
+
+        // Prefer image offers over plain text when both are advertised (e.g. browser copy).
+        let chosen_image = IMAGE_MIMES
+            .iter()
+            .copied()
+            .find(|want| offered_mimes.iter().any(|m| m.eq_ignore_ascii_case(want)));
+        let chosen_text = TEXT_MIMES
+            .iter()
+            .copied()
+            .find(|want| offered_mimes.iter().any(|m| m == want));
+
+        let Some((mime, is_image)) = chosen_image
+            .map(|m| (m, true))
+            .or_else(|| chosen_text.map(|m| (m, false)))
+        else {
+            cleanup(&mut reader, device);
+            anyhow::bail!(
+                "clipboard contains no supported image or text (offered: {})",
+                if offered_mimes.is_empty() {
+                    "none".to_owned()
+                } else {
+                    offered_mimes.join(", ")
+                }
+            );
+        };
+
+        let (mut pipe_reader, pipe_writer) =
+            std::io::pipe().context("creating clipboard transfer pipe")?;
+        selection.receive(mime.to_owned(), std::os::fd::AsFd::as_fd(&pipe_writer));
+        // Flushing sends `receive` (and its duplicated write fd via SCM_RIGHTS)
+        // to the compositor; dropping our local `pipe_writer` immediately after
+        // ensures `read_to_end` reaches EOF once the clipboard owner finishes.
+        conn.flush()
+            .context("flushing Wayland clipboard receive request")?;
+        drop(pipe_writer);
+
+        let mut bytes = Vec::new();
+        (&mut pipe_reader)
+            .take(MAX_CLIPBOARD_READ + 1)
+            .read_to_end(&mut bytes)
+            .context("reading clipboard bytes from owner")?;
+        cleanup(&mut reader, device);
+        drop(conn);
+
+        anyhow::ensure!(
+            (bytes.len() as u64) <= MAX_CLIPBOARD_READ,
+            "clipboard data exceeds 128 MiB safety limit"
+        );
+        anyhow::ensure!(!bytes.is_empty(), "clipboard data is empty");
+
+        if is_image {
+            let rgba = image::load_from_memory(&bytes)
+                .context("decoding image from clipboard")?
+                .into_rgba8();
+            let (w, h) = rgba.dimensions();
+            anyhow::ensure!(w > 0 && h > 0, "clipboard image has zero dimensions");
+            Ok(super::ClipboardData::Image {
+                w,
+                h,
+                rgba: rgba.into_raw(),
+            })
+        } else {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            anyhow::ensure!(!text.trim().is_empty(), "clipboard text is blank");
+            Ok(super::ClipboardData::Text(text))
+        }
+    }
+
+    #[derive(Default)]
+    struct ClipReader {
+        seat: Option<wl_seat::WlSeat>,
+        manager: Option<ZwlrDataControlManagerV1>,
+        offers: Vec<(ZwlrDataControlOfferV1, Vec<String>)>,
+        selection: Option<ZwlrDataControlOfferV1>,
+    }
+
+    impl Dispatch<wl_registry::WlRegistry, ()> for ClipReader {
+        fn event(
+            state: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            if let wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } = event
+            {
+                match interface.as_str() {
+                    "wl_seat" if state.seat.is_none() => {
+                        state.seat = Some(registry.bind(name, version.min(7), qh, ()));
+                    }
+                    "zwlr_data_control_manager_v1" => {
+                        state.manager = Some(registry.bind(name, version.min(2), qh, ()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    impl Dispatch<wl_seat::WlSeat, ()> for ClipReader {
+        fn event(
+            _: &mut Self,
+            _: &wl_seat::WlSeat,
+            _: wl_seat::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrDataControlManagerV1, ()> for ClipReader {
+        fn event(
+            _: &mut Self,
+            _: &ZwlrDataControlManagerV1,
+            _: zwlr_data_control_manager_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    impl Dispatch<ZwlrDataControlDeviceV1, ()> for ClipReader {
+        fn event(
+            state: &mut Self,
+            _: &ZwlrDataControlDeviceV1,
+            event: zwlr_data_control_device_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            match event {
+                zwlr_data_control_device_v1::Event::DataOffer { id } => {
+                    state.offers.push((id, Vec::new()));
+                }
+                zwlr_data_control_device_v1::Event::Selection { id } => {
+                    state.selection = id;
+                }
+                _ => {}
+            }
+        }
+
+        event_created_child!(ClipReader, ZwlrDataControlDeviceV1, [
+            zwlr_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ZwlrDataControlOfferV1, ()),
+        ]);
+    }
+
+    impl Dispatch<ZwlrDataControlOfferV1, ()> for ClipReader {
+        fn event(
+            state: &mut Self,
+            offer: &ZwlrDataControlOfferV1,
+            event: zwlr_data_control_offer_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+            if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event
+                && let Some((_, mimes)) = state.offers.iter_mut().find(|(o, _)| o == offer)
+            {
+                mimes.push(mime_type);
+            }
+        }
     }
 
     fn spawn_daemon(mime: &str, data: &[u8]) -> anyhow::Result<()> {

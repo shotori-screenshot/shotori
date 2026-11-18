@@ -501,6 +501,15 @@ impl PinZoomModifier {
         }
     }
 
+    pub(crate) fn explicit_matches(self, modifiers: &gpui_kit::Modifiers) -> bool {
+        match self {
+            Self::None => false,
+            Self::Ctrl => modifiers.control,
+            Self::Alt => modifiers.alt,
+            Self::Shift => modifiers.shift,
+        }
+    }
+
     pub fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::None => crate::i18n::t!("settings.pin.zoom_modifier.none"),
@@ -508,6 +517,90 @@ impl PinZoomModifier {
             Self::Alt => crate::i18n::t!("settings.pin.zoom_modifier.alt"),
             Self::Shift => crate::i18n::t!("settings.pin.zoom_modifier.shift"),
         }
+    }
+}
+
+/// Modifier key required to adjust a floating pin's opacity with the wheel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PinOpacityModifier {
+    #[default]
+    Ctrl,
+    Alt,
+    Shift,
+    None,
+    Disabled,
+}
+
+impl PinOpacityModifier {
+    pub const ALL: [Self; 5] = [
+        Self::Ctrl,
+        Self::Alt,
+        Self::Shift,
+        Self::None,
+        Self::Disabled,
+    ];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Ctrl => "ctrl",
+            Self::Alt => "alt",
+            Self::Shift => "shift",
+            Self::None => "none",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.id() == id.trim())
+    }
+
+    pub(crate) fn explicit_matches(self, modifiers: &gpui_kit::Modifiers) -> bool {
+        match self {
+            Self::Ctrl => modifiers.control,
+            Self::Alt => modifiers.alt,
+            Self::Shift => modifiers.shift,
+            Self::None | Self::Disabled => false,
+        }
+    }
+
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Ctrl => crate::i18n::t!("settings.pin.opacity_modifier.ctrl"),
+            Self::Alt => crate::i18n::t!("settings.pin.opacity_modifier.alt"),
+            Self::Shift => crate::i18n::t!("settings.pin.opacity_modifier.shift"),
+            Self::None => crate::i18n::t!("settings.pin.opacity_modifier.none"),
+            Self::Disabled => crate::i18n::t!("settings.pin.opacity_modifier.disabled"),
+        }
+    }
+}
+
+/// Resolved wheel behavior on a floating pin when both zoom and opacity
+/// modifiers may be configured independently.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PinWheelAction {
+    Zoom,
+    Opacity,
+}
+
+/// Arbitrate a scroll event between zoom and per-pin opacity adjustment:
+/// explicit modifier chords (`Ctrl`/`Alt`/`Shift`) always beat unmodified
+/// (`None`) wheel bindings so the factory pair (`zoom = none`, `opacity = ctrl`)
+/// zooms on bare wheel and adjusts opacity on `Ctrl+Wheel`.
+pub fn resolve_pin_wheel_action(
+    modifiers: &gpui_kit::Modifiers,
+    zoom: PinZoomModifier,
+    opacity: PinOpacityModifier,
+) -> Option<PinWheelAction> {
+    if zoom.explicit_matches(modifiers) {
+        Some(PinWheelAction::Zoom)
+    } else if opacity.explicit_matches(modifiers) {
+        Some(PinWheelAction::Opacity)
+    } else if zoom == PinZoomModifier::None {
+        Some(PinWheelAction::Zoom)
+    } else if opacity == PinOpacityModifier::None {
+        Some(PinWheelAction::Opacity)
+    } else {
+        None
     }
 }
 
@@ -519,10 +612,17 @@ pub enum PinDoubleClick {
     Close,
     CopyAndClose,
     ResetZoom,
+    Collapse,
 }
 
 impl PinDoubleClick {
-    pub const ALL: [Self; 4] = [Self::None, Self::Close, Self::CopyAndClose, Self::ResetZoom];
+    pub const ALL: [Self; 5] = [
+        Self::None,
+        Self::Close,
+        Self::CopyAndClose,
+        Self::ResetZoom,
+        Self::Collapse,
+    ];
 
     pub const fn id(self) -> &'static str {
         match self {
@@ -530,6 +630,7 @@ impl PinDoubleClick {
             Self::Close => "close",
             Self::CopyAndClose => "copy_close",
             Self::ResetZoom => "reset_zoom",
+            Self::Collapse => "collapse",
         }
     }
 
@@ -543,6 +644,7 @@ impl PinDoubleClick {
             Self::Close => crate::i18n::t!("settings.pin.double_click.close"),
             Self::CopyAndClose => crate::i18n::t!("settings.pin.double_click.copy_close"),
             Self::ResetZoom => crate::i18n::t!("settings.pin.double_click.reset_zoom"),
+            Self::Collapse => crate::i18n::t!("settings.pin.double_click.collapse"),
         }
     }
 }
@@ -551,6 +653,7 @@ impl PinDoubleClick {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinSettings {
     pub zoom_modifier: PinZoomModifier,
+    pub opacity_modifier: PinOpacityModifier,
     /// Percentage zoom increment per wheel line (`5..=50`, default `12` = `1.12×`).
     pub zoom_step: u8,
     /// Default opacity percentage (`20..=100`, default `100`).
@@ -560,18 +663,25 @@ pub struct PinSettings {
     pub show_border: bool,
     pub shadow: bool,
     pub snap_to_edge: bool,
+    /// Magnetically align pins against sibling pins while dragging.
+    pub snap_to_pins: bool,
+    /// Maximum persisted entries in `$XDG_DATA_HOME/shotori/pin-history` (`0..=200`, `0` = off).
+    pub max_history: u16,
 }
 
 impl Default for PinSettings {
     fn default() -> Self {
         Self {
             zoom_modifier: PinZoomModifier::None,
+            opacity_modifier: PinOpacityModifier::Ctrl,
             zoom_step: 12,
             opacity: 100,
             double_click: PinDoubleClick::None,
             show_border: true,
             shadow: true,
             snap_to_edge: false,
+            snap_to_pins: true,
+            max_history: 50,
         }
     }
 }
@@ -580,12 +690,15 @@ impl Default for PinSettings {
 #[serde(default)]
 pub(super) struct PinFile {
     zoom_modifier: Option<String>,
+    opacity_modifier: Option<String>,
     zoom_step: Option<i64>,
     opacity: Option<i64>,
     double_click: Option<String>,
     show_border: Option<bool>,
     shadow: Option<bool>,
     snap_to_edge: Option<bool>,
+    snap_to_pins: Option<bool>,
+    max_history: Option<i64>,
 }
 
 impl PinFile {
@@ -599,6 +712,16 @@ impl PinFile {
                     path.display()
                 ));
                 d.zoom_modifier
+            }),
+        };
+        let opacity_modifier = match self.opacity_modifier.as_deref() {
+            None => d.opacity_modifier,
+            Some(id) => PinOpacityModifier::from_id(id).unwrap_or_else(|| {
+                errors.push(format!(
+                    "{}: unknown pin.opacity_modifier {id:?} (using ctrl)",
+                    path.display()
+                ));
+                d.opacity_modifier
             }),
         };
         let zoom_step = match self.zoom_step {
@@ -635,14 +758,29 @@ impl PinFile {
                 d.double_click
             }),
         };
+        let max_history = match self.max_history {
+            None => d.max_history,
+            Some(v) if (0..=200).contains(&v) => v as u16,
+            Some(v) => {
+                errors.push(format!(
+                    "{}: pin.max_history = {v} must be in 0..=200 (using {})",
+                    path.display(),
+                    d.max_history
+                ));
+                d.max_history
+            }
+        };
         PinSettings {
             zoom_modifier,
+            opacity_modifier,
             zoom_step,
             opacity,
             double_click,
             show_border: self.show_border.unwrap_or(d.show_border),
             shadow: self.shadow.unwrap_or(d.shadow),
             snap_to_edge: self.snap_to_edge.unwrap_or(d.snap_to_edge),
+            snap_to_pins: self.snap_to_pins.unwrap_or(d.snap_to_pins),
+            max_history,
         }
     }
 }
@@ -667,6 +805,10 @@ impl PinSettings {
             toml::Value::from(self.zoom_modifier.id()),
         );
         t.insert(
+            "opacity_modifier".into(),
+            toml::Value::from(self.opacity_modifier.id()),
+        );
+        t.insert(
             "zoom_step".into(),
             toml::Value::from(i64::from(self.zoom_step)),
         );
@@ -678,6 +820,11 @@ impl PinSettings {
         t.insert("show_border".into(), toml::Value::from(self.show_border));
         t.insert("shadow".into(), toml::Value::from(self.shadow));
         t.insert("snap_to_edge".into(), toml::Value::from(self.snap_to_edge));
+        t.insert("snap_to_pins".into(), toml::Value::from(self.snap_to_pins));
+        t.insert(
+            "max_history".into(),
+            toml::Value::from(i64::from(self.max_history)),
+        );
         Ok(())
     }
 }
@@ -700,8 +847,54 @@ mod tests {
         for modif in PinZoomModifier::ALL {
             assert_eq!(PinZoomModifier::from_id(modif.id()), Some(modif));
         }
+        for modif in PinOpacityModifier::ALL {
+            assert_eq!(PinOpacityModifier::from_id(modif.id()), Some(modif));
+        }
         for dc in PinDoubleClick::ALL {
             assert_eq!(PinDoubleClick::from_id(dc.id()), Some(dc));
         }
+    }
+
+    #[test]
+    fn wheel_modifier_arbitration_prefers_explicit_chord_over_unmodified() {
+        let plain = gpui_kit::Modifiers::default();
+        let ctrl = gpui_kit::Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let alt = gpui_kit::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+
+        // Factory default: plain wheel zooms, Ctrl+wheel adjusts opacity.
+        assert_eq!(
+            resolve_pin_wheel_action(&plain, PinZoomModifier::None, PinOpacityModifier::Ctrl),
+            Some(PinWheelAction::Zoom)
+        );
+        assert_eq!(
+            resolve_pin_wheel_action(&ctrl, PinZoomModifier::None, PinOpacityModifier::Ctrl),
+            Some(PinWheelAction::Opacity)
+        );
+
+        // Inverted: plain wheel adjusts opacity, Ctrl+wheel zooms.
+        assert_eq!(
+            resolve_pin_wheel_action(&plain, PinZoomModifier::Ctrl, PinOpacityModifier::None),
+            Some(PinWheelAction::Opacity)
+        );
+        assert_eq!(
+            resolve_pin_wheel_action(&ctrl, PinZoomModifier::Ctrl, PinOpacityModifier::None),
+            Some(PinWheelAction::Zoom)
+        );
+
+        // Two explicit chords: bare wheel does nothing.
+        assert_eq!(
+            resolve_pin_wheel_action(&plain, PinZoomModifier::Ctrl, PinOpacityModifier::Alt),
+            None
+        );
+        assert_eq!(
+            resolve_pin_wheel_action(&alt, PinZoomModifier::Ctrl, PinOpacityModifier::Alt),
+            Some(PinWheelAction::Opacity)
+        );
     }
 }
