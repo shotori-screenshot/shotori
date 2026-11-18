@@ -7,11 +7,16 @@
 
 use super::profile::{BAND_COUNT, BandWeights, MIN_EVIDENCE_ROWS, RowProfile};
 use super::{Refusal, SheetLimits};
+use subpixel::refine_basin;
+
 /// The best offset found for a frame pair and the evidence for it.
 pub(super) struct OffsetEstimate {
     /// Viewport movement in rows, positive = down (canvas-append side).
     pub(super) dy: i32,
-    /// Mean |Δ| of the band signals at `dy` (grayscale units).
+    /// Continuous sub-row displacement (positive = down); `dy` is its
+    /// nearest integer (`subpixel_dy.round() as i32`).
+    pub(super) subpixel_dy: f32,
+    /// Mean |Δ| of the verified row signal at `subpixel_dy` (grayscale units).
     pub(super) cost: f32,
     /// Best cost among offsets outside the ±2-row peak around `dy`
     /// (`f32::INFINITY` when there is no such candidate).
@@ -118,6 +123,21 @@ fn band_cost(
     Some(active.iter().sum::<f32>() / active.len() as f32)
 }
 
+fn trimmed_weighted_mean(row_sums: &mut Vec<(f32, f32)>) -> Option<f32> {
+    let n = row_sums.len();
+    if n < MIN_EVIDENCE_ROWS {
+        return None;
+    }
+    let keep = n - n / 7;
+    row_sums.select_nth_unstable_by(keep - 1, |a, b| a.0.total_cmp(&b.0));
+    row_sums.truncate(keep);
+    let weight_sum: f32 = row_sums.iter().map(|(_, w)| w).sum();
+    if weight_sum <= 0.0 {
+        return None;
+    }
+    Some(row_sums.iter().map(|(cost, w)| cost * w).sum::<f32>() / weight_sum)
+}
+
 /// The exact signal that decides a match: per-row pixel MAD over the
 /// step grid, weighted by row evidence and trimmed at the expensive end
 /// (fixed edge chrome misaligns under every translation, and dropping the
@@ -177,18 +197,7 @@ fn row_cost(
         row_sums.push((sum as f32 / width as f32, w));
         j += cur.step;
     }
-    let n = row_sums.len();
-    if n < MIN_EVIDENCE_ROWS {
-        return None;
-    }
-    let keep = n - n / 7;
-    row_sums.select_nth_unstable_by(keep - 1, |a, b| a.0.total_cmp(&b.0));
-    row_sums.truncate(keep);
-    let weight_sum: f32 = row_sums.iter().map(|(_, w)| w).sum();
-    if weight_sum <= 0.0 {
-        return None;
-    }
-    Some(row_sums.iter().map(|(cost, w)| cost * w).sum::<f32>() / weight_sum)
+    trimmed_weighted_mean(&mut row_sums)
 }
 
 /// Row spacing of the coarse sweep. Kept in sync with the ±3 refinement
@@ -314,6 +323,7 @@ pub(super) fn estimate_offset(
         let cost = row_cost(prev, cur, 0, weights, trim_top, trim_bot)?;
         return Some(OffsetEstimate {
             dy: 0,
+            subpixel_dy: 0.0,
             cost,
             runner_up: f32::INFINITY,
             window: max_admissible,
@@ -377,25 +387,144 @@ pub(super) fn estimate_offset(
     if !include_zero {
         shortlist.push(0);
     }
-    let mut best: Option<(i32, f32)> = None;
-    let mut evaluated: Vec<(i32, f32)> = Vec::with_capacity(shortlist.len());
+    let mut int_evaluated: Vec<(i32, f32)> = Vec::with_capacity(shortlist.len());
+    let mut int_cache: Vec<(i32, Option<f32>)> = Vec::with_capacity(shortlist.len() + 16);
     for d in shortlist {
         // `None` = the overlap holds too little evidence to judge this
         // offset at all (a blank seam): it is not a candidate, and it is
         // not a runner-up either.
-        let Some(cost) = row_cost(prev, cur, d, weights, trim_top, trim_bot) else {
-            continue;
-        };
-        evaluated.push((d, cost));
-        if best.is_none_or(|(_, bc)| cost < bc) {
-            best = Some((d, cost));
+        let cost = row_cost(prev, cur, d, weights, trim_top, trim_bot);
+        int_cache.push((d, cost));
+        if let Some(cost) = cost {
+            int_evaluated.push((d, cost));
         }
     }
+    int_evaluated.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.abs().cmp(&b.0.abs())));
+
+    // Refine the top candidate basins (and the best non-neighbour runner-up
+    // basin) at subpixel resolution before picking `best` and `runner_up`:
+    // refining only `best` would let a periodic striped table at a fractional
+    // offset refine `best_cost` down to ~0 while leaving its periodic alias
+    // `d ± period` at unrefined half-pixel cost, falsely clearing
+    // `ambiguity_margin` instead of surfacing `Refusal::Unclear`.
+    // `(dy, subpixel_dy, cost, refined)`
+    let mut evaluated: Vec<(i32, f32, f32, bool)> = Vec::with_capacity(int_evaluated.len());
+    let mut refined_count = 0usize;
+    let mut min_refined_cost = f32::INFINITY;
+    let mut crisp_exact_int = false;
+    for &(d, cost) in &int_evaluated {
+        let near_refined = evaluated
+            .iter()
+            .any(|&(rd, _, _, is_ref)| is_ref && (rd - d).abs() <= 2);
+        let limit = if min_refined_cost <= options.cost_threshold {
+            2
+        } else {
+            4
+        };
+        let skip_crisp_runner_up = crisp_exact_int && cost > 16.0;
+        if refined_count < limit && !near_refined && !skip_crisp_runner_up {
+            let (r_dy, r_sub, r_cost) = refine_basin(
+                prev,
+                cur,
+                d,
+                cost,
+                max_admissible,
+                weights,
+                trim_top,
+                trim_bot,
+                !crisp_exact_int,
+                &mut int_cache,
+            );
+            if r_cost == 0.0 && (r_sub - r_dy as f32).abs() <= 1e-4 {
+                crisp_exact_int = true;
+            }
+            min_refined_cost = min_refined_cost.min(r_cost);
+            evaluated.push((r_dy, r_sub, r_cost, true));
+            refined_count += 1;
+        } else {
+            evaluated.push((d, d as f32, cost, false));
+        }
+    }
+
+    let best_entry = |items: &[(i32, f32, f32, bool)]| {
+        items.iter().copied().min_by(|a, b| {
+            a.2.total_cmp(&b.2)
+                .then_with(|| a.1.abs().total_cmp(&b.1.abs()))
+        })
+    };
+
+    // Ensure the winning runner-up outside the ±2-row correlation peak has
+    // also been subpixel-refined when `best` is admissible (`runner_up` is
+    // unused once `best_cost > cost_threshold`).
+    if let Some((mut best_dy, mut best_sub, mut best_cost, _)) = best_entry(&evaluated)
+        && best_cost <= options.cost_threshold
+    {
+        loop {
+            let best_is_crisp_int = best_cost == 0.0 && (best_sub - best_dy as f32).abs() <= 1e-4;
+            let already_ambiguous = evaluated.iter().any(|&(d, sub, c, is_ref)| {
+                is_ref
+                    && (d - best_dy).abs() > 2
+                    && (sub - best_sub).abs() > 2.0
+                    && c - best_cost < options.ambiguity_margin
+            });
+            if already_ambiguous {
+                break;
+            }
+            let next_unrefined = evaluated
+                .iter()
+                .enumerate()
+                .filter(|(_, (d, sub, _, _))| {
+                    (*d - best_dy).abs() > 2 && (*sub - best_sub).abs() > 2.0
+                })
+                .min_by(|(_, a), (_, b)| a.2.total_cmp(&b.2))
+                .and_then(|(idx, &(_, _, c, is_ref))| {
+                    (!is_ref && !(best_is_crisp_int && c > 16.0)).then_some(idx)
+                });
+            let Some(idx) = next_unrefined else {
+                break;
+            };
+            let (d, _, cost, _) = evaluated[idx];
+            let (r_dy, r_sub, r_cost) = refine_basin(
+                prev,
+                cur,
+                d,
+                cost,
+                max_admissible,
+                weights,
+                trim_top,
+                trim_bot,
+                !best_is_crisp_int,
+                &mut int_cache,
+            );
+            evaluated[idx] = (r_dy, r_sub, r_cost, true);
+            if r_cost < best_cost || (r_cost == best_cost && r_sub.abs() < best_sub.abs()) {
+                best_dy = r_dy;
+                best_sub = r_sub;
+                best_cost = r_cost;
+            }
+        }
+    }
+
+    let best = best_entry(&evaluated);
+    let zero_cost = int_cache
+        .iter()
+        .find(|&&(k, _)| k == 0)
+        .and_then(|&(_, c)| c);
+    // A uniform sub-half-pixel micro-scroll (`dy == 0`, `sub != 0.0`) whose
+    // whole-row MAD collapsed far below `row_cost(0)` is a genuine subpixel
+    // viewport shift, not a stationary backdrop masking jumped foreground.
+    let verified_subpixel_micro = best.is_some_and(|(dy, sub, cost, _)| {
+        dy == 0
+            && sub != 0.0
+            && cost <= options.cost_threshold
+            && zero_cost.is_some_and(|zc| cost * 2.0 < zc)
+    });
     // A fixed backdrop can supply a deceptively confident ordinary match.
     // Validate foreground motion independently before accepting its position,
     // and surface rejected foreground motion rather than letting a stationary
     // backdrop pull `d = 0` below `cost_threshold` as `Still`.
     if allow_foreground
+        && !verified_subpixel_micro
         && let Some(candidate) = foreground::estimate(
             prev,
             cur,
@@ -407,19 +536,20 @@ pub(super) fn estimate_offset(
             false,
         )
         && (candidate.cost <= options.cost_threshold
-            || best.is_none_or(|(dy, cost)| dy == 0 || cost > options.cost_threshold))
+            || best.is_none_or(|(dy, _, cost, _)| dy == 0 || cost > options.cost_threshold))
     {
         return Some(candidate);
     }
-    let (best_dy, best_cost) = best?;
+    let (best_dy, best_subpixel_dy, best_cost, _) = best?;
     let runner_up = evaluated
         .iter()
-        .filter(|(d, _)| (*d - best_dy).abs() > 2)
-        .map(|(_, c)| *c)
+        .filter(|(d, sub, _, _)| (*d - best_dy).abs() > 2 && (*sub - best_subpixel_dy).abs() > 2.0)
+        .map(|(_, _, c, _)| *c)
         .min_by(f32::total_cmp)
         .unwrap_or(f32::INFINITY);
     Some(OffsetEstimate {
         dy: best_dy,
+        subpixel_dy: best_subpixel_dy,
         cost: best_cost,
         runner_up,
         window: max_admissible,
@@ -428,3 +558,4 @@ pub(super) fn estimate_offset(
 }
 
 mod foreground;
+mod subpixel;

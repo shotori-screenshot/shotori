@@ -147,13 +147,13 @@ struct FilterPreview {
     magnifier: Option<crate::annotation::MagnifierPreview>,
 }
 
-/// The stable half of a drag-in-progress composite. `indices` covers
-/// the dragged shapes plus every Spotlight/Magnifier (a spotlight dim
-/// must apply exactly once over the union of all spotlights, and a
-/// lens samples the marked layer — neither survives a naive split).
+/// The stable half of a drag- or nudge-in-progress composite. `indices`
+/// covers the edited shapes, every Spotlight/Magnifier, and any higher-Z
+/// shapes whose padded footprint transitively overlaps the replay set so
+/// committed Z-order and Blur/Mosaic filters over dragged ink stay exact.
 /// `prev_dirty` records the physical pixel rectangle `(x0, y0, x1, y1)`
-/// painted on the previous drag frame so only that band is restored from
-/// `base` instead of cloning the full canvas per pointer move (#32).
+/// painted on the previous frame so only that band is restored from `base`
+/// instead of cloning the full canvas per step (#32).
 struct MovedReplay {
     indices: Vec<usize>,
     base: Vec<u8>,

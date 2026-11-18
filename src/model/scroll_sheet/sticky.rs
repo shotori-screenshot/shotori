@@ -12,6 +12,7 @@
 //! canvas bottom. Previously exposed content survives return passes.
 
 use super::SheetLimits;
+use super::alignment::phase_gain_64;
 use super::profile::RowProfile;
 
 /// Consecutive stationary observations needed for a candidate prefix.
@@ -210,6 +211,9 @@ impl StickyBands {
     /// `bot_run` counts from the BOTTOM edge, so its anchored skip and
     /// structure rows are mirrored.
     pub(super) fn bot_commit(&self, cur: &RowProfile, viewport_height: u32) -> Option<u32> {
+        if cur.height == 0 {
+            return None;
+        }
         let step = cur.step.max(1);
         let skip = (self.bot as usize).div_ceil(step);
         let rows = self.commit_height(
@@ -219,10 +223,16 @@ impl StickyBands {
             step,
             viewport_height,
         )?;
+        // Mirror `top_commit`: only sample rows strictly inside the candidate
+        // bottom band `[cur.height - rows, cur.height)`. When `j * step == rows`,
+        // `last - rows` lands on the first scrolling content row just above the
+        // band, which would let a blank bottom margin pin itself as a sticky
+        // footer off the texture of scrolling text above it.
         let last = cur.height as usize - 1;
         let structured = (skip..)
-            .take_while(|&j| (j * step) as u32 <= rows)
-            .any(|j| grid_row_structured(cur, last - j * step));
+            .take_while(|&j| ((j * step) as u32) < rows)
+            .filter_map(|j| last.checked_sub(j * step))
+            .any(|y| grid_row_structured(cur, y));
         (structured && rows > self.bot).then_some(rows)
     }
 
@@ -334,6 +344,7 @@ pub(super) fn stillness_grid(
     cur: &RowProfile,
     options: &SheetLimits,
     dy: i32,
+    subpixel_dy: f32,
     fixed_backdrop: bool,
 ) -> RowStillness {
     if base.stride != cur.stride || base.height != cur.height {
@@ -383,25 +394,67 @@ pub(super) fn stillness_grid(
             }
         } else {
             // Displacement verification: under the accepted step, the
-            // content of viewport row j pairs with base row j + dy. The
-            // matcher's own "these rows align" bar doubles as the "this
-            // row moved with the page" bar.
-            let t = j as i64 + i64::from(dy);
-            if t < 0 || t >= i64::from(cur.height) {
-                // Off the frame: the edge opposite the scroll cannot
-                // testify; inherit the offset-0 verdict.
-                true
-            } else {
-                let t = t as usize;
-                row_mad(c, &base.data[t * cur.stride..(t + 1) * cur.stride])
-                    >= options.cost_threshold
-            }
+            // content of viewport row j pairs with base row j + dy (and
+            // bi-phase subpixel blends at `subpixel_dy` when the scroll step
+            // has a fractional vertical component). The matcher's own "these
+            // rows align" bar doubles as the "this row moved with the page" bar.
+            row_translated_misfit(base, cur, j, dy, subpixel_dy, options.cost_threshold)
         };
         still.push(s);
         verified.push(v);
         j += cur.step;
     }
     RowStillness { still, verified }
+}
+
+/// Whether row `j` of `cur` misfits `base` at both integer `dy` and every valid
+/// bi-phase subpixel blend at `subpixel_dy` (or has its translated partner fall
+/// completely outside the frame).
+fn row_translated_misfit(
+    base: &RowProfile,
+    cur: &RowProfile,
+    j: usize,
+    dy: i32,
+    subpixel_dy: f32,
+    cost_threshold: f32,
+) -> bool {
+    let h = cur.height as usize;
+    let stride = cur.stride;
+    let c = &cur.data[j * stride..(j + 1) * stride];
+    let t = j as i64 + i64::from(dy);
+    if t >= 0 && t < i64::from(cur.height) {
+        let t = t as usize;
+        if row_mad(c, &base.data[t * stride..(t + 1) * stride]) < cost_threshold {
+            return false;
+        }
+    }
+    if !subpixel_dy.is_finite() {
+        return true;
+    }
+    let d_floor = subpixel_dy.floor() as i32;
+    let q64 = ((subpixel_dy - d_floor as f32) * 64.0)
+        .round()
+        .clamp(0.0, 64.0) as u32;
+    let phase_count = if q64 == 0 || q64 == 64 { 1 } else { 8 };
+    for p_phase in 0..phase_count {
+        let p64 = p_phase * 8;
+        let sum = p64 + q64;
+        let d_base = d_floor + (sum >> 6) as i32;
+        let c64 = sum & 63;
+        if j + usize::from(p64 > 0) >= h {
+            continue;
+        }
+        let s0 = j as i32 + d_base;
+        if s0 < 0 || (s0 as usize) + usize::from(c64 > 0) >= h {
+            continue;
+        }
+        let s0 = s0 as usize;
+        let raw = row_mad_bi_phase_64(cur, base, j, s0, p64, c64);
+        if raw / phase_gain_64(p64, c64) < cost_threshold {
+            return false;
+        }
+    }
+    true
 }
 
 /// Mean absolute difference of two luma rows.
@@ -411,4 +464,239 @@ fn row_mad(a: &[u8], b: &[u8]) -> f32 {
         .map(|(x, y)| u32::from(x.abs_diff(*y)))
         .sum::<u32>() as f32
         / a.len() as f32
+}
+
+/// Bi-phase 2-tap vertical MAD between `cur[j..j+1]` blended by `p64 / 64` and
+/// `base[s0..s0+1]` blended by `c64 / 64`.
+fn row_mad_bi_phase_64(
+    cur: &RowProfile,
+    base: &RowProfile,
+    j: usize,
+    s0: usize,
+    p64: u32,
+    c64: u32,
+) -> f32 {
+    let stride = cur.stride;
+    let c0 = &cur.data[j * stride..(j + 1) * stride];
+    if p64 == 0 && c64 == 0 {
+        return row_mad(c0, &base.data[s0 * stride..(s0 + 1) * stride]);
+    }
+    let j1 = j + usize::from(p64 > 0);
+    let s1 = s0 + usize::from(c64 > 0);
+    let c1 = &cur.data[j1 * stride..(j1 + 1) * stride];
+    let b0 = &base.data[s0 * stride..(s0 + 1) * stride];
+    let b1 = &base.data[s1 * stride..(s1 + 1) * stride];
+    let inv_p = 64 - p64;
+    let inv_c = 64 - c64;
+    let sum: u32 = c0
+        .iter()
+        .zip(c1.iter())
+        .zip(b0.iter().zip(b1.iter()))
+        .map(|((&ca, &cb), (&ba, &bb))| {
+            let cv = ((u32::from(ca) * inv_p + u32::from(cb) * p64 + 32) >> 6) as u8;
+            let bv = ((u32::from(ba) * inv_c + u32::from(bb) * c64 + 32) >> 6) as u8;
+            u32::from(cv.abs_diff(bv))
+        })
+        .sum();
+    sum as f32 / stride as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{COMMIT_FRAMES, RowProfile, SheetLimits, StickyBands, stillness_grid};
+    use crate::model::scroll_sheet::profile::BAND_COUNT;
+
+    fn render_viewport(
+        width: u32,
+        height: u32,
+        scroll_top: u32,
+        structured_footer: bool,
+    ) -> Vec<u8> {
+        const FOOTER_ROWS: u32 = 8;
+        let mut rgba = vec![255u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * 4) as usize;
+                let px = if y >= height - FOOTER_ROWS {
+                    if structured_footer {
+                        // Stationary structured status bar inside the bottom 8 rows.
+                        let glyph = (x / 6 + y).is_multiple_of(5) && (16..width - 16).contains(&x);
+                        let v = if glyph { 36 } else { 228 };
+                        [v, v, v, 255]
+                    } else {
+                        // Completely flat blank bottom margin.
+                        [248, 248, 250, 255]
+                    }
+                } else {
+                    // Non-periodic scrolling content right down to `height - FOOTER_ROWS - 1`
+                    // (the exact boundary row `last - rows` just above the margin).
+                    let doc_y = y + scroll_top;
+                    let hash = doc_y
+                        .wrapping_mul(73)
+                        .wrapping_add(x.wrapping_mul(37))
+                        .wrapping_add((doc_y / 3) ^ (x / 5));
+                    let ink = (16..width - 16).contains(&x) && (hash % 7 < 3);
+                    let v = if ink { 24 } else { 248 };
+                    [v, v, v, 255]
+                };
+                rgba[idx..idx + 4].copy_from_slice(&px);
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn blank_bottom_margin_below_scrolling_text_never_commits_as_footer() {
+        const W: u32 = 160;
+        const H: u32 = 200;
+        const STEP_DY: i32 = 16;
+
+        let limits = SheetLimits::default();
+        let mut blank_bands = StickyBands::new();
+        let mut prev_blank = RowProfile::from_rgba(&render_viewport(W, H, 0, false), W, H);
+
+        let mut footer_bands = StickyBands::new();
+        let mut prev_footer = RowProfile::from_rgba(&render_viewport(W, H, 0, true), W, H);
+
+        for frame_idx in 1..=u32::from(COMMIT_FRAMES) + 2 {
+            let scroll_top = frame_idx * STEP_DY as u32;
+
+            let cur_blank = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, false), W, H);
+            let blank_ev = stillness_grid(
+                &prev_blank,
+                &cur_blank,
+                &limits,
+                STEP_DY,
+                STEP_DY as f32,
+                false,
+            );
+            blank_bands.update(&blank_ev);
+            assert_eq!(
+                blank_bands.bot_commit(&cur_blank, H),
+                None,
+                "blank bottom margin must not commit off scrolling text at frame {frame_idx}"
+            );
+            prev_blank = cur_blank;
+
+            let cur_footer = RowProfile::from_rgba(&render_viewport(W, H, scroll_top, true), W, H);
+            let footer_ev = stillness_grid(
+                &prev_footer,
+                &cur_footer,
+                &limits,
+                STEP_DY,
+                STEP_DY as f32,
+                false,
+            );
+            footer_bands.update(&footer_ev);
+            if frame_idx >= u32::from(COMMIT_FRAMES) && footer_bands.bot == 0 {
+                let committed = footer_bands.bot_commit(&cur_footer, H);
+                assert_eq!(committed, Some(8));
+                footer_bands.bot = 8;
+            }
+            prev_footer = cur_footer;
+        }
+
+        assert_eq!(footer_bands.bot, 8);
+    }
+
+    #[test]
+    fn bot_commit_handles_zero_and_tiny_heights_without_underflow() {
+        let mut bands = StickyBands::new();
+        bands.bot_run = vec![COMMIT_FRAMES; 4];
+        bands.bot_verified = vec![COMMIT_FRAMES; 4];
+
+        let empty_profile = RowProfile {
+            height: 0,
+            stride: 16,
+            step: 1,
+            data: Vec::new(),
+            bands: [(0, 0); BAND_COUNT],
+            band_means: Vec::new(),
+            spread: 0,
+            row_weight: Vec::new(),
+        };
+        assert_eq!(bands.bot_commit(&empty_profile, 64), None);
+
+        // `cur.height == 2` while `commit_height` proposes `rows == 2` (`rows == height`)
+        // and `rows == 4` (`rows > cur.height` when `viewport_height` is larger): neither
+        // may underflow `last - j * step`.
+        let mut structured_row = vec![20u8; 32];
+        structured_row[0] = 220;
+        structured_row[16] = 220;
+        let tiny_structured = RowProfile {
+            height: 2,
+            stride: 16,
+            step: 1,
+            data: structured_row,
+            bands: [(0, 16); BAND_COUNT],
+            band_means: vec![[120.0; BAND_COUNT]; 2],
+            spread: 0,
+            row_weight: vec![1.0; 2],
+        };
+        bands.bot_run = vec![COMMIT_FRAMES; 2];
+        bands.bot_verified = vec![COMMIT_FRAMES; 2];
+        assert_eq!(bands.bot_commit(&tiny_structured, 8), Some(2));
+
+        bands.bot_run = vec![COMMIT_FRAMES; 4];
+        bands.bot_verified = vec![COMMIT_FRAMES; 4];
+        assert_eq!(bands.bot_commit(&tiny_structured, 32), Some(4));
+
+        let tiny_flat = RowProfile {
+            data: vec![200u8; 32],
+            ..tiny_structured
+        };
+        assert_eq!(bands.bot_commit(&tiny_flat, 8), None);
+        assert_eq!(bands.bot_commit(&tiny_flat, 32), None);
+    }
+
+    #[test]
+    fn stillness_grid_rejects_false_verification_on_half_pixel_scrolling_rows() {
+        const W: usize = 64;
+        const H: usize = 48;
+        let limits = SheetLimits::default();
+
+        // Construct a document row pair at `base[16..17]` (vertical edge `20 -> 220`
+        // across all columns) that scrolled up by `subpixel_dy = 16.5` so `cur[0]`
+        // sits at the half-pixel blend `(20 + 220) / 2 = 120`. Suppose `base[0]`
+        // also had luma `120` (e.g. a gray rule or repeated texture that happens
+        // to match at offset 0).
+        // Under an integer-only probe at `dy = 17` (or `16`), `cur[0]` (`120`) vs
+        // `base[17]` (`220`) has MAD = `100.0 >= 2.5`, which would falsely mark
+        // `verified[0] = true`. Under bi-phase subpixel verification at `16.5`,
+        // `cur[0]` matches `0.5 * base[16] + 0.5 * base[17] = 120` with MAD = `0.0`,
+        // proving row 0 moved with the page (`verified[0] = false`).
+        let mut base_data = vec![240u8; W * H];
+        let mut cur_data = vec![240u8; W * H];
+        base_data[..W].fill(120);
+        base_data[16 * W..17 * W].fill(20);
+        base_data[17 * W..18 * W].fill(220);
+        cur_data[..W].fill(120);
+
+        let make_profile = |data: Vec<u8>| RowProfile {
+            height: H as u32,
+            stride: W,
+            step: 1,
+            data,
+            bands: [(0, W); BAND_COUNT],
+            band_means: vec![[120.0; BAND_COUNT]; H],
+            spread: 200,
+            row_weight: vec![1.0; H],
+        };
+        let base = make_profile(base_data);
+        let cur = make_profile(cur_data);
+
+        let int_only = stillness_grid(&base, &cur, &limits, 17, 17.0, false);
+        assert!(int_only.still[0]);
+        assert!(
+            int_only.verified[0],
+            "integer-only probe at 17.0 misfits the half-pixel row"
+        );
+
+        let subpixel = stillness_grid(&base, &cur, &limits, 17, 16.5, false);
+        assert!(subpixel.still[0]);
+        assert!(
+            !subpixel.verified[0],
+            "subpixel probe at 16.5 must see the half-pixel blend match and clear verified[0]"
+        );
+    }
 }

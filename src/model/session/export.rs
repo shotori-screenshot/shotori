@@ -10,6 +10,25 @@ use super::{
 use gpui_kit::*;
 use std::sync::Arc;
 
+/// Conservative logical bounding box enclosing every pixel a shape can
+/// paint or filter, including antialiased stroke/badge fringes, rotated
+/// corners, magnifier destination rects, blur kernels, and mosaic tile
+/// edges. Used both to detect higher-Z shapes whose ink overlaps the drag
+/// replay plane and to bound the dirty rectangle restored from
+/// `MovedReplay::base` on the next frame.
+fn padded_shape_bounds(shape: &crate::annotation::Shape) -> Bounds<Pixels> {
+    let ink = shape.ink_bounds();
+    let pad = px(shape.size().max(4.) + 4.);
+    Bounds::new(
+        point(ink.origin.x - pad, ink.origin.y - pad),
+        size(ink.size.width + pad * 2., ink.size.height + pad * 2.),
+    )
+}
+
+fn bounds_overlap(a: &Bounds<Pixels>, b: &Bounds<Pixels>) -> bool {
+    a.left() <= b.right() && a.right() >= b.left() && a.top() <= b.bottom() && a.bottom() >= b.top()
+}
+
 impl ScreenshotSession {
     pub(crate) fn crop(&self, output: &str) -> Option<(u32, u32, Vec<u8>)> {
         self.crop_impl(output, true)
@@ -291,11 +310,14 @@ impl ScreenshotSession {
         // Edited geometry and its selection frame must be published together.
         // A cached lens only recomposites its changing suffix on this path.
         if self.annotations.editing_text().is_some()
-            || self.annotations.selected().is_some_and(|shape| {
-                matches!(
-                    shape.kind,
-                    crate::annotation::ShapeKind::Text | crate::annotation::ShapeKind::Magnifier
-                )
+            || self.annotations.selected_indices().iter().any(|&ix| {
+                self.annotations.committed().get(ix).is_some_and(|shape| {
+                    matches!(
+                        shape.kind,
+                        crate::annotation::ShapeKind::Text
+                            | crate::annotation::ShapeKind::Magnifier
+                    )
+                })
             })
         {
             self.preview_display = None;
@@ -463,9 +485,10 @@ impl ScreenshotSession {
         // resurrect a cancelled stroke or undone history while the worker drains.
         let committed = self.annotations.committed();
         let same_history = display.committed == committed;
-        // Editing one selected object must not hide every other annotation while
+        // Editing selected objects must not hide every other annotation while
         // the worker replaces the composite. The old full frame remains valid
-        // across move/resize and release, but never across deletion or a new draft.
+        // across single or multi-selection move/resize and release, never
+        // across deletion or a new draft.
         let selected_edit = display.committed.len() == committed.len()
             && display
                 .committed
@@ -493,9 +516,15 @@ impl ScreenshotSession {
         {
             return None;
         }
-        let mut bounds = display.bounds;
+        Some((
+            self.local_preview_bounds(output, display.bounds),
+            display.image.clone(),
+        ))
+    }
+
+    fn local_preview_bounds(&self, output: &str, mut bounds: Bounds<Pixels>) -> Bounds<Pixels> {
         bounds.origin -= self.screen(output).bounds().origin;
-        Some((bounds, display.image.clone()))
+        bounds
     }
 
     pub(crate) fn uses_raster_preview(&self) -> bool {
@@ -520,8 +549,8 @@ impl ScreenshotSession {
     /// Reuse the exported composite for freehand strokes, pixel filters and text.
     /// Captures are immutable; selection, shapes and display geometry own invalidation.
     /// The committed indices being edited by a live drag (move or
-    /// handle), if any. `filtered_preview` uses this to repaint only
-    /// the dragged shapes per frame instead of the whole scene.
+    /// handle) or keyboard nudge, if any. `filtered_preview` uses this to
+    /// repaint only the edited shapes per frame instead of the whole scene.
     fn editing_shape_indices(&self) -> Option<Vec<usize>> {
         let mut set: Vec<usize> = Vec::new();
         if let Some(drag) = &self.moving {
@@ -529,6 +558,9 @@ impl ScreenshotSession {
         }
         if let Some(drag) = &self.handle_drag {
             set.push(drag.ix);
+        }
+        if let Some(super::editing::NudgeGesture::Shapes { before }) = &self.nudge {
+            set.extend(before.iter().map(|(ix, _)| *ix));
         }
         if set.is_empty() {
             None
@@ -561,8 +593,14 @@ impl ScreenshotSession {
             ));
         }
         let cached = cache.as_mut()?;
-        let mut bounds = cached.original.bounds;
-        bounds.origin -= self.screen(output).bounds().origin;
+        let bounds = self.local_preview_bounds(output, cached.original.bounds);
+        // Live move/handle drag: replaying the whole scene per pointer
+        // move (full-frame base copy + every committed shape
+        // re-rasterized) cost ~20 ms/frame at 1080p and ~65 ms with a
+        // magnifier on screen — the dragged shape visibly trailed the
+        // pointer. Instead, composite the scene WITHOUT the replay set
+        // once (split plane), then repaint only the replay set over that
+        // stable base each frame.
         if let Some(editing) = self.editing_shape_indices() {
             let single_lens = editing.as_slice() == [editing[0]]
                 && committed
@@ -573,13 +611,18 @@ impl ScreenshotSession {
                 // MovedReplay so annotations=false never samples un-dragged marks
                 // and later marks keep their display order over the lens.
                 cached.moved = None;
-            } else if let Some(image) = cached.update_moved_replay(editing, committed) {
+            } else if let Some(image) =
+                cached.update_moved_replay(&editing, committed, self.annotations.draft_generation())
+            {
                 return Some((bounds, image));
             }
-        } else if cached.moved.take().is_some() && cached.committed == committed {
-            // A drag just ended: the split composite already equals the full
-            // replay (base + dragged shapes at their final positions).
-            cached.draft = draft.cloned();
+        } else if cached.moved.take().is_some() && draft.is_none() && cached.committed == committed
+        {
+            // A drag or keyboard nudge just ended: the split composite already
+            // equals the full replay (base + replay shapes at their final
+            // positions), so keep the frame and just drop the split state.
+            cached.draft = None;
+            cached.draft_generation = self.annotations.draft_generation();
             return Some((bounds, cached.image.clone()));
         }
         if cached.committed != committed
@@ -601,7 +644,8 @@ impl ScreenshotSession {
                     cached.update_standard_history(committed);
                 }
                 cached.stroke = None;
-                cached.committed = committed.to_vec();
+                cached.committed.clear();
+                cached.committed.extend_from_slice(committed);
             }
             cached.update_draft_image(
                 committed,
@@ -806,22 +850,40 @@ impl FilterPreview {
         }
     }
 
-    /// Composite a non-lens drag over a cached split plane of un-dragged shapes.
+    /// Composite a non-lens drag or nudge over a cached split plane of un-dragged shapes.
     /// Returns `None` if an un-dragged mark would pollute an `annotations: false` lens.
     fn update_moved_replay(
         &mut self,
-        mut replay: Vec<usize>,
+        editing: &[usize],
         committed: &[crate::annotation::Shape],
+        draft_generation: u64,
     ) -> Option<Arc<RenderImage>> {
         use crate::annotation::ShapeKind;
+        // Single forward Z-order pass: include the edited shapes,
+        // Spotlight/Magnifier passes, and every higher-Z shape whose padded
+        // footprint overlaps any shape already in `replay` (including
+        // transitive overlaps `0 -> 1 -> 2`). Keeping `replay` in ascending
+        // `ix` order preserves committed Z-order and re-runs higher-Z
+        // Blur/Mosaic filters over dragged ink, while spatially disjoint
+        // higher-Z strokes remain baked in `MovedReplay::base`. A Spotlight
+        // dims the unmarked capture before `committed[0]`, so when one is
+        // present every shape rides with `replay`.
+        let has_spotlight = committed.iter().any(|s| s.kind == ShapeKind::Spotlight);
+        let mut replay: Vec<usize> = Vec::new();
+        let mut replay_bounds: Vec<Bounds<Pixels>> = Vec::new();
         for (ix, shape) in committed.iter().enumerate() {
-            if matches!(shape.kind, ShapeKind::Spotlight | ShapeKind::Magnifier)
-                && !replay.contains(&ix)
-            {
+            let shape_bounds = padded_shape_bounds(shape);
+            let include = has_spotlight
+                || editing.binary_search(&ix).is_ok()
+                || shape.kind == ShapeKind::Magnifier
+                || replay_bounds
+                    .iter()
+                    .any(|b| bounds_overlap(b, &shape_bounds));
+            if include {
                 replay.push(ix);
+                replay_bounds.push(shape_bounds);
             }
         }
-        replay.sort_unstable();
         if replay.len() < committed.len()
             && committed
                 .iter()
@@ -830,19 +892,48 @@ impl FilterPreview {
             self.moved = None;
             return None;
         }
-        if self.moved.as_ref().is_some_and(|m| m.indices == replay) && self.committed == committed {
+        let base_stale = self.moved.as_ref().is_some_and(|_| {
+            self.committed.len() != committed.len()
+                || committed
+                    .iter()
+                    .zip(&self.committed)
+                    .enumerate()
+                    .any(|(ix, (now, prev))| replay.binary_search(&ix).is_err() && now != prev)
+        });
+        // Idempotence: the renderer may call this twice for one frame
+        // (element paint + the next frame before the move lands). Each call
+        // would otherwise mint a fresh image that never reaches the atlas —
+        // only a NEW committed state rebuilds.
+        if !base_stale
+            && self
+                .moved
+                .as_ref()
+                .is_some_and(|m| m.indices.as_slice() == replay.as_slice())
+            && self.committed == committed
+        {
             return Some(self.image.clone());
         }
         let dims = (self.original.width, self.original.height);
         let origin = self.original.bounds.origin;
         let scale = self.original.scale;
-        if self.moved.as_ref().is_none_or(|m| m.indices != replay) {
-            let mut base = self.original.rgba.clone();
+        let rebuilt_base = base_stale
+            || self
+                .moved
+                .as_ref()
+                .is_none_or(|m| m.indices.as_slice() != replay.as_slice());
+        let prior_dirty = self.moved.as_ref().and_then(|m| m.prev_dirty);
+        if rebuilt_base {
+            let mut base = self
+                .moved
+                .take()
+                .map(|m| m.base)
+                .unwrap_or_else(|| Vec::with_capacity(self.original.rgba.len()));
+            base.clone_from(&self.original.rgba);
             crate::annotation::Annotations::rasterize_shapes(
                 committed
                     .iter()
                     .enumerate()
-                    .filter(|(ix, _)| !replay.contains(ix))
+                    .filter(|(ix, _)| replay.binary_search(ix).is_err())
                     .map(|(_, shape)| shape),
                 &mut base,
                 dims.0,
@@ -850,26 +941,41 @@ impl FilterPreview {
                 origin,
                 scale,
             );
-            self.pixels.clone_from(&base);
             self.moved = Some(MovedReplay {
                 base,
                 indices: replay.clone(),
-                prev_dirty: None,
+                prev_dirty: prior_dirty,
             });
         }
+        let curr_dirty = replay_dirty_rect(committed, &replay, dims, origin, scale);
+        let has_full_canvas_effect = replay.iter().any(|&ix| {
+            matches!(
+                committed[ix].kind,
+                ShapeKind::Spotlight | ShapeKind::Magnifier
+            )
+        });
         let moved = self.moved.as_mut()?;
-        if let Some(dirty) = moved.prev_dirty {
+        if !base_stale
+            && !has_full_canvas_effect
+            && self.committed.len() == committed.len()
+            && self.pixels.len() == moved.base.len()
+            && let Some(old_dirty) = moved.prev_dirty
+        {
+            // Restore only the physical pixel bounding box dirtied by the
+            // previous frame's replay set (and any newly joined replay shapes
+            // when the split base rebuilt) instead of cloning the full capture
+            // buffer per step (#32).
+            let dirty = if rebuilt_base {
+                union_dirty_rects(old_dirty, curr_dirty)
+            } else {
+                old_dirty
+            };
             restore_rgba_rect(&mut self.pixels, &moved.base, dims.0 as usize, dirty);
         } else {
             self.pixels.clone_from(&moved.base);
         }
-        let curr_dirty = replay_dirty_rect(committed, &replay, dims, origin, scale);
         crate::annotation::Annotations::rasterize_shapes(
-            committed
-                .iter()
-                .enumerate()
-                .filter(|(ix, _)| replay.contains(ix))
-                .map(|(_, shape)| shape),
+            replay.iter().map(|&ix| &committed[ix]),
             &mut self.pixels,
             dims.0,
             dims.1,
@@ -878,8 +984,10 @@ impl FilterPreview {
         );
         moved.prev_dirty = Some(curr_dirty);
         self.image = crate::render_image::rgba_to_render_image(self.pixels.clone(), dims.0, dims.1);
-        self.committed = committed.to_vec();
+        self.committed.clear();
+        self.committed.extend_from_slice(committed);
         self.draft = None;
+        self.draft_generation = draft_generation;
         self.stroke = None;
         self.magnifier = None;
         Some(self.image.clone())
@@ -1043,6 +1151,19 @@ fn restore_rgba_rect(
     }
 }
 
+fn union_dirty_rects(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    if a.0 >= a.2 || a.1 >= a.3 {
+        return b;
+    }
+    if b.0 >= b.2 || b.1 >= b.3 {
+        return a;
+    }
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
 fn replay_dirty_rect(
     committed: &[crate::annotation::Shape],
     replay: &[usize],
@@ -1061,18 +1182,618 @@ fn replay_dirty_rect(
     }
     let Some(union) = replay
         .iter()
-        .filter_map(|&ix| committed.get(ix).map(|s| s.raster_dirty_bounds()))
+        .filter_map(|&ix| committed.get(ix).map(padded_shape_bounds))
         .reduce(|a, b| a.union(&b))
     else {
         return (0, 0, 0, 0);
     };
-    let x0 = ((f32::from(union.left() - origin.x) * scale).floor() as isize).clamp(0, w as isize)
-        as usize;
-    let y0 = ((f32::from(union.top() - origin.y) * scale).floor() as isize).clamp(0, h as isize)
-        as usize;
-    let x1 = ((f32::from(union.right() - origin.x) * scale).ceil() as isize).clamp(0, w as isize)
-        as usize;
-    let y1 = ((f32::from(union.bottom() - origin.y) * scale).ceil() as isize).clamp(0, h as isize)
-        as usize;
+    let x0 =
+        ((f32::from(union.left() - origin.x) * scale).floor() - 2.).clamp(0., w as f32) as usize;
+    let y0 =
+        ((f32::from(union.top() - origin.y) * scale).floor() - 2.).clamp(0., h as f32) as usize;
+    let x1 =
+        ((f32::from(union.right() - origin.x) * scale).ceil() + 2.).clamp(0., w as f32) as usize;
+    let y1 =
+        ((f32::from(union.bottom() - origin.y) * scale).ceil() + 2.).clamp(0., h as f32) as usize;
     (x0, y0, x1, y1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScreenshotSession;
+    use crate::annotation::{Annotations, ShapeKind};
+    use crate::platform::capture::Capture;
+    use gpui_kit::{AppContext, Bounds, Pixels, Point, point, px, size};
+    use std::sync::Arc;
+
+    fn patterned_capture(
+        name: &str,
+        logical_pos: (i32, i32),
+        logical_w: u32,
+        logical_h: u32,
+        scale: f32,
+    ) -> Arc<Capture> {
+        let mut cap = Capture::for_test(logical_pos, scale);
+        cap.output_name = name.into();
+        cap.width = (logical_w as f32 * scale).round() as u32;
+        cap.height = (logical_h as f32 * scale).round() as u32;
+        let mut rgba = Vec::with_capacity((cap.width * cap.height * 4) as usize);
+        for y in 0..cap.height {
+            for x in 0..cap.width {
+                rgba.extend_from_slice(&[
+                    ((x * 13 + y * 7) % 251) as u8,
+                    ((x * 5 + y * 19 + 40) % 251) as u8,
+                    ((x * 23 + y * 3 + 90) % 251) as u8,
+                    255,
+                ]);
+            }
+        }
+        cap.rgba = rgba;
+        Arc::new(cap)
+    }
+
+    /// Reference composite built directly from the unmarked capture and
+    /// `Annotations::rasterize_shapes`, bypassing `filter_preview` completely.
+    fn fresh_reference_rgba(session: &ScreenshotSession, output: &str) -> Vec<u8> {
+        let unmarked = session.crop_impl(output, false).unwrap();
+        let mut rgba = unmarked.rgba;
+        Annotations::rasterize_shapes(
+            session.annotations.committed().iter(),
+            &mut rgba,
+            unmarked.width,
+            unmarked.height,
+            unmarked.bounds.origin,
+            unmarked.scale,
+        );
+        rgba
+    }
+
+    #[test]
+    fn secondary_output_move_and_handle_drags_return_output_local_bounds() {
+        for (secondary_pos, secondary_scale) in [((1920, 0), 2.), ((-720, -100), 1.)] {
+            let mut s = ScreenshotSession::new(
+                vec![
+                    patterned_capture("primary", (0, 0), 300, 200, 1.),
+                    patterned_capture("secondary", secondary_pos, 300, 220, secondary_scale),
+                ],
+                Vec::new(),
+            );
+            s.begin("secondary", point(px(20.), px(30.)));
+            s.end("secondary", point(px(260.), px(190.)));
+            let screen_origin = point(px(secondary_pos.0 as f32), px(secondary_pos.1 as f32));
+            let area = s.selection.bounds().unwrap();
+
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Pencil);
+                a.set_color(0);
+                a.set_tool_size(8.);
+                a.begin(screen_origin + point(px(50.), px(60.)), area, false);
+                a.drag_to(screen_origin + point(px(110.), px(60.)), area, false);
+                a.end();
+
+                a.toggle(ShapeKind::Rectangle);
+                a.set_color(1);
+                a.set_tool_size(4.);
+                a.begin(screen_origin + point(px(130.), px(70.)), area, false);
+                a.drag_to(screen_origin + point(px(210.), px(140.)), area, false);
+                a.end();
+
+                a.toggle(ShapeKind::Select);
+                a.select_index(0);
+            });
+
+            let expected_local = Bounds::new(point(px(20.), px(30.)), size(px(240.), px(160.)));
+            let (idle_bounds, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(idle_bounds, expected_local, "idle {secondary_pos:?}");
+
+            // 1. Live move drag on secondary output: initial frame, idempotent
+            // repeat call, subsequent step, and release frame.
+            let move_press = point(px(80.), px(60.));
+            s.pointer_down("secondary", move_press, false, false);
+            s.pointer_move("secondary", move_press + point(px(18.), px(12.)), false);
+            assert!(s.moving.is_some());
+
+            let (drag_bounds_1, drag_img_1) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(drag_bounds_1, idle_bounds, "move initial {secondary_pos:?}");
+
+            let (repeat_bounds, repeat_img) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(repeat_bounds, idle_bounds, "move repeat {secondary_pos:?}");
+            assert!(Arc::ptr_eq(&drag_img_1, &repeat_img));
+
+            s.pointer_move("secondary", move_press + point(px(32.), px(24.)), false);
+            let (drag_bounds_2, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(drag_bounds_2, idle_bounds, "move step {secondary_pos:?}");
+
+            s.pointer_up("secondary", move_press + point(px(32.), px(24.)), false);
+            assert!(s.moving.is_none());
+            let (release_bounds, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(
+                release_bounds, idle_bounds,
+                "move release {secondary_pos:?}"
+            );
+
+            // 2. Live handle drag on secondary output (bottom-right corner of Rectangle).
+            s.edit_annotations(|a| {
+                a.select_index(1);
+            });
+            let br_handle_global = s.annotations.committed()[1].handle_points()[2];
+            let br_local = br_handle_global - screen_origin;
+            s.pointer_down("secondary", br_local, false, false);
+            s.pointer_move("secondary", br_local + point(px(16.), px(14.)), false);
+            assert!(s.handle_drag.is_some());
+
+            let (h_bounds_1, h_img_1) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(h_bounds_1, idle_bounds, "handle initial {secondary_pos:?}");
+
+            let (h_repeat_bounds, h_repeat_img) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(
+                h_repeat_bounds, idle_bounds,
+                "handle repeat {secondary_pos:?}"
+            );
+            assert!(Arc::ptr_eq(&h_img_1, &h_repeat_img));
+
+            s.pointer_move("secondary", br_local + point(px(26.), px(22.)), false);
+            let (h_bounds_2, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(h_bounds_2, idle_bounds, "handle step {secondary_pos:?}");
+
+            s.pointer_up("secondary", br_local + point(px(26.), px(22.)), false);
+            assert!(s.handle_drag.is_none());
+            let (h_release_bounds, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(
+                h_release_bounds, idle_bounds,
+                "handle release {secondary_pos:?}"
+            );
+            assert_eq!(
+                s.crop("secondary").unwrap().2,
+                fresh_reference_rgba(&s, "secondary")
+            );
+        }
+    }
+
+    #[test]
+    fn drag_under_higher_z_ink_and_filters_preserves_z_order_and_export_parity() {
+        for filter_kind in [ShapeKind::Blur, ShapeKind::Mosaic] {
+            let mut s = ScreenshotSession::new(
+                vec![patterned_capture("primary", (0, 0), 340, 180, 1.)],
+                Vec::new(),
+            );
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+
+            s.edit_annotations(|a| {
+                // ix = 0: lower-Z thick Pencil stroke starting on the left.
+                a.toggle(ShapeKind::Pencil);
+                a.set_color(0);
+                a.set_tool_size(14.);
+                a.begin(point(px(15.), px(70.)), area, false);
+                a.drag_to(point(px(45.), px(95.)), area, false);
+                a.end();
+
+                // ix = 1: higher-Z thick stroke in the middle.
+                if a.tool() != Some(ShapeKind::Pencil) {
+                    a.toggle(ShapeKind::Pencil);
+                }
+                a.set_color(3);
+                a.set_tool_size(16.);
+                a.begin(point(px(135.), px(60.)), area, false);
+                a.drag_to(point(px(165.), px(115.)), area, false);
+                a.end();
+
+                // ix = 2: higher-Z Blur/Mosaic overlapping shape 1 on its right.
+                a.toggle(filter_kind);
+                a.set_tool_size(16.);
+                a.begin(point(px(155.), px(55.)), area, false);
+                a.drag_to(point(px(215.), px(125.)), area, false);
+                a.end();
+
+                // ix = 3: far-away spatially disjoint Pencil stroke.
+                a.toggle(ShapeKind::Pencil);
+                a.set_color(2);
+                a.set_tool_size(8.);
+                a.begin(point(px(285.), px(135.)), area, false);
+                a.drag_to(point(px(320.), px(165.)), area, false);
+                a.end();
+
+                a.toggle(ShapeKind::Select);
+                a.select_index(0);
+            });
+
+            s.filtered_preview("primary").unwrap();
+
+            let press = point(px(25.), px(80.));
+            s.pointer_down("primary", press, false, false);
+
+            // Step 1: small move, still disjoint from 1, 2 and 3.
+            s.pointer_move("primary", press + point(px(8.), px(0.)), false);
+            assert!(s.moving.is_some());
+            s.filtered_preview("primary").unwrap();
+            assert_eq!(
+                s.filter_preview
+                    .borrow()
+                    .as_ref()
+                    .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone())),
+                Some(vec![0]),
+                "{filter_kind:?} disjoint step"
+            );
+            assert_eq!(
+                s.filter_preview.borrow().as_ref().unwrap().pixels,
+                fresh_reference_rgba(&s, "primary"),
+                "{filter_kind:?} disjoint pixels"
+            );
+
+            // Step 2 (dx=50): overlaps shape 1 only, pulling shape 2 in transitively (0 -> 1 -> 2).
+            // Steps 3 & 4 (dx=135, 143): directly underneath both shape 1's ink and shape 2's
+            // filter box while staying disjoint from shape 3.
+            for dx in [50., 135., 143.] {
+                s.pointer_move("primary", press + point(px(dx), px(4.)), false);
+                s.filtered_preview("primary").unwrap();
+                let indices = s
+                    .filter_preview
+                    .borrow()
+                    .as_ref()
+                    .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone()))
+                    .unwrap();
+                assert_eq!(
+                    indices,
+                    vec![0, 1, 2],
+                    "{filter_kind:?} at dx={dx}: must include overlapping 1,2 and exclude disjoint 3"
+                );
+                let expected = fresh_reference_rgba(&s, "primary");
+                assert_eq!(
+                    s.filter_preview.borrow().as_ref().unwrap().pixels,
+                    expected,
+                    "{filter_kind:?} mid-drag cached.pixels mismatch at dx={dx}"
+                );
+                assert_eq!(
+                    s.crop("primary").unwrap().2,
+                    expected,
+                    "{filter_kind:?} mid-drag crop() mismatch at dx={dx}"
+                );
+            }
+
+            // Release while shape 0 remains underneath shapes 1 and 2:
+            // cached.moved.take() retains cached.pixels, which crop() and
+            // crop_for_pin() export directly via the cache shortcut.
+            s.pointer_up("primary", press + point(px(143.), px(4.)), false);
+            assert!(s.moving.is_none());
+            s.filtered_preview("primary").unwrap();
+            assert!(s.filter_preview.borrow().as_ref().unwrap().moved.is_none());
+            let expected = fresh_reference_rgba(&s, "primary");
+            assert_eq!(
+                s.crop("primary").unwrap().2,
+                expected,
+                "{filter_kind:?} post-release crop() Z-order/filter corruption"
+            );
+            assert_eq!(
+                s.crop_for_pin("primary").unwrap().rgba,
+                expected,
+                "{filter_kind:?} post-release crop_for_pin() Z-order/filter corruption"
+            );
+        }
+    }
+
+    #[test]
+    fn dirty_rect_multi_step_drag_reuses_buffer_and_leaves_no_ghost_pixels() {
+        for scale in [1., 1.5] {
+            let mut s = ScreenshotSession::new(
+                vec![patterned_capture("primary", (0, 0), 320, 220, scale)],
+                Vec::new(),
+            );
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+
+            s.edit_annotations(|a| {
+                // Stationary lower-Z stroke baked into MovedReplay::base.
+                a.toggle(ShapeKind::Pencil);
+                a.set_color(1);
+                a.set_tool_size(10.);
+                a.begin(point(px(20.), px(180.)), area, false);
+                a.drag_to(point(px(290.), px(180.)), area, false);
+                a.end();
+
+                // Dragged Pencil stroke.
+                if a.tool() != Some(ShapeKind::Pencil) {
+                    a.toggle(ShapeKind::Pencil);
+                }
+                a.set_color(0);
+                a.set_tool_size(12.);
+                a.begin(point(px(25.), px(30.)), area, false);
+                a.drag_to(point(px(55.), px(50.)), area, false);
+                a.end();
+
+                a.toggle(ShapeKind::Select);
+                a.select_index(1);
+            });
+
+            s.filtered_preview("primary").unwrap();
+
+            let press = point(px(40.), px(40.));
+            s.pointer_down("primary", press, false, false);
+
+            // Initial drag frame builds MovedReplay; capture the pixel Vec's
+            // heap pointer so subsequent dirty-rect frames prove zero reallocation.
+            s.pointer_move("primary", press + point(px(10.), px(0.)), false);
+            s.filtered_preview("primary").unwrap();
+            let initial_ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+            assert_eq!(
+                s.filter_preview.borrow().as_ref().unwrap().pixels,
+                fresh_reference_rgba(&s, "primary")
+            );
+
+            // Six non-overlapping jump positions across the canvas (including
+            // crossing over the lower-Z stroke at y=180 and leaving it again).
+            let deltas: [Point<Pixels>; 6] = [
+                point(px(75.), px(5.)),
+                point(px(150.), px(10.)),
+                point(px(225.), px(45.)),
+                point(px(190.), px(135.)),
+                point(px(105.), px(140.)),
+                point(px(25.), px(95.)),
+            ];
+            for (step, delta) in deltas.into_iter().enumerate() {
+                s.pointer_move("primary", press + delta, false);
+                s.filtered_preview("primary").unwrap();
+                let ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+                assert_eq!(
+                    ptr, initial_ptr,
+                    "scale={scale} step={step}: cached.pixels reallocated during drag"
+                );
+                assert_eq!(
+                    s.filter_preview.borrow().as_ref().unwrap().pixels,
+                    fresh_reference_rgba(&s, "primary"),
+                    "scale={scale} step={step}: ghost pixels left behind"
+                );
+            }
+
+            s.pointer_up("primary", press + deltas[5], false);
+            s.filtered_preview("primary").unwrap();
+            assert_eq!(
+                s.crop("primary").unwrap().2,
+                fresh_reference_rgba(&s, "primary")
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn multi_selection_edit_keeps_display_preview_while_worker_drains(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let cap = patterned_capture("secondary", (1920, 0), 600, 600, 1.);
+        let session = cx.new(|_| ScreenshotSession::new(vec![cap], Vec::new()));
+        let screen_origin = point(px(1920.), px(0.));
+
+        session.update(cx, |s, cx| {
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Pencil);
+                a.set_color(0);
+                a.begin(screen_origin + point(px(40.), px(40.)), area, false);
+                a.drag_to(screen_origin + point(px(90.), px(60.)), area, false);
+                a.end();
+
+                if a.tool() != Some(ShapeKind::Pencil) {
+                    a.toggle(ShapeKind::Pencil);
+                }
+                a.set_color(1);
+                a.begin(screen_origin + point(px(120.), px(40.)), area, false);
+                a.drag_to(screen_origin + point(px(170.), px(60.)), area, false);
+                a.end();
+
+                // Large Blur (>= 512x512 px) so non-drag edits spawn the worker.
+                a.toggle(ShapeKind::Blur);
+                a.begin(screen_origin + point(px(20.), px(80.)), area, false);
+                a.drag_to(screen_origin + point(px(560.), px(595.)), area, false);
+                a.end();
+            });
+            let (idle_bounds, _) = s.filtered_preview("secondary").unwrap();
+            assert_eq!(
+                idle_bounds,
+                Bounds::new(point(px(0.), px(0.)), size(px(600.), px(600.)))
+            );
+
+            // Trigger a background worker render on the heavy Blur while keep-history len == 3.
+            s.edit_annotations(|a| {
+                a.select_index(2);
+                a.apply_size(24.);
+                a.end_size_drag();
+            });
+            assert!(s.request_filtered_preview("secondary", cx).is_some());
+            assert!(s.preview_busy);
+
+            // Select BOTH Pencil strokes (multi-selection: [0, 1, 2]) and move
+            // them while the worker is still in flight.
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Select);
+                a.select_indices([0, 1, 2]);
+            });
+            let press = point(px(60.), px(50.));
+            s.pointer_down("secondary", press, false, false);
+            s.pointer_move("secondary", press + point(px(15.), px(10.)), false);
+            s.pointer_up("secondary", press + point(px(15.), px(10.)), false);
+            assert!(s.preview_busy);
+
+            let fallback = s.request_filtered_preview("secondary", cx);
+            assert!(
+                fallback.is_some(),
+                "multi-selection edit blanked DisplayPreview while worker drained"
+            );
+            assert_eq!(fallback.unwrap().0, idle_bounds);
+        });
+        cx.run_until_parked();
+        session.update(cx, |s, cx| {
+            assert!(!s.preview_busy);
+            let (bounds, _) = s.request_filtered_preview("secondary", cx).unwrap();
+            assert_eq!(
+                bounds,
+                Bounds::new(point(px(0.), px(0.)), size(px(600.), px(600.)))
+            );
+            assert_eq!(
+                s.crop("secondary").unwrap().2,
+                fresh_reference_rgba(s, "secondary")
+            );
+        });
+    }
+
+    #[test]
+    fn arrow_key_nudge_uses_split_plane_dirty_rect_and_dynamic_replay_without_ghosts() {
+        let mut s = ScreenshotSession::new(
+            vec![patterned_capture("primary", (0, 0), 320, 200, 1.)],
+            Vec::new(),
+        );
+        s.select_all();
+        let area = s.selection.bounds().unwrap();
+
+        s.edit_annotations(|a| {
+            // ix = 0: lower-Z Pencil stroke to be nudged via keyboard.
+            a.toggle(ShapeKind::Pencil);
+            a.set_color(0);
+            a.set_tool_size(12.);
+            a.begin(point(px(20.), px(60.)), area, false);
+            a.drag_to(point(px(50.), px(80.)), area, false);
+            a.end();
+
+            // ix = 1: higher-Z Pencil stroke in the middle (entered and exited during nudge).
+            if a.tool() != Some(ShapeKind::Pencil) {
+                a.toggle(ShapeKind::Pencil);
+            }
+            a.set_color(2);
+            a.set_tool_size(14.);
+            a.begin(point(px(110.), px(50.)), area, false);
+            a.drag_to(point(px(130.), px(100.)), area, false);
+            a.end();
+
+            // ix = 2: stationary far-right stroke that stays in MovedReplay::base.
+            if a.tool() != Some(ShapeKind::Pencil) {
+                a.toggle(ShapeKind::Pencil);
+            }
+            a.set_color(1);
+            a.set_tool_size(8.);
+            a.begin(point(px(260.), px(140.)), area, false);
+            a.drag_to(point(px(300.), px(170.)), area, false);
+            a.end();
+
+            a.toggle(ShapeKind::Select);
+            a.select_index(0);
+        });
+
+        s.filtered_preview("primary").unwrap();
+
+        // First nudge step initializes MovedReplay with only shape 0 in replay.
+        assert!(s.nudge(point(px(10.), px(0.))));
+        s.filtered_preview("primary").unwrap();
+        let initial_ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+        assert_eq!(
+            s.filter_preview
+                .borrow()
+                .as_ref()
+                .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone())),
+            Some(vec![0])
+        );
+        assert_eq!(
+            s.filter_preview.borrow().as_ref().unwrap().pixels,
+            fresh_reference_rgba(&s, "primary")
+        );
+
+        // Nudge into overlap with higher-Z shape 1 (replay transitions [0] -> [0, 1]),
+        // then past shape 1 so it leaves overlap again (replay transitions [0, 1] -> [0]).
+        for (step, dx) in [35., 35., 45., 45.].into_iter().enumerate() {
+            assert!(s.nudge(point(px(dx), px(0.))));
+            s.filtered_preview("primary").unwrap();
+            let ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+            assert_eq!(
+                ptr, initial_ptr,
+                "step={step}: cached.pixels reallocated during keyboard nudge"
+            );
+            assert_eq!(
+                s.filter_preview.borrow().as_ref().unwrap().pixels,
+                fresh_reference_rgba(&s, "primary"),
+                "step={step}: pixel mismatch or ghost trail during keyboard nudge"
+            );
+        }
+        assert_eq!(
+            s.filter_preview
+                .borrow()
+                .as_ref()
+                .and_then(|c| c.moved.as_ref().map(|m| m.indices.clone())),
+            Some(vec![0]),
+            "replay must shrink back to [0] after leaving overlap with shape 1"
+        );
+
+        // Finishing the nudge drops MovedReplay in O(1) while retaining the buffer.
+        s.finish_nudge();
+        s.filtered_preview("primary").unwrap();
+        assert!(s.filter_preview.borrow().as_ref().unwrap().moved.is_none());
+        assert_eq!(
+            s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr(),
+            initial_ptr
+        );
+        assert_eq!(
+            s.crop("primary").unwrap().2,
+            fresh_reference_rgba(&s, "primary")
+        );
+    }
+
+    #[test]
+    fn live_freehand_draft_with_committed_spotlight_or_magnifier_reuses_committed_pixels() {
+        for lens_kind in [ShapeKind::Spotlight, ShapeKind::Magnifier] {
+            let mut s = ScreenshotSession::new(
+                vec![patterned_capture("primary", (0, 0), 260, 180, 1.)],
+                Vec::new(),
+            );
+            s.select_all();
+            let area = s.selection.bounds().unwrap();
+
+            s.edit_annotations(|a| {
+                a.toggle(lens_kind);
+                a.begin(point(px(30.), px(30.)), area, false);
+                a.drag_to(point(px(120.), px(110.)), area, false);
+                a.end();
+                a.finish_interaction();
+            });
+            s.filtered_preview("primary").unwrap();
+            let committed_snapshot = s.filter_preview.borrow().as_ref().unwrap().pixels.clone();
+            let pixels_ptr = s.filter_preview.borrow().as_ref().unwrap().pixels.as_ptr();
+            let committed_vec_ptr = s
+                .filter_preview
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .committed
+                .as_ptr();
+
+            // Begin a live freehand Pencil stroke and move across several points.
+            s.edit_annotations(|a| {
+                a.toggle(ShapeKind::Pencil);
+                a.begin(point(px(140.), px(40.)), area, false);
+            });
+            for x in [155., 175., 195., 215.] {
+                s.edit_annotations(|a| {
+                    a.drag_to(point(px(x), px(75.)), area, false);
+                });
+                s.filtered_preview("primary").unwrap();
+                let cache = s.filter_preview.borrow();
+                let cached = cache.as_ref().unwrap();
+                assert_eq!(
+                    cached.pixels.as_ptr(),
+                    pixels_ptr,
+                    "{lens_kind:?}: cached.pixels reallocated during freehand draft"
+                );
+                assert_eq!(
+                    cached.committed.as_ptr(),
+                    committed_vec_ptr,
+                    "{lens_kind:?}: cached.committed reallocated during freehand draft where history_changed is false"
+                );
+                assert_eq!(cached.pixels, committed_snapshot);
+            }
+
+            s.edit_annotations(|a| a.end());
+            s.filtered_preview("primary").unwrap();
+            assert_eq!(
+                s.crop("primary").unwrap().2,
+                fresh_reference_rgba(&s, "primary"),
+                "{lens_kind:?}: post-stroke export mismatch"
+            );
+        }
+    }
 }

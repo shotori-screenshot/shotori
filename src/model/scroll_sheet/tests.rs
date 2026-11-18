@@ -1986,3 +1986,131 @@ fn flat_top_content_is_not_pinned() {
         assert_eq!(s.viewport_span(), (top, H2), "band pinned at {top}");
     }
 }
+
+#[test]
+fn fractional_periodic_stripes_still_refuse_as_unclear() {
+    let periodic_sample = |top: f32| -> Vec<u8> {
+        let mut out = Vec::with_capacity((W * H * 4) as usize);
+        for j in 0..H {
+            let y = top + j as f32;
+            let y0 = y.floor() as u32;
+            let frac = y - y0 as f32;
+            let row_px = |r: u32| {
+                let mut px = source_row(r % 24);
+                let parity = ((r / 24) % 2) as u8;
+                for c in &mut px[..3] {
+                    *c = c.saturating_add(parity);
+                }
+                px
+            };
+            let a = row_px(y0);
+            let b = row_px(y0 + 1);
+            let mut blended = [0u8; 4];
+            for ch in 0..3 {
+                blended[ch] =
+                    (f32::from(a[ch]) * (1.0 - frac) + f32::from(b[ch]) * frac).round() as u8;
+            }
+            blended[3] = 255;
+            out.extend_from_slice(&blended.repeat(W as usize));
+        }
+        out
+    };
+
+    let seed = periodic_sample(0.0);
+    let mut s = ScrollSheet::new(W, H, &seed, SheetLimits::default()).unwrap();
+    assert_eq!(
+        s.push(&periodic_sample(12.5)),
+        Fold::Refused(Refusal::Unclear)
+    );
+    assert_eq!(s.canvas(), seed.as_slice());
+    assert_eq!(s.subpixel_carry, 0.0);
+}
+
+#[test]
+fn fractional_torn_frame_still_refuses_as_mismatch_and_preserves_carry() {
+    let page = text_page();
+    let vh = 240u32;
+    let mut s = ScrollSheet::new(TW, vh, &sample(page, 0.0, vh), SheetLimits::default()).unwrap();
+    assert!(matches!(
+        s.push(&sample(page, 12.5, vh)),
+        Fold::GrewBottom { dy: 13, growth: 13 }
+    ));
+    let carry_after_half = s.subpixel_carry;
+    assert!(
+        (carry_after_half - (-0.5)).abs() < 0.05,
+        "{carry_after_half}"
+    );
+    let snapshot = s.canvas().to_vec();
+
+    // Mid-animation tear: top half still at 12.5, bottom half jumped to 37.5.
+    let old = sample(page, 12.5, vh);
+    let next = sample(page, 37.5, vh);
+    let mut torn = old[..old.len() / 2].to_vec();
+    torn.extend_from_slice(&next[next.len() / 2..]);
+    assert_eq!(s.push(&torn), Fold::Refused(Refusal::Mismatch));
+    assert_eq!(s.canvas(), snapshot.as_slice());
+    assert_eq!(s.subpixel_carry, carry_after_half);
+
+    // Height-cap refusal also preserves `subpixel_carry` untouched.
+    let capped = SheetLimits {
+        max_height: vh + 20,
+        ..SheetLimits::default()
+    };
+    let mut capped_sheet = ScrollSheet::new(TW, vh, &sample(page, 0.0, vh), capped).unwrap();
+    assert!(matches!(
+        capped_sheet.push(&sample(page, 12.5, vh)),
+        Fold::GrewBottom { dy: 13, growth: 13 }
+    ));
+    let capped_carry = capped_sheet.subpixel_carry;
+    assert_eq!(
+        capped_sheet.push(&sample(page, 25.0, vh)),
+        Fold::Refused(Refusal::TooTall)
+    );
+    assert_eq!(capped_sheet.subpixel_carry, capped_carry);
+    // A smaller step that stays under `max_height` still uses the preserved carry:
+    // 12.5 + 7.5 = 20.0 exact rows.
+    assert!(matches!(
+        capped_sheet.push(&sample(page, 20.0, vh)),
+        Fold::GrewBottom { dy: 7, growth: 7 }
+    ));
+    assert_eq!(capped_sheet.dimensions(), (TW, vh + 20));
+}
+
+#[test]
+fn fractional_smooth_flick_and_micro_scroll_accumulate_without_drift() {
+    let page = text_page();
+    let vh = 700u32;
+    let steps = [95.5_f32, 91.25, 84.25, 66.5, 43.75, 24.5, 10.25, 4.0];
+    let mut s = ScrollSheet::new(TW, vh, &sample(page, 0.0, vh), SheetLimits::default()).unwrap();
+    let mut top = 0.0_f32;
+    for round in 0..3 {
+        for &step in &steps {
+            top += step;
+            let verdict = s.push(&sample(page, top, vh));
+            assert!(
+                matches!(verdict, Fold::GrewBottom { .. }),
+                "round {round} top {top}: {verdict:?}"
+            );
+        }
+        let expected_top = (round + 1) * 420;
+        assert_eq!(s.dimensions(), (TW, vh + expected_top));
+    }
+
+    // Sub-0.5 px micro-scrolls stay `Still` until crossing the half-pixel
+    // threshold, then advance to exact row 6 at `top = 6.0`.
+    let mut micro =
+        ScrollSheet::new(TW, 240, &sample(page, 0.0, 240), SheetLimits::default()).unwrap();
+    assert_eq!(micro.push(&sample(page, 0.3, 240)), Fold::Still);
+    assert_eq!(micro.captured_extent(), 0);
+    assert_eq!(micro.subpixel_carry, 0.0);
+    for step_idx in 2..=20 {
+        let y = step_idx as f32 * 0.3;
+        let verdict = micro.push(&sample(page, y, 240));
+        assert!(
+            matches!(verdict, Fold::Still | Fold::GrewBottom { .. }),
+            "micro y={y}: {verdict:?}"
+        );
+    }
+    assert_eq!(micro.captured_extent(), 6);
+    assert_eq!(micro.dimensions(), (TW, 246));
+}

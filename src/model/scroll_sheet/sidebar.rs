@@ -91,12 +91,13 @@ impl Sidebar {
     pub(super) fn observe(
         &mut self,
         frame: &[u8],
-        document_dy: i32,
+        document_step: (i32, f32),
         prepend: u32,
         output_height: u32,
         content: Range<usize>,
         frame_edge: &FrameEdge,
     ) {
+        let (document_dy, document_carry) = document_step;
         let width = self.left + self.sheet.width as usize;
         self.frame_edge.copy_from_slice(frame_edge.mask());
         let mut content_frame = (!frame_edge.is_empty()).then(|| frame.to_vec());
@@ -126,9 +127,12 @@ impl Sidebar {
                 .sheet
                 .classify(&self.sheet.stable_profile, &profile, None)
             {
-                Placement::Match(estimate) => {
-                    Some(self.sheet.state.position + i64::from(estimate.dy))
-                }
+                Placement::Match(estimate) => Some(
+                    (self.sheet.state.position as f64
+                        + f64::from(self.sheet.subpixel_carry)
+                        + f64::from(estimate.subpixel_dy))
+                    .round() as i64,
+                ),
                 Placement::Still => Some(self.sheet.state.position),
                 Placement::Reject(_) => None,
             }
@@ -278,7 +282,11 @@ impl Sidebar {
             self.status = ColumnStatus::Retained;
         }
         let retained = matches!(self.status, ColumnStatus::Retained);
-        self.independent |= retained || dy != document_dy;
+        let doc_continuous = self.document_position as f64 + f64::from(document_carry);
+        let col_continuous =
+            (self.sheet.state.position + self.origin) as f64 + f64::from(self.sheet.subpixel_carry);
+        let diverged = dy != document_dy && (col_continuous - doc_continuous).abs() > 0.75;
+        self.independent |= retained || diverged;
         if !retained {
             self.background = self.background_row();
         }
@@ -390,6 +398,14 @@ impl Sidebar {
             let bytes = (right - left) * 4;
             let current = &frame[at..at + bytes];
             let translated = &self.previous[before..before + bytes];
+            let translated_prev = (previous_y > content.start as i64).then(|| {
+                let idx = ((previous_y as usize - 1) * width + left) * 4;
+                self.previous[idx..idx + bytes].as_chunks::<4>().0
+            });
+            let translated_next = (previous_y + 1 < content.end as i64).then(|| {
+                let idx = ((previous_y as usize + 1) * width + left) * 4;
+                self.previous[idx..idx + bytes].as_chunks::<4>().0
+            });
             let stationary = &self.previous[at..at + bytes];
             if !self.crosses_gutter(frame, width, y) {
                 continue;
@@ -402,18 +418,30 @@ impl Sidebar {
                 rows = 0;
                 continue;
             }
-            let mut mismatch = 0;
-            let mut changed = 0;
-            for ((pixel, moved), still) in current
-                .as_chunks::<4>()
-                .0
+            let current_px = current.as_chunks::<4>().0;
+            let translated_px = translated.as_chunks::<4>().0;
+            let stationary_px = stationary.as_chunks::<4>().0;
+            let changed = current_px
                 .iter()
-                .zip(translated.as_chunks::<4>().0)
-                .zip(stationary.as_chunks::<4>().0)
-            {
-                mismatch += usize::from(!color_matches(pixel, moved));
-                changed += usize::from(!color_matches(pixel, still));
-            }
+                .zip(stationary_px)
+                .filter(|(pixel, still)| !color_matches(*pixel, *still))
+                .count();
+            let row_mismatch = |adj: Option<&[[u8; 4]]>| {
+                current_px
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, pixel)| {
+                        !pixel_matches_vertical_span(
+                            pixel,
+                            &translated_px[i],
+                            adj.map(|r| &r[i][..]),
+                        )
+                    })
+                    .count()
+            };
+            let mismatch = row_mismatch(None)
+                .min(translated_prev.map_or(usize::MAX, |adj| row_mismatch(Some(adj))))
+                .min(translated_next.map_or(usize::MAX, |adj| row_mismatch(Some(adj))));
             if mismatch > (right - left) / 100 || changed < gutter {
                 continue;
             }
@@ -482,18 +510,36 @@ impl Sidebar {
                 .iter()
                 .any(|pixel| !color_matches(pixel, &self.gutter_color));
             if foreground && self.is_captured_column_row(frame, width, y, column_position) {
-                let source = (column_position + y as i64) as usize * self.sheet.width as usize * 4;
+                let height = i64::from(self.sheet.height());
+                let source_y = column_position + y as i64;
+                let row_stride = self.sheet.width as usize * 4;
+                let source = source_y as usize * row_stride;
                 let pixels = &frame[(y * width + self.left) * 4..(y * width + right) * 4];
-                let known = &self.sheet.canvas[source..source + pixels.len()];
+                let known = self.sheet.canvas[source..source + pixels.len()]
+                    .as_chunks::<4>()
+                    .0;
+                let prev_known = (source_y > 0)
+                    .then(|| (source_y as usize - 1) * row_stride)
+                    .map(|s| self.sheet.canvas[s..s + pixels.len()].as_chunks::<4>().0);
+                let next_known = (source_y + 1 < height)
+                    .then(|| (source_y as usize + 1) * row_stride)
+                    .map(|s| self.sheet.canvas[s..s + pixels.len()].as_chunks::<4>().0);
                 // A sparse new ascender may fit the row's noise allowance.
                 // Only an ink pixel also present in the column can stop it.
                 if pixels
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .zip(known.as_chunks::<4>().0)
-                    .any(|(pixel, known)| {
-                        !color_matches(pixel, &self.gutter_color) && color_matches(pixel, known)
+                    .enumerate()
+                    .any(|(i, pixel)| {
+                        !color_matches(pixel, &self.gutter_color)
+                            && (color_matches(pixel, &known[i])
+                                || prev_known.is_some_and(|adj| {
+                                    pixel_matches_vertical_span(pixel, &known[i], Some(&adj[i]))
+                                })
+                                || next_known.is_some_and(|adj| {
+                                    pixel_matches_vertical_span(pixel, &known[i], Some(&adj[i]))
+                                }))
                     })
                 {
                     break;
@@ -521,22 +567,38 @@ impl Sidebar {
     }
 
     fn is_captured_column_row(&self, frame: &[u8], width: usize, y: usize, position: i64) -> bool {
+        let height = i64::from(self.sheet.height());
         let source_y = position + y as i64;
-        if !(0..i64::from(self.sheet.height())).contains(&source_y) {
+        if !(0..height).contains(&source_y) {
             return false;
         }
         let right = width - (width / 64).max(4);
         let bytes = (right - self.left) * 4;
         let at = (y * width + self.left) * 4;
-        let source = source_y as usize * self.sheet.width as usize * 4;
-        frame[at..at + bytes]
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(self.sheet.canvas[source..source + bytes].as_chunks::<4>().0)
-            .filter(|(a, b)| !color_matches(*a, *b))
-            .count()
-            <= (right - self.left) / 100
+        let row_stride = self.sheet.width as usize * 4;
+        let source = source_y as usize * row_stride;
+        let current = frame[at..at + bytes].as_chunks::<4>().0;
+        let known = self.sheet.canvas[source..source + bytes].as_chunks::<4>().0;
+        let prev_known = (source_y > 0)
+            .then(|| (source_y as usize - 1) * row_stride)
+            .map(|s| self.sheet.canvas[s..s + bytes].as_chunks::<4>().0);
+        let next_known = (source_y + 1 < height)
+            .then(|| (source_y as usize + 1) * row_stride)
+            .map(|s| self.sheet.canvas[s..s + bytes].as_chunks::<4>().0);
+        let limit = (right - self.left) / 100;
+        let matches_with = |adj: Option<&[[u8; 4]]>| {
+            current
+                .iter()
+                .enumerate()
+                .filter(|&(i, a)| {
+                    !pixel_matches_vertical_span(a, &known[i], adj.map(|r| &r[i][..]))
+                })
+                .count()
+                <= limit
+        };
+        matches_with(None)
+            || prev_known.is_some_and(|adj| matches_with(Some(adj)))
+            || next_known.is_some_and(|adj| matches_with(Some(adj)))
     }
 
     /// Suffixes beginning below this exclusive bound have insufficient known
@@ -551,6 +613,8 @@ impl Sidebar {
         position: i64,
     ) -> Option<usize> {
         let right = width - (width / 64).max(4);
+        let height = i64::from(self.sheet.height());
+        let row_stride = self.sheet.width as usize * 4;
         let mut matching = 0;
         for y in rows.rev() {
             if !self.is_captured_column_row(frame, width, y, position) {
@@ -558,19 +622,43 @@ impl Sidebar {
             }
             let at = (y * width + self.left) * 4;
             let pixels = frame[at..(y * width + right) * 4].as_chunks::<4>().0;
-            let source = (position + y as i64) as usize * self.sheet.width as usize * 4;
-            let known = self.sheet.canvas[source..source + pixels.len() * 4]
+            let source_y = position + y as i64;
+            let source = source_y as usize * row_stride;
+            let byte_len = pixels.len() * 4;
+            let known = self.sheet.canvas[source..source + byte_len]
                 .as_chunks::<4>()
                 .0;
+            let prev_known = (source_y > 0)
+                .then(|| (source_y as usize - 1) * row_stride)
+                .map(|s| self.sheet.canvas[s..s + byte_len].as_chunks::<4>().0);
+            let next_known = (source_y + 1 < height)
+                .then(|| (source_y as usize + 1) * row_stride)
+                .map(|s| self.sheet.canvas[s..s + byte_len].as_chunks::<4>().0);
             // The row-level noise allowance may hide a tiny new glyph on a
             // wide blank row. Identity needs edges present in both images.
             let edges = pixels
                 .windows(2)
-                .zip(known.windows(2))
-                .filter(|(pair, known)| {
+                .enumerate()
+                .filter(|&(i, pair)| {
                     !color_matches(&pair[0], &pair[1])
-                        && color_matches(&pair[0], &known[0])
-                        && color_matches(&pair[1], &known[1])
+                        && ((color_matches(&pair[0], &known[i])
+                            && color_matches(&pair[1], &known[i + 1]))
+                            || prev_known.is_some_and(|adj| {
+                                pixel_matches_vertical_span(&pair[0], &known[i], Some(&adj[i]))
+                                    && pixel_matches_vertical_span(
+                                        &pair[1],
+                                        &known[i + 1],
+                                        Some(&adj[i + 1]),
+                                    )
+                            })
+                            || next_known.is_some_and(|adj| {
+                                pixel_matches_vertical_span(&pair[0], &known[i], Some(&adj[i]))
+                                    && pixel_matches_vertical_span(
+                                        &pair[1],
+                                        &known[i + 1],
+                                        Some(&adj[i + 1]),
+                                    )
+                            }))
                 })
                 .take(MIN_DETAIL_EDGES)
                 .count();
@@ -625,8 +713,11 @@ impl Sidebar {
         rows: (usize, usize),
         columns: Range<usize>,
     ) -> Option<bool> {
+        let vp_height = self.sheet.viewport_height as usize;
         let mut observed = 0;
-        let mut mismatch = 0;
+        let mut mismatch_exact = 0;
+        let mut mismatch_above = 0;
+        let mut mismatch_below = 0;
         for x in columns.clone() {
             let current = rows.0 * width + x;
             let previous = rows.1 * width + x;
@@ -634,11 +725,29 @@ impl Sidebar {
                 continue;
             }
             observed += 1;
-            mismatch += usize::from(!color_matches(
-                &frame[current * 4..current * 4 + 4],
-                &self.previous[previous * 4..previous * 4 + 4],
-            ));
+            let pixel = &frame[current * 4..current * 4 + 4];
+            let prev_pixel = &self.previous[previous * 4..previous * 4 + 4];
+            let exact = color_matches(pixel, prev_pixel);
+            mismatch_exact += usize::from(!exact);
+            if !exact {
+                let above = (rows.1 > 0 && !self.previous_frame_edge[(rows.1 - 1) * width + x])
+                    .then(|| {
+                        let idx = ((rows.1 - 1) * width + x) * 4;
+                        &self.previous[idx..idx + 4]
+                    });
+                let below = (rows.1 + 1 < vp_height
+                    && !self.previous_frame_edge[(rows.1 + 1) * width + x])
+                    .then(|| {
+                        let idx = ((rows.1 + 1) * width + x) * 4;
+                        &self.previous[idx..idx + 4]
+                    });
+                mismatch_above +=
+                    usize::from(!pixel_matches_vertical_span(pixel, prev_pixel, above));
+                mismatch_below +=
+                    usize::from(!pixel_matches_vertical_span(pixel, prev_pixel, below));
+            }
         }
+        let mismatch = mismatch_exact.min(mismatch_above).min(mismatch_below);
         (observed * 2 >= columns.len()).then_some(mismatch <= observed / 100)
     }
 
@@ -725,6 +834,22 @@ fn color_matches(a: &[u8], b: &[u8]) -> bool {
     a.iter()
         .zip(b)
         .all(|(a, b)| a.abs_diff(*b) <= COLOR_TOLERANCE)
+}
+
+fn pixel_matches_vertical_span(pixel: &[u8], row_a: &[u8], row_b: Option<&[u8]>) -> bool {
+    if color_matches(pixel, row_a) {
+        return true;
+    }
+    let Some(row_b) = row_b else {
+        return false;
+    };
+    pixel
+        .iter()
+        .zip(row_a.iter().zip(row_b.iter()))
+        .all(|(&p, (&a, &b))| {
+            p >= a.min(b).saturating_sub(COLOR_TOLERANCE)
+                && p <= a.max(b).saturating_add(COLOR_TOLERANCE)
+        })
 }
 
 fn crop(frame: &[u8], width: usize, left: usize) -> Vec<u8> {
@@ -905,5 +1030,84 @@ mod tests {
                 .is_none(),
             "previously captured metadata stays in its own column when it moves again"
         );
+    }
+
+    #[test]
+    fn subpixel_blended_column_and_flow_boundary_preserve_identity_and_detect_tail() {
+        let width = 480;
+        let height = 640;
+        let mut seed = vec![255u8; width * height * 4];
+        for y in 220..480 {
+            for x in 352..444 {
+                if (y % 31 < 9) && (x % 13 < 8) {
+                    let i = (y * width + x) * 4;
+                    seed[i..i + 3].fill((y * 37 % 151) as u8);
+                }
+            }
+        }
+        let mut sidebar =
+            Sidebar::new(width as u32, height as u32, &seed, SheetLimits::default()).unwrap();
+        sidebar.independent = true;
+
+        // Add a full-width document section near the bottom (`510..620`) of
+        // `sidebar.previous` that crosses the gutter and translates by a
+        // fractional step (`8.5` px) in `blended`.
+        for y in 510..620 {
+            for x in 40..width - 8 {
+                if (y - 510) % 19 < 7 {
+                    let i = (y * width + x) * 4;
+                    sidebar.previous[i..i + 3].fill((40 + (y * 23 + x * 7) % 140) as u8);
+                }
+            }
+        }
+
+        // 50/50 vertical blend of the column (`y` and `y + 1`) simulating a
+        // half-pixel phase shift on the stationary sidebar while the bottom
+        // full-width section moves up by `8.5` rows (`y + 8` and `y + 9`).
+        let mut blended = vec![255u8; width * height * 4];
+        for y in 0..height - 1 {
+            for x in 0..width {
+                let dst = (y * width + x) * 4;
+                if y < 490 {
+                    let s0 = (y * width + x) * 4;
+                    let s1 = ((y + 1) * width + x) * 4;
+                    for c in 0..3 {
+                        blended[dst + c] = ((u16::from(sidebar.previous[s0 + c])
+                            + u16::from(sidebar.previous[s1 + c]))
+                            / 2) as u8;
+                    }
+                } else if y + 9 < height {
+                    let s0 = ((y + 8) * width + x) * 4;
+                    let s1 = ((y + 9) * width + x) * 4;
+                    for c in 0..3 {
+                        blended[dst + c] = ((u16::from(sidebar.previous[s0 + c])
+                            + u16::from(sidebar.previous[s1 + c]))
+                            / 2) as u8;
+                    }
+                }
+            }
+        }
+
+        assert!(sidebar.is_captured_column_row(&blended, width, 220, 0));
+        assert!(
+            sidebar
+                .captured_detail_end(&blended, width, 220..480, 0)
+                .is_some(),
+            "half-pixel blended sidebar rows must retain column detail identity"
+        );
+        let boundary = sidebar
+            .flow_boundary(&blended, width, 8, 0..height, 0)
+            .expect("half-pixel shifted full-width section should establish a flow boundary");
+        assert!(
+            (495..=510).contains(&boundary),
+            "expected flow boundary near the shifted full-width section top, got {boundary}"
+        );
+        assert!(sidebar.translated_suffix_matches(
+            &blended,
+            width,
+            8,
+            boundary..height,
+            &(0..height),
+        ));
     }
 }

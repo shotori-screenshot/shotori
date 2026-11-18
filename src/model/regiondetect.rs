@@ -17,15 +17,18 @@
 //!   threshold (35th percentile of the gradient histogram, clamped), and
 //!   long-run "weak line" promotion so faint 1px panel borders survive
 //!   while short text strokes do not;
-//! - **four proposal sources** (closed contours, connected components,
-//!   edge-bounded background, paired long lines) so both small controls
-//!   and large panels get nominated;
-//! - **border-support scoring** — a candidate must have edges along all
-//!   four sides — plus texture penalties that reject text blocks and
-//!   icon grids;
+//! - **six proposal sources** (closed contours, connected components,
+//!   edge-bounded background, paired long lines, orthogonal rounded-box
+//!   completion, and divider/boundary split-pane cells) so hollow rounded
+//!   cards, small controls, screen-flush bars/sidebars, and T-junction
+//!   tiled panes all get nominated;
+//! - **corner-aware border-support scoring** — a candidate must have
+//!   edges along all four sides — plus texture penalties that reject
+//!   unbordered text blocks and icon grids while preserving labeled
+//!   bordered controls;
 //! - **sub-pixel-free refinement** on the ORIGINAL resolution: each side
-//!   searches ±radius px for the strongest color boundary, undoing the
-//!   downscale blur.
+//!   searches ±radius px for the crispest high-contrast boundary,
+//!   undoing downscale blur without snapping onto soft drop shadows.
 //!
 //! Analysis runs at most 1280 px on the long edge, once per capture, on
 //! a background thread (see `main.rs`); the result is a candidate list
@@ -96,6 +99,7 @@ impl Sources {
     const BACKGROUND: Self = Self(1 << 2);
     const LINES: Self = Self(1 << 3);
     pub(crate) const WINDOW: Self = Self(1 << 4);
+    const SPLIT: Self = Self(1 << 5);
 
     fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -135,7 +139,7 @@ use edges::build_edge_field;
 use image::{GrayImage, RgbaView, close_linf1, dilate_linf1, downscale};
 use proposals::{
     border_sides, component_proposals, contour_proposals, inset_support, interior_density,
-    line_proposals, merge_candidate, refine_rect, scale_rect,
+    line_proposals, merge_candidate, quad_proposals, refine_rect, scale_rect, split_pane_proposals,
 };
 // ── Pipeline ─────────────────────────────────────────────────────────
 
@@ -183,6 +187,8 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     let mut proposals = contour_proposals(&closed);
     proposals.extend(component_proposals(&closed, false));
     proposals.extend(line_proposals(&field));
+    proposals.extend(quad_proposals(&field));
+    proposals.extend(split_pane_proposals(&field));
 
     // Background regions: everything NOT behind a dilated edge — panels
     // and split layouts bounded by edges nominate their interiors.
@@ -222,6 +228,21 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
     for proposal in proposals {
         let rect = proposal.rect;
         let sides = border_sides(&field, rect);
+        let on_boundary = [
+            rect.left <= 1 || rect.left + 2 >= analysis_w,
+            rect.top <= 1 || rect.top + 2 >= analysis_h,
+            (rect.right - 1) <= 1 || (rect.right - 1) + 2 >= analysis_w,
+            (rect.bottom - 1) <= 1 || (rect.bottom - 1) + 2 >= analysis_h,
+        ];
+        let boundary_sides = on_boundary.into_iter().filter(|&b| b).count();
+        if boundary_sides == 4 {
+            continue;
+        }
+        let min_interior_side = sides
+            .into_iter()
+            .zip(on_boundary)
+            .filter_map(|(s, is_bound)| (!is_bound).then_some(s))
+            .fold(1.0f32, f32::min);
         let mut sorted = sides;
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let support = (sides[0] + sides[1] + sides[2] + sides[3]) / 4.;
@@ -230,19 +251,66 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
         if sorted[1] < 0.48 || sorted[0] < 0.18 || support < 0.58 {
             continue;
         }
+        // Boundary-score dilution guard: `side_support` grants capture
+        // boundaries a free 0.85 so screen-flush bars and tiled panes do
+        // not lose points for edges outside the screenshot. When 2 or 3
+        // sides sit on capture boundaries, those free 0.85 scores inflate
+        // both `sorted[1]` and the 4-side mean (e.g. `[0.85, 0.85, 0.85,
+        // 0.20]` yields `support = 0.69`), which would let a short floating
+        // rule near the middle of the screen hallucinate a half-screen box.
+        // Require every *interior* side to show continuous directional
+        // support (>= 0.80), and enforce the same bar on divider/boundary
+        // split-pane cells regardless of boundary count.
+        if (boundary_sides >= 2 || proposal.source.has(Sources::SPLIT)) && min_interior_side < 0.80
+        {
+            continue;
+        }
         // Line-pairing proposals are hypothesis-grade: demand more.
         if proposal.source.has(Sources::LINES) && (sorted[0] < 0.70 || support < 0.85) {
             continue;
         }
         let density = interior_density(&field.combined, rect);
         let inset = inset_support(&field, rect);
-        let compact = rect.width().min(rect.height()) as f32 * scale < 32.0;
-        // Compact + busy inside = text block or icon grid, not a panel.
-        if compact && (density > 0.30 || (density > 0.12 && inset > 0.60)) {
+        let min_dim_px = rect.width().min(rect.height()) as f32 * scale;
+        let max_dim_px = rect.width().max(rect.height()) as f32 * scale;
+        // Screen- and pane-spanning bars (e.g. a 28..30 px Waybar or IDE
+        // statusbar/activity rail) fall under `min_dim_px < 32` yet often
+        // contain 4px-padded workspace pills whose borders land right on
+        // `inset_support`'s 4px sample ring. Once `Sources::SPLIT` has
+        // proven >= 0.80 continuous dividers end-to-end, score elongated
+        // structural bars as panels rather than compact text words.
+        let structural_bar = proposal.source.has(Sources::SPLIT)
+            && min_dim_px >= 18.0
+            && max_dim_px >= 180.0
+            && max_dim_px >= min_dim_px * 5.0;
+        let compact = min_dim_px < 32.0 && !structural_bar;
+        // Distinguish an unbordered text/icon blob from a crisp 4-sided UI
+        // control (e.g. a 24..30 px `[ Save ]` button or text input whose
+        // label glyphs raise interior edge density without hugging all four
+        // outer walls like a tight-cropped word).
+        let crisp_control =
+            min_dim_px >= 20.0 && support >= 0.80 && sorted[0] >= 0.65 && inset < 0.55;
+        if compact {
+            let text_blob = if crisp_control {
+                density > 0.55
+            } else {
+                density > 0.30 || (density > 0.12 && inset > 0.60)
+            };
+            if text_blob {
+                continue;
+            }
+        } else if support < 0.78 && (density > 0.28 || (density > 0.16 && inset > 0.45)) {
+            // Multi-line prose paragraphs and unbordered icon grids exceed
+            // `compact` (`>= 32 px`), yet lack a solid 4-sided frame while
+            // staying textured both across the interior and 4 px inside.
             continue;
         }
         let texture_penalty = if compact {
-            density * 0.30 + inset * 0.18
+            if crisp_control {
+                density * 0.10 + inset * 0.05
+            } else {
+                density * 0.30 + inset * 0.18
+            }
         } else {
             density * 0.08
         };
@@ -264,7 +332,7 @@ fn detect_regions(view: RgbaView<'_>) -> Vec<RegionCandidate> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     candidates.truncate(MAX_REFINED);
-    let radius = ((scale.ceil() as i32) * 3).clamp(3, 16);
+    let radius = ((scale.ceil() as i32) * 3).clamp(6, 16);
     for candidate in candidates.iter_mut() {
         candidate.rect = refine_rect(&view, candidate.rect, radius, field.threshold);
     }
@@ -398,37 +466,78 @@ impl RegionDetector {
             .unwrap_or_else(|| self.bounds())
     }
 
-    /// Smallest parent of `current` containing `point`, or the full
-    /// image when there is none.
+    /// Smallest parent of `current` containing `point` that is not a mere
+    /// concentric border twin, or the full image when none exists before
+    /// `self.bounds()`.
     fn parent_of(&self, current: IntRect, x: i32, y: i32) -> IntRect {
-        self.candidates
-            .iter()
-            .filter(|c| {
-                c.rect.contains_point(x, y) && c.rect != current && c.rect.contains_rect(current)
-            })
-            .min_by_key(|c| c.rect.area())
-            .map(|c| c.rect)
-            .unwrap_or_else(|| self.bounds())
+        let bounds = self.bounds();
+        let find_parent = |skip_twins: bool| {
+            self.candidates
+                .iter()
+                .filter(|c| {
+                    c.rect.contains_point(x, y)
+                        && c.rect != current
+                        && c.rect.contains_rect(current)
+                        && (!skip_twins || !is_border_twin(current, c.rect))
+                })
+                .min_by_key(|c| c.rect.area())
+                .map(|c| c.rect)
+        };
+        if let Some(parent) = find_parent(true) {
+            return parent;
+        }
+        if !is_border_twin(current, bounds) {
+            return bounds;
+        }
+        find_parent(false).unwrap_or(bounds)
     }
 
-    /// Largest child of `current` containing `point`, or `current`.
+    /// Largest child of `current` containing `point`, skipping concentric
+    /// border twins whenever a genuinely distinct descendant exists.
     fn child_of(&self, current: IntRect, x: i32, y: i32) -> IntRect {
-        self.candidates
-            .iter()
-            .filter(|c| {
-                c.rect.contains_point(x, y) && c.rect != current && current.contains_rect(c.rect)
-            })
-            .max_by_key(|c| c.rect.area())
-            .map(|c| c.rect)
+        let find_child = |skip_twins: bool| {
+            self.candidates
+                .iter()
+                .filter(|c| {
+                    c.rect.contains_point(x, y)
+                        && c.rect != current
+                        && current.contains_rect(c.rect)
+                        && (!skip_twins || !is_border_twin(current, c.rect))
+                })
+                .max_by_key(|c| c.rect.area())
+                .map(|c| c.rect)
+        };
+        find_child(true)
+            .or_else(|| find_child(false))
             .unwrap_or(current)
     }
 }
 
-/// Ranking for `region_at`: reliable bounds first (quality ≥ 0.80),
+/// Two rects are concentric border twins when all four sides sit within
+/// 4 image px (e.g. a compositor `WINDOW` rect or outer 2..4 px border
+/// surviving `merge_candidate(..., 2)` around an inner client rect) and
+/// their areas differ by less than 10% (preserving small controls inside
+/// tight wrappers).
+fn is_border_twin(a: IntRect, b: IntRect) -> bool {
+    const MAX_SIDE_DIFF: i32 = 4;
+    let (area_a, area_b) = (a.area(), b.area());
+    let max_area = area_a.max(area_b);
+    if max_area <= 0 {
+        return false;
+    }
+    (a.left - b.left).abs() <= MAX_SIDE_DIFF
+        && (a.top - b.top).abs() <= MAX_SIDE_DIFF
+        && (a.right - b.right).abs() <= MAX_SIDE_DIFF
+        && (a.bottom - b.bottom).abs() <= MAX_SIDE_DIFF
+        && (max_area - area_a.min(area_b)) * 100 < max_area * 10
+}
+
+/// Ranking for `region_at`: reliable bounds first (quality ≥ 0.72),
 /// then smaller rects at equal quality — the innermost solid frame
-/// under the cursor.
+/// under the cursor, so labeled compact buttons/inputs beat a 20×
+/// larger enclosing panel while weak hypotheses stay fallback-only.
 fn rank(candidate: &RegionCandidate) -> f32 {
-    let tier = if candidate.quality >= 0.80 {
+    let tier = if candidate.quality >= 0.72 {
         0.
     } else {
         10000.
@@ -460,7 +569,10 @@ impl SelectionCursor {
     /// Update the hovered candidate for a pointer position (image px).
     /// Returns the current rect.
     pub(crate) fn hover(&mut self, detector: &RegionDetector, x: i32, y: i32) -> IntRect {
-        let tolerance = if self.manual_level { 6. } else { 3. };
+        // Wheel-stepped parent selections get 12 image px (~6 logical px on
+        // 2× HiDPI) of jitter slack so click tremors do not snap back to an
+        // inner child while the pointer stays inside `current`.
+        let tolerance = if self.manual_level { 12. } else { 3. };
         if let Some(current) = self.current
             && current.contains_point(x, y)
         {
@@ -747,5 +859,699 @@ mod tests {
         assert!(detector.candidates().is_empty());
         let view = RgbaView::new(&[0u8; 16], 100, 100);
         assert!(view.is_none());
+    }
+
+    fn solid_rgba(w: i32, h: i32, rgb: [u8; 3]) -> RgbaBuf {
+        RgbaBuf {
+            width: w,
+            height: h,
+            data: [rgb[0], rgb[1], rgb[2], 255].repeat((w * h) as usize),
+        }
+    }
+
+    fn set_px(buf: &mut RgbaBuf, x: i32, y: i32, rgb: [u8; 3]) {
+        if x < 0 || y < 0 || x >= buf.width || y >= buf.height {
+            return;
+        }
+        let i = ((y * buf.width + x) * 4) as usize;
+        buf.data[i] = rgb[0];
+        buf.data[i + 1] = rgb[1];
+        buf.data[i + 2] = rgb[2];
+        buf.data[i + 3] = 255;
+    }
+
+    /// Antialiased 1px rounded-rectangle stroke along the centerline of the
+    /// outer pixel ring of `rect`, leaving rounded corners open while axis-
+    /// aligned straight spans remain crisp 1px borders.
+    fn stroke_rounded_rect(buf: &mut RgbaBuf, rect: IntRect, radius: f32, stroke: [u8; 3]) {
+        let x0 = rect.left as f32 + 0.5;
+        let y0 = rect.top as f32 + 0.5;
+        let x1 = rect.right as f32 - 0.5;
+        let y1 = rect.bottom as f32 - 0.5;
+        let r = (radius - 0.5).max(0.5);
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let hx = (x1 - x0) * 0.5 - r;
+        let hy = (y1 - y0) * 0.5 - r;
+        for y in (rect.top - 2).max(0)..=(rect.bottom + 2).min(buf.height - 1) {
+            for x in (rect.left - 2).max(0)..=(rect.right + 2).min(buf.width - 1) {
+                let dx = (x as f32 + 0.5 - cx).abs() - hx;
+                let dy = (y as f32 + 0.5 - cy).abs() - hy;
+                let sdf = dx.max(0.).hypot(dy.max(0.)) + dx.max(dy).min(0.) - r;
+                let alpha = (1.0 - sdf.abs()).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let i = ((y * buf.width + x) * 4) as usize;
+                for c in 0..3 {
+                    let base = f32::from(buf.data[i + c]);
+                    let fg = f32::from(stroke[c]);
+                    buf.data[i + c] = (base * (1.0 - alpha) + fg * alpha).round() as u8;
+                }
+            }
+        }
+    }
+
+    fn assert_rect_near(actual: IntRect, expected: IntRect, tol: i32) {
+        assert!(
+            (actual.left - expected.left).abs() <= tol
+                && (actual.top - expected.top).abs() <= tol
+                && (actual.right - expected.right).abs() <= tol
+                && (actual.bottom - expected.bottom).abs() <= tol,
+            "expected {expected:?} (±{tol} px), got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn detects_hollow_rounded_border_card_on_same_background() {
+        // #f8fafc page with a 1px #cbd5e1 rounded card (r = 12 px) and an
+        // identical #f8fafc interior; also verify a compact 32 px-tall pill
+        // input (r = 10 px) whose corner arcs consume >30% of vertical sides.
+        let bg = [0xf8, 0xfa, 0xfc];
+        let border = [0xcb, 0xd5, 0xe1];
+        let card = IntRect::new(50, 40, 310, 200);
+        let mut image = solid_rgba(360, 240, bg);
+        stroke_rounded_rect(&mut image, card, 12.0, border);
+
+        let detector = RegionDetector::analyze(&image.data, 360, 240);
+        assert!(
+            detector.candidates().iter().any(|c| {
+                (c.rect.left - card.left).abs() <= 2
+                    && (c.rect.top - card.top).abs() <= 2
+                    && (c.rect.right - card.right).abs() <= 2
+                    && (c.rect.bottom - card.bottom).abs() <= 2
+            }),
+            "card missing from candidates: {:?}",
+            detector.candidates()
+        );
+        assert_rect_near(detector.region_at(180, 120), card, 2);
+
+        let pill_input = IntRect::new(90, 96, 250, 128);
+        let mut pill_scene = solid_rgba(340, 220, bg);
+        stroke_rounded_rect(&mut pill_scene, pill_input, 10.0, border);
+        let pill_detector = RegionDetector::analyze(&pill_scene.data, 340, 220);
+        assert_rect_near(pill_detector.region_at(170, 112), pill_input, 2);
+    }
+
+    #[test]
+    fn refinement_prefers_crisp_panel_edge_over_drop_shadow() {
+        // Bright panel [60, 50, 260, 170] surrounded by an 8 px dark drop
+        // shadow whose steepest band (3..4 px outside) has per-pixel diff ≈ 52.
+        let panel = IntRect::new(60, 50, 260, 170);
+        let mut image = solid_rgba(320, 220, [214, 218, 224]);
+        let shadow_luma = [58u8, 68, 86, 138, 170, 190, 203, 210];
+        for y in 0..220 {
+            for x in 0..320 {
+                if panel.contains_point(x, y) {
+                    set_px(&mut image, x, y, [248, 250, 252]);
+                    continue;
+                }
+                let dx = (panel.left - x).max(x - (panel.right - 1)).max(0);
+                let dy = (panel.top - y).max(y - (panel.bottom - 1)).max(0);
+                let dist = dx.max(dy);
+                if (1..=8).contains(&dist) {
+                    let v = shadow_luma[(dist - 1) as usize];
+                    set_px(&mut image, x, y, [v, v, v.saturating_add(4)]);
+                }
+            }
+        }
+
+        let seeded_on_shadow = IntRect::new(57, 47, 263, 173);
+        let refined = refine_rect(&image.view(), seeded_on_shadow, 6, 8);
+        assert_rect_near(refined, panel, 1);
+
+        let detector = RegionDetector::analyze(&image.data, 320, 220);
+        assert_rect_near(detector.region_at(160, 110), panel, 1);
+        // Stepping up from the panel must go straight to the full screen
+        // rather than stopping on a leftover drop-shadow halo candidate.
+        let mut cursor = SelectionCursor::default();
+        assert_rect_near(cursor.hover(&detector, 160, 110), panel, 1);
+        assert_eq!(
+            cursor.step(&detector, 160, 110, 1),
+            IntRect::new(0, 0, 320, 220)
+        );
+    }
+
+    #[test]
+    fn hover_prefers_labeled_button_inside_panel() {
+        let full = IntRect::new(0, 0, 420, 280);
+        let panel = IntRect::new(20, 20, 400, 260);
+        let button = IntRect::new(60, 60, 156, 90);
+        let rounded_button = IntRect::new(200, 60, 296, 90);
+        let mut image = solid_rgba(420, 280, [28, 32, 40]);
+
+        for y in panel.top..panel.bottom {
+            for x in panel.left..panel.right {
+                set_px(&mut image, x, y, [246, 248, 250]);
+            }
+        }
+        for y in button.top..button.bottom {
+            for x in button.left..button.right {
+                let on_border = x == button.left
+                    || x == button.right - 1
+                    || y == button.top
+                    || y == button.bottom - 1;
+                let color = if on_border {
+                    [100, 116, 139]
+                } else {
+                    [232, 236, 242]
+                };
+                set_px(&mut image, x, y, color);
+            }
+        }
+        stroke_rounded_rect(&mut image, rounded_button, 8.0, [148, 163, 184]);
+
+        // Faux glyph strokes inside y = 70..80 (six character cells with stems
+        // and crossbars so interior texture matches a real `[ Submit ]` label).
+        let ink = [30, 41, 59];
+        for base_x in [74, 214] {
+            for glyph in 0..6 {
+                let gx = base_x + glyph * 11;
+                for y in 70..80 {
+                    set_px(&mut image, gx, y, ink);
+                    set_px(&mut image, gx + 1, y, ink);
+                    if glyph % 2 == 0 {
+                        set_px(&mut image, gx + 6, y, ink);
+                    }
+                }
+                for x in gx..gx + 7 {
+                    set_px(&mut image, x, 70, ink);
+                    set_px(&mut image, x, 75, ink);
+                    set_px(&mut image, x, 79, ink);
+                }
+            }
+        }
+
+        // Unbordered body label directly on the panel at y = 144..156: plain
+        // text words without a control frame must still be rejected so hover
+        // over body copy selects the enclosing panel, not a glyph cluster.
+        for glyph in 0..8 {
+            let gx = 74 + glyph * 10;
+            for y in 144..156 {
+                set_px(&mut image, gx, y, ink);
+                if glyph % 2 == 0 {
+                    set_px(&mut image, gx + 5, y, ink);
+                }
+            }
+            for x in gx..gx + 6 {
+                set_px(&mut image, x, 144, ink);
+                set_px(&mut image, x, 150, ink);
+                set_px(&mut image, x, 155, ink);
+            }
+        }
+
+        let detector = RegionDetector::analyze(&image.data, 420, 280);
+        assert_rect_near(detector.region_at(100, 75), button, 2);
+        assert_rect_near(detector.region_at(248, 75), rounded_button, 2);
+        assert_rect_near(detector.region_at(110, 150), panel, 2);
+        assert_rect_near(detector.region_at(250, 150), panel, 2);
+
+        let mut cursor = SelectionCursor::default();
+        assert_rect_near(cursor.hover(&detector, 100, 75), button, 2);
+        let stepped_panel = cursor.step(&detector, 100, 75, 1);
+        assert_rect_near(stepped_panel, panel, 2);
+        assert!(cursor.manual_level());
+        // HiDPI click/scroll tremor (~9 px > old 6 px cap, <= 12 px) keeps
+        // the wheel-chosen parent instead of snapping back to the button.
+        assert_eq!(cursor.hover(&detector, 108, 79), stepped_panel);
+        assert!(cursor.manual_level());
+        assert_eq!(cursor.step(&detector, 108, 79, 1), full);
+    }
+
+    fn fill_rect(buf: &mut RgbaBuf, rect: IntRect, rgb: [u8; 3]) {
+        for y in rect.top.max(0)..rect.bottom.min(buf.height) {
+            for x in rect.left.max(0)..rect.right.min(buf.width) {
+                set_px(buf, x, y, rgb);
+            }
+        }
+    }
+
+    /// Paint dense synthetic glyph rows across `rect` (8 px tall glyph cells
+    /// on an 11 px vertical pitch) so dilated `barriers` cover >55% of the
+    /// pane interior and drop `background` connected-component fill well
+    /// below the 0.72 threshold.
+    fn paint_dense_text_block(buf: &mut RgbaBuf, rect: IntRect, ink: [u8; 3]) {
+        let mut row_idx = 0i32;
+        let mut y0 = rect.top + 6;
+        while y0 + 8 <= rect.bottom - 4 {
+            let indent = (row_idx % 3) * 8;
+            let right_trim = ((row_idx * 17) % 36) + 6;
+            let mut gx = rect.left + 8 + indent;
+            let mut glyph = 0i32;
+            while gx + 6 <= rect.right - right_trim {
+                // Skip every 6th cell as a word space so lines mirror real
+                // code/prose rather than continuous rules.
+                if (glyph + row_idx) % 6 != 4 {
+                    for y in y0..y0 + 8 {
+                        set_px(buf, gx, y, ink);
+                        if glyph % 2 == 0 {
+                            set_px(buf, gx + 4, y, ink);
+                        }
+                    }
+                    for x in gx..gx + 5 {
+                        set_px(buf, x, y0, ink);
+                        if glyph % 3 != 1 {
+                            set_px(buf, x, y0 + 4, ink);
+                        }
+                        set_px(buf, x, y0 + 7, ink);
+                    }
+                }
+                gx += 8;
+                glyph += 1;
+            }
+            y0 += 11;
+            row_idx += 1;
+        }
+    }
+
+    #[test]
+    fn detects_populated_waybar_and_dense_tiled_split_panes() {
+        // 800×300 desktop: 30 px screen-flush Waybar `[0, 800) × [0, 30)`
+        // with 4px-padded workspace/status pills, internal separators, and
+        // clock glyphs, over two T-junction tiled panes `[0, 400) × [30, 300)`
+        // and `[400, 800) × [30, 300)` packed with dense code/terminal text.
+        let (w, h) = (800, 300);
+        let waybar = IntRect::new(0, 0, 800, 30);
+        let left_pane = IntRect::new(0, 30, 400, 300);
+        let right_pane = IntRect::new(400, 30, 800, 300);
+
+        let mut image = solid_rgba(w, h, [22, 24, 33]);
+        fill_rect(&mut image, waybar, [20, 22, 30]);
+        fill_rect(&mut image, left_pane, [30, 34, 46]);
+        fill_rect(&mut image, right_pane, [244, 246, 250]);
+        // 1px bar bottom rule + 1px vertical splitter meeting at a T-junction.
+        fill_rect(&mut image, IntRect::new(0, 29, 800, 30), [72, 78, 96]);
+        fill_rect(&mut image, IntRect::new(400, 30, 401, 300), [84, 92, 112]);
+
+        // Waybar pills at y = 4..26 (landing directly on `inset_support`'s
+        // 4 px ring) plus internal separators and unbordered title/clock text.
+        for &(x0, x1, fill) in &[
+            (6, 94, [48, 56, 78]),
+            (102, 186, [38, 44, 62]),
+            (690, 794, [44, 50, 70]),
+        ] {
+            let pill = IntRect::new(x0, 4, x1, 26);
+            fill_rect(&mut image, pill, fill);
+            for gx in (x0 + 8..x1 - 8).step_by(9) {
+                for y in 9..21 {
+                    set_px(&mut image, gx, y, [226, 232, 240]);
+                }
+                for x in gx..gx + 5 {
+                    set_px(&mut image, x, 9, [226, 232, 240]);
+                    set_px(&mut image, x, 20, [226, 232, 240]);
+                }
+            }
+        }
+        // Internal bar separators and dense center window-title glyphs.
+        fill_rect(&mut image, IntRect::new(200, 5, 201, 25), [90, 98, 120]);
+        fill_rect(&mut image, IntRect::new(676, 5, 677, 25), [90, 98, 120]);
+        for gx in (220..650).step_by(8) {
+            if gx % 48 == 4 {
+                continue;
+            }
+            for y in 9..21 {
+                set_px(&mut image, gx, y, [210, 216, 228]);
+            }
+            for x in gx..gx + 5 {
+                set_px(&mut image, x, 9, [210, 216, 228]);
+                set_px(&mut image, x, 15, [210, 216, 228]);
+            }
+        }
+
+        paint_dense_text_block(&mut image, left_pane, [214, 222, 236]);
+        paint_dense_text_block(&mut image, right_pane, [36, 42, 56]);
+
+        // Verify the test scene actually breaks `background` fill (< 0.72) so
+        // `component_proposals(&background, true)` alone cannot rescue the panes.
+        let field = build_edge_field(image.view());
+        let barriers = super::image::dilate_linf1(&field.combined);
+        for pane in [left_pane, right_pane] {
+            let mut clear = 0i64;
+            for y in pane.top..pane.bottom {
+                for x in pane.left..pane.right {
+                    clear += i64::from(barriers.at(x, y) == 0);
+                }
+            }
+            let fill_ratio = clear as f64 / pane.area() as f64;
+            assert!(
+                fill_ratio < 0.55,
+                "expected dense text to break background fill (< 0.55), got {fill_ratio:.3}"
+            );
+        }
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(400, 15), waybar, 2);
+        assert_rect_near(detector.region_at(200, 160), left_pane, 2);
+        assert_rect_near(detector.region_at(600, 160), right_pane, 2);
+
+        let mut cursor = SelectionCursor::default();
+        assert_rect_near(cursor.hover(&detector, 200, 160), left_pane, 2);
+        let parent = cursor.step(&detector, 200, 160, 1);
+        assert!(
+            parent == IntRect::new(0, 30, 800, 300)
+                || (parent.left == 0
+                    && (parent.top - 30).abs() <= 2
+                    && parent.right == 800
+                    && parent.bottom == 300)
+                || parent == IntRect::new(0, 0, w, h),
+            "unexpected parent step from left tiled pane: {parent:?}"
+        );
+    }
+
+    #[test]
+    fn detects_ide_t_junction_sidebar_and_split_editors() {
+        // 840×520 IDE layout:
+        // - top toolbar:       [0, 840) × [0, 34)
+        // - left file sidebar: [0, 220) × [34, 494)
+        // - top-left editor:   [220, 530) × [34, 340)
+        // - top-right editor:  [530, 840) × [34, 340)
+        // - bottom terminal:   [220, 840) × [340, 494)
+        // - bottom statusbar:  [0, 840) × [494, 520)
+        let (w, h) = (840, 520);
+        let toolbar = IntRect::new(0, 0, 840, 34);
+        let sidebar = IntRect::new(0, 34, 220, 494);
+        let editor_left = IntRect::new(220, 34, 530, 340);
+        let editor_right = IntRect::new(530, 34, 840, 340);
+        let terminal = IntRect::new(220, 340, 840, 494);
+        let statusbar = IntRect::new(0, 494, 840, 520);
+
+        let mut image = solid_rgba(w, h, [30, 33, 42]);
+        fill_rect(&mut image, toolbar, [24, 26, 34]);
+        fill_rect(&mut image, sidebar, [27, 30, 39]);
+        fill_rect(&mut image, editor_left, [33, 37, 48]);
+        fill_rect(&mut image, editor_right, [33, 37, 48]);
+        fill_rect(&mut image, terminal, [22, 25, 33]);
+        fill_rect(&mut image, statusbar, [38, 74, 132]);
+
+        // Structural 1px splitters forming nested T-junctions on both axes.
+        let rule = [68, 74, 92];
+        fill_rect(&mut image, IntRect::new(0, 34, 840, 35), rule);
+        fill_rect(&mut image, IntRect::new(0, 493, 840, 494), rule);
+        fill_rect(&mut image, IntRect::new(220, 34, 221, 494), rule);
+        fill_rect(&mut image, IntRect::new(220, 340, 840, 341), rule);
+        fill_rect(&mut image, IntRect::new(530, 34, 531, 340), rule);
+
+        paint_dense_text_block(&mut image, sidebar, [178, 186, 204]);
+        paint_dense_text_block(&mut image, editor_left, [212, 220, 234]);
+        paint_dense_text_block(&mut image, editor_right, [212, 220, 234]);
+        paint_dense_text_block(&mut image, terminal, [168, 218, 186]);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(420, 17), toolbar, 2);
+        assert_rect_near(detector.region_at(110, 240), sidebar, 2);
+        assert_rect_near(detector.region_at(375, 180), editor_left, 2);
+        assert_rect_near(detector.region_at(685, 180), editor_right, 2);
+        assert_rect_near(detector.region_at(530, 420), terminal, 2);
+        assert_rect_near(detector.region_at(420, 507), statusbar, 2);
+    }
+
+    #[test]
+    fn isolated_floating_dividers_do_not_hallucinate_screen_panels() {
+        let (w, h) = (800, 600);
+        let full = IntRect::new(0, 0, w, h);
+
+        // 1. Floating horizontal & vertical rules in open space plus a half-
+        //    width rule anchored to ONLY the left screen edge.
+        let mut rules_scene = solid_rgba(w, h, [246, 248, 250]);
+        fill_rect(
+            &mut rules_scene,
+            IntRect::new(180, 150, 620, 152),
+            [80, 90, 110],
+        );
+        fill_rect(
+            &mut rules_scene,
+            IntRect::new(520, 260, 522, 510),
+            [80, 90, 110],
+        );
+        fill_rect(
+            &mut rules_scene,
+            IntRect::new(0, 420, 360, 422),
+            [80, 90, 110],
+        );
+
+        let detector = RegionDetector::analyze(&rules_scene.data, w as u32, h as u32);
+        assert_eq!(detector.region_at(400, 80), full);
+        assert_eq!(detector.region_at(400, 220), full);
+        assert_eq!(detector.region_at(200, 360), full);
+        assert_eq!(detector.region_at(200, 500), full);
+        assert_eq!(detector.region_at(660, 380), full);
+
+        // 2. Unbordered prose paragraphs and an unbordered icon grid on open
+        //    background must not produce half-screen or grid-frame boxes.
+        let mut prose_scene = solid_rgba(w, h, [250, 250, 252]);
+        paint_dense_text_block(
+            &mut prose_scene,
+            IntRect::new(80, 60, 720, 240),
+            [32, 38, 48],
+        );
+        for row in 0..3 {
+            for col in 0..5 {
+                let ix = 140 + col * 110;
+                let iy = 320 + row * 72;
+                for dy in 0..16 {
+                    set_px(&mut prose_scene, ix + dy, iy + dy, [45, 55, 72]);
+                    set_px(&mut prose_scene, ix + 15 - dy, iy + dy, [45, 55, 72]);
+                }
+            }
+        }
+        let prose_detector = RegionDetector::analyze(&prose_scene.data, w as u32, h as u32);
+        assert_eq!(prose_detector.region_at(400, 150), full);
+        assert_eq!(prose_detector.region_at(310, 360), full);
+    }
+
+    #[test]
+    fn detects_downscaled_three_column_t_junction_panes() {
+        // 1600×900 (> 1280 long-edge cap, exercising downscale + scale_rect +
+        // refine_rect) with a 32 px top bar and three T-junction columns
+        // `[0, 260) × [32, 900)`, `[260, 1100) × [32, 900)`, and
+        // `[1100, 1600) × [32, 900)`.
+        let (w, h) = (1600, 900);
+        let top_bar = IntRect::new(0, 0, 1600, 32);
+        let col_left = IntRect::new(0, 32, 260, 900);
+        let col_mid = IntRect::new(260, 32, 1100, 900);
+        let col_right = IntRect::new(1100, 32, 1600, 900);
+
+        let mut image = solid_rgba(w, h, [24, 27, 36]);
+        fill_rect(&mut image, top_bar, [18, 20, 28]);
+        fill_rect(&mut image, col_left, [28, 32, 43]);
+        fill_rect(&mut image, col_mid, [34, 39, 52]);
+        fill_rect(&mut image, col_right, [26, 30, 40]);
+        fill_rect(&mut image, IntRect::new(0, 32, 1600, 34), [76, 84, 104]);
+        fill_rect(&mut image, IntRect::new(260, 32, 262, 900), [76, 84, 104]);
+        fill_rect(&mut image, IntRect::new(1100, 32, 1102, 900), [76, 84, 104]);
+
+        paint_dense_text_block(&mut image, col_left, [196, 206, 224]);
+        paint_dense_text_block(&mut image, col_mid, [214, 222, 236]);
+        paint_dense_text_block(&mut image, col_right, [188, 214, 198]);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(800, 16), top_bar, 2);
+        assert_rect_near(detector.region_at(130, 450), col_left, 2);
+        assert_rect_near(detector.region_at(680, 450), col_mid, 2);
+        assert_rect_near(detector.region_at(1350, 450), col_right, 2);
+    }
+
+    #[test]
+    fn hierarchy_step_skips_concentric_border_twins() {
+        let full = IntRect::new(0, 0, 800, 600);
+        let button = candidate(IntRect::new(140, 140, 220, 172), 0.88, Sources::CONTOUR);
+        let client = candidate(IntRect::new(100, 100, 500, 400), 0.90, Sources::CONTOUR);
+        let window_twin = candidate(IntRect::new(98, 98, 502, 402), 0.92, Sources::WINDOW);
+        let outer_border_twin = candidate(IntRect::new(96, 96, 504, 404), 0.86, Sources::CONTOUR);
+
+        let detector = RegionDetector::from_candidates(
+            800,
+            600,
+            vec![
+                button.clone(),
+                client.clone(),
+                window_twin,
+                outer_border_twin.clone(),
+            ],
+        );
+        let mut cursor = SelectionCursor::default();
+
+        assert_eq!(cursor.hover(&detector, 180, 156), button.rect);
+        // First notch up lands on the panel; second notch skips both 2 px and
+        // 4 px concentric twins straight to full-screen bounds.
+        assert_eq!(cursor.step(&detector, 180, 156, 1), client.rect);
+        assert_eq!(cursor.step(&detector, 180, 156, 1), full);
+
+        // Stepping back down from full bounds lands on the outermost window
+        // frame, then skips the inner border twins straight to the button.
+        assert_eq!(cursor.step(&detector, 180, 156, -1), outer_border_twin.rect);
+        assert_eq!(cursor.step(&detector, 180, 156, -1), button.rect);
+
+        // Also verify when a distinct enclosing workspace container exists
+        // before `full`: the twin is skipped in favor of that container.
+        let workspace = candidate(IntRect::new(40, 32, 760, 568), 0.91, Sources::SPLIT);
+        let nested_detector = RegionDetector::from_candidates(
+            800,
+            600,
+            vec![
+                button.clone(),
+                client.clone(),
+                candidate(IntRect::new(97, 97, 503, 403), 0.92, Sources::WINDOW),
+                workspace.clone(),
+            ],
+        );
+        cursor.reset();
+        assert_eq!(cursor.hover(&nested_detector, 180, 156), button.rect);
+        assert_eq!(cursor.step(&nested_detector, 180, 156, 1), client.rect);
+        assert_eq!(cursor.step(&nested_detector, 180, 156, 1), workspace.rect);
+        assert_eq!(cursor.step(&nested_detector, 180, 156, 1), full);
+    }
+
+    fn point_in_rounded_rect(x: i32, y: i32, rect: IntRect, radius: f32) -> bool {
+        let x0 = rect.left as f32 + 0.5;
+        let y0 = rect.top as f32 + 0.5;
+        let x1 = rect.right as f32 - 0.5;
+        let y1 = rect.bottom as f32 - 0.5;
+        let r = (radius - 0.5).max(0.5);
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let hx = (x1 - x0) * 0.5 - r;
+        let hy = (y1 - y0) * 0.5 - r;
+        let dx = (x as f32 + 0.5 - cx).abs() - hx;
+        let dy = (y as f32 + 0.5 - cy).abs() - hy;
+        let sdf = dx.max(0.).hypot(dy.max(0.)) + dx.max(dy).min(0.) - r;
+        sdf <= 0.0
+    }
+
+    #[test]
+    fn detects_split_panes_inside_floating_rounded_window() {
+        // 900×580 wallpaper desktop with a floating r = 12 px rounded IDE
+        // window `[60, 840) × [40, 540)` containing:
+        // - header bar:        [60, 840) × [40, 72)
+        // - left sidebar:      [60, 260) × [72, 510)
+        // - top-left editor:   [260, 550) × [72, 370)
+        // - top-right editor:  [550, 840) × [72, 370)
+        // - bottom terminal:   [260, 840) × [370, 510)
+        // - footer statusbar:  [60, 840) × [510, 540)
+        let (w, h) = (900, 580);
+        let window = IntRect::new(60, 40, 840, 540);
+        let header = IntRect::new(60, 40, 840, 72);
+        let sidebar = IntRect::new(60, 72, 260, 510);
+        let editor_left = IntRect::new(260, 72, 550, 370);
+        let editor_right = IntRect::new(550, 72, 840, 370);
+        let terminal = IntRect::new(260, 370, 840, 510);
+        let footer = IntRect::new(60, 510, 840, 540);
+
+        let mut image = solid_rgba(w, h, [14, 18, 26]);
+        for y in window.top..window.bottom {
+            for x in window.left..window.right {
+                if !point_in_rounded_rect(x, y, window, 12.0) {
+                    continue;
+                }
+                let rgb = if y < 72 {
+                    [26, 29, 38]
+                } else if y >= 510 {
+                    [36, 70, 126]
+                } else if x < 260 {
+                    [29, 33, 44]
+                } else if y < 370 {
+                    [34, 39, 52]
+                } else {
+                    [22, 26, 35]
+                };
+                set_px(&mut image, x, y, rgb);
+            }
+        }
+
+        // Interior 1 px divider rules meeting the straight outer window walls
+        // at tight T-junctions, with a 1 px scrollbar/antialiasing break along
+        // the editor splitter to exercise `extract_rails`'s gap tolerance.
+        let rule = [74, 82, 102];
+        fill_rect(&mut image, IntRect::new(60, 72, 840, 73), rule);
+        fill_rect(&mut image, IntRect::new(60, 509, 840, 510), rule);
+        fill_rect(&mut image, IntRect::new(260, 72, 261, 510), rule);
+        fill_rect(&mut image, IntRect::new(260, 370, 840, 371), rule);
+        fill_rect(&mut image, IntRect::new(550, 72, 551, 220), rule);
+        fill_rect(&mut image, IntRect::new(550, 221, 551, 370), rule);
+        stroke_rounded_rect(&mut image, window, 12.0, [92, 102, 126]);
+
+        paint_dense_text_block(&mut image, sidebar, [182, 190, 208]);
+        paint_dense_text_block(&mut image, editor_left, [214, 222, 236]);
+        paint_dense_text_block(&mut image, editor_right, [214, 222, 236]);
+        paint_dense_text_block(&mut image, terminal, [168, 218, 186]);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(450, 56), header, 2);
+        assert_rect_near(detector.region_at(160, 260), sidebar, 2);
+        assert_rect_near(detector.region_at(400, 210), editor_left, 2);
+        assert_rect_near(detector.region_at(700, 210), editor_right, 2);
+        assert_rect_near(detector.region_at(550, 440), terminal, 2);
+        assert_rect_near(detector.region_at(450, 525), footer, 2);
+    }
+
+    #[test]
+    fn detects_subtle_compact_controls_on_high_contrast_text_page() {
+        // 1600×900 HiDPI page (downscaled to 1280×720, scale = 1.25): dense
+        // high-contrast ink pushes `field.threshold` to its upper clamp (18),
+        // while compact 28 px-tall controls (`~22` analysis px < old 24 px
+        // `weak_lines` floor) have subtle 1 px borders with contrast = 10.
+        let (w, h) = (1600, 900);
+        let subtle_button = IntRect::new(120, 80, 280, 108);
+        let subtle_input = IntRect::new(320, 80, 580, 108);
+        let bg = [246, 248, 250];
+        let subtle_border = [236, 238, 240];
+
+        let mut image = solid_rgba(w, h, bg);
+        // Subtle filled compact button (step contrast = 10) and subtle 1 logical-px
+        // (2 physical-px on HiDPI) bordered compact input (stroke contrast = 10).
+        fill_rect(&mut image, subtle_button, subtle_border);
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.top,
+                subtle_input.right,
+                subtle_input.top + 2,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.bottom - 2,
+                subtle_input.right,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.left,
+                subtle_input.top,
+                subtle_input.left + 2,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+        fill_rect(
+            &mut image,
+            IntRect::new(
+                subtle_input.right - 2,
+                subtle_input.top,
+                subtle_input.right,
+                subtle_input.bottom,
+            ),
+            subtle_border,
+        );
+
+        // High-contrast body copy elsewhere on the page drives the gradient
+        // histogram's 35th percentile to the global threshold clamp (18).
+        paint_dense_text_block(&mut image, IntRect::new(100, 180, 1500, 820), [20, 24, 32]);
+
+        let (analysis_w, analysis_h) = analysis_size(w, h);
+        let downscaled = super::image::downscale(&image.view(), analysis_w, analysis_h);
+        let field = build_edge_field(downscaled.view());
+        assert_eq!(field.threshold, 18);
+
+        let detector = RegionDetector::analyze(&image.data, w as u32, h as u32);
+        assert_rect_near(detector.region_at(200, 94), subtle_button, 2);
+        assert_rect_near(detector.region_at(450, 94), subtle_input, 2);
     }
 }
