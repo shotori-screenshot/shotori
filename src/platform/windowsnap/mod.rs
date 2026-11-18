@@ -8,22 +8,17 @@
 //! uses (verified against niri: output logical positions match the
 //! capture geometry).
 //!
-//! ## Coverage on niri (source-verified, 26.04)
+//! ## Coverage on niri
 //!
-//! - **Floating windows: exact rects.** `tile_pos_in_workspace_view` is
-//!   populated only for floating windows (niri's scrolling layout leaves
-//!   it null for tiled ones — `tiles_with_ipc_layouts` never fills it;
-//!   see upstream issue #2381 / PR #4147 proposing to expose the view
-//!   offset). That field doubles as the visibility filter.
-//! - **Tiled windows: not available.** Their positions depend on the
-//!   workspace scroll offset, which the IPC does not expose, and column
-//!   packing cannot be reconstructed from `(column, tile)` indices
-//!   alone. Pixel-based detection was prototyped and rejected: content
-//!   edges inside windows score as strongly as real window boundaries
-//!   (measured), so snapping would sometimes grab a wrong region —
-//!   silently degrading beats mis-snapping.
-//! - The day upstream exposes tile positions, this backend lights up
-//!   for tiled windows with no architectural change.
+//! - **Floating windows (all versions) & tiled scrolling windows (niri > 26.04,
+//!   upstream `niri#4711`)**: `tile_pos_in_workspace_view` plus `Workspace::is_active`
+//!   yields visible window rects, clipped to each output's `logical` bounds so
+//!   partially scrolled columns never bleed onto adjacent monitors.
+//! - **Tiled windows on niri ≤ 26.04**: `tile_pos_in_workspace_view` is `None`
+//!   for scrolling tiles and acts as the filter — pixel-based window-edge
+//!   detection was prototyped and rejected because content edges inside windows
+//!   score as strongly as real window boundaries (silently degrading beats
+//!   mis-snapping).
 //!
 //! Backends (detected via environment variables, first hit wins):
 //! - niri — `NIRI_SOCKET`, typed via the `niri-ipc` crate

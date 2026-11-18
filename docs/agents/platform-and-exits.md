@@ -51,7 +51,7 @@ per-compositor IPC sockets (`first env var hit wins`):
 
 | Compositor | Env Trigger | Mechanism & Schema Rules |
 | --- | --- | --- |
-| **niri** | `NIRI_SOCKET` | `niri-ipc` crate. Only **floating** windows populate `tile_pos_in_workspace_view` (tiled scrolling columns leave it `None`); `None` acts as the filter — never guess tiled rects from pixel edges. |
+| **niri** | `NIRI_SOCKET` | `niri-ipc` crate. Filters `Workspace::is_active`, requires `tile_pos_in_workspace_view: Some(...)` (floating windows on all versions; tiled scrolling columns since upstream `niri#4711`), and clips rects to `output.logical` bounds — never guess tiled rects from pixel edges. |
 | **sway** | `SWAYSOCK` | i3 IPC `GET_TREE` over Unix socket, parsed tolerantly with `serde_json::Value`. |
 | **Hyprland** | `HYPRLAND_INSTANCE_SIGNATURE` | `j/clients` over Unix socket, parsed tolerantly with `serde_json::Value` (schemas drift across releases; rigid `#[derive(Deserialize)]` structs break). |
 | **Other compositors** | — | Returns `None` silently; hover/click degrades cleanly to smart-region / manual drag. |
