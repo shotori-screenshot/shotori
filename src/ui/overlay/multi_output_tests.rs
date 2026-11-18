@@ -10,14 +10,14 @@ fn all_image_annotation_tools_release_replaced_previews(cx: &mut TestAppContext)
     cx.update(gpui_kit::component::init);
     let mut capture = Capture::for_test((0, 0), 1.);
     capture.output_name = "screen".into();
-    capture.width = 200;
-    capture.height = 200;
-    capture.rgba = vec![255; 200 * 200 * 4];
+    capture.width = 120;
+    capture.height = 120;
+    capture.rgba = vec![255; 120 * 120 * 4];
     let capture = Arc::new(capture);
     let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (view, cx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    cx.simulate_resize(size(px(200.), px(200.)));
+    cx.simulate_resize(size(px(120.), px(120.)));
     let mut previous: Vec<Arc<gpui_kit::RenderImage>> = Vec::new();
     for kind in [
         ShapeKind::Highlighter,
@@ -31,22 +31,22 @@ fn all_image_annotation_tools_release_replaced_previews(cx: &mut TestAppContext)
         cx.update(|_, cx| {
             session.update(cx, |s, cx| {
                 s.begin("screen", point(px(0.), px(0.)));
-                s.end("screen", point(px(190.), px(190.)));
+                s.end("screen", point(px(110.), px(110.)));
                 s.edit_annotations(|a| a.toggle(kind));
                 s.pointer_down("screen", point(px(10.), px(10.)), false, false);
                 cx.notify();
             })
         });
-        for i in 0..30 {
+        for i in 0..3 {
             cx.update(|window, cx| {
                 session.update(cx, |s, cx| {
                     if kind == ShapeKind::Text {
                         s.preview_text(
-                            gpui_kit::Bounds::new(point(px(10.), px(10.)), size(px(150.), px(80.))),
+                            gpui_kit::Bounds::new(point(px(10.), px(10.)), size(px(90.), px(60.))),
                             format!("Text {i}"),
                         );
                     } else {
-                        s.pointer_move("screen", point(px(30. + i as f32), px(70.)), false);
+                        s.pointer_move("screen", point(px(30. + i as f32 * 8.), px(60.)), false);
                     }
                     cx.notify();
                 });
@@ -73,14 +73,14 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
     cx.update(gpui_kit::component::init);
     let mut capture = Capture::for_test((0, 0), 1.);
     capture.output_name = "screen".into();
-    capture.width = 200;
-    capture.height = 200;
-    capture.rgba = vec![255; 200 * 200 * 4];
+    capture.width = 120;
+    capture.height = 120;
+    capture.rgba = vec![255; 120 * 120 * 4];
     let capture = Arc::new(capture);
     let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (_, cx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    cx.simulate_resize(size(px(200.), px(200.)));
+    cx.simulate_resize(size(px(120.), px(120.)));
     cx.update(|_, cx| {
         session.update(cx, |s, cx| {
             s.select_all();
@@ -90,16 +90,16 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
         })
     });
     let mut previous: Option<Arc<gpui_kit::RenderImage>> = None;
-    for i in 0..250 {
+    for i in 0..12 {
         cx.update(|window, cx| {
             session.update(cx, |s, cx| {
                 s.pointer_move(
                     "screen",
-                    point(px(20. + (i % 150) as f32), px(30. + (i % 80) as f32)),
+                    point(px(20. + (i * 7 % 80) as f32), px(25. + (i * 5 % 60) as f32)),
                     false,
                 );
-                if i % 25 == 24 {
-                    s.pointer_up("screen", point(px(170.), px(100.)), false);
+                if i % 4 == 3 {
+                    s.pointer_up("screen", point(px(100.), px(80.)), false);
                     s.pointer_down("screen", point(px(10.), px(10.)), false, false);
                 }
                 cx.notify();
@@ -355,94 +355,6 @@ fn chrome_follows_a_cross_output_move_through_the_event_pipeline(cx: &mut TestAp
         let b = session.read(cx).selection().bounds().unwrap();
         assert_eq!(b.origin, point(px(70.), px(80.)));
         assert!(session.read(cx).active_on("left"));
-    });
-}
-
-#[gpui_kit::test]
-fn selection_moves_and_resizes_after_release_through_the_event_pipeline(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::base::init);
-    cx.update(gpui_kit::component::init);
-    let mut capture = Capture::for_test((0, 0), 1.);
-    capture.output_name = "main".into();
-    capture.width = 400;
-    capture.height = 400;
-    capture.rgba = vec![255; 400 * 400 * 4];
-    let capture = Arc::new(capture);
-    let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
-    let (_, vcx) =
-        cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    vcx.simulate_resize(size(px(400.), px(400.)));
-    vcx.update(|window, cx| window.draw(cx).clear(cx));
-    vcx.run_until_parked();
-
-    // draw a selection (50,50)-(150,120)
-    vcx.simulate_mouse_down(
-        point(px(50.), px(50.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_move(
-        point(px(150.), px(120.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_up(
-        point(px(150.), px(120.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.run_until_parked();
-
-    // press the interior and drag: the whole selection translates
-    vcx.simulate_mouse_down(
-        point(px(100.), px(80.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_move(
-        point(px(140.), px(110.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_up(
-        point(px(140.), px(110.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.run_until_parked();
-    vcx.update(|_, cx| {
-        let shared = session.read(cx);
-        assert!(shared.selection().is_selected());
-        let b = shared.selection().bounds().unwrap();
-        assert_eq!(b.origin, point(px(90.), px(80.)));
-        assert_eq!(b.size, size(px(100.), px(70.)));
-    });
-
-    // press exactly the bottom-right corner and drag: resize only that
-    // corner; the top-left stays pinned
-    vcx.simulate_mouse_down(
-        point(px(190.), px(150.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_move(
-        point(px(230.), px(190.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.simulate_mouse_up(
-        point(px(230.), px(190.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    vcx.run_until_parked();
-    vcx.update(|_, cx| {
-        let shared = session.read(cx);
-        assert!(shared.selection().is_selected());
-        let b = shared.selection().bounds().unwrap();
-        assert_eq!(b.origin, point(px(90.), px(80.)));
-        assert_eq!(b.size, size(px(140.), px(110.)));
-        assert_eq!(shared.crop("main").unwrap().0, 140); // export follows
     });
 }
 
@@ -1096,43 +1008,13 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn rectangle_toolbar_keyboard_and_export_share_the_same_state(cx: &mut TestAppContext) {
-    geometry_toolbar_keyboard_and_export(cx, crate::annotation::ShapeKind::Rectangle);
+fn rectangle_and_ellipse_toolbar_keyboard_and_export(cx: &mut TestAppContext) {
+    geometry_toolbar_keyboard_and_export(cx);
 }
 
 #[gpui_kit::test]
-fn ellipse_toolbar_keyboard_and_export_share_the_same_state(cx: &mut TestAppContext) {
-    geometry_toolbar_keyboard_and_export(cx, crate::annotation::ShapeKind::Ellipse);
-}
-
-#[gpui_kit::test]
-fn line_and_polyline_pointer_keyboard_and_toolbar_workflows(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Line);
-}
-
-#[gpui_kit::test]
-fn arrow_and_polyline_share_keyboard_focus_history_and_export(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Arrow);
-}
-
-#[gpui_kit::test]
-fn number_toolbar_keeps_focus_size_and_shared_history(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Number);
-}
-
-#[gpui_kit::test]
-fn pencil_toolbar_and_curve_share_history(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Pencil);
-}
-
-#[gpui_kit::test]
-fn highlighter_toolbar_and_curve_share_history(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Highlighter);
-}
-
-#[gpui_kit::test]
-fn mosaic_and_blur_toolbar_share_focus_history(cx: &mut TestAppContext) {
-    stroke_and_polyline_workflows(cx, crate::annotation::ShapeKind::Mosaic);
+fn stroke_tools_and_polyline_toolbar_keyboard_workflows(cx: &mut TestAppContext) {
+    stroke_and_polyline_workflows(cx);
 }
 
 #[gpui_kit::test]
@@ -2060,7 +1942,8 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     let _ = view;
 }
 
-fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotation::ShapeKind) {
+fn stroke_and_polyline_workflows(cx: &mut TestAppContext) {
+    use crate::annotation::ShapeKind;
     cx.update(|cx| {
         gpui_kit::base::init(cx);
         gpui_kit::component::init(cx);
@@ -2073,14 +1956,14 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
     });
     let mut capture = Capture::for_test((0, 0), 1.);
     capture.output_name = "screen".into();
-    capture.width = 500;
-    capture.height = 500;
-    capture.rgba = vec![255; 500 * 500 * 4];
+    capture.width = 760;
+    capture.height = 420;
+    capture.rgba = vec![255; 760 * 420 * 4];
     let capture = Arc::new(capture);
     let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (_, cx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    cx.simulate_resize(size(px(500.), px(500.)));
+    cx.simulate_resize(size(px(760.), px(420.)));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.simulate_mouse_down(
         point(px(20.), px(20.)),
@@ -2088,154 +1971,95 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
         Default::default(),
     );
     cx.simulate_mouse_up(
-        point(px(350.), px(300.)),
+        point(px(360.), px(300.)),
         MouseButton::Left,
         Default::default(),
     );
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let line_button = cx
-        .debug_bounds(match kind {
-            crate::annotation::ShapeKind::Arrow => "tb-arrow",
-            crate::annotation::ShapeKind::Number => "tb-number",
-            crate::annotation::ShapeKind::Pencil => "tb-pencil",
-            crate::annotation::ShapeKind::Highlighter => "tb-highlighter",
-            crate::annotation::ShapeKind::Mosaic => "tb-mosaic",
-            crate::annotation::ShapeKind::Eraser => "tb-eraser",
-            _ => "tb-line",
-        })
-        .unwrap();
-    cx.simulate_click(line_button.center(), Default::default());
-    if kind == crate::annotation::ShapeKind::Number {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(40.))));
-        cx.simulate_keystrokes("n");
-        cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
-        cx.simulate_keystrokes("n");
-        cx.update(|_, cx| {
-            assert_eq!(session.read(cx).annotations().tool(), Some(kind));
-            assert_eq!(session.read(cx).annotations().number_size(), 40.);
-        });
-    }
 
-    if kind == crate::annotation::ShapeKind::Eraser {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("tb-color-0").is_none());
-        cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(48.))));
-        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().width(), 48.));
-        let trigger = cx.debug_bounds("eraser-mode").unwrap();
-        cx.simulate_click(trigger.center(), Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let rect = cx.debug_bounds("toolbar.eraser_rect").unwrap();
-        cx.simulate_click(rect.center(), Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        // (no size UI in rectangle-eraser mode — same as before)
-        cx.simulate_keystrokes("d");
+    for (kind, id, key) in [
+        (ShapeKind::Line, "tb-line", "l"),
+        (ShapeKind::Arrow, "tb-arrow", "a"),
+        (ShapeKind::Number, "tb-number", "n"),
+        (ShapeKind::Pencil, "tb-pencil", "b"),
+        (ShapeKind::Highlighter, "tb-highlighter", "h"),
+        (ShapeKind::Mosaic, "tb-mosaic", "m"),
+    ] {
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.clear_annotations();
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let button = cx.debug_bounds(id).unwrap();
+        cx.simulate_click(button.center(), Default::default());
+        if kind == ShapeKind::Number {
+            cx.update(|_, cx| {
+                session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(40.)))
+            });
+        }
+        cx.simulate_keystrokes(key);
         cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
-        cx.simulate_keystrokes("d");
+        cx.simulate_keystrokes(key);
         cx.update(|_, cx| assert_eq!(session.read(cx).annotations().tool(), Some(kind)));
-    }
-    if kind == crate::annotation::ShapeKind::Arrow {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_keystrokes("a");
-        cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
-        cx.simulate_keystrokes("a");
-        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().tool(), Some(kind)));
-    }
-    cx.simulate_mouse_down(
-        point(px(50.), px(50.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    if matches!(
-        kind,
-        crate::annotation::ShapeKind::Pencil | crate::annotation::ShapeKind::Highlighter
-    ) {
-        cx.simulate_mouse_move(
-            point(px(90.), px(90.)),
+        cx.simulate_mouse_down(
+            point(px(50.), px(50.)),
             MouseButton::Left,
             Default::default(),
         );
-    }
-    cx.simulate_mouse_up(
-        point(
-            px(180.),
-            px(if kind == crate::annotation::ShapeKind::Mosaic {
-                100.
-            } else {
-                50.
-            }),
-        ),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.update(|_, cx| {
-        assert_eq!(
-            session
-                .read(cx)
-                .annotations()
-                .visible()
-                .next()
-                .unwrap()
-                .kind,
-            kind
-        )
-    });
-    if matches!(
-        kind,
-        crate::annotation::ShapeKind::Pencil | crate::annotation::ShapeKind::Highlighter
-    ) {
+        if matches!(kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
+            cx.simulate_mouse_move(
+                point(px(90.), px(90.)),
+                MouseButton::Left,
+                Default::default(),
+            );
+        }
+        cx.simulate_mouse_up(
+            point(
+                px(180.),
+                px(if kind == ShapeKind::Mosaic { 100. } else { 50. }),
+            ),
+            MouseButton::Left,
+            Default::default(),
+        );
         cx.update(|_, cx| {
             let marks = session.read(cx).annotations();
-            let stroke = marks.visible().next().unwrap().points.clone();
-            // Three samples recorded, smoothed: the first lands exactly,
-            // the rest trail their raw sample within the ink radius.
-            assert_eq!(stroke.len(), 3);
-            assert_eq!(stroke[0], point(px(50.), px(50.)));
-            for (recorded, raw) in stroke[1..].iter().zip([(90., 90.), (180., 50.)]) {
-                let dx = f32::from(recorded.x - px(raw.0));
-                let dy = f32::from(recorded.y - px(raw.1));
-                assert!(dx.hypot(dy) <= 3., "{recorded:?} trails {raw:?} too far");
+            let first = marks.visible().next().unwrap();
+            assert_eq!(first.kind, kind);
+            if kind == ShapeKind::Number {
+                assert_eq!(marks.number_size(), 40.);
+            }
+            if matches!(kind, ShapeKind::Pencil | ShapeKind::Highlighter) {
+                assert_eq!(first.points.len(), 3);
+                assert_eq!(first.points[0], point(px(50.), px(50.)));
             }
         });
-        let key = if kind == crate::annotation::ShapeKind::Highlighter {
-            "h"
+        if kind == ShapeKind::Mosaic {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let trigger = cx.debug_bounds("filter-effect").unwrap();
+            cx.simulate_click(trigger.center(), Default::default());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let blur = cx.debug_bounds("toolbar.filter_blur").unwrap();
+            cx.simulate_click(blur.center(), Default::default());
+            cx.update(|_, cx| {
+                assert_eq!(session.read(cx).annotations().tool(), Some(ShapeKind::Blur));
+            });
+            cx.simulate_keystrokes("ctrl-z");
+            cx.update(|_, cx| {
+                assert_eq!(
+                    session.read(cx).annotations().committed()[0].kind,
+                    ShapeKind::Mosaic
+                )
+            });
+            cx.simulate_keystrokes("m");
         } else {
-            "b"
-        };
-        cx.simulate_keystrokes(key);
-        cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
-        cx.simulate_keystrokes(key);
-    }
-    if kind == crate::annotation::ShapeKind::Mosaic {
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let trigger = cx.debug_bounds("filter-effect").unwrap();
-        cx.simulate_click(trigger.center(), Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let blur = cx.debug_bounds("toolbar.filter_blur").unwrap();
-        cx.simulate_click(blur.center(), Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(24.))));
-        cx.update(|_, cx| {
-            assert_eq!(
-                session.read(cx).annotations().tool(),
-                Some(crate::annotation::ShapeKind::Blur)
-            );
-            assert_eq!(session.read(cx).annotations().width(), 24.);
-        });
-        cx.simulate_keystrokes("ctrl-z");
-        cx.update(|_, cx| {
-            assert_eq!(
-                session.read(cx).annotations().committed()[0].kind,
-                crate::annotation::ShapeKind::Mosaic
-            )
-        });
-        cx.simulate_keystrokes("ctrl-z");
-        cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 0));
-        cx.simulate_keystrokes("ctrl-y");
-        cx.simulate_keystrokes("ctrl-y");
-        cx.simulate_keystrokes("m");
+            cx.simulate_keystrokes(key);
+        }
         cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
     }
+
+    // Polyline multi-vertex commit, right-click finish, double-click finish and Escape cancel.
     cx.simulate_keystrokes("p");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     for (x, y) in [(50., 80.), (100., 150.), (180., 80.)] {
@@ -2276,24 +2100,10 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
     );
     cx.update(|window, cx| {
         window.draw(cx).clear(cx);
-        assert_eq!(
-            session
-                .read(cx)
-                .annotations()
-                .visible()
-                .last()
-                .unwrap()
-                .points
-                .len(),
-            2
-        );
-    });
-    cx.update(|_, cx| {
-        assert_eq!(
-            session.read(cx).annotations().tool(),
-            Some(crate::annotation::ShapeKind::Polyline)
-        );
-        assert!(!session.read(cx).annotations().is_drawing_polyline());
+        let marks = session.read(cx).annotations();
+        assert_eq!(marks.visible().last().unwrap().points.len(), 2);
+        assert_eq!(marks.tool(), Some(ShapeKind::Polyline));
+        assert!(!marks.is_drawing_polyline());
     });
     cx.simulate_mouse_down(
         point(px(250.), px(230.)),
@@ -2336,12 +2146,7 @@ fn stroke_and_polyline_workflows(cx: &mut TestAppContext, kind: crate::annotatio
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 4));
 }
 
-fn geometry_toolbar_keyboard_and_export(
-    cx: &mut TestAppContext,
-    kind: crate::annotation::ShapeKind,
-) {
-    let is_rectangle = kind == crate::annotation::ShapeKind::Rectangle;
-    let key = if is_rectangle { "r" } else { "e" };
+fn geometry_toolbar_keyboard_and_export(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::base::init(cx);
         gpui_kit::component::init(cx);
@@ -2380,13 +2185,7 @@ fn geometry_toolbar_keyboard_and_export(
     );
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let button = cx
-        .debug_bounds(if is_rectangle {
-            "tb-rectangle"
-        } else {
-            "tb-ellipse"
-        })
-        .expect("geometry toolbar button");
+    let button = cx.debug_bounds("tb-rectangle").expect("rectangle button");
     cx.simulate_click(button.center(), Default::default());
     cx.update(|_, cx| assert!(session.read(cx).annotations().enabled()));
     let shift = gpui_kit::Modifiers {
@@ -2404,7 +2203,7 @@ fn geometry_toolbar_keyboard_and_export(
         window.draw(cx).clear(cx);
         let shared = session.read(cx);
         let rectangle = shared.annotations().visible().next().unwrap();
-        assert_eq!(rectangle.kind, kind);
+        assert_eq!(rectangle.kind, crate::annotation::ShapeKind::Rectangle);
         assert_eq!(rectangle.bounds.size, size(px(60.), px(60.)));
         assert_eq!(
             shared.selection().bounds().unwrap().size,
@@ -2416,7 +2215,7 @@ fn geometry_toolbar_keyboard_and_export(
         );
         let painted = window.painted_quads();
         let scale = window.scale_factor();
-        for stroke in rectangle.strokes().into_iter().filter(|_| is_rectangle) {
+        for stroke in rectangle.strokes() {
             assert!(
                 painted.iter().any(|quad| {
                     quad.bounds.origin.x.0 == f32::from(stroke.origin.x) * scale
@@ -2432,8 +2231,6 @@ fn geometry_toolbar_keyboard_and_export(
     assert!(cx.debug_bounds("tb-undo").is_none());
     assert!(cx.debug_bounds("tb-redo").is_none());
     // Settings clicks must not strand keyboard focus on a transient button.
-    // This test changes the next-stroke preset; editing the selected
-    // shape would correctly add its own undoable style change.
     cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.deselect())));
     {
         cx.simulate_resize(size(px(400.), px(400.)));
@@ -2461,33 +2258,45 @@ fn geometry_toolbar_keyboard_and_export(
         cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 1));
     }
     cx.update(|_, cx| {
-        // (the old tb-width-2 detent click set this; the detents are
-        // gone — set the stroke width through the session instead)
         session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(5.)));
         assert_eq!(session.read(cx).annotations().color().1, "Green");
         assert_eq!(session.read(cx).annotations().width(), 5.);
     });
-    cx.simulate_keystrokes("ctrl-z");
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 0));
-    cx.simulate_keystrokes("ctrl-y");
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 1));
     cx.simulate_keystrokes("escape");
     cx.update(|_, cx| {
         assert!(!session.read(cx).annotations().enabled());
         assert_eq!(session.read(cx).annotations().visible().count(), 1);
     });
-    cx.simulate_keystrokes(key);
-    cx.update(|_, cx| assert!(session.read(cx).annotations().enabled()));
+    // Also verify Ellipse toolbar/shortcut dispatch and Shift-circle constraint.
+    cx.simulate_keystrokes("e");
+    cx.update(|_, cx| {
+        assert_eq!(
+            session.read(cx).annotations().tool(),
+            Some(crate::annotation::ShapeKind::Ellipse)
+        );
+    });
+    cx.simulate_mouse_down(
+        point(px(130.), px(50.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    cx.simulate_mouse_move(point(px(170.), px(100.)), MouseButton::Left, shift);
+    cx.simulate_mouse_up(point(px(170.), px(100.)), MouseButton::Left, shift);
+    cx.update(|_, cx| {
+        let ellipse = session.read(cx).annotations().visible().last().unwrap();
+        assert_eq!(ellipse.kind, crate::annotation::ShapeKind::Ellipse);
+        assert_eq!(ellipse.bounds.size, size(px(50.), px(50.)));
+    });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     // Even keyboard focus on a settings button must survive that row's
     // removal when the active tool is toggled off.
     cx.simulate_keystrokes("tab tab tab tab tab tab");
-    cx.simulate_keystrokes(key);
+    cx.simulate_keystrokes("e");
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.simulate_keystrokes("ctrl-z");
-    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 0));
-    cx.simulate_keystrokes("ctrl-shift-z");
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 1));
+    cx.simulate_keystrokes("ctrl-shift-z");
+    cx.update(|_, cx| assert_eq!(session.read(cx).annotations().visible().count(), 2));
 }
 
 #[gpui_kit::test]

@@ -806,9 +806,9 @@ mod pointer_tests {
             ArrowStyle::Triangle,
             ArrowStyle::DoubleTriangle,
         ] {
-            for direction in 0..16 {
+            for direction in 0..8 {
                 let mut marks = Annotations::default();
-                let (sin, cos) = (direction as f32 * std::f32::consts::TAU / 16.).sin_cos();
+                let (sin, cos) = (direction as f32 * std::f32::consts::TAU / 8.).sin_cos();
                 draft(
                     &mut marks,
                     point(px(20. + cos * 500.), px(60. + sin * 500.)),

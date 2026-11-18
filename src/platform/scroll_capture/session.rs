@@ -635,16 +635,33 @@ mod tests {
                     wait_hint: Duration::from_secs(1),
                 },
             );
-            ev_rx
         });
-
-        std::thread::sleep(Duration::from_millis(25));
-        cmd_tx.try_send(Cmd::Finish).expect("finish after cap");
-        let ev_rx = handle.join().expect("session thread");
 
         let mut phases = Vec::new();
         let mut preview_widths = Vec::new();
         let mut finished_h = None;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(ev) = ev_rx.try_recv() {
+                let hit_cap = matches!(ev, ScrollEvent::Phase(Phase::MaxLength));
+                match ev {
+                    ScrollEvent::Phase(p) => phases.push(p),
+                    ScrollEvent::Preview { width, .. } => preview_widths.push(width),
+                    ScrollEvent::Finished { height, .. } => finished_h = Some(height),
+                    _ => {}
+                }
+                if hit_cap {
+                    // Let several still frames poll at the cap before finishing.
+                    std::thread::sleep(Duration::from_millis(12));
+                    break;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        cmd_tx.try_send(Cmd::Finish).expect("finish after cap");
+        handle.join().expect("session thread");
+
         while let Ok(ev) = ev_rx.try_recv() {
             match ev {
                 ScrollEvent::Phase(p) => phases.push(p),
@@ -784,25 +801,28 @@ mod tests {
                     wait_hint: Duration::from_secs(1),
                 },
             );
-            ev_rx
         });
-        std::thread::sleep(Duration::from_millis(15));
-        cmd_tx.try_send(Cmd::Finish).expect("finish");
-        let ev_rx = handle.join().expect("session thread");
-
         let mut resumed_tail = None;
-        while let Ok(ev) = ev_rx.try_recv() {
-            if let ScrollEvent::Preview {
-                window_top,
-                window_rows,
-                sheet_len,
-                peeking,
-                ..
-            } = ev
-            {
-                resumed_tail = Some((window_top + window_rows, sheet_len, peeking));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while resumed_tail.is_none() && Instant::now() < deadline {
+            if let Ok(ev) = ev_rx.try_recv() {
+                if let ScrollEvent::Preview {
+                    window_top,
+                    window_rows,
+                    sheet_len,
+                    peeking,
+                    ..
+                } = ev
+                    && sheet_len == H + 240
+                {
+                    resumed_tail = Some((window_top + window_rows, sheet_len, peeking));
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(2));
             }
         }
+        cmd_tx.try_send(Cmd::Finish).expect("finish");
+        handle.join().expect("session thread");
         assert_eq!(
             resumed_tail,
             Some((H + 240, H + 240, false)),
