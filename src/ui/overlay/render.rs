@@ -511,6 +511,13 @@ impl Render for Overlay {
                     {
                         return;
                     }
+                    if crate::model::settings::current()
+                        .capture()
+                        .right_click_cancel
+                    {
+                        this.escape(window, cx);
+                        return;
+                    }
                     this.finish_text(true, window, cx);
                     window.focus(&this.focus_handle, cx);
                     this.session.update(cx, |s, cx| {
@@ -984,6 +991,27 @@ fn pointer_event_sink(input_view: WeakEntity<Overlay>) -> impl IntoElement {
                             .number_at_double_click(&this.capture.output_name, event.position)
                     {
                         this.start_number_edit(ix, badge_local, window, cx);
+                        return;
+                    }
+                    if event.click_count == 2
+                        && crate::model::settings::current()
+                            .capture()
+                            .double_click_copy
+                        && matches!(tool, None | Some(crate::annotation::ShapeKind::Select))
+                        && this
+                            .session
+                            .read(cx)
+                            .selection()
+                            .bounds()
+                            .is_some_and(|b| b.contains(&p))
+                        && this
+                            .session
+                            .read(cx)
+                            .annotations()
+                            .interaction_hit_test(p)
+                            .is_none()
+                    {
+                        this.copy_selection(window, cx);
                         return;
                     }
                     window.focus(&this.focus_handle, cx);

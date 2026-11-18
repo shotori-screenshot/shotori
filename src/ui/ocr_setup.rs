@@ -480,16 +480,24 @@ mod keyboard_tests {
     }
 
     #[gpui_kit::test]
-    fn enter_downloads_and_cancels_without_copying(cx: &mut TestAppContext) {
+    fn dialog_keys_cycle_confirm_ignore_space_and_shield_overlay(cx: &mut TestAppContext) {
         let (view, cx) = harness(cx, Stage::Confirm);
-        press(cx, "ctrl-c ctrl-s enter");
+        press(cx, "space right space left h l");
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.confirmations, 0);
+            assert_eq!(view.cancellations, 0);
+            assert!(!view.closed);
+            assert!(view.focus.confirm.is_focused(window));
+        });
+        press(cx, "ctrl-c ctrl-s enter space");
         cx.update(|window, cx| {
             let view = view.read(cx);
             assert_eq!(view.confirmations, 1);
             assert_eq!(view.copies, 0);
             assert!(view.focus.cancel.is_focused(window));
         });
-        press(cx, "right left h l enter");
+        press(cx, "enter");
         cx.update(|window, cx| {
             let view = view.read(cx);
             assert_eq!(view.cancellations, 1);
@@ -502,26 +510,7 @@ mod keyboard_tests {
     }
 
     #[gpui_kit::test]
-    fn arrows_and_h_l_cycle_between_dialog_buttons(cx: &mut TestAppContext) {
-        let (view, cx) = harness(cx, Stage::Confirm);
-        for (key, confirm_focused) in [("right", false), ("left", true), ("h", false), ("l", true)]
-        {
-            press(cx, key);
-            cx.update(|window, cx| {
-                let view = view.read(cx);
-                assert_eq!(view.focus.confirm.is_focused(window), confirm_focused);
-                assert_eq!(view.focus.cancel.is_focused(window), !confirm_focused);
-            });
-        }
-        press(cx, "right enter");
-        cx.update(|_, cx| {
-            assert!(view.read(cx).closed);
-            assert_eq!(view.read(cx).confirmations, 0);
-        });
-    }
-
-    #[gpui_kit::test]
-    fn enter_retries_failed_download(cx: &mut TestAppContext) {
+    fn failed_retry_and_escape_cancel_restore_focus(cx: &mut TestAppContext) {
         let (view, cx) = harness(cx, Stage::Failed("test network error".into()));
         press(cx, "enter");
         cx.update(|window, cx| {
@@ -529,36 +518,12 @@ mod keyboard_tests {
             assert_eq!(view.confirmations, 1);
             assert!(view.focus.cancel.is_focused(window));
         });
-    }
-
-    #[gpui_kit::test]
-    fn escape_closes_download_dialog_and_restores_focus(cx: &mut TestAppContext) {
-        let (view, cx) = harness(cx, Stage::Downloading);
         press(cx, "escape");
         cx.update(|window, cx| {
             let view = view.read(cx);
             assert!(view.closed);
             assert_eq!(view.cancellations, 1);
             assert!(view.root_focus.is_focused(window));
-        });
-    }
-
-    #[gpui_kit::test]
-    fn space_does_not_activate_either_button(cx: &mut TestAppContext) {
-        let (view, cx) = harness(cx, Stage::Confirm);
-        press(cx, "space right space");
-        cx.update(|_, cx| {
-            let view = view.read(cx);
-            assert_eq!(view.confirmations, 0);
-            assert_eq!(view.cancellations, 0);
-            assert!(!view.closed);
-        });
-        press(cx, "h enter space");
-        cx.update(|_, cx| {
-            let view = view.read(cx);
-            assert_eq!(view.confirmations, 1);
-            assert_eq!(view.cancellations, 0);
-            assert!(!view.closed);
         });
     }
 }

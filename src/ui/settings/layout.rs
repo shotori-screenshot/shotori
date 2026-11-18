@@ -113,7 +113,7 @@ pub(super) fn content_column() -> Div {
         .mx_auto()
         .px_6()
         .py_5()
-        .gap_4()
+        .gap_5()
 }
 
 /// Page title with an optional inline [`super::help_tooltip`] mark.
@@ -140,31 +140,98 @@ pub(super) fn page_header(
         .children(hint_key.map(|key| super::help_tooltip(key, cx)))
 }
 
-/// Section captions share a compact divider above their form rows.
+/// Section header with an optional trailing action control, used above both
+/// surface form cards ([`card_group`]) and standalone card grids (`section_block`).
+fn group_heading(cx: &App, caption: Option<&str>, action: Option<AnyElement>) -> Option<Div> {
+    if caption.is_none() && action.is_none() {
+        return None;
+    }
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .w_full()
+            .px_0p5()
+            .children(caption.map(|text| {
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(text.to_owned())
+            }))
+            .children(action),
+    )
+}
+
+/// Freeform section wrapper (for multi-card grids like base palettes or OCR
+/// models that already draw their own card borders).
+pub(super) fn section_block(
+    cx: &App,
+    caption: Option<&str>,
+    action: Option<AnyElement>,
+    content: impl IntoElement,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .children(group_heading(cx, caption, action))
+        .child(content)
+}
+
+/// Bordered surface card grouping related form rows with subtle dividers.
 pub(super) fn card_group(
     cx: &App,
     caption: Option<&str>,
     rows: impl IntoIterator<Item = impl IntoElement>,
 ) -> Div {
-    let mut group = div().flex().flex_col().gap_1().w_full().min_w_0();
-    if let Some(caption) = caption {
-        group = group.child(
+    card_group_with_action(cx, caption, None, rows)
+}
+
+/// Bordered surface card with an optional header action button on the right.
+pub(super) fn card_group_with_action(
+    cx: &App,
+    caption: Option<&str>,
+    action: Option<AnyElement>,
+    rows: impl IntoIterator<Item = impl IntoElement>,
+) -> Div {
+    let divider_color = cx.theme().border.opacity(0.6);
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().group_box);
+    for (ix, row) in rows.into_iter().enumerate() {
+        body = body.child(
             div()
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(cx.theme().foreground)
                 .w_full()
-                .pb_2()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .child(caption.to_owned()),
+                .min_w_0()
+                .px_4()
+                .when(ix > 0, |d| d.border_t_1().border_color(divider_color))
+                .child(row),
         );
     }
-    let mut body = div().flex().flex_col().w_full().min_w_0();
-    for row in rows {
-        body = body.child(row);
-    }
-    group.child(body)
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .children(group_heading(cx, caption, action))
+        .child(body)
+}
+
+/// Visually dims a dependent row when its parent toggle is turned off.
+pub(super) fn dim_when(disabled: bool, row: Div) -> Div {
+    row.when(disabled, |d| d.opacity(0.45))
 }
 
 /// Wrapping is driven by available layout width, not a cached window size.
@@ -226,8 +293,8 @@ fn form_row(
     if let Some(description) = description {
         label = label.child(
             div()
-                .text_sm()
-                .line_height(relative(1.5))
+                .text_xs()
+                .line_height(relative(1.45))
                 .text_color(cx.theme().muted_foreground)
                 .child(description),
         );
@@ -237,7 +304,7 @@ fn form_row(
         .flex_wrap()
         .items_center()
         .gap_4()
-        .py_2()
+        .py_2p5()
         .w_full()
         .min_w_0()
         .child(label)
@@ -272,24 +339,58 @@ pub(super) fn slider_control(
     readout: String,
     cx: &App,
 ) -> Div {
+    slider_control_disabled(state, readout, false, cx)
+}
+
+/// Slider row control with explicit disabled state for dependent rows.
+pub(super) fn slider_control_disabled(
+    state: &Entity<gpui_kit::base::slider::SliderState>,
+    readout: String,
+    disabled: bool,
+    cx: &App,
+) -> Div {
     use gpui_kit::component::slider::Slider as ThemedSlider;
     div()
         .flex()
         .items_center()
+        .justify_end()
         .gap_3()
         .w_full()
         .child(
-            div()
-                .w(rems(9.))
-                .flex_shrink_0()
-                .child(ThemedSlider::new(state).horizontal().bg(cx.theme().primary)),
+            div().w(rems(9.)).flex_shrink_0().child(
+                ThemedSlider::new(state)
+                    .horizontal()
+                    .disabled(disabled)
+                    .bg(cx.theme().primary),
+            ),
         )
         .child(
             div()
+                .min_w(rems(3.5))
+                .text_right()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(readout),
         )
+}
+
+/// Format a byte count into a compact human-readable string (`0 B`, `420 KB`, `38.4 MB`).
+pub(super) fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if bytes == 0 {
+        "0 B".to_owned()
+    } else if b < KB {
+        format!("{bytes} B")
+    } else if b < MB {
+        format!("{:.1} KB", b / KB)
+    } else if b < GB {
+        format!("{:.1} MB", b / MB)
+    } else {
+        format!("{:.2} GB", b / GB)
+    }
 }
 
 /// Bordered compact action button used across file/folder/cache rows.
@@ -302,6 +403,7 @@ pub(super) fn action_button(
     let theme = cx.theme();
     gpui_kit::base::Button::new(SharedString::from(id))
         .accessibility_label(label.clone())
+        .styles(|s| s.disabled(|d| d.opacity(0.45)))
         .flex()
         .items_center()
         .h_8()

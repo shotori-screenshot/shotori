@@ -400,6 +400,11 @@ async fn copy_to_clipboard(
         .spawn(async move {
             let png = crate::model::export::encode_png_fast(w, h, &rgba)?;
             crate::clipboard::copy_image(w, h, &rgba, &png)?;
+            if crate::model::settings::current().export().save_on_copy
+                && let Err(e) = crate::model::export::save_to_default_dir(w, h, &rgba)
+            {
+                eprintln!("[shotori] save_on_copy failed: {e:#}");
+            }
             Ok::<Vec<u8>, anyhow::Error>(png)
         })
         .await;

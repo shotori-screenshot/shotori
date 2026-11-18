@@ -1,18 +1,22 @@
 //! Save & Export settings page (issue #42): default save folder, direct
-//! one-click save without a dialog, dialog folder memory, filename pattern,
-//! and image format / compression options.
+//! one-click save without a dialog, dialog folder memory, filename pattern
+//! with quick-insert tokens, and contextual image format / compression options.
 
 use std::path::PathBuf;
 
+use gpui_kit::base::Button;
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::Switch;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::*;
 
-use crate::model::settings::{ExportFormat, ExportSettings, PngCompression, Settings};
+use crate::model::settings::{
+    DEFAULT_FILENAME_TEMPLATE, ExportFormat, ExportSettings, PngCompression, Settings,
+};
 
 use super::{SettingsWindow, card_group, card_row, open_external, page_body, page_header};
 
@@ -217,6 +221,48 @@ impl SettingsWindow {
         self.persist(cx);
     }
 
+    pub(super) fn append_filename_token(
+        &mut self,
+        suffix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.settings.export().filename_template.clone();
+        let next = if current.ends_with('_') || current.ends_with('-') || suffix.starts_with('_') {
+            format!("{current}{suffix}")
+        } else {
+            format!("{current}_{suffix}")
+        };
+        if self
+            .settings
+            .export_mut()
+            .set_filename_template(&next)
+            .is_ok()
+        {
+            self.export_page.template_error = None;
+            self.export_page
+                .template_input
+                .update(cx, |s, cx| s.set_value(next, window, cx));
+            self.persist(cx);
+        }
+    }
+
+    fn reset_filename_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tpl = DEFAULT_FILENAME_TEMPLATE.to_owned();
+        if self
+            .settings
+            .export_mut()
+            .set_filename_template(&tpl)
+            .is_ok()
+        {
+            self.export_page.template_error = None;
+            self.export_page
+                .template_input
+                .update(cx, |s, cx| s.set_value(tpl, window, cx));
+            self.persist(cx);
+        }
+    }
+
     fn bool_export_switch(
         &self,
         id: &'static str,
@@ -246,8 +292,9 @@ impl SettingsWindow {
         let exp = self.settings.export();
         let resolved_dir = exp.resolved_save_dir().ok();
         let has_custom_dir = exp.save_dir.is_some();
+        let direct_save = exp.auto_save;
 
-        let mut dir_actions = div().flex().items_center().gap_1().flex_shrink_0();
+        let mut dir_actions = div().flex().items_center().gap_1p5().flex_shrink_0();
         {
             let resolved_for_open = exp.resolved_save_dir();
             let resolved_open_str = resolved_for_open
@@ -316,14 +363,16 @@ impl SettingsWindow {
             cx,
             |s, v| s.export_mut().auto_save = v,
         );
-        let remember_last_dir = self.bool_export_switch(
-            "export-remember-last-dir",
-            exp.remember_last_dir,
-            "settings.export.remember_last_dir.title",
-            window,
-            cx,
-            |s, v| s.export_mut().remember_last_dir = v,
-        );
+        let remember_last_dir = self
+            .bool_export_switch(
+                "export-remember-last-dir",
+                exp.remember_last_dir,
+                "settings.export.remember_last_dir.title",
+                window,
+                cx,
+                |s, v| s.export_mut().remember_last_dir = v,
+            )
+            .disabled(direct_save);
         let copy_on_save = self.bool_export_switch(
             "export-copy-on-save",
             exp.copy_on_save,
@@ -332,13 +381,28 @@ impl SettingsWindow {
             cx,
             |s, v| s.export_mut().copy_on_save = v,
         );
+        let save_on_copy = self.bool_export_switch(
+            "export-save-on-copy",
+            exp.save_on_copy,
+            "settings.export.save_on_copy.title",
+            window,
+            cx,
+            |s, v| s.export_mut().save_on_copy = v,
+        );
 
-        let template_desc = match &self.export_page.template_error {
-            Some(reason) => crate::i18n::t!(
-                "settings.export.filename_template.invalid",
-                reason = reason.as_str()
-            )
-            .to_string(),
+        let remember_desc = direct_save.then(|| {
+            crate::i18n::t!("settings.export.remember_last_dir.disabled_note").to_string()
+        });
+
+        let (template_text, template_is_err) = match &self.export_page.template_error {
+            Some(reason) => (
+                crate::i18n::t!(
+                    "settings.export.filename_template.invalid",
+                    reason = reason.as_str()
+                )
+                .to_string(),
+                true,
+            ),
             None => {
                 let preview = crate::model::export::suggested_filename_for(
                     exp,
@@ -346,13 +410,201 @@ impl SettingsWindow {
                     1920,
                     1080,
                 );
-                crate::i18n::t!(
-                    "settings.export.filename_template.preview",
-                    name = preview.as_str()
+                (
+                    crate::i18n::t!(
+                        "settings.export.filename_template.preview",
+                        name = preview.as_str()
+                    )
+                    .to_string(),
+                    false,
                 )
-                .to_string()
             }
         };
+
+        let token_chip = |id: &'static str, label_key: &'static str, token: &'static str| {
+            let entity = cx.entity();
+            let label = crate::i18n::t!(label_key).to_string();
+            Button::new(id)
+                .accessibility_label(label.clone())
+                .px_2p5()
+                .h_7()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .hover(|s| s.bg(cx.theme().secondary_hover))
+                .focus_visible(|s| s.border_color(cx.theme().ring))
+                .child(label)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.append_filename_token(token, window, cx);
+                    });
+                })
+        };
+
+        let template_customized = exp.filename_template != DEFAULT_FILENAME_TEMPLATE
+            || self.export_page.template_error.is_some();
+
+        let mut token_bar = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .child(token_chip(
+                "export-token-date",
+                "settings.export.token.date",
+                "%Y-%m-%d",
+            ))
+            .child(token_chip(
+                "export-token-time",
+                "settings.export.token.time",
+                "%H-%M-%S",
+            ))
+            .child(token_chip(
+                "export-token-ms",
+                "settings.export.token.ms",
+                "%3f",
+            ))
+            .child(token_chip(
+                "export-token-size",
+                "settings.export.token.size",
+                "{w}x{h}",
+            ));
+        if template_customized {
+            let entity = cx.entity();
+            let reset_lbl = crate::i18n::t!("settings.export.token.reset").to_string();
+            token_bar = token_bar.child(
+                Button::new("export-token-reset")
+                    .accessibility_label(reset_lbl.clone())
+                    .px_2p5()
+                    .h_7()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|s| {
+                        s.bg(cx.theme().secondary_hover)
+                            .text_color(cx.theme().foreground)
+                    })
+                    .focus_visible(|s| s.border_color(cx.theme().ring))
+                    .child(reset_lbl)
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.reset_filename_template(window, cx);
+                        });
+                    }),
+            );
+        }
+
+        // Full-width stacked block so long strftime templates are never truncated.
+        let naming_block = div()
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .py_3()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(
+                                crate::i18n::t!("settings.export.filename_template.title")
+                                    .to_string(),
+                            )
+                            .child(super::help_tooltip(
+                                "settings.export.filename_template.hint",
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(if template_is_err {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().border
+                            })
+                            .text_xs()
+                            .text_color(if template_is_err {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(template_text),
+                    ),
+            )
+            .child(Input::new(&self.export_page.template_input).w_full())
+            .child(token_bar);
+
+        let mut encoding_rows: Vec<AnyElement> = vec![
+            card_row(
+                cx,
+                crate::i18n::t!("settings.export.format_row.title").to_string(),
+                Some("settings.export.format_row.body"),
+                None,
+                Select::new(&self.export_page.format_select).w_full(),
+            )
+            .into_any_element(),
+        ];
+        match exp.format {
+            ExportFormat::Png => {
+                encoding_rows.push(
+                    card_row(
+                        cx,
+                        crate::i18n::t!("settings.export.png_compression_row.title").to_string(),
+                        None,
+                        None,
+                        Select::new(&self.export_page.png_compression_select).w_full(),
+                    )
+                    .into_any_element(),
+                );
+            }
+            ExportFormat::Jpeg => {
+                encoding_rows.push(
+                    card_row(
+                        cx,
+                        crate::i18n::t!("settings.export.jpeg_quality.title").to_string(),
+                        None,
+                        None,
+                        super::layout::slider_control(
+                            &self.export_page.jpeg_quality_slider,
+                            format!("{}%", exp.jpeg_quality),
+                            cx,
+                        ),
+                    )
+                    .into_any_element(),
+                );
+            }
+            ExportFormat::Webp => {
+                encoding_rows.push(
+                    div()
+                        .py_2p5()
+                        .text_xs()
+                        .line_height(relative(1.5))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::i18n::t!("settings.export.webp_lossless_note").to_string())
+                        .into_any_element(),
+                );
+            }
+        }
 
         let body = super::layout::content_column()
             .child(
@@ -393,12 +645,15 @@ impl SettingsWindow {
                         None,
                         auto_save,
                     ),
-                    super::layout::compact_row(
-                        cx,
-                        crate::i18n::t!("settings.export.remember_last_dir.title").to_string(),
-                        Some("settings.export.remember_last_dir.body"),
-                        None,
-                        remember_last_dir,
+                    super::layout::dim_when(
+                        direct_save,
+                        super::layout::compact_row(
+                            cx,
+                            crate::i18n::t!("settings.export.remember_last_dir.title").to_string(),
+                            Some("settings.export.remember_last_dir.body"),
+                            remember_desc,
+                            remember_last_dir,
+                        ),
                     ),
                     super::layout::compact_row(
                         cx,
@@ -407,49 +662,24 @@ impl SettingsWindow {
                         None,
                         copy_on_save,
                     ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.export.save_on_copy.title").to_string(),
+                        Some("settings.export.save_on_copy.body"),
+                        None,
+                        save_on_copy,
+                    ),
                 ],
             ))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.export.group.naming").as_ref()),
-                vec![card_row(
-                    cx,
-                    crate::i18n::t!("settings.export.filename_template.title").to_string(),
-                    Some("settings.export.filename_template.hint"),
-                    Some(template_desc),
-                    Input::new(&self.export_page.template_input).w_full(),
-                )],
+                vec![naming_block],
             ))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.export.group.encoding").as_ref()),
-                vec![
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.export.format_row.title").to_string(),
-                        Some("settings.export.format_row.body"),
-                        None,
-                        Select::new(&self.export_page.format_select).w_full(),
-                    ),
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.export.png_compression_row.title").to_string(),
-                        None,
-                        None,
-                        Select::new(&self.export_page.png_compression_select).w_full(),
-                    ),
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.export.jpeg_quality.title").to_string(),
-                        None,
-                        None,
-                        super::layout::slider_control(
-                            &self.export_page.jpeg_quality_slider,
-                            format!("{}%", exp.jpeg_quality),
-                            cx,
-                        ),
-                    ),
-                ],
+                encoding_rows,
             ));
 
         page_body("page-export").child(body)

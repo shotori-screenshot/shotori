@@ -101,6 +101,7 @@ pub(super) enum ShapeParameters {
     },
     Badge {
         diameter: f32,
+        fill: bool,
         format: NumberFormat,
         arrow: ArrowStyle,
         tip: Option<gpui_kit::Point<gpui_kit::Pixels>>,
@@ -134,6 +135,7 @@ impl ShapeParameters {
             ShapeKind::Text => Self::Text { font_size: value },
             ShapeKind::Number => Self::Badge {
                 diameter: value,
+                fill: true,
                 format: NumberFormat::Decimal,
                 arrow: ArrowStyle::default(),
                 tip: None,
@@ -236,6 +238,13 @@ impl NumberFormat {
 }
 
 impl Shape {
+    pub(crate) fn number_fill(&self) -> bool {
+        match self.parameters {
+            ShapeParameters::Badge { fill, .. } => fill,
+            _ => true,
+        }
+    }
+
     pub(crate) fn number_format(&self) -> NumberFormat {
         match self.parameters {
             ShapeParameters::Badge { format, .. } => format,

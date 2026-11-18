@@ -163,20 +163,132 @@ settings:
       en: About
       zh-CN: 关于
     tagline:
-      en: Wayland screenshots, annotations, pins, scrolling capture and local OCR
-      zh-CN: 截图、标注、贴图、长截图与本地文字识别
+      en: Wayland screenshots, annotations, pins, scrolling capture, QR codes and local OCR
+      zh-CN: Wayland 原生截图、标注、悬浮贴图、长截图、二维码扫描与本地文字识别
     repository:
       en: Source repository
       zh-CN: 源码仓库
     issues:
       en: Report an issue
       zh-CN: 问题反馈
+    copy_info:
+      en: Copy system info
+      zh-CN: 复制环境信息
+    copied:
+      en: Copied ✓
+      zh-CN: 已复制 ✓
     license:
       en: Released under the MIT License
-      zh-CN: 以 MIT 许可证发布
-    credits:
-      en: UI hand-drawn with gpui-kit · OCR by RapidOCR (PP-OCR) · Community themes — Catppuccin, Dracula, Gruvbox, Nord, Rosé Pine, Tokyo Night
-      zh-CN: 界面基于 gpui-kit 手绘 · 识别引擎 RapidOCR（PP-OCR）· 社区主题——Catppuccin、Dracula、Gruvbox、Nord、Rosé Pine、Tokyo Night
+      zh-CN: 以 MIT 许可证开源发布
+    tech_title:
+      en: Architecture & credits
+      zh-CN: 架构与致谢
+    tech_ui:
+      en: GPU-accelerated Wayland UI hand-drawn with gpui-kit
+      zh-CN: 基于 gpui-kit 手绘的 Wayland 原生 GPU 加速界面
+    tech_ocr:
+      en: 100% offline text & QR recognition via RapidOCR (PP-OCR) and rqrr
+      zh-CN: 基于 RapidOCR（PP-OCR）与 rqrr 的纯本地文字与二维码识别
+    tech_themes:
+      en: Built-in community palettes — Catppuccin · Dracula · Gruvbox · Nord · Rosé Pine · Tokyo Night · Solarized · GitHub
+      zh-CN: "内置社区配色：Catppuccin · Dracula · Gruvbox · Nord · Rosé Pine · Tokyo Night · Solarized · GitHub"
+  advanced:
+    blurb:
+      en: Configuration files, local caches, Wayland session diagnostics and factory reset
+      zh-CN: 配置文件读写、本地缓存清理、Wayland 会话诊断与恢复出厂设置
+    reload:
+      en: Reload from disk
+      zh-CN: 从磁盘重新加载
+    reloaded:
+      en: Reloaded ✓
+      zh-CN: 已重新加载 ✓
+    open_dir:
+      en: Open folder
+      zh-CN: 打开目录
+    file_present:
+      en: Saved on disk
+      zh-CN: 已写入磁盘
+    file_default:
+      en: Using defaults (created on edit)
+      zh-CN: 当前使用默认值（编辑时自动创建）
+    group:
+      storage:
+        en: Caches & local state
+        zh-CN: 缓存与本地状态
+      diagnostics:
+        en: Session & compositor diagnostics
+        zh-CN: 环境与合成器诊断
+      danger:
+        en: Factory reset
+        zh-CN: 恢复出厂设置
+    notify_cache:
+      title:
+        en: Notification & clipboard preview cache
+        zh-CN: 通知与剪贴板临时缓存
+      hint:
+        en: Temporary thumbnails and text files kept so clicking a toast notification opens them; pruned automatically after 24 hours
+        zh-CN: 用于点击系统通知时打开原图或文本的临时文件，超过 24 小时会自动清理
+    cache_empty:
+      en: Empty
+      zh-CN: 空
+    cache_stats:
+      en: "%{size} · %{count} files"
+      zh-CN: "%{size} · %{count} 个文件"
+    clear_cache:
+      en: Clear
+      zh-CN: 清理
+    last_dir:
+      title:
+        en: Remembered save-dialog folder
+        zh-CN: 保存弹窗记忆目录
+      none:
+        en: Not recorded yet
+        zh-CN: 尚未记录
+      clear:
+        en: Forget
+        zh-CN: 清除记录
+    ocr_cache:
+      title:
+        en: OCR model cache
+        zh-CN: OCR 模型缓存目录
+    diag:
+      copy:
+        en: Copy report
+        zh-CN: 复制诊断摘要
+      copied:
+        en: Copied ✓
+        zh-CN: 已复制 ✓
+      wayland:
+        en: Wayland display
+        zh-CN: Wayland 显示套接字
+      desktop:
+        en: Desktop session
+        zh-CN: 当前桌面会话
+      snap_backend:
+        en: Window-snap IPC backend
+        zh-CN: 窗口吸附 IPC 后端
+      snap_unavailable:
+        en: Not detected (pixel smart-region remains active)
+        zh-CN: 未检测到（像素级智能选区仍正常生效）
+      unset:
+        en: Not set
+        zh-CN: 未设置
+    factory_reset:
+      title:
+        en: Reset all settings & theme overrides
+        zh-CN: 重置全部设置与主题覆盖
+      desc:
+        en: Restores every preference page, custom shortcut, toolbar layout and theme override to factory defaults
+        zh-CN: 将所有设置项、自定义快捷键、工具栏布局与主题覆盖恢复为初始默认状态
+      arm:
+        en: Reset all…
+        zh-CN: 恢复出厂设置…
+      confirm:
+        en: Confirm reset
+        zh-CN: 确认重置
+      cancel:
+        en: Cancel
+        zh-CN: 取消
   keys_page:
     title:
       en: Shortcuts
@@ -284,6 +396,40 @@ settings:
     reset:
       en: Reset to defaults
       zh-CN: 恢复默认
+    reset_single:
+      en: Reset to default shortcut
+      zh-CN: 恢复默认快捷键
+    no_matches:
+      en: No shortcuts match the current search
+      zh-CN: 没有匹配当前搜索词的快捷键
+    builtin:
+      group:
+        en: Built-in fixed keys & canvas gestures
+        zh-CN: 内置固定按键与画布手势
+      enter:
+        en: Copy selection to clipboard and finish
+        zh-CN: 复制选区到剪贴板并完成截图
+      escape:
+        en: Exit active tool / cancel drag / close overlay
+        zh-CN: 逐级退出当前工具、取消拖拽或关闭截图
+      arrows:
+        en: Nudge selection or selected mark by 1 px (hold Shift for 10 px)
+        zh-CN: 微调选区或选中标注 1 px（按住 Shift 为 10 px）
+      wheel:
+        en: Step smart-region hierarchy or resize active brush / zoom crop
+        zh-CN: 切换智能选区层级、微调选区大小或调节画笔粗细
+      alt_click:
+        en: Place sequence badge repeating the previous number
+        zh-CN: 序号工具下重复放置上一个编号
+      arrows_key:
+        en: "↑ ↓ ← →"
+        zh-CN: "↑ ↓ ← →"
+      wheel_key:
+        en: Scroll wheel
+        zh-CN: 鼠标滚轮
+      alt_click_key:
+        en: Alt + Click
+        zh-CN: Alt + 左键
   toolbar_page:
     group:
       current:
@@ -296,8 +442,8 @@ settings:
       en: "Drag to reorder\nclick to hide\nshortcuts stay available"
       zh-CN: "拖动排序\n点击隐藏\n快捷键不受影响"
     reset:
-      en: Reset to defaults
-      zh-CN: 恢复默认
+      en: Reset toolbar
+      zh-CN: 重置工具栏
     palette_hint:
       en: Click or drag onto the toolbar
       zh-CN: 点击添加，或拖入工具栏
@@ -308,12 +454,46 @@ settings:
     title:
       en: OCR
       zh-CN: 文字识别
+    blurb:
+      en: On-device PP-OCR inference — screenshots never leave your machine
+      zh-CN: 纯本地 PP-OCR 离线文字识别，截图数据完全留在本地设备
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
+    group:
+      models:
+        en: Recognition model
+        zh-CN: 识别模型选择
+      behavior:
+        en: Recognition & formatting
+        zh-CN: 识别与排版行为
+      advanced:
+        en: Custom model & cache
+        zh-CN: 自定义配置与模型缓存
+    download_btn:
+      en: Download
+      zh-CN: 下载
+    cancel_download:
+      en: Cancel
+      zh-CN: 取消
+    downloading_status:
+      en: "Downloading (%{idx}/%{count}) · %{done}"
+      zh-CN: "下载中 (%{idx}/%{count}) · %{done}"
+    download_failed:
+      en: "Download failed: %{reason}"
+      zh-CN: "下载失败：%{reason}"
+    use_presets:
+      en: Use preset models
+      zh-CN: 切回预设模型
+    clear_cache:
+      en: Clear cache
+      zh-CN: 清空缓存
+    clear_confirm:
+      en: Confirm clear
+      zh-CN: 确认清空
     cache_row:
       en: Model cache
       zh-CN: 模型缓存
-    model:
-      en: Recognition model
-      zh-CN: 识别模型
     ready:
       en: Ready
       zh-CN: 已就绪
@@ -444,9 +624,18 @@ settings:
         en: Swatch border
         zh-CN: 色块边框
     group:
+      interface:
+        en: Language & motion
+        zh-CN: 语言与界面动效
     base_palette:
       en: Base palette
       zh-CN: 基础配色
+    custom_active:
+      en: Custom color overrides active
+      zh-CN: 当前包含自定义颜色覆盖
+    reset_single:
+      en: Reset this color
+      zh-CN: 恢复此颜色默认值
     dim_opacity:
       en: Dim opacity
       zh-CN: 遮罩不透明度
@@ -461,6 +650,12 @@ settings:
         en: Skip non-essential chrome animations such as loupe fade and OSD orbit
         zh-CN: 跳过放大镜淡入、识别动画等非必要的界面过渡效果
   capture:
+    blurb:
+      en: Toolbar layout, smart snapping, selection HUD, mouse gestures and long-capture limits
+      zh-CN: 工具栏布局定制、智能吸附、辅助显示、鼠标手势与长截图参数
+    reset:
+      en: Reset to defaults
+      zh-CN: 恢复默认
     size_label:
       logical:
         en: Logical pixels (W × H)
@@ -541,6 +736,20 @@ settings:
       body:
         en: Applies when saving directly to the default folder without a file dialog
         zh-CN: 开启「直接保存到默认目录」时，保存后不关闭截图界面
+    double_click_copy:
+      title:
+        en: Double-click inside selection to copy
+        zh-CN: 双击选区内部立即复制
+      body:
+        en: Double-clicking empty space inside the selected area copies the screenshot and finishes
+        zh-CN: 未选中画笔工具时，双击选区空白区域立即复制截图并完成
+    right_click_cancel:
+      title:
+        en: Right-click to cancel or exit
+        zh-CN: 右键逐级取消或退出截图
+      body:
+        en: Acts like Escape — exits active annotation tools first, then closes the overlay
+        zh-CN: 与 Esc 相同：优先退出当前标注工具或拖拽，空闲时关闭截图界面
   scroll:
     axis:
       vertical:
@@ -574,9 +783,18 @@ settings:
       colors:
         en: Palette & default colors
         zh-CN: 调色板与默认颜色
-      tools:
-        en: Default tool sizes & styles
-        zh-CN: 工具默认尺寸与样式
+      shapes:
+        en: Shapes, lines & arrows
+        zh-CN: 几何形状、线条与箭头
+      highlighter:
+        en: Highlighter
+        zh-CN: 荧光笔
+      text_badge:
+        en: Text & sequence badges
+        zh-CN: 文字与序号圆标
+      effects:
+        en: Privacy, spotlight & magnifier
+        zh-CN: 隐私遮挡、聚光灯与放大镜
     number_format:
       decimal:
         en: Numbers (1, 2, 3)
@@ -640,6 +858,13 @@ settings:
       title:
         en: Sequence badge format
         zh-CN: 序号编码格式
+    number_fill:
+      title:
+        en: Fill sequence badges
+        zh-CN: 填充序号徽章
+      body:
+        en: Start sequence badges as solid circles instead of hollow rings
+        zh-CN: 默认使用实心圆标而非空心圆环
     mosaic_strength:
       title:
         en: Mosaic & blur strength
@@ -652,10 +877,41 @@ settings:
       title:
         en: Spotlight backdrop opacity
         zh-CN: 聚光灯背景暗度
+    spotlight_ellipse:
+      title:
+        en: Elliptical spotlight cutout
+        zh-CN: 聚光灯默认使用椭圆高亮区
     magnifier_zoom:
       title:
         en: Magnifier lens zoom
         zh-CN: 放大镜标注倍率
+    magnifier_ellipse:
+      title:
+        en: Circular magnifier lens
+        zh-CN: 放大镜默认使用圆形镜片
+    magnifier_shadow:
+      title:
+        en: Magnifier lens drop shadow
+        zh-CN: 放大镜默认显示投影
+    geometry_radius:
+      title:
+        en: Rectangle corner radius
+        zh-CN: 矩形默认圆角
+    geometry_fill:
+      title:
+        en: Fill rectangles & ellipses by default
+        zh-CN: 默认实心填充矩形与椭圆
+    text_bold:
+      title:
+        en: Bold text by default
+        zh-CN: 文字默认使用粗体
+    text_outline:
+      title:
+        en: High-contrast white text outline
+        zh-CN: 文字默认添加白色描边
+      body:
+        en: Keeps colored text legible across both dark and light screenshot backgrounds
+        zh-CN: 在深色或浅色截图背景上都能保持彩色标注文字清晰易读
   export:
     blurb:
       en: Default folder, direct save without a dialog, filename pattern and image encoding
@@ -720,6 +976,9 @@ settings:
       body:
         en: When the save dialog opens, start in the folder chosen last time instead of the default folder
         zh-CN: 使用文件保存弹窗时，默认打开上一次保存所选的目录
+      disabled_note:
+        en: Inactive while saving directly without a file dialog
+        zh-CN: 开启一键直存时跳过保存弹窗，此项暂不生效
     copy_on_save:
       title:
         en: Also copy to clipboard when saving
@@ -727,6 +986,13 @@ settings:
       body:
         en: Put the saved screenshot on the clipboard automatically
         zh-CN: 每次将截图保存为文件时，自动复制一份到剪贴板
+    save_on_copy:
+      title:
+        en: Auto-save backup when copying
+        zh-CN: 复制截图时自动保存备份文件
+      body:
+        en: Silently save a copy to the default folder whenever copying to the clipboard
+        zh-CN: 每次复制到剪贴板时，同时在后台静默保存一份到默认目录
     filename_template:
       title:
         en: Filename template
@@ -740,6 +1006,25 @@ settings:
       invalid:
         en: "Invalid template: %{reason}"
         zh-CN: "模板无效：%{reason}"
+    token:
+      date:
+        en: "+ Date"
+        zh-CN: "+ 日期"
+      time:
+        en: "+ Time"
+        zh-CN: "+ 时间"
+      ms:
+        en: "+ Millis"
+        zh-CN: "+ 毫秒"
+      size:
+        en: "+ Size {w}x{h}"
+        zh-CN: "+ 尺寸 {w}x{h}"
+      reset:
+        en: Default template
+        zh-CN: 恢复默认模板
+    webp_lossless_note:
+      en: Lossless WebP encoding — full pixel fidelity with smaller files than PNG
+      zh-CN: 无损 WebP 编码保存——像素级无损画质，体积通常小于 PNG
     format_row:
       title:
         en: Image format
@@ -766,6 +1051,31 @@ settings:
     group:
       en: Notifications
       zh-CN: 桌面通知
+    test_btn:
+      en: Send test toast
+      zh-CN: 发送测试通知
+    test_title:
+      en: Shotori notification test
+      zh-CN: Shotori 桌面通知测试
+    test_body:
+      en: "Desktop notifications are active (%{secs} s timeout)."
+      zh-CN: "桌面气泡通知工作正常（停留时间 %{secs} 秒）。"
+    events:
+      title:
+        en: Notify on events
+        zh-CN: 触发通知的场景
+      copy:
+        en: Copy image
+        zh-CN: 复制图片
+      save:
+        en: Save file
+        zh-CN: 保存文件
+      ocr:
+        en: Copy OCR
+        zh-CN: OCR 识字
+      qr:
+        en: Scan QR
+        zh-CN: 二维码扫码
     enabled:
       title:
         en: Enable desktop notifications
@@ -773,22 +1083,6 @@ settings:
       body:
         en: Show toast banners for completed actions and errors
         zh-CN: 在操作完成或发生错误时显示系统通知横幅
-    on_copy:
-      title:
-        en: Notify after copying image
-        zh-CN: 复制截图后通知
-    on_save:
-      title:
-        en: Notify after saving file
-        zh-CN: 保存文件后通知
-    on_ocr:
-      title:
-        en: Notify after copying OCR text
-        zh-CN: OCR 复制文字后通知
-    on_qr:
-      title:
-        en: Notify after scanning QR code
-        zh-CN: 扫描二维码复制后通知
     show_thumbnail:
       title:
         en: Include image preview
@@ -804,6 +1098,34 @@ settings:
     group:
       en: Floating pins
       zh-CN: 悬浮贴图
+    preview:
+      label:
+        en: Live appearance preview
+        zh-CN: 贴图外观实时预览
+      sample:
+        en: "Pinned crop · %{opacity}%"
+        zh-CN: "悬浮贴图 · %{opacity}%"
+    opacity:
+      title:
+        en: Initial opacity
+        zh-CN: 贴图初始不透明度
+    double_click_row:
+      title:
+        en: Double-click action
+        zh-CN: 双击贴图动作
+    double_click:
+      none:
+        en: Do nothing
+        zh-CN: 无动作
+      close:
+        en: Close pin
+        zh-CN: 关闭贴图
+      copy_close:
+        en: Copy & close
+        zh-CN: 复制并关闭
+      reset_zoom:
+        en: Reset zoom to 100%
+        zh-CN: 重置缩放至 100%
     zoom_modifier:
       none:
         en: Wheel directly (no modifier)
@@ -1164,6 +1486,9 @@ toolbar:
   corner_radius:
     en: Corner radius
     zh-CN: 圆角半径
+  number_fill:
+    en: Fill badge
+    zh-CN: 填充徽章
   number_value:
     en: Sequence value
     zh-CN: 序号数值

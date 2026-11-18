@@ -1,5 +1,5 @@
-//! Capture & Toolbar settings page: selection HUD, corner loupe, post-exit
-//! behavior, long-screenshot defaults, and the drag-and-drop toolbar layout.
+//! Capture & Toolbar settings page: drag-and-drop toolbar layout, selection
+//! HUD, corner loupe, mouse gestures, post-exit behavior, and long-screenshot defaults.
 
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::Switch;
@@ -185,9 +185,47 @@ impl CapturePageState {
             _subscriptions: subs,
         }
     }
+
+    pub(super) fn resync(&self, settings: &Settings, window: &mut Window, cx: &mut App) {
+        let cap = settings.capture();
+        let size_ix = SizeLabelMode::ALL
+            .iter()
+            .position(|m| *m == cap.size_label)
+            .map(IndexPath::new);
+        self.size_label_select
+            .update(cx, |s, cx| s.set_selected_index(size_ix, window, cx));
+        self.loupe_zoom_slider.update(cx, |s, cx| {
+            s.set_value(f32::from(cap.loupe_zoom), window, cx)
+        });
+        let loupe_ix = LoupeSize::ALL
+            .iter()
+            .position(|sz| *sz == cap.loupe_size)
+            .map(IndexPath::new);
+        self.loupe_size_select
+            .update(cx, |s, cx| s.set_selected_index(loupe_ix, window, cx));
+        let axis_ix = ScrollAxisSetting::ALL
+            .iter()
+            .position(|a| *a == settings.scroll().default_axis)
+            .map(IndexPath::new);
+        self.scroll_axis_select
+            .update(cx, |s, cx| s.set_selected_index(axis_ix, window, cx));
+        self.scroll_max_length_slider.update(cx, |s, cx| {
+            s.set_value(settings.scroll().max_length as f32, window, cx)
+        });
+    }
 }
 
 impl SettingsWindow {
+    fn reset_capture_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.reset_capture_defaults();
+        self.capture_page.resync(&self.settings, window, cx);
+        self.persist(cx);
+        if self.appearance.file.dim_opacity.take().is_some() {
+            self.appearance_resync(window, cx);
+            self.appearance_apply(cx);
+        }
+    }
+
     fn bool_capture_switch(
         &self,
         id: &'static str,
@@ -218,6 +256,9 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let cap = self.settings.capture();
+        let loupe_on = cap.loupe;
+
         let smart_region = self.bool_capture_switch(
             "smart-region",
             self.settings.smart_region(),
@@ -228,7 +269,7 @@ impl SettingsWindow {
         );
         let window_snap = self.bool_capture_switch(
             "capture-window-snap",
-            self.settings.capture().window_snap,
+            cap.window_snap,
             "settings.capture.window_snap.title",
             window,
             cx,
@@ -236,7 +277,7 @@ impl SettingsWindow {
         );
         let crosshair = self.bool_capture_switch(
             "capture-crosshair",
-            self.settings.capture().crosshair,
+            cap.crosshair,
             "settings.capture.crosshair.title",
             window,
             cx,
@@ -244,15 +285,31 @@ impl SettingsWindow {
         );
         let loupe = self.bool_capture_switch(
             "capture-loupe",
-            self.settings.capture().loupe,
+            cap.loupe,
             "settings.capture.loupe.title",
             window,
             cx,
             |s, v| s.capture_mut().loupe = v,
         );
+        let double_click_copy = self.bool_capture_switch(
+            "capture-double-click-copy",
+            cap.double_click_copy,
+            "settings.capture.double_click_copy.title",
+            window,
+            cx,
+            |s, v| s.capture_mut().double_click_copy = v,
+        );
+        let right_click_cancel = self.bool_capture_switch(
+            "capture-right-click-cancel",
+            cap.right_click_cancel,
+            "settings.capture.right_click_cancel.title",
+            window,
+            cx,
+            |s, v| s.capture_mut().right_click_cancel = v,
+        );
         let keep_open_copy = self.bool_capture_switch(
             "capture-keep-open-copy",
-            self.settings.capture().keep_open_after_copy,
+            cap.keep_open_after_copy,
             "settings.capture.keep_open_after_copy.title",
             window,
             cx,
@@ -260,7 +317,7 @@ impl SettingsWindow {
         );
         let keep_open_save = self.bool_capture_switch(
             "capture-keep-open-save",
-            self.settings.capture().keep_open_after_save,
+            cap.keep_open_after_save,
             "settings.capture.keep_open_after_save.title",
             window,
             cx,
@@ -268,7 +325,29 @@ impl SettingsWindow {
         );
 
         let body = super::layout::content_column()
-            .child(page_header(cx, "settings.preferences.capture", None))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_4()
+                    .child(page_header(
+                        cx,
+                        "settings.preferences.capture",
+                        Some("settings.capture.blurb"),
+                    ))
+                    .child(super::shell::reset_button("settings.capture.reset", cx, {
+                        let entity = cx.entity();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.reset_capture_page(window, cx);
+                            });
+                        }
+                    })),
+            )
+            // Keep the interactive toolbar layout editor above the fold so the
+            // primary "Capture & toolbar" customization is immediately reachable.
+            .child(self.toolbar_editor_card(cx))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.capture.group.hud").as_ref()),
@@ -301,31 +380,6 @@ impl SettingsWindow {
                         None,
                         Select::new(&self.capture_page.size_label_select).w_full(),
                     ),
-                    super::layout::compact_row(
-                        cx,
-                        crate::i18n::t!("settings.capture.loupe.title").to_string(),
-                        Some("settings.capture.loupe.body"),
-                        None,
-                        loupe,
-                    ),
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.capture.loupe_zoom.title").to_string(),
-                        None,
-                        None,
-                        super::layout::slider_control(
-                            &self.capture_page.loupe_zoom_slider,
-                            format!("{}×", self.settings.capture().loupe_zoom),
-                            cx,
-                        ),
-                    ),
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.capture.loupe_size_row.title").to_string(),
-                        None,
-                        None,
-                        Select::new(&self.capture_page.loupe_size_select).w_full(),
-                    ),
                     card_row(
                         cx,
                         crate::i18n::t!("settings.appearance.dim_opacity").to_string(),
@@ -333,12 +387,60 @@ impl SettingsWindow {
                         None,
                         self.opacity_control(cx),
                     ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.capture.loupe.title").to_string(),
+                        Some("settings.capture.loupe.body"),
+                        None,
+                        loupe,
+                    ),
+                    super::layout::dim_when(
+                        !loupe_on,
+                        card_row(
+                            cx,
+                            crate::i18n::t!("settings.capture.loupe_zoom.title").to_string(),
+                            None,
+                            None,
+                            super::layout::slider_control_disabled(
+                                &self.capture_page.loupe_zoom_slider,
+                                format!("{}×", cap.loupe_zoom),
+                                !loupe_on,
+                                cx,
+                            ),
+                        ),
+                    ),
+                    super::layout::dim_when(
+                        !loupe_on,
+                        card_row(
+                            cx,
+                            crate::i18n::t!("settings.capture.loupe_size_row.title").to_string(),
+                            None,
+                            None,
+                            Select::new(&self.capture_page.loupe_size_select)
+                                .disabled(!loupe_on)
+                                .w_full(),
+                        ),
+                    ),
                 ],
             ))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.capture.group.behavior").as_ref()),
                 vec![
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.capture.double_click_copy.title").to_string(),
+                        Some("settings.capture.double_click_copy.body"),
+                        None,
+                        double_click_copy,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.capture.right_click_cancel.title").to_string(),
+                        Some("settings.capture.right_click_cancel.body"),
+                        None,
+                        right_click_cancel,
+                    ),
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.capture.keep_open_after_copy.title").to_string(),
@@ -378,8 +480,7 @@ impl SettingsWindow {
                         ),
                     ),
                 ],
-            ))
-            .child(self.toolbar_editor_card(cx));
+            ));
 
         self.attach_toolbar_drag_handlers(page_body("page-toolbar").child(body), cx)
     }

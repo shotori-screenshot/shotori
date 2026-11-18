@@ -42,13 +42,13 @@ pub(crate) use annotation::{
     highlight_blend_label, number_format_label,
 };
 pub use capture::{
-    CaptureSettings, LoupeSize, NotifySettings, PinSettings, PinZoomModifier, ScrollAxisSetting,
-    ScrollSettings, SizeLabelMode,
+    CaptureSettings, LoupeSize, NotifySettings, PinDoubleClick, PinSettings, PinZoomModifier,
+    ScrollAxisSetting, ScrollSettings, SizeLabelMode,
 };
 pub use export::{
     DEFAULT_FILENAME_TEMPLATE, DEFAULT_SAVE_DIR_DISPLAY, ExportFormat, ExportSettings,
-    PngCompression, expand_tilde_path, read_last_save_dir, validate_filename_template,
-    write_last_save_dir,
+    PngCompression, clear_last_save_dir, expand_tilde_path, read_last_save_dir,
+    validate_filename_template, write_last_save_dir,
 };
 pub use ocr::{DEFAULT_OCR_MODEL, OcrModel};
 pub use toolbar::{DEFAULT_ROW, ToolbarButton, ToolbarCluster, ToolbarItem};
@@ -417,6 +417,27 @@ impl Settings {
         &mut self.scroll
     }
 
+    /// Restore capture and scroll preferences to factory defaults without
+    /// altering `reduce_motion` (which lives on the Appearance page) or the
+    /// custom toolbar button order.
+    pub fn reset_capture_defaults(&mut self) {
+        let reduce_motion = self.capture.reduce_motion;
+        self.smart_region = true;
+        self.capture = CaptureSettings {
+            reduce_motion,
+            ..CaptureSettings::default()
+        };
+        self.scroll = ScrollSettings::default();
+    }
+
+    /// Restore all OCR preferences to factory defaults.
+    pub fn reset_ocr_defaults(&mut self) {
+        self.ocr_model = DEFAULT_OCR_MODEL;
+        self.ocr_assume_upright = false;
+        self.ocr_join_lines = false;
+        self.ocr_custom_config = None;
+    }
+
     /// Restore all annotation preferences and palette swatches to factory defaults.
     pub fn reset_annotation_defaults(&mut self) {
         self.annotation_auto_select = true;
@@ -442,6 +463,16 @@ impl Settings {
     /// and keystroke were validated against the registry before this).
     pub fn set_key(&mut self, id: &str, keystroke: String) {
         self.keys.insert(id.to_owned(), keystroke);
+    }
+
+    /// Restore a single shortcut to its factory keystroke.
+    pub fn reset_key(&mut self, id: &str) {
+        if let Some(&(_, factory)) = crate::actions::CONFIGURABLE_KEYS
+            .iter()
+            .find(|&&(k, _)| k == id)
+        {
+            self.keys.insert(id.to_owned(), factory.to_owned());
+        }
     }
 
     /// Restore every shortcut to its factory keystroke.
@@ -1314,6 +1345,8 @@ mod tests {
         s.capture_mut().loupe_size = LoupeSize::Large;
         s.capture_mut().keep_open_after_copy = true;
         s.capture_mut().keep_open_after_save = true;
+        s.capture_mut().double_click_copy = true;
+        s.capture_mut().right_click_cancel = true;
         s.capture_mut().reduce_motion = true;
 
         s.export_mut().set_save_dir(Some("~/Desktop/Shots".into()));
@@ -1326,6 +1359,7 @@ mod tests {
         s.export_mut().png_compression = PngCompression::Best;
         s.export_mut().jpeg_quality = 82;
         s.export_mut().copy_on_save = true;
+        s.export_mut().save_on_copy = true;
 
         s.annotation_mut().default_color_index = 4;
         s.annotation_mut().highlighter_color_index = 1;
@@ -1336,11 +1370,19 @@ mod tests {
         s.annotation_mut().eraser_size = 48;
         s.annotation_mut().text_size = 36;
         s.annotation_mut().number_size = 44;
+        s.annotation_mut().number_fill = false;
         s.annotation_mut().number_format = crate::annotation::NumberFormat::Roman;
         s.annotation_mut().arrow_style = crate::annotation::ArrowStyle::Filled;
         s.annotation_mut().smooth_pencil = false;
         s.annotation_mut().spotlight_opacity = 70;
+        s.annotation_mut().spotlight_ellipse = true;
         s.annotation_mut().magnifier_zoom = 4;
+        s.annotation_mut().magnifier_ellipse = true;
+        s.annotation_mut().magnifier_shadow = true;
+        s.annotation_mut().geometry_radius = 12;
+        s.annotation_mut().geometry_fill = true;
+        s.annotation_mut().text_bold = true;
+        s.annotation_mut().text_outline = true;
 
         s.notify_mut().enabled = false;
         s.notify_mut().on_copy = false;
@@ -1352,6 +1394,8 @@ mod tests {
 
         s.pin_mut().zoom_modifier = PinZoomModifier::Ctrl;
         s.pin_mut().zoom_step = 20;
+        s.pin_mut().opacity = 80;
+        s.pin_mut().double_click = PinDoubleClick::CopyAndClose;
         s.pin_mut().show_border = false;
         s.pin_mut().shadow = false;
         s.pin_mut().snap_to_edge = true;
@@ -1376,15 +1420,53 @@ mod tests {
             &path,
             "[capture]\nsize_label = \"nope\"\nloupe_zoom = 99\n\
              [export]\nformat = \"bmp\"\njpeg_quality = 0\nfilename_template = \"../bad\"\n\
-             [annotation]\nstroke_width = 99\ndefault_color_index = 20\n\
+             [annotation]\nstroke_width = 99\ndefault_color_index = 20\ngeometry_radius = 99\n\
              [notify]\ntimeout_secs = 99\n\
-             [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\n\
+             [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\nopacity = 5\ndouble_click = \"explode\"\n\
              [scroll]\nmax_length = 100\ndefault_axis = \"diagonal\"\n",
         )
         .unwrap();
         let (degraded, errors) = Settings::load(Some(&path));
         assert_eq!(degraded, Settings::default());
-        assert_eq!(errors.len(), 12, "errors: {errors:?}");
+        assert_eq!(errors.len(), 15, "errors: {errors:?}");
+    }
+
+    #[test]
+    fn reset_helpers_preserve_cross_page_fields_and_single_keys() {
+        let mut s = Settings::default();
+        s.capture_mut().reduce_motion = true;
+        s.capture_mut().crosshair = true;
+        s.capture_mut().double_click_copy = true;
+        s.set_smart_region(false);
+        s.scroll_mut().max_length = 50_000;
+        s.reset_capture_defaults();
+        assert!(
+            s.capture().reduce_motion,
+            "reduce_motion belongs to Appearance and must survive Capture reset"
+        );
+        assert!(!s.capture().crosshair);
+        assert!(!s.capture().double_click_copy);
+        assert!(s.smart_region());
+        assert_eq!(s.scroll().max_length, 20_000);
+
+        s.set_key("copy", "ctrl-shift-c".into());
+        s.set_key("save", "ctrl-shift-s".into());
+        s.reset_key("copy");
+        assert_eq!(s.keys().get("copy").map(String::as_str), Some("ctrl-c"));
+        assert_eq!(
+            s.keys().get("save").map(String::as_str),
+            Some("ctrl-shift-s")
+        );
+
+        s.set_ocr_model(OcrModel::Ppocrv6Medium);
+        s.set_ocr_assume_upright(true);
+        s.set_ocr_join_lines(true);
+        s.set_ocr_custom_config(Some("~/custom.toml".into()));
+        s.reset_ocr_defaults();
+        assert_eq!(s.ocr_model(), DEFAULT_OCR_MODEL);
+        assert!(!s.ocr_assume_upright());
+        assert!(!s.ocr_join_lines());
+        assert!(s.ocr_custom_config().is_none());
     }
 
     #[test]

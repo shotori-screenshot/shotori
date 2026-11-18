@@ -31,7 +31,7 @@ impl SettingsWindow {
         } else {
             3
         };
-        let mut grid = div().grid().grid_cols(columns).gap_2().pt_2().w_full();
+        let mut grid = div().grid().grid_cols(columns).gap_2().w_full();
         for (base, label) in choices {
             let selected = configured == base;
             let file = ThemeFile {
@@ -65,6 +65,18 @@ impl SettingsWindow {
                         .rounded_full()
                         .bg(rgba(palette.accent)),
                 );
+            let swatch_dots = div().flex().items_center().gap_1().children(
+                [palette.accent, palette.chip_bg, palette.toolbar_selected]
+                    .into_iter()
+                    .map(|c| {
+                        div()
+                            .size_2()
+                            .rounded_full()
+                            .bg(rgba(c | 0xFF))
+                            .border_1()
+                            .border_color(rgba(palette.toolbar_border))
+                    }),
+            );
             grid = grid.child(
                 Button::new(SharedString::from(format!("theme-choice-{base}")))
                     .accessibility_label(label.clone())
@@ -75,7 +87,7 @@ impl SettingsWindow {
                     .h_auto()
                     .min_h(rems(4.))
                     .gap_3()
-                    .p_2()
+                    .p_2p5()
                     .w_full()
                     .min_w_0()
                     .border_1()
@@ -92,16 +104,30 @@ impl SettingsWindow {
                     })
                     .text_color(cx.theme().foreground)
                     .text_sm()
-                    .line_height(relative(1.4))
+                    .line_height(relative(1.35))
                     .hover(|s| s.border_color(cx.theme().primary))
                     .focus_visible(|s| s.border_color(cx.theme().ring).bg(cx.theme().accent))
                     .child(preview)
-                    .child(div().flex_1().min_w_0().child(label))
                     .child(
                         div()
-                            .size_3()
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap_1()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().w_full().truncate().child(label))
+                            .child(swatch_dots),
+                    )
+                    .child(
+                        div()
+                            .size_4()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .flex_shrink_0()
-                            .children(selected.then(|| Icon::new(IconName::Check).size_3())),
+                            .text_color(cx.theme().primary)
+                            .children(selected.then(|| Icon::new(IconName::Check).size_3p5())),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.appearance_set_base(base, window, cx);

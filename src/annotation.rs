@@ -9,6 +9,7 @@ mod chrome;
 mod filter;
 mod magnifier;
 mod raster;
+pub(crate) use raster::MagnifierPreview;
 mod spotlight;
 pub(crate) use arrange::{CloneDrag, LayerOrder};
 pub(crate) use magnifier::{LensConnector, LensOption};
@@ -246,6 +247,7 @@ pub(crate) struct Annotations {
     pencil_angle: u16,
     geometry_fill: GeometryFill,
     geometry_radius: f32,
+    number_fill: bool,
     number_format: NumberFormat,
     number_arrow_style: ArrowStyle,
     number_override: Option<u32>,
@@ -296,6 +298,7 @@ impl Default for Annotations {
             pencil_angle: 0,
             geometry_fill: GeometryFill::None,
             geometry_radius: 0.,
+            number_fill: true,
             number_format: NumberFormat::default(),
             number_arrow_style: ArrowStyle::default(),
             number_override: None,
@@ -596,21 +599,33 @@ impl Annotations {
                 .highlighter_color_index
                 .min(crate::model::settings::PALETTE - 1),
             spotlight_opacity: f32::from(cfg.spotlight_opacity),
+            spotlight_ellipse: cfg.spotlight_ellipse,
             lens: magnifier::Lens {
                 zoom: f32::from(cfg.magnifier_zoom),
+                ellipse: cfg.magnifier_ellipse,
+                shadow: cfg.magnifier_shadow,
                 ..magnifier::Lens::default()
             },
             arrow_style: cfg.arrow_style,
             number_arrow_style: cfg.arrow_style,
+            geometry_fill: if cfg.geometry_fill {
+                parameters::GeometryFill::Solid
+            } else {
+                parameters::GeometryFill::None
+            },
+            geometry_radius: f32::from(cfg.geometry_radius),
             highlighter: highlighter::HighlighterOptions {
                 blend: cfg.highlighter_blend,
                 ..highlighter::HighlighterOptions::default()
             },
             text_style: text::TextStyle {
+                bold: cfg.text_bold,
+                outline: cfg.text_outline.then_some(0xFFFF_FFFF),
                 wrap: cfg.text_wrap,
                 ..Default::default()
             },
             pencil_smooth: cfg.smooth_pencil,
+            number_fill: cfg.number_fill,
             number_format: cfg.number_format,
             preset: ToolSizes {
                 rectangle: stroke,
@@ -1918,6 +1933,7 @@ mod tests {
         cfg.eraser_size = 56;
         cfg.text_size = 40;
         cfg.number_size = 48;
+        cfg.number_fill = false;
         cfg.number_format = super::NumberFormat::Roman;
         cfg.arrow_style = super::ArrowStyle::Filled;
         cfg.smooth_pencil = false;
@@ -1938,6 +1954,7 @@ mod tests {
         assert_eq!(a.size_of(super::ShapeKind::Spotlight), 75.);
         assert_eq!(a.size_of(super::ShapeKind::Magnifier), 5.);
         assert_eq!(a.arrow_style(), super::ArrowStyle::Filled);
+        assert!(!a.number_fill());
         assert_eq!(a.number_format(), super::NumberFormat::Roman);
         assert!(!a.pencil_smooth());
         assert_eq!(

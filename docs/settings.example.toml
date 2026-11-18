@@ -40,6 +40,10 @@ loupe_size = "medium"  # "small" | "medium" | "large"
 keep_open_after_copy = false
 keep_open_after_save = false
 
+# Mouse shortcuts while selecting regions.
+double_click_copy = false
+right_click_cancel = false
+
 # Skip non-essential chrome animations (loupe fade, OSD orbit, sidebar slide).
 reduce_motion = false
 
@@ -73,6 +77,9 @@ jpeg_quality = 90
 # Also copy the screenshot to the clipboard whenever saving to disk.
 copy_on_save = false
 
+# Automatically save a backup file to `save_dir` whenever copying to the clipboard.
+save_on_copy = false
+
 [annotation]
 # Default text-box wrapping mode: "word" | "character" | "none".
 text_wrap = "word"
@@ -92,11 +99,19 @@ mosaic_strength = 16           # 4..=48
 eraser_size = 32               # 8..=96
 text_size = 24                 # 12..=72
 number_size = 32               # 16..=64
+number_fill = true             # true (solid badge) | false (outline ring)
 number_format = "decimal"      # "decimal" | "alphabetic" | "roman"
 arrow_style = "open"           # "open" | "filled" | "triangle" | "outline" | "double_open" | "double_triangle" | "dimension"
 smooth_pencil = true
 spotlight_opacity = 55         # 0..=100
+spotlight_ellipse = false
 magnifier_zoom = 2             # 1..=8
+magnifier_ellipse = false
+magnifier_shadow = false
+geometry_radius = 0            # 0..=48
+geometry_fill = false
+text_bold = false
+text_outline = false
 
 [toolbar]
 # Row one of the selection toolbar, left to right. Buttons not listed
@@ -138,6 +153,8 @@ timeout_secs = 10 # 2..=30
 # Modifier required to wheel-zoom a floating pin: "none" | "ctrl" | "alt" | "shift".
 zoom_modifier = "none"
 zoom_step = 12        # 5..=50 (% per wheel notch; 12 = 1.12x)
+opacity = 100         # 20..=100 (% initial pin opacity)
+double_click = "none" # "none" | "close" | "copy_close" | "reset_zoom"
 show_border = true
 shadow = true
 snap_to_edge = false

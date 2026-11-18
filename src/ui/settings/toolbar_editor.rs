@@ -13,7 +13,7 @@ use crate::model::settings::{Settings, ToolbarCluster, ToolbarItem};
 use crate::ui::theme;
 use crate::ui::toolbar;
 
-use super::{Button, SettingsWindow, card_group};
+use super::{Button, SettingsWindow};
 
 mod rail;
 use rail::{edge_scroll_delta, set_strip_scroll_pos, strip_scroll_pos};
@@ -410,63 +410,77 @@ impl SettingsWindow {
 
     /// The interactive drag-and-drop toolbar layout card (preview bar + palette).
     pub(super) fn toolbar_editor_card(&self, cx: &mut Context<Self>) -> Div {
-        card_group(
-            cx,
-            None,
-            vec![
+        let is_factory_row = self.settings.row() == crate::model::settings::DEFAULT_ROW;
+        let reset_label = crate::i18n::t!("settings.toolbar_page.reset").to_string();
+        let reset_btn = Button::new("toolbar-layout-reset")
+            .accessibility_label(reset_label.clone())
+            .disabled(is_factory_row)
+            .styles(|s| s.disabled(|d| d.opacity(0.45)))
+            .px_3()
+            .h_8()
+            .flex_shrink_0()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .hover(|s| s.bg(cx.theme().secondary_hover))
+            .focus_visible(|s| s.border_color(cx.theme().ring))
+            .on_click({
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.reset_toolbar(cx));
+                }
+            })
+            .child(reset_label);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .w_full()
+            .min_w_0()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().group_box)
+            .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .p_3()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().group_box)
+                    .gap_2()
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_start()
-                                    .justify_between()
-                                    .gap_4()
-                                    .child(group_heading(
-                                        cx,
-                                        "settings.toolbar_page.group.current",
-                                        "settings.toolbar_page.hint",
-                                    ))
-                                    .child(super::shell::reset_button(
-                                        "settings.toolbar_page.reset",
-                                        cx,
-                                        {
-                                            let entity = cx.entity();
-                                            move |_, _, cx| {
-                                                entity
-                                                    .update(cx, |this, cx| this.reset_toolbar(cx));
-                                            }
-                                        },
-                                    )),
-                            )
-                            .child(self.preview_strip(cx)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
                             .child(group_heading(
                                 cx,
-                                "settings.toolbar_page.group.palette",
-                                "settings.toolbar_page.palette_hint",
+                                "settings.toolbar_page.group.current",
+                                "settings.toolbar_page.hint",
                             ))
-                            .child(self.palette(cx)),
-                    ),
-            ],
-        )
+                            .child(reset_btn),
+                    )
+                    .child(self.preview_strip(cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border.opacity(0.6))
+                    .child(group_heading(
+                        cx,
+                        "settings.toolbar_page.group.palette",
+                        "settings.toolbar_page.palette_hint",
+                    ))
+                    .child(self.palette(cx)),
+            )
     }
 
     /// The preview bar's scroll viewport. The bar hugs its content (the

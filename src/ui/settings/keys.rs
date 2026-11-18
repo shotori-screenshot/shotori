@@ -1,19 +1,16 @@
-//! The Keys page: the shortcut recorder. One row per configurable
-//! command, a key-cap click starts recording, the next chord rebinds
-//! (or is refused inline). The chord canonicalization and display
-//! helpers live with the page that uses them.
+//! The Keys page: the shortcut recorder, per-row reset, live search filtering,
+//! and the built-in fixed canvas gesture reference.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Button;
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
-use super::{SettingsWindow, card_group, card_row, page_body, page_header};
+use super::{SettingsWindow, card_group, page_body, page_header};
 
-/// The localized display name of a configurable shortcut id. The ids
-/// live in `actions::CONFIGURABLE_KEYS`; the test below pins that
-/// every one of them lands on a real label (the fallback returns the
-/// raw id only so a future registry entry can't render as nothing).
+/// The localized display name of a configurable shortcut id.
 fn key_label(id: &str) -> String {
     match id {
         "copy" => crate::i18n::t!("settings.keys_page.copy").to_string(),
@@ -46,11 +43,7 @@ fn key_label(id: &str) -> String {
     }
 }
 
-/// Canonical stored form of a captured chord (`"ctrl-alt-p"`). Built
-/// from the event's modifiers — NOT `Keystroke`'s Display, which
-/// prints platform glyphs (❖) on Linux that `Keystroke::parse` then
-/// can't read back; these strings must round-trip through parse
-/// (resolve_keys re-validates them on the next load).
+/// Canonical stored form of a captured chord (`"ctrl-alt-p"`).
 fn canonical_chord(keystroke: &gpui_kit::Keystroke) -> String {
     let mut chord = String::new();
     let m = &keystroke.modifiers;
@@ -73,66 +66,175 @@ fn canonical_chord(keystroke: &gpui_kit::Keystroke) -> String {
     chord
 }
 
+fn row_matches_query(id: &str, label: &str, keystroke: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    // Generic section-level queries ("快捷键", "shortcuts", "keys") keep all rows visible.
+    let page_title = crate::i18n::t!("settings.keys_page.title").to_lowercase();
+    if page_title.contains(query) || "shortcuts keys keybindings 快捷键 按键".contains(query) {
+        return true;
+    }
+    let pretty = crate::actions::pretty_keystroke(keystroke).to_lowercase();
+    label.to_lowercase().contains(query)
+        || id.to_lowercase().contains(query)
+        || keystroke.to_lowercase().contains(query)
+        || pretty.contains(query)
+}
+
 impl SettingsWindow {
-    /// Shortcut editor: one row per configurable command, grouped into
-    /// capture exits and annotation tools/editing. Clicking a key cap
-    /// starts a recording; the next (non-modifier) keystroke rebinds
-    /// the command, escape cancels, reserved keys and conflicts are
-    /// refused inline. Writes through like every control here — the
-    /// next screenshot binds from the file.
     pub(super) fn page_keys(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let query = self.search.read(cx).value().trim().to_lowercase();
+
         let mut capture_rows = Vec::with_capacity(crate::actions::CAPTURE_KEYS.len());
-        for (id, factory) in crate::actions::CAPTURE_KEYS {
-            capture_rows.push(self.key_row(id, factory, cx));
+        for &(id, factory) in crate::actions::CAPTURE_KEYS {
+            let keystroke = self
+                .settings
+                .keys()
+                .get(id)
+                .map(String::as_str)
+                .unwrap_or(factory);
+            let label = key_label(id);
+            if row_matches_query(id, &label, keystroke, &query) {
+                capture_rows.push(self.key_row(id, factory, cx));
+            }
         }
         let mut annot_rows = Vec::with_capacity(crate::actions::ANNOTATION_KEYS.len());
-        for (id, factory) in crate::actions::ANNOTATION_KEYS {
-            annot_rows.push(self.key_row(id, factory, cx));
+        for &(id, factory) in crate::actions::ANNOTATION_KEYS {
+            let keystroke = self
+                .settings
+                .keys()
+                .get(id)
+                .map(String::as_str)
+                .unwrap_or(factory);
+            let label = key_label(id);
+            if row_matches_query(id, &label, keystroke, &query) {
+                annot_rows.push(self.key_row(id, factory, cx));
+            }
         }
-        let body = super::layout::content_column()
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_4()
-                    .child(page_header(
-                        cx,
-                        "settings.keys_page.title",
-                        Some("settings.keys_page.blurb"),
-                    ))
-                    .child(super::shell::reset_button(
-                        "settings.keys_page.reset",
-                        cx,
-                        {
-                            let entity = cx.entity();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.settings.reset_keys();
-                                    this.persist(cx);
-                                });
-                            }
-                        },
-                    )),
-            )
-            .child(card_group(
+
+        let any_customized = crate::actions::CONFIGURABLE_KEYS
+            .iter()
+            .any(|&(id, factory)| {
+                self.settings
+                    .keys()
+                    .get(id)
+                    .is_some_and(|k| k.as_str() != factory)
+            });
+
+        let mut body = super::layout::content_column().child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_4()
+                .child(page_header(
+                    cx,
+                    "settings.keys_page.title",
+                    Some("settings.keys_page.blurb"),
+                ))
+                .child(
+                    super::shell::reset_button("settings.keys_page.reset", cx, {
+                        let entity = cx.entity();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.settings.reset_keys();
+                                this.persist(cx);
+                            });
+                        }
+                    })
+                    .disabled(!any_customized),
+                ),
+        );
+
+        if capture_rows.is_empty() && annot_rows.is_empty() {
+            body = body.child(card_group(
                 cx,
-                Some(crate::i18n::t!("settings.keys_page.group.capture").as_ref()),
-                capture_rows,
-            ))
-            .child(card_group(
-                cx,
-                Some(crate::i18n::t!("settings.keys_page.group.annotation").as_ref()),
-                annot_rows,
+                None,
+                vec![
+                    div()
+                        .py_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::i18n::t!("settings.keys_page.no_matches").to_string()),
+                ],
             ));
+        } else {
+            if !capture_rows.is_empty() {
+                body = body.child(card_group(
+                    cx,
+                    Some(crate::i18n::t!("settings.keys_page.group.capture").as_ref()),
+                    capture_rows,
+                ));
+            }
+            if !annot_rows.is_empty() {
+                body = body.child(card_group(
+                    cx,
+                    Some(crate::i18n::t!("settings.keys_page.group.annotation").as_ref()),
+                    annot_rows,
+                ));
+            }
+        }
+
+        // Built-in fixed canvas shortcuts & gestures reference card.
+        let static_cap = |text: String| {
+            div()
+                .px_2p5()
+                .py_1()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(text)
+        };
+        let builtin_rows = vec![
+            super::layout::compact_row(
+                cx,
+                crate::i18n::t!("settings.keys_page.builtin.enter").to_string(),
+                None,
+                None,
+                static_cap("Enter".into()),
+            ),
+            super::layout::compact_row(
+                cx,
+                crate::i18n::t!("settings.keys_page.builtin.escape").to_string(),
+                None,
+                None,
+                static_cap("Esc".into()),
+            ),
+            super::layout::compact_row(
+                cx,
+                crate::i18n::t!("settings.keys_page.builtin.arrows").to_string(),
+                None,
+                None,
+                static_cap(crate::i18n::t!("settings.keys_page.builtin.arrows_key").to_string()),
+            ),
+            super::layout::compact_row(
+                cx,
+                crate::i18n::t!("settings.keys_page.builtin.wheel").to_string(),
+                None,
+                None,
+                static_cap(crate::i18n::t!("settings.keys_page.builtin.wheel_key").to_string()),
+            ),
+            super::layout::compact_row(
+                cx,
+                crate::i18n::t!("settings.keys_page.builtin.alt_click").to_string(),
+                None,
+                None,
+                static_cap(crate::i18n::t!("settings.keys_page.builtin.alt_click_key").to_string()),
+            ),
+        ];
+        body = body.child(card_group(
+            cx,
+            Some(crate::i18n::t!("settings.keys_page.builtin.group").as_ref()),
+            builtin_rows,
+        ));
+
         page_body("page-keys").child(body)
     }
 
-    /// One shortcut row: the command's label (plus its factory
-    /// keystroke once customized) on the left, the key cap on the
-    /// right. Only the RECORDING row tracks focus — one shared handle,
-    /// attached to whichever row is listening; without focus the
-    /// keydown listener is dead weight on the others.
     fn key_row(&self, id: &str, factory: &str, cx: &mut Context<Self>) -> Div {
         let entity = cx.entity();
         let recording = self.recording.as_deref() == Some(id);
@@ -169,7 +271,7 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .justify_center()
-            .min_w(rems(7.))
+            .min_w(rems(6.5))
             .max_w_full()
             .min_h_8()
             .h_auto()
@@ -178,9 +280,12 @@ impl SettingsWindow {
             .px_3()
             .rounded(cx.theme().radius)
             .text_sm()
+            .font_weight(FontWeight::MEDIUM)
             .border_1()
             .border_color(if recording {
                 cx.theme().ring
+            } else if customized {
+                cx.theme().primary.opacity(0.65)
             } else {
                 cx.theme().border
             })
@@ -193,28 +298,56 @@ impl SettingsWindow {
             .focus_visible(|s| s.border_color(cx.theme().ring))
             .hover(|s| s.bg(cx.theme().secondary_hover));
         if recording {
-            // Only the RECORDING cap listens: one shared focus handle,
-            // attached to whichever row is armed — without focus the
-            // keydown listener is dead weight on the others.
             cap = cap.track_focus(&self.record_focus);
         }
         let cap = cap
             .on_click({
+                let entity = entity.clone();
                 let id = id.to_owned();
                 move |_, window, cx| {
                     entity.update(cx, |this, cx| this.toggle_recording(&id, window, cx));
                 }
             })
             .child(cap_label);
-        let cap = div()
-            .capture_key_down(cx.listener(Self::capture_key))
-            .child(cap);
-        card_row(cx, key_label(id), None, description, cap)
+
+        let reset_single = (customized && !recording).then(|| {
+            let entity = entity.clone();
+            let id_owned = id.to_owned();
+            let reset_tip = crate::i18n::t!("settings.keys_page.reset_single").to_string();
+            Button::new(SharedString::from(format!("key-reset-{id}")))
+                .accessibility_label(format!("{reset_tip}: {}", key_label(id)))
+                .size_7()
+                .flex_shrink_0()
+                .rounded(cx.theme().radius)
+                .text_color(cx.theme().muted_foreground)
+                .hover(|s| {
+                    s.bg(cx.theme().secondary_hover)
+                        .text_color(cx.theme().foreground)
+                })
+                .focus_visible(|s| s.border_1().border_color(cx.theme().ring))
+                .tooltip(move |_, cx| cx.new(|_| Tooltip::new(reset_tip.clone())).into())
+                .child(Icon::new(IconName::Undo2).size_3p5())
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.settings.reset_key(&id_owned);
+                        this.persist(cx);
+                    });
+                })
+        });
+
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .children(reset_single)
+            .child(
+                div()
+                    .capture_key_down(cx.listener(Self::capture_key))
+                    .child(cap),
+            );
+        super::layout::compact_row(cx, key_label(id), None, description, control)
     }
 
-    /// Key-cap click: start recording (focusing the cap so the chord
-    /// lands on its keydown listener), or — clicking the listening cap
-    /// again — cancel.
     fn toggle_recording(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.recording.as_deref() == Some(id) {
             self.stop_recording(window, cx);
@@ -226,8 +359,6 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Leave recording mode (commit, cancel — and refocus nothing: the
-    /// cap keeps no focus so a stray chord can't re-trigger it).
     fn stop_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = None;
         self.record_error = None;
@@ -235,33 +366,18 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The recording cap's keydown: canonicalize the chord, then
-    /// commit it, refuse it (reserved / taken — inline message, still
-    /// recording) or wait it out (bare modifiers, so Ctrl then C can
-    /// be pressed as one chord). Escape cancels. stop_propagation
-    /// keeps the window's own Esc binding from closing the window
-    /// mid-recording.
     fn capture_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.recording.clone() else {
             return;
         };
-        // Capture before Button handles Enter/Space as activation, otherwise
-        // binding one of those keys would merely toggle the recorder off.
         cx.stop_propagation();
         let keystroke = &event.keystroke;
         let bare = keystroke.modifiers == gpui_kit::Modifiers::default();
         if keystroke.key == "escape" && bare {
-            // Cancel WITHOUT clearing `recording` here: the CloseSettings
-            // action still fires after this listener (see the guard on
-            // the root), and it consumes `recording` to tell "this Esc
-            // was the recorder's, not the window's". Re-render happens
-            // via that path.
             window.blur(cx);
             cx.stop_propagation();
             return;
         }
-        // Plain modifier keys (ctrl alone, alt alone …): hold the
-        // recording until a real key joins the chord
         if matches!(
             keystroke.key.as_str(),
             "ctrl" | "control" | "alt" | "shift" | "super" | "cmd" | "fn" | "platform" | "meta"

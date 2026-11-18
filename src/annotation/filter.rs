@@ -318,23 +318,6 @@ mod tests {
             points: vec![],
         }
     }
-    #[test]
-    #[ignore = "manual large-area blur measurement"]
-    fn benchmark_4k_blur() {
-        let mut mark = shape(ShapeKind::Blur);
-        mark.bounds = Bounds::new(point(px(0.), px(0.)), size(px(3840.), px(2160.)));
-        mark.parameters.set_size(16.);
-        let mut data: Vec<_> = (0..3840 * 2160)
-            .flat_map(|i| [(i % 251) as u8, 70, 120, 255])
-            .collect();
-        let started = std::time::Instant::now();
-        rasterize(&mark, &mut data, 3840, 2160, point(px(0.), px(0.)), 1.);
-        eprintln!(
-            "4K blur: {:?}; checksum {}",
-            started.elapsed(),
-            data.iter().map(|&b| b as u64).sum::<u64>()
-        );
-    }
 
     #[test]
     fn mosaic_averages_each_tile_and_preserves_outside_and_gaps() {

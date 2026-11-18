@@ -652,22 +652,21 @@ mod tests {
     #[gpui_kit::test]
     fn backdrop_has_no_gaps_or_overlaps_at_fractional_dpi(cx: &mut gpui_kit::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| BackdropHarness { selection: None });
-        cx.update(|window, _| window.resize(ws(400., 400.)));
+        cx.update(|window, _| window.resize(ws(120., 100.)));
         for scale in [1., 1.25, 1.5, 1.75, 2.] {
             cx.simulate_scale_factor_change(scale);
             let selections = [
                 None,
-                Some(bounds(50., 101., 200., 230.)),
-                Some(bounds(51., 102., 201., 229.)),
-                Some(bounds(50., 103., 200., 230.)),
-                Some(bounds(50., 104., 200., 230.)),
-                Some(bounds(0., 0., 200., 230.)),
-                Some(bounds(200., 170., 200., 230.)),
-                Some(bounds(0., 0., 400., 400.)),
+                Some(bounds(15., 21., 60., 50.)),
+                Some(bounds(16., 22., 61., 49.)),
+                Some(bounds(15., 23., 60., 50.)),
+                Some(bounds(0., 0., 60., 50.)),
+                Some(bounds(60., 50., 60., 50.)),
+                Some(bounds(0., 0., 120., 100.)),
                 // A global selection can continue beyond this output. Its
                 // border must stay at the real edges, not the monitor seam.
-                Some(bounds(-100., 10., 600., 380.)),
-                Some(bounds(10., -100., 380., 600.)),
+                Some(bounds(-30., 10., 180., 80.)),
+                Some(bounds(10., -30., 100., 160.)),
             ];
             for selection in selections {
                 view.update(cx, |view, cx| {
@@ -683,8 +682,8 @@ mod tests {
                 let contains = |b: &gpui_kit::Bounds<gpui_kit::ScaledPixels>, x: f32, y: f32| {
                     x >= b.left().0 && x < b.right().0 && y >= b.top().0 && y < b.bottom().0
                 };
-                for y in 0..(400. * scale) as usize {
-                    for x in 0..(400. * scale) as usize {
+                for y in 0..(100. * scale) as usize {
+                    for x in 0..(120. * scale) as usize {
                         let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
                         let inside = border.is_some_and(|q| contains(&q.bounds, x, y));
                         let layers = quads

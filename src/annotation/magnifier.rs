@@ -53,6 +53,10 @@ impl Shape {
         }
     }
 
+    pub(crate) fn lens_samples_annotations(&self) -> bool {
+        self.lens().is_some_and(|lens| lens.annotations)
+    }
+
     pub(crate) fn lens_source_outline(&self) -> Option<Shape> {
         let lens = self.lens()?;
         let mut outline = self.clone();
@@ -312,13 +316,27 @@ pub(super) fn rasterize(
             (bounds.size.height - inset * 2.).max(px(0.)),
         ),
     );
+    // Sampling coordinates are separable. Compute each column and row once,
+    // rather than repeating floor, clipping and pixel addressing per channel.
+    let columns: Vec<_> = (left..right)
+        .map(|x| {
+            let px = origin.x + px((x as f32 + 0.5) / scale);
+            let sample = shape.bounds.center().x + (px - bounds.center().x) / lens.zoom;
+            let sx = f32::from(sample - origin.x) * scale - 0.5;
+            (px, sample_axis(sx, w, lens.smooth))
+        })
+        .collect();
     for y in top..bottom {
-        for x in left..right {
-            let p = origin + point(px((x as f32 + 0.5) / scale), px((y as f32 + 0.5) / scale));
+        let py = origin.y + px((y as f32 + 0.5) / scale);
+        let sample = shape.bounds.center().y + (py - bounds.center().y) / lens.zoom;
+        let sy = f32::from(sample - origin.y) * scale - 0.5;
+        let rows = sample_axis(sy, h, lens.smooth);
+        for (column, &(px, samples)) in columns.iter().enumerate() {
+            let p = point(px, py);
             if !inside(bounds, p, lens.ellipse) {
                 continue;
             }
-            let at = ((y * w + x) * 4) as usize;
+            let at = ((y * w + left) as usize + column) * 4;
             if rgba[at + 3] == 0 {
                 continue;
             }
@@ -331,64 +349,75 @@ pub(super) fn rasterize(
                 }
                 continue;
             }
-            let sample = shape.bounds.center() + (p - bounds.center()) / lens.zoom;
-            let sx = f32::from(sample.x - origin.x) * scale - 0.5;
-            let sy = f32::from(sample.y - origin.y) * scale - 0.5;
             let mut total = [0.; 4];
-            let positions = if lens.smooth {
-                let (fx, fy) = (sx - sx.floor(), sy - sy.floor());
-                [
-                    (sx.floor(), sy.floor(), (1. - fx) * (1. - fy)),
-                    (sx.floor() + 1., sy.floor(), fx * (1. - fy)),
-                    (sx.floor(), sy.floor() + 1., (1. - fx) * fy),
-                    (sx.floor() + 1., sy.floor() + 1., fx * fy),
-                ]
-            } else {
-                [
-                    (sx.round(), sy.round(), 1.),
-                    (0., 0., 0.),
-                    (0., 0., 0.),
-                    (0., 0., 0.),
-                ]
-            };
-            for (xx, yy, weight) in positions {
-                if xx < 0. || yy < 0. || xx >= w as f32 || yy >= h as f32 {
-                    continue;
+            for (row, row_weight) in rows {
+                for (col, col_weight) in samples {
+                    let weight = col_weight * row_weight;
+                    if weight == 0. {
+                        continue;
+                    }
+                    let pixel = &source[(row * w as usize + col) * 4..][..4];
+                    let alpha = pixel[3] as f32 * weight;
+                    for c in 0..3 {
+                        total[c] += pixel[c] as f32 * alpha;
+                    }
+                    total[3] += alpha;
                 }
-                let pixel = &source[((yy as u32 * w + xx as u32) * 4) as usize..][..4];
-                let alpha = pixel[3] as f32 * weight;
-                for c in 0..3 {
-                    total[c] += pixel[c] as f32 * alpha;
-                }
-                total[3] += alpha;
             }
             if total[3] > 0. {
+                let shade = if lens.shadow {
+                    lens_shade(bounds, inner, p, lens.ellipse)
+                } else {
+                    1.
+                };
                 for c in 0..3 {
-                    let shade = if lens.shadow {
-                        let delta = p - bounds.center();
-                        let edge = if lens.ellipse {
-                            let rx = f32::from(inner.size.width / 2.).max(0.001);
-                            let ry = f32::from(inner.size.height / 2.).max(0.001);
-                            (1. - (f32::from(delta.x) / rx).hypot(f32::from(delta.y) / ry)).max(0.)
-                                * rx.min(ry)
-                        } else {
-                            f32::from(
-                                (p.x - inner.left())
-                                    .min(inner.right() - p.x)
-                                    .min(p.y - inner.top())
-                                    .min(inner.bottom() - p.y),
-                            )
-                            .max(0.)
-                        };
-                        1. - 0.22 * (1. - edge / 8.).clamp(0., 1.).powi(2)
-                    } else {
-                        1.
-                    };
                     rgba[at + c] = (total[c] / total[3] * shade).round() as u8;
                 }
             }
         }
     }
+}
+
+fn lens_shade(
+    bounds: Bounds<Pixels>,
+    inner: Bounds<Pixels>,
+    p: Point<Pixels>,
+    ellipse: bool,
+) -> f32 {
+    let delta = p - bounds.center();
+    let edge = if ellipse {
+        let rx = f32::from(inner.size.width / 2.).max(0.001);
+        let ry = f32::from(inner.size.height / 2.).max(0.001);
+        (1. - (f32::from(delta.x) / rx).hypot(f32::from(delta.y) / ry)).max(0.) * rx.min(ry)
+    } else {
+        f32::from(
+            (p.x - inner.left())
+                .min(inner.right() - p.x)
+                .min(p.y - inner.top())
+                .min(inner.bottom() - p.y),
+        )
+        .max(0.)
+    };
+    1. - 0.22 * (1. - edge / 8.).clamp(0., 1.).powi(2)
+}
+
+/// Zero-weight entries keep edge sampling inside the capture without clamping
+/// missing pixels into the average. Transparent desktop gaps retain their alpha.
+fn sample_axis(position: f32, limit: u32, smooth: bool) -> [(usize, f32); 2] {
+    let samples = if smooth {
+        let lower = position.floor();
+        let fraction = position - lower;
+        [(lower, 1. - fraction), (lower + 1., fraction)]
+    } else {
+        [(position.round(), 1.), (0., 0.)]
+    };
+    samples.map(|(index, weight)| {
+        if !(0. ..limit as f32).contains(&index) {
+            (0, 0.)
+        } else {
+            (index as usize, weight)
+        }
+    })
 }
 
 #[cfg(test)]

@@ -1,92 +1,221 @@
-//! The OCR page: the model-set dropdown and the upright-assume
-//! switch, with the model's langs · tier · readiness detail line —
-//! plus the custom-config row (`[ocr] custom_config`, which overrides
-//! the dropdown): pick an existing rapidocr config TOML, or write a
-//! new one from the current model's parameters as a template — and
-//! the cache row (open the model directory).
+//! The OCR page: visual model-set cards with readiness status and in-window
+//! pre-download, recognition & formatting switches, custom rapidocr TOML
+//! override, and model cache management.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context as _;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::{Button, Switch};
-use gpui_kit::component::ActiveTheme;
-use gpui_kit::component::select::Select;
+use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use std::path::{Path, PathBuf};
+
+use crate::model::settings::OcrModel;
 
 use super::{SettingsWindow, card_group, open_external, page_body, page_header};
 
 /// Suggested file name for a fresh template config.
 const CUSTOM_CONFIG_FILE_NAME: &str = "shotori-custom-ocr.toml";
 
+#[derive(Default)]
+pub(super) struct OcrPageState {
+    pub(super) downloading: Option<(OcrModel, Arc<crate::ocr::DownloadProgress>)>,
+    pub(super) download_error: Option<(OcrModel, String)>,
+    pub(super) confirm_clear_cache: bool,
+}
+
+impl Drop for OcrPageState {
+    fn drop(&mut self) {
+        if let Some((_, progress)) = &self.downloading {
+            progress.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 impl SettingsWindow {
-    /// OCR: the model-set dropdown + the upright-assume switch, the
-    /// custom-config row, and the cache row. The dropdown rows stay
-    /// single-line (the model's localized label); the current choice's
-    /// langs · tier · readiness render as one detail line under it,
-    /// from `settings` — the file stays the single truth, the Select
-    /// is just the picker.
-    pub(super) fn page_ocr(&self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
-        let model = self.settings.ocr_model();
-        // The live toggle state, not the startup global — persist()
-        // never reinstalls the global, so the chip must follow what a
-        // restart would actually read.
+    fn reset_ocr_page(&mut self, cx: &mut Context<Self>) {
+        self.settings.reset_ocr_defaults();
+        self.ocr_page.confirm_clear_cache = false;
+        self.ocr_page.download_error = None;
+        self.persist(cx);
+    }
+
+    fn start_ocr_download(&mut self, model: OcrModel, cx: &mut Context<Self>) {
+        if let Some((_, prev)) = self.ocr_page.downloading.take() {
+            prev.cancel.store(true, Ordering::Relaxed);
+        }
+        self.ocr_page.download_error = None;
         let upright = self.settings.ocr_assume_upright();
-        // The custom status reads THIS window's live snapshot too (the
-        // raw value is passed in, not re-read from the global): a path
-        // picked in this window must light the chip up — and disable
-        // the dropdown — within the same window lifetime.
-        let custom_raw = self.settings.ocr_custom_config().map(str::to_string);
-        let custom = crate::ocr::custom_config_status(custom_raw.as_deref(), upright);
-        // A custom config outranks the dropdown entirely: its status
-        // takes over the dropdown's detail line (a "Ready" about a
-        // model that will never run is a lie), and the picker disables
-        // — picking there would write a setting that has no effect.
-        let status = match &custom {
-            Some(_) => crate::i18n::t!("settings.ocr_page.custom.overridden").to_string(),
-            None => {
-                let ready = crate::ocr::set_ready(model, self.settings.ocr_assume_upright());
-                if ready {
-                    crate::i18n::t!("settings.ocr_page.ready").to_string()
-                } else {
-                    crate::i18n::t!("settings.ocr_page.downloads_first").to_string()
+        let progress = Arc::new(crate::ocr::DownloadProgress::for_model(model, upright));
+        self.ocr_page.downloading = Some((model, Arc::clone(&progress)));
+        crate::ocr::spawn_download_for(model, upright, Arc::clone(&progress));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let mut last = (0u64, 0u64, 0u8);
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(80))
+                    .await;
+                let snap = (
+                    progress.done_bytes.load(Ordering::Relaxed)
+                        + progress.bytes.load(Ordering::Relaxed),
+                    progress.total.load(Ordering::Relaxed),
+                    progress.file_idx.load(Ordering::Relaxed),
+                );
+                let running = progress.is_running();
+                if !running {
+                    let ok = progress.finished_ok();
+                    let err_msg = (!ok).then(|| progress.error());
+                    let _ = this.update(cx, |view, cx| {
+                        let still_same = view
+                            .ocr_page
+                            .downloading
+                            .as_ref()
+                            .is_some_and(|(_, p)| Arc::ptr_eq(p, &progress));
+                        if still_same {
+                            view.ocr_page.downloading = None;
+                            if let Some(reason) = err_msg
+                                && reason != "cancelled"
+                            {
+                                view.ocr_page.download_error = Some((model, one_line(&reason)));
+                            }
+                            cx.notify();
+                        }
+                    });
+                    break;
+                }
+                if snap != last {
+                    last = snap;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        progress.cancel.store(true, Ordering::Relaxed);
+                        break;
+                    }
                 }
             }
-        };
-        let summary = format!("{} · {} · {}", model.languages(), model.tier(), status);
-        let upright = self.upright_switch(window, cx);
+        })
+        .detach();
+    }
+
+    fn cancel_ocr_download(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, progress)) = self.ocr_page.downloading.take() {
+            progress.cancel.store(true, Ordering::Relaxed);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn page_ocr(&self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
+        let selected_model = self.settings.ocr_model();
+        let upright = self.settings.ocr_assume_upright();
+        let custom_raw = self.settings.ocr_custom_config().map(str::to_string);
+        let custom = crate::ocr::custom_config_status(custom_raw.as_deref(), upright);
+        let custom_active = custom.is_some();
+
+        let upright_switch = self.upright_switch(window, cx);
         let join_lines = self.join_lines_switch(window, cx);
-        // The custom row's live detail: path · ready, or the first
-        // problem; None while off — the off how-to lives in the row's
-        // help mark instead.
         let custom_detail = custom_summary(&custom);
-        let custom_actions_row =
-            custom_actions(&custom, custom_raw.as_deref(), model, cx.entity(), cx);
+        let custom_actions_row = custom_actions(
+            &custom,
+            custom_raw.as_deref(),
+            selected_model,
+            cx.entity(),
+            cx,
+        );
+
+        let override_banner = custom_active.then(|| {
+            let entity = cx.entity();
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_3p5()
+                .py_2p5()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.5))
+                .bg(cx.theme().accent)
+                .text_xs()
+                .text_color(cx.theme().foreground)
+                .child(crate::i18n::t!("settings.ocr_page.custom.overridden").to_string())
+                .child(ghost_button(
+                    cx,
+                    "ocr-switch-presets",
+                    crate::i18n::t!("settings.ocr_page.use_presets").to_string(),
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.settings.set_ocr_custom_config(None);
+                            this.persist(cx);
+                        });
+                    },
+                ))
+        });
+
+        let (cache_files, cache_bytes) = crate::ocr::cache_stats();
+        let cache_stats_str = if cache_files == 0 {
+            format!(
+                "{} · {}",
+                crate::i18n::t!("settings.advanced.cache_empty"),
+                crate::ocr::model_dir_display()
+            )
+        } else {
+            format!(
+                "{} · {}",
+                crate::i18n::t!(
+                    "settings.advanced.cache_stats",
+                    size = super::layout::format_bytes(cache_bytes),
+                    count = cache_files
+                ),
+                crate::ocr::model_dir_display()
+            )
+        };
+
+        let cache_actions = self.ocr_cache_actions(cache_files > 0, cx);
+
         let body = super::layout::content_column()
-            .child(page_header(cx, "settings.ocr_page.title", None))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_4()
+                    .child(page_header(
+                        cx,
+                        "settings.ocr_page.title",
+                        Some("settings.ocr_page.blurb"),
+                    ))
+                    .child(super::shell::reset_button("settings.ocr_page.reset", cx, {
+                        let entity = cx.entity();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.reset_ocr_page(cx);
+                            });
+                        }
+                    })),
+            )
+            .children(override_banner)
+            .child(super::layout::section_block(
+                cx,
+                Some(crate::i18n::t!("settings.ocr_page.group.models").as_ref()),
+                None,
+                super::layout::dim_when(
+                    custom_active,
+                    self.ocr_model_cards(selected_model, upright, custom_active, window, cx),
+                ),
+            ))
             .child(card_group(
                 cx,
-                None,
+                Some(crate::i18n::t!("settings.ocr_page.group.behavior").as_ref()),
                 vec![
-                    super::layout::compact_row(
-                        cx,
-                        crate::i18n::t!("settings.ocr_page.model").to_string(),
-                        None,
-                        Some(summary),
-                        div().w(rems(20.)).max_w_full().child(
-                            Select::new(&self.ocr_select)
-                                .w_full()
-                                .disabled(custom.is_some())
-                                .accessibility_label(
-                                    crate::i18n::t!("settings.ocr_page.model").to_string(),
-                                )
-                                .menu_width(rems(20.)),
-                        ),
-                    ),
                     super::layout::compact_row(
                         cx,
                         crate::i18n::t!("settings.ocr_page.upright.title").to_string(),
                         Some("settings.ocr_page.upright.body"),
                         None,
-                        upright,
+                        upright_switch,
                     ),
                     super::layout::compact_row(
                         cx,
@@ -97,12 +226,9 @@ impl SettingsWindow {
                     ),
                 ],
             ))
-            // The custom config and the model directory share one card:
-            // a "Cache" caption over a single "Model cache" row only
-            // repeated the row's own label.
             .child(card_group(
                 cx,
-                None,
+                Some(crate::i18n::t!("settings.ocr_page.group.advanced").as_ref()),
                 vec![
                     super::layout::compact_row(
                         cx,
@@ -115,16 +241,315 @@ impl SettingsWindow {
                         cx,
                         crate::i18n::t!("settings.ocr_page.cache_row").to_string(),
                         Some("settings.ocr_page.cache_hint"),
-                        Some(crate::ocr::model_dir_display()),
-                        open_dir_button(cx),
+                        Some(cache_stats_str),
+                        cache_actions,
                     ),
                 ],
             ));
         page_body("page-ocr").child(body)
     }
 
-    /// The orientation switch: a controlled `Switch` whose owner writes
-    /// the requested value back (write-through, like every control here).
+    fn ocr_model_cards(
+        &self,
+        selected_model: OcrModel,
+        upright: bool,
+        disabled: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Div {
+        let columns = if window.viewport_size().width < window.rem_size() * 38. {
+            1
+        } else {
+            2
+        };
+        let mut grid = div().grid().grid_cols(columns).gap_2p5().w_full();
+        for model in OcrModel::ALL {
+            let selected = !disabled && model == selected_model;
+            let ready = crate::ocr::set_ready(model, upright);
+            let active_dl = self
+                .ocr_page
+                .downloading
+                .as_ref()
+                .filter(|(m, _)| *m == model)
+                .map(|(_, p)| p);
+            let dl_err = self
+                .ocr_page
+                .download_error
+                .as_ref()
+                .filter(|(m, _)| *m == model)
+                .map(|(_, e)| e.clone());
+
+            let status_row = if let Some(progress) = active_dl {
+                let done = progress.done_bytes.load(Ordering::Relaxed)
+                    + progress.bytes.load(Ordering::Relaxed);
+                let cur_bytes = progress.bytes.load(Ordering::Relaxed);
+                let cur_total = progress.total.load(Ordering::Relaxed);
+                let idx = progress.file_idx.load(Ordering::Relaxed).max(1);
+                let pct = if cur_total > 0 {
+                    (cur_bytes as f32 / cur_total as f32).clamp(0.05, 1.0)
+                } else {
+                    0.25
+                };
+                let entity = cx.entity();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .w_full()
+                    .pt_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div().text_xs().text_color(cx.theme().primary).child(
+                                    crate::i18n::t!(
+                                        "settings.ocr_page.downloading_status",
+                                        idx = idx,
+                                        count = progress.file_count.max(1),
+                                        done = super::layout::format_bytes(done)
+                                    )
+                                    .to_string(),
+                                ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "ocr-cancel-dl-{}",
+                                    model.id()
+                                )))
+                                .px_2()
+                                .h_6()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .text_xs()
+                                .text_color(cx.theme().foreground)
+                                .hover(|s| s.bg(cx.theme().secondary_hover))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    entity.update(cx, |this, cx| this.cancel_ocr_download(cx));
+                                })
+                                .child(
+                                    crate::i18n::t!("settings.ocr_page.cancel_download")
+                                        .to_string(),
+                                ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h_1()
+                            .rounded_full()
+                            .bg(cx.theme().border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(pct))
+                                    .rounded_full()
+                                    .bg(cx.theme().primary),
+                            ),
+                    )
+            } else if ready {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .pt_0p5()
+                    .text_xs()
+                    .text_color(cx.theme().primary)
+                    .child(Icon::new(IconName::Check).size_3())
+                    .child(crate::i18n::t!("settings.ocr_page.ready").to_string())
+            } else {
+                let entity = cx.entity();
+                let dl_label = crate::i18n::t!("settings.ocr_page.download_btn").to_string();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .pt_0p5()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                crate::i18n::t!("settings.ocr_page.downloads_first").to_string(),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("ocr-dl-{}", model.id())))
+                            .accessibility_label(format!("{dl_label}: {}", model.label()))
+                            .disabled(disabled)
+                            .px_2p5()
+                            .h_6()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background)
+                            .text_xs()
+                            .text_color(cx.theme().foreground)
+                            .hover(|s| s.bg(cx.theme().secondary_hover))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                entity.update(cx, |this, cx| {
+                                    this.select_ocr_model(model, cx);
+                                    this.start_ocr_download(model, cx);
+                                });
+                            })
+                            .child(dl_label),
+                    )
+            };
+
+            let card_body = div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1p5()
+                .w_full()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .w_full()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(cx.theme().foreground)
+                                .min_w_0()
+                                .truncate()
+                                .child(model.label()),
+                        )
+                        .child(
+                            div()
+                                .size_4()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().primary)
+                                .children(selected.then(|| Icon::new(IconName::Check).size_3p5())),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{} · {}", model.languages(), model.tier())),
+                )
+                .child(status_row)
+                .children(dl_err.map(|reason| {
+                    div().text_xs().text_color(cx.theme().danger).child(
+                        crate::i18n::t!("settings.ocr_page.download_failed", reason = reason)
+                            .to_string(),
+                    )
+                }));
+
+            let entity = cx.entity();
+            let mut card = div()
+                .id(SharedString::from(format!("ocr-model-card-{}", model.id())))
+                .flex()
+                .flex_col()
+                .p_3()
+                .w_full()
+                .min_w_0()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(if selected {
+                    cx.theme().primary
+                } else {
+                    cx.theme().border
+                })
+                .bg(if selected {
+                    cx.theme().accent
+                } else {
+                    cx.theme().group_box
+                })
+                .when(!disabled, |d| {
+                    d.cursor_pointer()
+                        .hover(|s| s.border_color(cx.theme().primary))
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.select_ocr_model(model, cx));
+                        })
+                })
+                .child(card_body);
+            if selected {
+                card = card.debug_selector(|| "ocr-selected-model-card".into());
+            }
+            grid = grid.child(card);
+        }
+        grid
+    }
+
+    fn ocr_cache_actions(&self, has_files: bool, cx: &Context<Self>) -> AnyElement {
+        let mut row = div().flex().items_center().gap_1p5().flex_shrink_0();
+        row = row.child(open_dir_button(cx));
+        if has_files && self.ocr_page.downloading.is_none() {
+            if self.ocr_page.confirm_clear_cache {
+                let entity_confirm = cx.entity();
+                let entity_cancel = cx.entity();
+                let confirm_lbl = crate::i18n::t!("settings.ocr_page.clear_confirm").to_string();
+                let cancel_lbl =
+                    crate::i18n::t!("settings.advanced.factory_reset.cancel").to_string();
+                row = row
+                    .child(
+                        Button::new("ocr-cache-clear-confirm")
+                            .accessibility_label(confirm_lbl.clone())
+                            .h_8()
+                            .px_3()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().danger)
+                            .text_color(cx.theme().danger_foreground)
+                            .text_sm()
+                            .on_click(move |_, _, cx| {
+                                entity_confirm.update(cx, |this, cx| {
+                                    this.ocr_page.confirm_clear_cache = false;
+                                    if let Err(e) = crate::ocr::clear_model_cache() {
+                                        this.error = Some(format!("{e:#}"));
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .child(confirm_lbl),
+                    )
+                    .child(ghost_button(
+                        cx,
+                        "ocr-cache-clear-cancel",
+                        cancel_lbl,
+                        move |_, _, cx| {
+                            entity_cancel.update(cx, |this, cx| {
+                                this.ocr_page.confirm_clear_cache = false;
+                                cx.notify();
+                            });
+                        },
+                    ));
+            } else {
+                let entity = cx.entity();
+                row = row.child(ghost_button(
+                    cx,
+                    "ocr-cache-clear-arm",
+                    crate::i18n::t!("settings.ocr_page.clear_cache").to_string(),
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.ocr_page.confirm_clear_cache = true;
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+        }
+        row.into_any_element()
+    }
+
     fn upright_switch(&self, window: &mut Window, cx: &mut Context<Self>) -> Switch {
         let entity = cx.entity();
         super::layout::settings_switch(
@@ -159,10 +584,6 @@ impl SettingsWindow {
         })
     }
 
-    /// A file dialog settled: a picked or just-saved path enables the
-    /// custom config (write-through, so the chip re-validates and the
-    /// dropdown disables this frame); a failed template write
-    /// surfaces as a notification; a cancel does nothing.
     fn custom_config_picked(
         &mut self,
         outcome: Option<anyhow::Result<PathBuf>>,
@@ -180,10 +601,6 @@ impl SettingsWindow {
     }
 }
 
-/// The custom row's live detail line, when a config is set: path ·
-/// ready, or the first problem (parse errors and missing files, one
-/// line — the raw anyhow chain is multi-line and would wreck the
-/// row). Off renders no detail: the off how-to is the row's help mark.
 fn custom_summary(custom: &Option<Result<std::path::PathBuf, String>>) -> Option<String> {
     match custom {
         None => None,
@@ -199,11 +616,6 @@ fn custom_summary(custom: &Option<Result<std::path::PathBuf, String>>) -> Option
     }
 }
 
-/// The custom row's actions, by state: off offers pick-an-existing
-/// and new-from-template; set offers open/replace/clear. The dialogs
-/// run on a plain thread (see `run_file_dialog`) — the click handler
-/// only captures what render time already knows (the entity, the
-/// model choice, the open target).
 fn custom_actions(
     custom: &Option<Result<std::path::PathBuf, String>>,
     raw: Option<&str>,
@@ -212,10 +624,8 @@ fn custom_actions(
     cx: &App,
 ) -> AnyElement {
     let t = |key: &'static str| crate::i18n::t!(key).to_string();
-    let mut row = div().flex().items_center().gap_1().flex_shrink_0();
+    let mut row = div().flex().items_center().gap_1p5().flex_shrink_0();
     if let Some(path) = custom_config_path(custom, raw) {
-        // Fixing a broken config is exactly the moment the open button
-        // matters, so it shows for Err paths too.
         row = row
             .child(ghost_button(
                 cx,
@@ -261,15 +671,9 @@ fn custom_actions(
                 "ocr-custom-new",
                 t("settings.ocr_page.custom.new"),
                 {
-                    move |_, _, cx| {
-                        // Generated here, not in the dialog thread: the
-                        // template comes from THIS window's model choice,
-                        // and building it is pure string work (the
-                        // registry entry plus path joins — no IO).
-                        match crate::ocr::template_config_toml(model) {
-                            Ok(text) => run_file_dialog(entity.clone(), Some(text), cx),
-                            Err(e) => notify_template_failed(e),
-                        }
+                    move |_, _, cx| match crate::ocr::template_config_toml(model) {
+                        Ok(text) => run_file_dialog(entity.clone(), Some(text), cx),
+                        Err(e) => notify_template_failed(e),
                     }
                 },
             ));
@@ -277,8 +681,6 @@ fn custom_actions(
     row.into_any_element()
 }
 
-/// Template generation/IO failure surface — the click has no other
-/// natural error channel, and a silent no-op reads as broken.
 fn notify_template_failed(e: anyhow::Error) {
     crate::notify::send(
         crate::i18n::t!("settings.ocr_page.custom.template_failed_title").as_ref(),
@@ -290,13 +692,6 @@ fn notify_template_failed(e: anyhow::Error) {
     );
 }
 
-/// Run a native file dialog on a dedicated thread: the xdg-portal
-/// round trip blocks, and gpui's executors are async contexts that
-/// must not block — the same rule that gives model downloads their
-/// own thread. `template` picks the flavor: None opens an existing
-/// config; Some(text) saves that text as a new one. The outcome lands
-/// in `SettingsWindow::custom_config_picked` on the window's entity;
-/// a window closed meanwhile simply drops it.
 fn run_file_dialog(entity: Entity<SettingsWindow>, template: Option<String>, cx: &mut App) {
     let title_key = if template.is_some() {
         "settings.ocr_page.custom.new_title"
@@ -321,8 +716,6 @@ fn run_file_dialog(entity: Entity<SettingsWindow>, template: Option<String>, cx:
                 .map(|path| write_template(&path, text)),
             None => dialog.pick_file().map(Ok),
         };
-        // A send error only means the window closed while the dialog
-        // was up — the click's effect is gone with it, nothing to report.
         drop(tx.send_blocking(outcome));
     });
     cx.spawn(async move |cx| {
@@ -333,26 +726,18 @@ fn run_file_dialog(entity: Entity<SettingsWindow>, template: Option<String>, cx:
     .detach();
 }
 
-/// Write the template text to the chosen path. The content is already
-/// validated (`to_toml_string`); this is plain IO, so failures carry
-/// the OS error verbatim.
 fn write_template(path: &Path, text: String) -> anyhow::Result<PathBuf> {
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(path.to_path_buf())
 }
 
-/// Where dialogs open: next to settings.toml (a hand-made config
-/// naturally lives beside it, and that directory exists whenever this
-/// window runs) — falling back to `$HOME`, then to rfd's default.
 fn dialog_start_dir() -> Option<PathBuf> {
     crate::model::settings::config_path()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }
 
-/// The cache row's action: open (and if needed create) the model
-/// directory in the file manager.
-fn open_dir_button(cx: &App) -> AnyElement {
+fn open_dir_button(cx: &App) -> Button {
     ghost_button(
         cx,
         "ocr-cache-open",
@@ -369,12 +754,8 @@ fn open_dir_button(cx: &App) -> AnyElement {
             ),
         },
     )
-    .into_any_element()
 }
 
-/// The shared ghost-button shape (the custom row's actions, the cache
-/// row's open). Click behavior is call-site owned: everything here is
-/// either instant or hands off to a plain thread.
 fn ghost_button(
     cx: &App,
     id: &'static str,
@@ -400,11 +781,6 @@ fn ghost_button(
         .on_click(on_click)
 }
 
-/// The configured path from a live status plus its raw setting (Ok
-/// gives it directly; Err keeps the normalized path so "open the
-/// config to fix it" works even when a model file is missing — the
-/// raw must come from the same live snapshot that produced
-/// `custom`, or the fallback resurrects a cleared path).
 fn custom_config_path(
     custom: &Option<Result<std::path::PathBuf, String>>,
     raw: Option<&str>,
@@ -416,7 +792,6 @@ fn custom_config_path(
     }
 }
 
-/// Collapse an error chain into one row-safe line.
 fn one_line(s: &str) -> String {
     let flat = s.replace('\n', " ");
     let cut: String = flat.chars().take(160).collect();

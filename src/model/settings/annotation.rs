@@ -126,14 +126,30 @@ pub(crate) struct AnnotationSettings {
     pub text_size: u8,
     /// Initial sequence badge diameter (`16..=64`, default `32`).
     pub number_size: u8,
+    /// Fill sequence badges by default (`true` = solid circle, `false` = outline ring).
+    pub number_fill: bool,
     pub number_format: NumberFormat,
     pub arrow_style: ArrowStyle,
     /// Smooth freehand pencil strokes (`true` by default).
     pub smooth_pencil: bool,
     /// Initial spotlight backdrop opacity percentage (`0..=100`, default `55`).
     pub spotlight_opacity: u8,
+    /// Default spotlight cutout shape (`false` = rectangle, `true` = ellipse).
+    pub spotlight_ellipse: bool,
     /// Initial magnifier lens zoom (`1..=8`, default `2`).
     pub magnifier_zoom: u8,
+    /// Default magnifier lens shape (`false` = rectangle, `true` = circle/ellipse).
+    pub magnifier_ellipse: bool,
+    /// Default drop shadow on magnifier lenses.
+    pub magnifier_shadow: bool,
+    /// Default rectangle corner radius (`0..=48`, default `0`).
+    pub geometry_radius: u8,
+    /// Default filled geometry mode for rectangles and ellipses.
+    pub geometry_fill: bool,
+    /// Default bold text annotations.
+    pub text_bold: bool,
+    /// Default high-contrast white outline around text annotations.
+    pub text_outline: bool,
 }
 
 impl Default for AnnotationSettings {
@@ -150,11 +166,19 @@ impl Default for AnnotationSettings {
             eraser_size: 32,
             text_size: 24,
             number_size: 32,
+            number_fill: true,
             number_format: NumberFormat::Decimal,
             arrow_style: ArrowStyle::Open,
             smooth_pencil: true,
             spotlight_opacity: 55,
+            spotlight_ellipse: false,
             magnifier_zoom: 2,
+            magnifier_ellipse: false,
+            magnifier_shadow: false,
+            geometry_radius: 0,
+            geometry_fill: false,
+            text_bold: false,
+            text_outline: false,
         }
     }
 }
@@ -173,11 +197,19 @@ pub(super) struct AnnotationFile {
     eraser_size: Option<i64>,
     text_size: Option<i64>,
     number_size: Option<i64>,
+    number_fill: Option<bool>,
     number_format: Option<String>,
     arrow_style: Option<String>,
     smooth_pencil: Option<bool>,
     spotlight_opacity: Option<i64>,
+    spotlight_ellipse: Option<bool>,
     magnifier_zoom: Option<i64>,
+    magnifier_ellipse: Option<bool>,
+    magnifier_shadow: Option<bool>,
+    geometry_radius: Option<i64>,
+    geometry_fill: Option<bool>,
+    text_bold: Option<bool>,
+    text_outline: Option<bool>,
 }
 
 fn bounded_u8(
@@ -338,6 +370,7 @@ impl AnnotationFile {
                 path,
                 errors,
             ),
+            number_fill: self.number_fill.unwrap_or(d.number_fill),
             number_format,
             arrow_style,
             smooth_pencil: self.smooth_pencil.unwrap_or(d.smooth_pencil),
@@ -350,6 +383,7 @@ impl AnnotationFile {
                 path,
                 errors,
             ),
+            spotlight_ellipse: self.spotlight_ellipse.unwrap_or(d.spotlight_ellipse),
             magnifier_zoom: bounded_u8(
                 self.magnifier_zoom,
                 1,
@@ -359,6 +393,20 @@ impl AnnotationFile {
                 path,
                 errors,
             ),
+            magnifier_ellipse: self.magnifier_ellipse.unwrap_or(d.magnifier_ellipse),
+            magnifier_shadow: self.magnifier_shadow.unwrap_or(d.magnifier_shadow),
+            geometry_radius: bounded_u8(
+                self.geometry_radius,
+                0,
+                48,
+                d.geometry_radius,
+                "geometry_radius",
+                path,
+                errors,
+            ),
+            geometry_fill: self.geometry_fill.unwrap_or(d.geometry_fill),
+            text_bold: self.text_bold.unwrap_or(d.text_bold),
+            text_outline: self.text_outline.unwrap_or(d.text_outline),
         }
     }
 }
@@ -419,6 +467,7 @@ impl AnnotationSettings {
             "number_size".into(),
             toml::Value::from(i64::from(self.number_size)),
         );
+        t.insert("number_fill".into(), toml::Value::from(self.number_fill));
         t.insert(
             "number_format".into(),
             toml::Value::from(number_format_id(self.number_format)),
@@ -436,9 +485,31 @@ impl AnnotationSettings {
             toml::Value::from(i64::from(self.spotlight_opacity)),
         );
         t.insert(
+            "spotlight_ellipse".into(),
+            toml::Value::from(self.spotlight_ellipse),
+        );
+        t.insert(
             "magnifier_zoom".into(),
             toml::Value::from(i64::from(self.magnifier_zoom)),
         );
+        t.insert(
+            "magnifier_ellipse".into(),
+            toml::Value::from(self.magnifier_ellipse),
+        );
+        t.insert(
+            "magnifier_shadow".into(),
+            toml::Value::from(self.magnifier_shadow),
+        );
+        t.insert(
+            "geometry_radius".into(),
+            toml::Value::from(i64::from(self.geometry_radius)),
+        );
+        t.insert(
+            "geometry_fill".into(),
+            toml::Value::from(self.geometry_fill),
+        );
+        t.insert("text_bold".into(), toml::Value::from(self.text_bold));
+        t.insert("text_outline".into(), toml::Value::from(self.text_outline));
         Ok(())
     }
 }
