@@ -5,33 +5,47 @@ putting anything on the live desktop. Written after a session that spawned
 windows onto the maintainer's niri session and stole focus: never do that.
 
 What this buys you: real GPU rendering, real layer-shell surfaces, real
-screencopy, in a compositor that exists only in memory. What it does **not**
-buy you is input — see "No hands" below.
+screencopy, and — when paired with `vptr keep` — real pointer clicks, drags,
+wheel scrolling, and keyboard shortcuts in a compositor that exists only in
+memory.
 
 ## The whole thing
 
 Run it from the compositor's session (see "Why the `niri msg action spawn`
-wrapper"), with `$APP` pointing at `target/release/shotori`:
+wrapper"), with `$APP` pointing at `target/release/shotori` (and `$VPTR` at
+`target/release/vptr` after `cargo build --release -p vptr`):
 
 ```sh
 niri msg action spawn -- sh -c '
 APP=/abs/path/to/target/release/shotori
-OUT=/abs/path/to/target/headless/settings.png
+VPTR=/abs/path/to/target/release/vptr
+OUT=/abs/path/to/target/headless/interactive.png
 RT=$(mktemp -d /tmp/shotori-headless.XXXXXX)
 printf "output HEADLESS-1 resolution 1600x1000\noutput HEADLESS-1 bg #ff00ff solid_color\ndefault_border none\n" > $RT/sway.conf
 export XDG_RUNTIME_DIR=$RT
 export WLR_BACKENDS=headless WLR_HEADLESS_OUTPUTS=1 WLR_LIBINPUT_NO_DEVICES=1
-export WLR_RENDERER=gles2 WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128
+export WLR_RENDERER=vulkan WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128
 sway -c $RT/sway.conf > $RT/sway.log 2>&1 &
 SW=$!
 sleep 2
 export WAYLAND_DISPLAY=wayland-1
-"$APP" settings > $RT/app.log 2>&1 &
+
+# Start persistent virtual devices BEFORE shotori so seat0 gets capabilities=3:
+mkfifo $RT/input.fifo
+"$VPTR" keep 1600 1000 < $RT/input.fifo > $RT/vptr.log 2>&1 &
+KP=$!
+exec 3>"$RT/input.fifo"
+sleep 0.3
+
+"$APP" > $RT/app.log 2>&1 &
 AP=$!
-sleep 6
+sleep 3.5
+printf "drag 180 120 1060 660 20\nsleep 150\nkey r\nsleep 120\ndrag 240 190 520 390 16\nmove 380 190\nscroll 1 8\n" >&3
+sleep 1.5
 grim -o HEADLESS-1 "$OUT"
-grim -o HEADLESS-1 "${OUT%.png}-b.png"     # a second frame: animations need >1
-kill $AP $SW 2>/dev/null
+
+exec 3>&-
+kill $AP $KP $SW 2>/dev/null
 rm -rf $RT
 '
 ```
@@ -127,35 +141,35 @@ it is a process launcher, not a window request.
 - If you forget the wrapper, the app's log says `vkCreateInstance: Found no
   drivers!` and grim still writes a PNG — all magenta.
 
-## No hands: a headless session has no input
+## Interactive input in headless sway: `vptr keep` vs `SHOTORI_DEBUG_*`
 
-Measured, with the app focused (`swaymsg -t get_tree` reports `"focused": true`
-for app_id `shotori`):
+`WLR_LIBINPUT_NO_DEVICES=1` keeps the maintainer's physical keyboard and mouse
+out of the headless session, starting `seat0` with `capabilities: 0`. Two
+measured traps broke naive virtual-input attempts before `vptr keep` solved
+both:
 
-```text
-$ swaymsg -t get_seats
-[{ "name": "seat0", "capabilities": 0, "focus": 5, "devices": [] }]
-$ swaymsg -t get_inputs
-[]
-```
+1. **The seat-capability timeline**: if `shotori` maps its `wlr-layer-shell`
+   surface while `seat0` still has `capabilities: 0`, sway never grants focus.
+   Starting `vptr keep W H < input.fifo &` **before** launching `shotori`
+   attaches a persistent `zwlr_virtual_pointer_v1` and `zwp_virtual_keyboard_v1`,
+   raising `seat0` to `capabilities: 3` (`keyboard | pointer`).
+2. **Ephemeral pointer disconnect on drag / `axis_discrete` on wheel**:
+   short-lived `vptr down` CLI calls destroy their virtual pointer on process
+   exit, causing wlroots to auto-release held buttons before `vptr move` runs;
+   and wlroots drops `AxisSource::Wheel` frames that lack `axis_discrete`.
+   `vptr keep [W H]` executes the entire gesture stream on one persistent
+   connection:
+   - `move X Y [W H]`
+   - `click | dclick | rclick X Y [W H]`
+   - `drag X1 Y1 X2 Y2 [STEPS]` (and `down [left|right]` / `up [left|right]`)
+   - `scroll | hscroll LINES [STEPS]` (positive = scroll/step up, negative = down)
+   - `mods shift|ctrl|alt|super|shift+alt|none`
+   - `key CHORD` (or bare `CHORD`), `extent W H`, `sleep MS`
 
-`WLR_LIBINPUT_NO_DEVICES=1` is what keeps the user's real keyboard and mouse
-out of the test session, and the price is a seat with **zero capabilities**:
-
-- `zwlr_virtual_pointer_v1` motion is accepted and never becomes a `wl_pointer`
-  event. This is the same wall [wdotool](https://github.com/cushycush/wdotool/blob/main/docs/testing.md)
-  documents for sway/labwc/river: wlroots seeds pointer capability from real
-  input devices.
-- `wtype` (i.e. `zwp_virtual_keyboard_v1`) did not reach the app either: three
-  `Tab` presses produced a 0-pixel difference, and `Escape` never closed the
-  overlay.
-
-So a headless run can **only** drive the app through the `SHOTORI_DEBUG_*`
-backdoors in `src/ui/e2e.rs`. If a test needs a click on a particular section,
-add a backdoor for it — do not fabricate clicks, and do not "just use the real
-desktop". `/dev/uinput` would sidestep this (sway cannot tell it from real
-hardware) but it needs device permissions and an injector; that is the only
-known route to wheel/click e2e, including long-capture scrolling.
+When you only need a fast deterministic snapshot of a pre-built scene (without
+scripting pointer coordinates), use the `SHOTORI_DEBUG_*` backdoors in
+`src/ui/e2e.rs` directly; when testing end-to-end pointer drags, handle bends,
+sidebar clicks, or wheel scrolling, drive `vptr keep`.
 
 ## When pixels are the wrong tool
 
@@ -177,8 +191,10 @@ behaviour, this page for pixels.
   PID captured in the block (`$AP`, `$SW`).
 - App boot plus font cache needs ~4–6 s. Capture earlier and the frame is pure
   magenta.
-- `SHOT_RENDERER=pixman` boots faster but cannot import the client's GPU
-  buffers, so shotori paints nothing. Keep `gles2`.
+- **Use `WLR_RENDERER=vulkan`, not `pixman` or `gles2`.** `pixman` cannot import
+  the client's GPU buffers, and wlroots's `gles2` headless readback announces
+  24-bit `BGR888` (`stride = w * 3`) instead of 32-bit `XRGB8888` (`stride = w * 4`).
+  `WLR_RENDERER=vulkan` announces 32-bit `XRGB8888` cleanly.
 - The session contains no other toplevels: omit `SHOTORI_DEBUG_TARGET` (it
   restricts overlays to a named output) and expect
   `window snap: no visible windows` in the app log.
@@ -189,8 +205,9 @@ behaviour, this page for pixels.
 
 ## Related
 
-- `tools/vptr` — pointer and keyboard into a **live** session (needs a real
-  seat); the counterpart for the maintainer's own desktop, useless headless.
+- `tools/vptr` — persistent (`vptr keep [W H]`) and one-shot virtual pointer +
+  keyboard injector (`zwlr_virtual_pointer_v1` + `zwp_virtual_keyboard_v1`) for
+  headless sway e2e and live sessions.
 - `tools/scrollprobe` — frame-sequence driver for the long-capture matcher.
-- `src/ui/e2e.rs` — the `SHOTORI_DEBUG_*` backdoors, the only input surface a
-  headless run has.
+- `src/ui/e2e.rs` — deterministic `SHOTORI_DEBUG_*` scene/action backdoors for
+  fast single-shot headless snapshots.

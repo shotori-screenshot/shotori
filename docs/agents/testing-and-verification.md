@@ -9,14 +9,14 @@ Match the verification tier to what your change touches.
 | --- | --- | --- | --- |
 | **1. Pure Unit Tests** | `cargo test` (`mod tests` in `model/`, `annotation/`, `args.rs`, `i18n.rs`, `ocr.rs`) | No | State machines, placement sweep, smart-region detection, `scroll_sheet` pixel-prefix invariants, rasterizer math, config round-trips, CLI parsing |
 | **2. Headless Widget Tests** | `cargo test` (`#[gpui_kit::test]` + `gpui_kit::test::TestWindowExt`) | No | Real GPUI widget layout, hit-testing, menu clicks, focus restoration, shortcut dispatch, `TextInput` / `TextEditor` / `Overlay` interaction |
-| **3. Private Headless Wayland E2E** | Headless `sway` + `grim` via `niri msg action spawn` + `SHOTORI_DEBUG_*` ([`docs/headless-e2e.md`](../headless-e2e.md)) | Private in-memory `sway` (`WLR_BACKENDS=headless`) | Real Vulkan (`blade`) rendering, `BGRA` swap, `wlr-layer-shell` geometry, `wlr-screencopy`, fractional HiDPI (`1.25×`), multi-frame async transitions |
+| **3. Private Headless Wayland E2E** | Headless `sway` (`WLR_RENDERER=vulkan`) + `grim` via `niri msg action spawn` + `vptr keep` or `SHOTORI_DEBUG_*` ([`docs/headless-e2e.md`](../headless-e2e.md)) | Private in-memory `sway` (`WLR_BACKENDS=headless`) | Real Vulkan (`blade`) rendering, `BGRA` swap, `wlr-layer-shell` geometry, `wlr-screencopy`, real pointer drag/click/wheel & keyboard focus, fractional HiDPI (`1.25×`) |
 | **4. Perf & Live Protocol Probes** | `--bench`, `--perf` (`--features perf`), `SHOTORI_BOOT=1`, `tools/scrollprobe`, `tools/vptr` | `--bench`: No · `--perf` / `scrollprobe` / `vptr`: Yes | Pixel/PNG throughput, cold-start phase latency & RSS, screencopy/pointer protocol diagnostics |
 
 > **Important notes on `cargo test`:**
-> - `Cargo.toml` sets `[profile.test] opt-level = 3` because `scroll_sheet`
->   pixel-regression fixtures run per-pixel `f32` math across hundreds of
->   frames (~17 s optimized vs ~7 min unoptimized) while keeping debug
->   assertions and overflow checks enabled.
+> - `Cargo.toml` scopes `[profile.test] opt-level = 2` to the workspace and
+>   pixel/font leaf crates (`[profile.test.package."*"] opt-level = 0`), keeping
+>   `scroll_sheet` and rasterizer tests fast (~5 s) while sharing cached `dev`
+>   dependency artifacts with `cargo build`.
 > - `#[gpui_kit::test]` works cleanly on pinned `gpui-kit 0.8` (see
 >   `src/ui/text_input.rs`, `src/ui/text_editor.rs`,
 >   `src/ui/overlay/interaction_tests.rs`,
@@ -24,14 +24,17 @@ Match the verification tier to what your change touches.
 >   dependency bump ever reintroduces a `rustc` SIGSEGV in macro expansion,
 >   stop and report the regression — never silently downgrade widget tests.
 
-## 2. Complete `SHOTORI_*` Environment Variable Reference
+## 2. Headless Input (`vptr keep`) & `SHOTORI_DEBUG_*` Reference
 
-Headless Wayland sessions (`WLR_LIBINPUT_NO_DEVICES=1`) have **zero seat
-input capabilities** (`capabilities: 0`): virtual pointer and virtual
-keyboard events are dropped by sway without physical devices. Drive
-headless sessions exclusively through `SHOTORI_DEBUG_*` (`src/ui/e2e.rs`
-and friends) — add a clean backdoor in `src/ui/e2e.rs` if a new flow needs
-one.
+Headless Wayland sessions (`WLR_LIBINPUT_NO_DEVICES=1`) start `seat0` with
+`capabilities: 0`. You have two ways to drive them:
+- **Interactive pointer & keyboard (`tools/vptr`)**: start
+  `vptr keep <width> <height> < input.fifo &` **before** launching `shotori` so
+  `seat0` acquires `capabilities: 3` (`keyboard | pointer`), then stream
+  `move`, `click`/`dclick`/`rclick`, `drag`, `scroll`/`hscroll`, `mods`, and
+  `key` commands over the FIFO ([`docs/headless-e2e.md`](../headless-e2e.md)).
+- **Deterministic scene/action seeds (`SHOTORI_DEBUG_*`)**: fast one-shot
+  state injection in `src/ui/e2e.rs` when pointer choreography is unnecessary.
 
 ### Overlay & Capture Backdoors
 
