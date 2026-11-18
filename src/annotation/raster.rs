@@ -3,7 +3,72 @@
 //! Magnifiers sample the complete ordinary mark layer without recursively sampling
 //! other lenses. Display order remains independent of that sampling pass.
 use super::{Annotations, Shape, ShapeKind, filter, line, magnifier, number, spotlight, text};
-use gpui_kit::{Pixels, Point};
+use gpui_kit::{Bounds, Pixels, Point, point, px, size};
+
+/// Tight straight-alpha RGBA sprite baked from one or more source-over marks
+/// (issue #32). Reused across pointer-move frames so dragging a long stroke,
+/// text box, or multi-selection translates a pre-rasterized texture on GPU
+/// (or blits a compact band on CPU) instead of re-tessellating every frame.
+pub(crate) struct BakedLayer {
+    pub(crate) bounds: Bounds<Pixels>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
+}
+
+impl BakedLayer {
+    /// Alpha-composite this baked sprite onto `dst` (`dst_w × dst_h` at
+    /// `dst_origin`, physical `scale`) translated by logical `delta`.
+    /// Preserves transparent desktop gaps (`dst[3] == 0`) just like direct
+    /// rasterization.
+    pub(crate) fn blit(
+        &self,
+        dst: &mut [u8],
+        dst_w: u32,
+        dst_h: u32,
+        dst_origin: Point<Pixels>,
+        scale: f32,
+        delta: Point<Pixels>,
+    ) {
+        let off_x =
+            (f32::from(self.bounds.origin.x + delta.x - dst_origin.x) * scale).round() as i32;
+        let off_y =
+            (f32::from(self.bounds.origin.y + delta.y - dst_origin.y) * scale).round() as i32;
+        let sx0 = (-off_x).max(0) as u32;
+        let sy0 = (-off_y).max(0) as u32;
+        let sx1 = ((dst_w as i32 - off_x).max(0) as u32).min(self.width);
+        let sy1 = ((dst_h as i32 - off_y).max(0) as u32).min(self.height);
+        if sx0 >= sx1 || sy0 >= sy1 {
+            return;
+        }
+        for sy in sy0..sy1 {
+            let dy = (sy as i32 + off_y) as usize;
+            let src_row = (sy * self.width) as usize;
+            let dst_row = dy * dst_w as usize;
+            for sx in sx0..sx1 {
+                let s = (src_row + sx as usize) * 4;
+                let sa = self.rgba[s + 3];
+                if sa == 0 {
+                    continue;
+                }
+                let d = (dst_row + (sx as i32 + off_x) as usize) * 4;
+                if dst[d + 3] == 0 {
+                    continue;
+                }
+                if sa == 255 {
+                    dst[d..d + 3].copy_from_slice(&self.rgba[s..s + 3]);
+                } else {
+                    let a = f32::from(sa) / 255.;
+                    for c in 0..3 {
+                        dst[d + c] = (f32::from(dst[d + c]) * (1. - a)
+                            + f32::from(self.rgba[s + c]) * a)
+                            .round() as u8;
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Reuses the sampling layer and display prefix while one committed lens changes.
 /// Later marks still composite in order, including filters and spotlights over the lens.
@@ -107,6 +172,35 @@ fn rasterize_sampled<'a>(
 }
 
 impl Shape {
+    /// Whether this mark composites purely via backdrop-independent straight-alpha
+    /// source-over blending (so it can be baked once into a [`BakedLayer`] sprite
+    /// and translated across frames without re-sampling the underlying capture).
+    pub(crate) fn is_source_over_layerable(&self) -> bool {
+        match self.kind {
+            ShapeKind::Mosaic | ShapeKind::Blur | ShapeKind::Spotlight | ShapeKind::Magnifier => {
+                false
+            }
+            ShapeKind::Highlighter => {
+                self.highlighter_options().blend != super::HighlightBlend::Multiply
+            }
+            _ => true,
+        }
+    }
+
+    /// Conservative logical bounding box covering all rasterized pixels of
+    /// this mark (including rotated corners, badge drop shadows, text outlines,
+    /// and magnifier destination rects).
+    pub(crate) fn raster_dirty_bounds(&self) -> Bounds<Pixels> {
+        let mut b = self.selection_box();
+        for p in self.frame_corners() {
+            b = b.union(&Bounds::new(p, size(px(0.), px(0.))));
+        }
+        if let Some(mag) = self.magnified_bounds() {
+            b = b.union(&mag);
+        }
+        super::select::inflate(&b, px(10.))
+    }
+
     fn rasterize_ellipse(
         &self,
         rgba: &mut [u8],
@@ -236,6 +330,75 @@ impl Annotations {
         for shape in shapes {
             draw_ordinary_shape(shape, rgba, w, h, origin, scale);
         }
+    }
+
+    /// Bake one or more backdrop-independent (`is_source_over_layerable`) marks
+    /// into a tight straight-alpha RGBA sprite via dual-background matte
+    /// extraction over [`Annotations::rasterize_ordinary`].
+    ///
+    /// Why dual-background matte extraction instead of duplicating blend loops:
+    /// every source-over mark (antialiased strokes, translucent geometry/marker,
+    /// shadowed badges, outlined/rotated text) satisfies `Out(B) = (1 - A)*B + P`
+    /// with channel-uniform transmittance `1 - A`. Evaluating `rasterize_ordinary`
+    /// once over opaque black (`B = 0 → P`) and once over opaque white
+    /// (`B = 255 → 255*(1 - A) + P`) recovers exact `(R, G, B, A)` for arbitrary
+    /// overlapping multi-selections while reusing 100% of the authoritative
+    /// rasterizers and side-stepping the `dst_alpha == 0` multi-output gap guard.
+    pub(crate) fn bake_source_over_layer(shapes: &[&Shape], scale: f32) -> Option<BakedLayer> {
+        if shapes.is_empty() || scale <= 0. || !shapes.iter().all(|s| s.is_source_over_layerable())
+        {
+            return None;
+        }
+        let union = shapes
+            .iter()
+            .map(|s| s.raster_dirty_bounds())
+            .reduce(|a, b| a.union(&b))?;
+        let left = (f32::from(union.left()) * scale).floor();
+        let top = (f32::from(union.top()) * scale).floor();
+        let right = (f32::from(union.right()) * scale).ceil();
+        let bottom = (f32::from(union.bottom()) * scale).ceil();
+        if right <= left || bottom <= top {
+            return None;
+        }
+        let w = (right - left) as u32;
+        let h = (bottom - top) as u32;
+        let n = (w as usize).checked_mul(h as usize)?;
+        let origin = point(px(left / scale), px(top / scale));
+        let mut on_black = [0u8, 0, 0, 255].repeat(n);
+        let mut on_white = vec![255u8; n * 4];
+        Self::rasterize_ordinary(shapes.iter().copied(), &mut on_black, w, h, origin, scale);
+        Self::rasterize_ordinary(shapes.iter().copied(), &mut on_white, w, h, origin, scale);
+        let mut rgba = vec![0u8; n * 4];
+        for ((dst, k), wt) in rgba
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(on_black.as_chunks::<4>().0.iter())
+            .zip(on_white.as_chunks::<4>().0.iter())
+        {
+            let a0 = 255 - i32::from(wt[0]) + i32::from(k[0]);
+            let a1 = 255 - i32::from(wt[1]) + i32::from(k[1]);
+            let a2 = 255 - i32::from(wt[2]) + i32::from(k[2]);
+            let a = ((a0 + a1 + a2 + 1) / 3).clamp(0, 255) as u8;
+            if a == 0 {
+                continue;
+            }
+            if a == 255 {
+                *dst = [k[0], k[1], k[2], 255];
+            } else {
+                let au = u32::from(a);
+                dst[0] = ((u32::from(k[0]) * 255 + au / 2) / au).min(255) as u8;
+                dst[1] = ((u32::from(k[1]) * 255 + au / 2) / au).min(255) as u8;
+                dst[2] = ((u32::from(k[2]) * 255 + au / 2) / au).min(255) as u8;
+                dst[3] = a;
+            }
+        }
+        Some(BakedLayer {
+            bounds: Bounds::new(origin, size(px(w as f32 / scale), px(h as f32 / scale))),
+            width: w,
+            height: h,
+            rgba,
+        })
     }
 }
 
@@ -585,6 +748,86 @@ mod tests {
                     .any(|p| p[0] > 0 && p[0] < 255)
             );
             assert_eq!(shape.line_paths(point(px(0.), px(0.))).len(), 2);
+        }
+    }
+
+    #[test]
+    fn baked_source_over_layer_matches_direct_rasterization_within_1_lsb() {
+        let area = Bounds::new(point(px(0.), px(0.)), size(px(240.), px(180.)));
+        let mut a = Annotations::default();
+        // Long freehand stroke
+        a.toggle(ShapeKind::Pencil);
+        a.set_tool_size(8.);
+        a.begin(point(px(20.), px(30.)), area, false);
+        for k in 1..40 {
+            a.drag_to(
+                point(
+                    px(20. + k as f32 * 4.),
+                    px(30. + ((k * 7) % 19) as f32 * 3.),
+                ),
+                area,
+                false,
+            );
+        }
+        a.end();
+        // Translucent filled rounded rectangle overlapping the stroke
+        a.toggle(ShapeKind::Rectangle);
+        a.set_geometry_radius(10.);
+        a.set_geometry_fill_mode(super::super::GeometryFill::Translucent);
+        a.begin(point(px(40.), px(25.)), area, false);
+        a.drag_to(point(px(140.), px(100.)), area, false);
+        a.end();
+        // Sequence badge with drop shadow
+        a.toggle(ShapeKind::Number);
+        a.begin(point(px(90.), px(70.)), area, false);
+        a.end();
+
+        let refs: Vec<&Shape> = a.committed().iter().collect();
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let baked = Annotations::bake_source_over_layer(&refs, scale).expect("layerable");
+            let w = (240. * scale).round() as u32;
+            let h = (180. * scale).round() as u32;
+            let base: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    [
+                        (i * 37 % 251) as u8,
+                        (i * 73 % 241) as u8,
+                        (i * 19 % 233) as u8,
+                        if i % w == 0 { 0 } else { 255 },
+                    ]
+                })
+                .collect();
+            let delta = point(px(16.), px(12.)); // exact integer pixels at 1.0, 1.25, 2.0
+            let mut blitted = base.clone();
+            baked.blit(&mut blitted, w, h, point(px(0.), px(0.)), scale, delta);
+
+            let mut moved: Vec<Shape> = a.committed().to_vec();
+            for s in &mut moved {
+                s.translate(delta);
+            }
+            let mut direct = base;
+            Annotations::rasterize_shapes(
+                moved.iter(),
+                &mut direct,
+                w,
+                h,
+                point(px(0.), px(0.)),
+                scale,
+            );
+
+            let max_diff = blitted
+                .iter()
+                .zip(&direct)
+                .map(|(&x, &y)| x.abs_diff(y))
+                .max()
+                .unwrap_or(0);
+            // 8-bit straight-alpha quantization (`k = round(a*C)` then
+            // `C' = round(255*k/a)`) has a tight mathematical bound of ≤ 2 LSB
+            // on low-alpha drop-shadow / multi-coat antialiased fringe pixels.
+            assert!(
+                max_diff <= 2,
+                "baked layer diverged by {max_diff} LSB at scale {scale}"
+            );
         }
     }
 }

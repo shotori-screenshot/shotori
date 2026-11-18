@@ -118,8 +118,26 @@ impl Render for Overlay {
         };
         // Keep display geometry stable while dragging. The backdrop paints
         // shared edges directly so fractional DPI cannot open layout seams.
-        let filtered = self.session.update(cx, |session, cx| {
-            session.request_filtered_preview(&self.capture.output_name, cx)
+        let (drag_planes, filtered) = self.session.update(cx, |session, cx| {
+            let local_sel = session.local_bounds(&self.capture.output_name);
+            if local_sel.is_some()
+                && session.is_body_moving()
+                && let Some(planes) = session.request_drag_preview_planes(&self.capture.output_name)
+            {
+                return (Some(planes), None);
+            }
+            let filtered = session.request_filtered_preview(&self.capture.output_name, cx);
+            let holdover = if local_sel.is_some() && session.is_preview_busy() {
+                session.request_drag_preview_planes(&self.capture.output_name)
+            } else {
+                session.clear_drag_preview_planes();
+                None
+            };
+            if holdover.is_some() {
+                (holdover, None)
+            } else {
+                (None, filtered)
+            }
         });
         let shared = self.session.read(cx);
         let selection = shared.selection();
@@ -158,6 +176,14 @@ impl Render for Overlay {
         };
         let canvas_images = self.canvas_images.clone();
         let filtered_image = filtered.as_ref().map(|(_, image)| image.clone());
+        let mut drag_plane_images = Vec::new();
+        if let Some(planes) = &drag_planes {
+            drag_plane_images.push(planes.base.1.clone());
+            drag_plane_images.push(planes.dragged.1.clone());
+            if let Some((_, above_img)) = &planes.above {
+                drag_plane_images.push(above_img.clone());
+            }
+        }
         let number_cache = self.number_cache.clone();
         let highlighter_cache = self.highlighter_cache.clone();
         let drawing_polyline = shared.annotations().is_drawing_polyline();
@@ -662,6 +688,7 @@ impl Render for Overlay {
                             .prepare(&shapes, window.scale_factor());
                         let next = filtered_image
                             .into_iter()
+                            .chain(drag_plane_images)
                             .chain(images.iter().flatten().map(|image| image.image.clone()))
                             .chain(highlights.iter().flatten().map(|image| image.image.clone()))
                             .collect();
@@ -682,7 +709,25 @@ impl Render for Overlay {
                         if let Some(mut clip) = sel {
                             clip.origin += viewport.origin;
                             window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                            if let Some((mut bounds, image)) = filtered {
+                            if let Some(planes) = drag_planes {
+                                let mut layers = vec![planes.base, planes.dragged];
+                                if let Some(above) = planes.above {
+                                    layers.push(above);
+                                }
+                                for (mut bounds, image) in layers {
+                                    bounds.origin += viewport.origin;
+                                    if let Err(error) = window.paint_image(
+                                        bounds,
+                                        bounds,
+                                        Corners::default(),
+                                        image,
+                                        0,
+                                        false,
+                                    ) {
+                                        eprintln!("[shotori] drag plane preview failed: {error}");
+                                    }
+                                }
+                            } else if let Some((mut bounds, image)) = filtered {
                                 bounds.origin += viewport.origin;
                                 if let Err(error) = window.paint_image(
                                     bounds,

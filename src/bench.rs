@@ -430,6 +430,7 @@ pub fn bench_main() -> i32 {
             let base_plane = std::sync::Arc::new(base_plane);
             let base_plane_ref = base_plane.clone();
             let ann_ref2 = ann.clone();
+            let before_sprite = before_split.clone();
             let split_tag = tag.replace("full", "split");
             let workload: Workload = Box::new(move || {
                 // One pointer move: place the dragged shape at its new
@@ -453,6 +454,38 @@ pub fn bench_main() -> i32 {
             });
             run(&split_tag, workload);
             ran += 1;
+
+            if !lens {
+                // Pre-baked sprite blit over dirty-rect base buffer (#32 CPU
+                // band cost, before GPU zero-upload DragPreviewPlanes reduces
+                // live Overlay moves to a 0-allocation Bounds offset).
+                let baked = std::sync::Arc::new(
+                    Annotations::bake_source_over_layer(&[&before_sprite], 1.0).unwrap(),
+                );
+                let mut working = base_plane.as_ref().clone();
+                let base_plane_sprite = base_plane.clone();
+                let workload: Workload = Box::new(move || {
+                    let delta = point(px(3.), px(2.));
+                    let b = before_sprite.raster_dirty_bounds();
+                    let x0 = (f32::from(b.left() + delta.x).floor() as isize).clamp(0, w as isize)
+                        as usize;
+                    let y0 = (f32::from(b.top() + delta.y).floor() as isize).clamp(0, h as isize)
+                        as usize;
+                    let x1 = (f32::from(b.right() + delta.x).ceil() as isize).clamp(0, w as isize)
+                        as usize;
+                    let y1 = (f32::from(b.bottom() + delta.y).ceil() as isize).clamp(0, h as isize)
+                        as usize;
+                    for row in y0..y1 {
+                        let start = (row * w as usize + x0) * 4;
+                        let end = (row * w as usize + x1) * 4;
+                        working[start..end].copy_from_slice(&base_plane_sprite[start..end]);
+                    }
+                    baked.blit(&mut working, w, h, point(px(0.), px(0.)), 1.0, delta);
+                    vec![working[0]]
+                });
+                run("move-frame-sprite-blit-1080p", workload);
+                ran += 1;
+            }
         }
     }
 

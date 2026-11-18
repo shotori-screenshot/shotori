@@ -151,9 +151,36 @@ struct FilterPreview {
 /// the dragged shapes plus every Spotlight/Magnifier (a spotlight dim
 /// must apply exactly once over the union of all spotlights, and a
 /// lens samples the marked layer — neither survives a naive split).
+/// `prev_dirty` records the physical pixel rectangle `(x0, y0, x1, y1)`
+/// painted on the previous drag frame so only that band is restored from
+/// `base` instead of cloning the full canvas per pointer move (#32).
 struct MovedReplay {
     indices: Vec<usize>,
     base: Vec<u8>,
+    prev_dirty: Option<(usize, usize, usize, usize)>,
+}
+
+/// GPU-composited split planes for a live body-move drag (#32), mapped
+/// into the requesting window's local coordinates. Every `Arc<RenderImage>`
+/// keeps a stable `ImageId` across pointer-move frames so GPUI's texture
+/// atlas never re-uploads the 8–33 MB full-selection canvas per move.
+pub(crate) struct DragPreviewPlanes {
+    pub(crate) base: (Bounds<Pixels>, Arc<RenderImage>),
+    pub(crate) dragged: (Bounds<Pixels>, Arc<RenderImage>),
+    pub(crate) above: Option<(Bounds<Pixels>, Arc<RenderImage>)>,
+}
+
+struct DragOverlayCache {
+    selection: Option<Bounds<Pixels>>,
+    scale: f32,
+    indices: Vec<usize>,
+    anchor_ix: usize,
+    baked_anchor_origin: Point<Pixels>,
+    static_shapes: Vec<(usize, crate::annotation::Shape)>,
+    base_bounds: Bounds<Pixels>,
+    base_image: Arc<RenderImage>,
+    sprite: (Bounds<Pixels>, Arc<RenderImage>),
+    above: Option<(Bounds<Pixels>, Arc<RenderImage>)>,
 }
 
 struct DisplayPreview {
@@ -236,6 +263,7 @@ pub struct ScreenshotSession {
     /// Optional CLI `--tool` armed as soon as the first finalized selection lands.
     pending_tool: Option<crate::annotation::ShapeKind>,
     filter_preview: std::cell::RefCell<Option<FilterPreview>>,
+    drag_overlay: std::cell::RefCell<Option<DragOverlayCache>>,
     preview_busy: bool,
     preview_display: Option<DisplayPreview>,
     geometry_revision: u64,
@@ -283,6 +311,7 @@ impl ScreenshotSession {
             annotations: crate::annotation::Annotations::from_settings(),
             pending_tool: None,
             filter_preview: Default::default(),
+            drag_overlay: Default::default(),
             preview_busy: false,
             preview_display: None,
             geometry_revision: 0,

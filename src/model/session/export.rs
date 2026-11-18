@@ -4,7 +4,8 @@
 //! the frozen capture, cached and invalidated by session state).
 
 use super::{
-    DisplayPreview, FilterPreview, MovedReplay, RasterSelection, ScreenshotSession, ScrollRect,
+    DisplayPreview, DragOverlayCache, DragPreviewPlanes, FilterPreview, MovedReplay,
+    RasterSelection, ScreenshotSession, ScrollRect,
 };
 use gpui_kit::*;
 use std::sync::Arc;
@@ -54,6 +55,225 @@ impl ScreenshotSession {
     pub fn crop_original(&self, output: &str) -> Option<(u32, u32, Vec<u8>)> {
         self.crop_impl(output, false)
             .map(|r| (r.width, r.height, r.rgba))
+    }
+
+    pub(crate) fn is_preview_busy(&self) -> bool {
+        self.preview_busy
+    }
+
+    pub(crate) fn clear_drag_preview_planes(&mut self) {
+        self.drag_overlay.get_mut().take();
+    }
+
+    /// Zero-reupload GPU split-plane preview for a live body-move drag (#32),
+    /// plus seamless holdover while a post-release heavy background composite
+    /// drains (`self.preview_busy`).
+    ///
+    /// Why this exists alongside `MovedReplay`: even a sub-millisecond CPU
+    /// drag-layer blit still paid ~5–8 ms/frame @ 4K in full-canvas `Vec<u8>`
+    /// clones + RGBA→BGRA swizzling, and minting a fresh `RenderImage` forced
+    /// GPUI's atlas to upload ~33 MB over PCIe every pointer move. Keeping
+    /// `base`, `sprite`, and optional `above` as stable `Arc<RenderImage>`
+    /// textures reduces per-move work to a `Bounds` origin add (~0 ms, 0 uploads).
+    pub(crate) fn request_drag_preview_planes(
+        &mut self,
+        output: &str,
+    ) -> Option<DragPreviewPlanes> {
+        use crate::annotation::{Annotations, ShapeKind};
+        if !self.uses_raster_preview()
+            || self.annotations.editing_text().is_some()
+            || self.annotations.draft_shape().is_some()
+            || self.handle_drag.is_some()
+        {
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+        let selection = self.selection.bounds()?;
+        let committed = self.annotations.committed();
+        let screen_origin = self.screen(output).bounds().origin;
+
+        let project = |cache: &DragOverlayCache| -> Option<DragPreviewPlanes> {
+            let anchor_shape = committed.get(cache.anchor_ix)?;
+            let raw_delta = anchor_shape.bounds.origin - cache.baked_anchor_origin;
+            let snapped_delta = point(
+                px((f32::from(raw_delta.x) * cache.scale).round() / cache.scale),
+                px((f32::from(raw_delta.y) * cache.scale).round() / cache.scale),
+            );
+            let mut base_bounds = cache.base_bounds;
+            base_bounds.origin -= screen_origin;
+            let mut drag_bounds = cache.sprite.0;
+            drag_bounds.origin += snapped_delta - screen_origin;
+            let above = cache.above.as_ref().map(|&(mut b, ref img)| {
+                b.origin -= screen_origin;
+                (b, img.clone())
+            });
+            Some(DragPreviewPlanes {
+                base: (base_bounds, cache.base_image.clone()),
+                dragged: (drag_bounds, cache.sprite.1.clone()),
+                above,
+            })
+        };
+
+        if !self.is_body_moving() {
+            if self.preview_busy
+                && let Some(cache) = self.drag_overlay.get_mut().as_ref()
+                && cache.selection == Some(selection)
+                && committed.len() == cache.static_shapes.len() + cache.indices.len()
+                && cache
+                    .static_shapes
+                    .iter()
+                    .all(|(ix, shape)| committed.get(*ix) == Some(shape))
+                && cache.indices.iter().all(|&ix| {
+                    committed
+                        .get(ix)
+                        .is_some_and(|s| s.is_source_over_layerable())
+                })
+            {
+                return project(cache);
+            }
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+
+        let mut indices: Vec<usize> = self
+            .moving
+            .as_ref()?
+            .before
+            .iter()
+            .map(|(ix, _)| *ix)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty()
+            || !indices.windows(2).all(|w| w[1] == w[0] + 1)
+            || committed
+                .iter()
+                .any(|s| matches!(s.kind, ShapeKind::Spotlight | ShapeKind::Magnifier))
+        {
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+        let first_drag = indices[0];
+        let last_drag = *indices.last()?;
+        if last_drag >= committed.len()
+            || !indices
+                .iter()
+                .all(|&ix| committed[ix].is_source_over_layerable())
+            || !committed[last_drag + 1..]
+                .iter()
+                .all(|s| s.is_source_over_layerable())
+        {
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+        // Restrict to single-output selections so desktop gaps (`alpha == 0`)
+        // never need per-frame gap masking against a translated sprite, and skip
+        // tiny sub-256×256 crops with trivial strokes where direct CPU replay is
+        // already < 0.1 ms (avoiding 2-pass matte setup on micro selections).
+        let participating: Vec<_> = self
+            .screens
+            .iter()
+            .filter(|screen| {
+                let inter = selection.intersect(&screen.bounds());
+                inter.size.width > px(0.) && inter.size.height > px(0.)
+            })
+            .collect();
+        if participating.len() != 1 {
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+        let screen = participating[0];
+        let approx_scale = screen.capture.width as f32 / f32::from(screen.logical_size.width);
+        let approx_pixels = f32::from(selection.size.width)
+            * f32::from(selection.size.height)
+            * approx_scale
+            * approx_scale;
+        let nontrivial_drag = approx_pixels >= 65_536.
+            || indices.iter().any(|&ix| {
+                let s = &committed[ix];
+                s.points.len() >= 32 || matches!(s.kind, ShapeKind::Text | ShapeKind::Number)
+            });
+        if !nontrivial_drag {
+            self.drag_overlay.get_mut().take();
+            return None;
+        }
+
+        let cache_valid = self.drag_overlay.get_mut().as_ref().is_some_and(|cache| {
+            cache.selection == Some(selection)
+                && cache.indices == indices
+                && committed.len() == cache.static_shapes.len() + cache.indices.len()
+                && cache
+                    .static_shapes
+                    .iter()
+                    .all(|(ix, shape)| committed.get(*ix) == Some(shape))
+        });
+
+        if !cache_valid {
+            let original = self.crop_impl(output, false)?;
+            let scale = original.scale;
+            let base_bounds = original.bounds;
+            let mut base_rgba = original.rgba;
+            if first_drag > 0 {
+                Annotations::rasterize_shapes(
+                    committed[..first_drag].iter(),
+                    &mut base_rgba,
+                    original.width,
+                    original.height,
+                    base_bounds.origin,
+                    scale,
+                );
+            }
+            let base_image = crate::render_image::rgba_to_render_image(
+                base_rgba,
+                original.width,
+                original.height,
+            );
+            let dragged_refs: Vec<_> = indices.iter().map(|&ix| &committed[ix]).collect();
+            let baked_sprite = Annotations::bake_source_over_layer(&dragged_refs, scale)?;
+            let sprite = (
+                baked_sprite.bounds,
+                crate::render_image::rgba_to_render_image(
+                    baked_sprite.rgba,
+                    baked_sprite.width,
+                    baked_sprite.height,
+                ),
+            );
+            let above = if last_drag + 1 < committed.len() {
+                let above_refs: Vec<_> = committed[last_drag + 1..].iter().collect();
+                let baked_above = Annotations::bake_source_over_layer(&above_refs, scale)?;
+                Some((
+                    baked_above.bounds,
+                    crate::render_image::rgba_to_render_image(
+                        baked_above.rgba,
+                        baked_above.width,
+                        baked_above.height,
+                    ),
+                ))
+            } else {
+                None
+            };
+            let static_shapes = committed
+                .iter()
+                .enumerate()
+                .filter(|(ix, _)| !indices.contains(ix))
+                .map(|(ix, s)| (ix, s.clone()))
+                .collect();
+            let anchor_ix = first_drag;
+            *self.drag_overlay.get_mut() = Some(DragOverlayCache {
+                selection: Some(selection),
+                scale,
+                indices,
+                anchor_ix,
+                baked_anchor_origin: committed[anchor_ix].bounds.origin,
+                static_shapes,
+                base_bounds,
+                base_image,
+                sprite,
+                above,
+            });
+        }
+
+        project(self.drag_overlay.get_mut().as_ref()?)
     }
 
     /// Publish edited text and lenses with their current selection geometry.
@@ -630,13 +850,20 @@ impl FilterPreview {
                 origin,
                 scale,
             );
+            self.pixels.clone_from(&base);
             self.moved = Some(MovedReplay {
                 base,
                 indices: replay.clone(),
+                prev_dirty: None,
             });
         }
-        let base = self.moved.as_ref().map(|m| m.base.clone())?;
-        self.pixels = base;
+        let moved = self.moved.as_mut()?;
+        if let Some(dirty) = moved.prev_dirty {
+            restore_rgba_rect(&mut self.pixels, &moved.base, dims.0 as usize, dirty);
+        } else {
+            self.pixels.clone_from(&moved.base);
+        }
+        let curr_dirty = replay_dirty_rect(committed, &replay, dims, origin, scale);
         crate::annotation::Annotations::rasterize_shapes(
             committed
                 .iter()
@@ -649,6 +876,7 @@ impl FilterPreview {
             origin,
             scale,
         );
+        moved.prev_dirty = Some(curr_dirty);
         self.image = crate::render_image::rgba_to_render_image(self.pixels.clone(), dims.0, dims.1);
         self.committed = committed.to_vec();
         self.draft = None;
@@ -791,4 +1019,60 @@ impl FilterPreview {
             self.original.height,
         );
     }
+}
+
+fn restore_rgba_rect(
+    dst: &mut [u8],
+    src: &[u8],
+    stride_px: usize,
+    (x0, y0, x1, y1): (usize, usize, usize, usize),
+) {
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    if x0 == 0 && x1 == stride_px {
+        let start = y0 * stride_px * 4;
+        let end = y1 * stride_px * 4;
+        dst[start..end].copy_from_slice(&src[start..end]);
+        return;
+    }
+    for row in y0..y1 {
+        let start = (row * stride_px + x0) * 4;
+        let end = (row * stride_px + x1) * 4;
+        dst[start..end].copy_from_slice(&src[start..end]);
+    }
+}
+
+fn replay_dirty_rect(
+    committed: &[crate::annotation::Shape],
+    replay: &[usize],
+    dims: (u32, u32),
+    origin: Point<Pixels>,
+    scale: f32,
+) -> (usize, usize, usize, usize) {
+    use crate::annotation::ShapeKind;
+    let (w, h) = (dims.0 as usize, dims.1 as usize);
+    if replay.iter().any(|&ix| {
+        committed
+            .get(ix)
+            .is_some_and(|s| s.kind == ShapeKind::Spotlight)
+    }) {
+        return (0, 0, w, h);
+    }
+    let Some(union) = replay
+        .iter()
+        .filter_map(|&ix| committed.get(ix).map(|s| s.raster_dirty_bounds()))
+        .reduce(|a, b| a.union(&b))
+    else {
+        return (0, 0, 0, 0);
+    };
+    let x0 = ((f32::from(union.left() - origin.x) * scale).floor() as isize).clamp(0, w as isize)
+        as usize;
+    let y0 = ((f32::from(union.top() - origin.y) * scale).floor() as isize).clamp(0, h as isize)
+        as usize;
+    let x1 = ((f32::from(union.right() - origin.x) * scale).ceil() as isize).clamp(0, w as isize)
+        as usize;
+    let y1 = ((f32::from(union.bottom() - origin.y) * scale).ceil() as isize).clamp(0, h as isize)
+        as usize;
+    (x0, y0, x1, y1)
 }

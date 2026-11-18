@@ -130,6 +130,119 @@ fn continuous_pencil_repaints_release_retired_atlas_images(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn moving_a_stroke_keeps_split_plane_atlas_textures_without_per_frame_reupload(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::base::init);
+    cx.update(gpui_kit::component::init);
+    let mut capture = Capture::for_test((0, 0), 1.);
+    capture.output_name = "screen".into();
+    capture.width = 320;
+    capture.height = 240;
+    capture.rgba = vec![240; 320 * 240 * 4];
+    let capture = Arc::new(capture);
+    let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
+    let (view, cx) =
+        cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
+    cx.simulate_resize(size(px(320.), px(240.)));
+    let press = cx.update(|window, cx| {
+        let press = session.update(cx, |s, cx| {
+            s.select_all();
+            let area = s.selection().bounds().unwrap();
+            s.edit_annotations(|a| {
+                a.toggle(crate::annotation::ShapeKind::Mosaic);
+                a.begin(point(px(10.), px(160.)), area, false);
+                a.drag_to(point(px(90.), px(220.)), area, false);
+                a.end();
+                a.toggle(crate::annotation::ShapeKind::Pencil);
+                a.set_tool_size(8.);
+                a.begin(point(px(40.), px(60.)), area, false);
+                for k in 1..40 {
+                    a.drag_to(
+                        point(px(40. + k as f32 * 4.), px(60. + (k % 5) as f32 * 5.)),
+                        area,
+                        false,
+                    );
+                }
+                a.end();
+                a.toggle(crate::annotation::ShapeKind::Rectangle);
+                a.begin(point(px(180.), px(30.)), area, false);
+                a.drag_to(point(px(260.), px(90.)), area, false);
+                a.end();
+                a.select_index(1);
+            });
+            let press = s.annotations().selected().unwrap().selection_box().center();
+            cx.notify();
+            press
+        });
+        window.draw(cx).clear(cx);
+        press
+    });
+
+    // Begin dragging the middle Pencil stroke (above Mosaic #0, below Rectangle #2).
+    cx.update(|window, cx| {
+        session.update(cx, |s, cx| {
+            s.pointer_down("screen", press, false, false);
+            s.pointer_move("screen", press + point(px(12.), px(8.)), false);
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+    let first_drag_ids: Vec<_> = cx.update(|window, cx| {
+        let current = view.read(cx).canvas_images.borrow().current().to_vec();
+        assert_eq!(
+            current.len(),
+            3,
+            "base + dragged sprite + upper static layer"
+        );
+        for img in &current {
+            assert!(window.has_image_atlas_entry(img));
+        }
+        current.iter().map(|img| img.id).collect()
+    });
+    let first_drag_arcs =
+        cx.update(|_, cx| view.read(cx).canvas_images.borrow().current().to_vec());
+
+    // Subsequent move frames MUST reuse the exact same RenderImage IDs (zero re-uploads).
+    for step in 2..16 {
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.pointer_move(
+                    "screen",
+                    press + point(px(12. + step as f32 * 3.), px(8. + (step % 4) as f32 * 2.)),
+                    false,
+                );
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+            let current = view.read(cx).canvas_images.borrow().current().to_vec();
+            let ids: Vec<_> = current.iter().map(|img| img.id).collect();
+            assert_eq!(ids, first_drag_ids, "drag step {step} re-uploaded textures");
+            for img in &current {
+                assert!(window.has_image_atlas_entry(img));
+            }
+        });
+    }
+
+    // Releasing promotes back to the single authoritative composite and evicts drag sprites.
+    cx.update(|window, cx| {
+        session.update(cx, |s, cx| {
+            s.pointer_up("screen", press + point(px(60.), px(14.)), false);
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+        let after = view.read(cx).canvas_images.borrow().current().to_vec();
+        assert_eq!(after.len(), 1);
+        assert!(window.has_image_atlas_entry(&after[0]));
+        for old in &first_drag_arcs {
+            if old.id != after[0].id {
+                assert!(!window.has_image_atlas_entry(old));
+            }
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn pointer_events_share_selection_and_handle_release_outside_window(cx: &mut TestAppContext) {
     cx.update(gpui_kit::base::init);
     cx.update(gpui_kit::component::init);
