@@ -2741,6 +2741,17 @@ fn annotation_style_menus_select_without_drawing_on_the_capture(cx: &mut TestApp
             marks.committed()[ix].number_format(),
             crate::annotation::NumberFormat::Alphabetic
         );
+        assert!(marks.committed()[ix].number_fill());
+        window.draw(cx).clear(cx);
+    });
+    let fill_bounds = cx
+        .debug_bounds("number-fill")
+        .expect("visible badge fill toggle");
+    cx.simulate_click(fill_bounds.center(), Default::default());
+    cx.update(|window, cx| {
+        let marks = session.read(cx).annotations();
+        assert_eq!(marks.selected_index(), Some(ix));
+        assert!(!marks.committed()[ix].number_fill());
         window.draw(cx).clear(cx);
     });
 }

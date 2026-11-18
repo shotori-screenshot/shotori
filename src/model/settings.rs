@@ -1336,6 +1336,7 @@ mod tests {
         s.annotation_mut().eraser_size = 48;
         s.annotation_mut().text_size = 36;
         s.annotation_mut().number_size = 44;
+        s.annotation_mut().number_fill = false;
         s.annotation_mut().number_format = crate::annotation::NumberFormat::Roman;
         s.annotation_mut().arrow_style = crate::annotation::ArrowStyle::Filled;
         s.annotation_mut().smooth_pencil = false;

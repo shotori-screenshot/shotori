@@ -212,7 +212,7 @@ impl SettingsWindow {
                 Section::Annotation,
                 "settings.preferences.annotation",
                 IconName::Pencil,
-                "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap number spotlight magnifier pencil 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 序号 聚光灯 铅笔",
+                "annotation palette swatch stroke arrow highlighter mosaic blur eraser text wrap number badge fill outline spotlight magnifier pencil 标注 调色板 色块 线条 箭头 荧光笔 马赛克 模糊 橡皮擦 文字 换行 序号 徽章 填充 空心 聚光灯 铅笔",
             ),
             (
                 Section::Export,

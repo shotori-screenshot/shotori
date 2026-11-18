@@ -95,6 +95,17 @@ pub(crate) fn debug_editing_scene(
     if scene == "numbers" {
         session.edit_annotations(|a| {
             a.toggle(crate::annotation::ShapeKind::Number);
+            for (row, filled) in [(0., true), (64., false)] {
+                for color_ix in 0..crate::model::settings::PALETTE {
+                    a.deselect();
+                    a.set_color(color_ix);
+                    a.set_number_fill(filled);
+                    a.set_number_format(crate::annotation::NumberFormat::Decimal);
+                    let pos = bounds.origin + point(px(60. + color_ix as f32 * 56.), px(60. + row));
+                    a.begin(pos, bounds, false);
+                    a.end();
+                }
+            }
             for (index, format) in [
                 crate::annotation::NumberFormat::Decimal,
                 crate::annotation::NumberFormat::Alphabetic,
@@ -104,21 +115,27 @@ pub(crate) fn debug_editing_scene(
             .enumerate()
             {
                 a.deselect();
+                a.set_color(index);
+                a.set_number_fill(index != 1);
                 a.set_number_format(format);
-                a.set_number_value(12);
+                a.set_number_value(match index {
+                    0 => 11,
+                    1 => 14,
+                    _ => 15,
+                });
                 a.begin(
-                    bounds.origin + point(px(100. + index as f32 * 120.), px(100.)),
+                    bounds.origin + point(px(80. + index as f32 * 130.), px(200.)),
                     bounds,
                     false,
                 );
                 a.drag_to(
-                    bounds.origin + point(px(100. + index as f32 * 120.), px(240.)),
+                    bounds.origin + point(px(80. + index as f32 * 130.), px(290.)),
                     bounds,
                     false,
                 );
                 a.end();
             }
-            a.select_index(2);
+            a.select_index(0);
         });
         return;
     }

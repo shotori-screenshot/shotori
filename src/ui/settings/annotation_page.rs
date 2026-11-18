@@ -459,6 +459,14 @@ impl SettingsWindow {
             cx,
             |s, v| s.annotation_mut().smooth_pencil = v,
         );
+        let number_fill = self.bool_annot_switch(
+            "annotation-number-fill",
+            self.settings.annotation().number_fill,
+            "settings.annotation.number_fill.title",
+            window,
+            cx,
+            |s, v| s.annotation_mut().number_fill = v,
+        );
 
         let mut palette_row = div().flex().items_center().gap_1p5();
         for (ix, picker) in self.annotation_page.swatches.iter().enumerate() {
@@ -633,6 +641,13 @@ impl SettingsWindow {
                         None,
                         None,
                         Select::new(&self.annotation_page.number_format).w_full(),
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.annotation.number_fill.title").to_string(),
+                        Some("settings.annotation.number_fill.body"),
+                        None,
+                        number_fill,
                     ),
                     card_row(
                         cx,
