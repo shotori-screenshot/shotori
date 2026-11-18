@@ -334,6 +334,7 @@ impl Render for PinHistoryWindow {
             Button::new(id)
                 .debug_selector(move || id.into())
                 .accessibility_label(label.clone())
+                .cursor_pointer()
                 .disabled(disabled)
                 .styles(|s| s.disabled(|d| d.opacity(0.45)))
                 .px_2p5()
@@ -347,7 +348,10 @@ impl Render for PinHistoryWindow {
                 .gap_1p5()
                 .text_xs()
                 .text_color(cx.theme().foreground)
-                .hover(|s| s.bg(cx.theme().secondary_hover))
+                .hover(|s| {
+                    s.bg(cx.theme().primary.opacity(0.14))
+                        .border_color(cx.theme().primary.opacity(0.55))
+                })
                 .on_click(on_click)
                 .child(Icon::new(icon).size_3p5())
                 .child(label)
@@ -486,6 +490,7 @@ impl Render for PinHistoryWindow {
                          on_click: ClickHandler| {
                             Button::new(btn_id)
                                 .debug_selector(move || sel.clone())
+                                .cursor_pointer()
                                 .h_7()
                                 .px_2()
                                 .rounded(cx.theme().radius)
@@ -507,9 +512,11 @@ impl Render for PinHistoryWindow {
                                 })
                                 .hover(|s| {
                                     if primary {
-                                        s.opacity(0.9)
+                                        s.bg(cx.theme().primary_hover)
+                                            .border_color(cx.theme().primary_hover)
                                     } else {
-                                        s.bg(cx.theme().secondary_hover)
+                                        s.bg(cx.theme().primary.opacity(0.14))
+                                            .border_color(cx.theme().primary.opacity(0.55))
                                     }
                                 })
                                 .flex()

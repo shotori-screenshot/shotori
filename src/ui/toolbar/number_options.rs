@@ -91,9 +91,11 @@ impl ValueState {
 
 impl RenderOnce for NumberValue {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state("annotation-number-value", cx, |window, cx| {
-            ValueState::new(self.session, window, cx)
-        });
+        let state = window.use_keyed_state(
+            ("annotation-number-value", self.session.entity_id()),
+            cx,
+            |window, cx| ValueState::new(self.session, window, cx),
+        );
         div()
             .debug_selector(|| "tb-number-value".into())
             .on_action(|_: &gpui_kit::base::input::Enter, _, cx| cx.stop_propagation())

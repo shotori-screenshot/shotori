@@ -42,35 +42,38 @@ impl SettingsWindow {
                 ..Default::default()
             };
             let (palette, _) = file.palette();
-            // Miniature 2-pane window swatch: left sidebar strip + main body
-            // with sample glyph and capsule accent pill.
+            // Miniature 2-pane window swatch: rounded canvas owns the fill so
+            // inner panels never bleed sharp 90-degree corners under the curve.
             let preview = div()
                 .flex()
-                .w(px(46.))
-                .h(px(36.))
+                .items_center()
+                .w(px(44.))
+                .h(px(34.))
+                .p(px(3.))
+                .gap(px(2.))
                 .flex_shrink_0()
-                .overflow_hidden()
-                .rounded(px(8.))
+                .rounded(px(9.))
+                .bg(rgba(palette.toolbar_bg | 0xFF))
                 .border_1()
                 .border_color(rgba(palette.toolbar_border))
                 .child(
                     div()
-                        .w(px(12.))
+                        .w(px(9.))
                         .h_full()
+                        .rounded(px(4.5))
                         .bg(rgba(palette.chip_bg | 0xFF))
-                        .border_r_1()
-                        .border_color(rgba(theme::alpha(palette.toolbar_border, 0x66))),
+                        .border_1()
+                        .border_color(rgba(theme::alpha(palette.toolbar_border, 0x55))),
                 )
                 .child(
                     div()
                         .flex_1()
                         .h_full()
-                        .bg(rgba(palette.toolbar_bg))
                         .flex()
                         .flex_col()
                         .items_center()
                         .justify_center()
-                        .gap_1()
+                        .gap(px(3.))
                         .child(
                             Icon::new(IconName::Type)
                                 .size_3p5()
@@ -78,24 +81,12 @@ impl SettingsWindow {
                         )
                         .child(
                             div()
-                                .w_4()
-                                .h(px(3.))
+                                .w(px(14.))
+                                .h(px(2.5))
                                 .rounded_full()
                                 .bg(rgba(palette.accent)),
                         ),
                 );
-            let swatch_dots = div().flex().items_center().gap_1().children(
-                [palette.accent, palette.chip_bg, palette.toolbar_selected]
-                    .into_iter()
-                    .map(|c| {
-                        div()
-                            .size_2()
-                            .rounded_full()
-                            .bg(rgba(c | 0xFF))
-                            .border_1()
-                            .border_color(rgba(palette.toolbar_border))
-                    }),
-            );
             let hover_bg = s.selected_card_bg;
             grid = grid.child(
                 Button::new(SharedString::from(format!("theme-choice-{base}")))
@@ -105,9 +96,10 @@ impl SettingsWindow {
                     .items_center()
                     .justify_start()
                     .h_auto()
-                    .min_h(rems(4.25))
+                    .min_h(rems(3.6))
                     .gap_3()
-                    .p_3()
+                    .px_3()
+                    .py_2p5()
                     .w_full()
                     .min_w_0()
                     .border_1()
@@ -130,18 +122,8 @@ impl SettingsWindow {
                     .hover(move |st| st.border_color(primary).bg(hover_bg))
                     .focus_visible(move |st| st.border_color(ring).bg(hover_bg))
                     .child(preview)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap_1()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().w_full().truncate().child(label))
-                            .child(swatch_dots),
-                    )
-                    .child(super::style_cards::selection_circle(selected, cx))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(super::layout::selection_circle(selected, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.appearance_set_base(base, window, cx);
                     })),

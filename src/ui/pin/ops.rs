@@ -71,6 +71,9 @@ impl PinBoard {
     /// Remove one pin, push onto `closed_stack` for `Ctrl+Shift+T`, and flush
     /// its final bounds/opacity/annotations to disk history.
     pub(super) fn remove_pin_by_id(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
+        }
         self.sync_pin_to_history(id);
         if let Some(ix) = self.pins.iter().position(|p| p.id == id) {
             let removed = self.pins.remove(ix);
@@ -95,11 +98,6 @@ impl PinBoard {
         }
         if self.drag.as_ref().is_some_and(|d| d.id == id) {
             self.drag = None;
-        }
-        if self.annotating == Some(id) {
-            self.annotating = None;
-            self.annot_gesture = None;
-            self.text_prompt = None;
         }
         self.menu = None;
         cx.notify();
@@ -168,6 +166,9 @@ impl PinBoard {
 
     pub(super) fn rotate_pin(&mut self, id: u64, cw: bool, cx: &mut Context<Self>) {
         self.menu = None;
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
+        }
         if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
             if let Some(collapsed) = pin.collapsed.take() {
                 pin.rect = expand_bounds(pin.rect, collapsed, &self.outputs);
@@ -204,6 +205,9 @@ impl PinBoard {
 
     pub(super) fn flip_pin(&mut self, id: u64, horizontal: bool, cx: &mut Context<Self>) {
         self.menu = None;
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
+        }
         if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
             pin.bake_annotations_into_base();
             let (w, h, ref rgba) = *pin.base_crop;
@@ -228,35 +232,57 @@ impl PinBoard {
     }
 
     pub(super) fn toggle_grayscale(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.menu = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            pin.grayscale = !pin.grayscale;
-            let on = pin.grayscale;
-            pin.dirty_raster = true;
-            pin.rebuild_visuals();
-            let msg = if on {
-                crate::i18n::t!("pin.hud.grayscale_on").into_owned()
-            } else {
-                crate::i18n::t!("pin.hud.grayscale_off").into_owned()
-            };
-            self.show_hud(id, msg, cx);
-            self.sync_pin_to_history(id);
-        }
-        cx.notify();
+        self.toggle_pin_effect(
+            id,
+            |pin| {
+                pin.grayscale = !pin.grayscale;
+                if pin.grayscale {
+                    crate::i18n::t!("pin.hud.grayscale_on").into_owned()
+                } else {
+                    crate::i18n::t!("pin.hud.grayscale_off").into_owned()
+                }
+            },
+            cx,
+        );
     }
 
     pub(super) fn toggle_invert(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.toggle_pin_effect(
+            id,
+            |pin| {
+                pin.invert = !pin.invert;
+                if pin.invert {
+                    crate::i18n::t!("pin.hud.invert_on").into_owned()
+                } else {
+                    crate::i18n::t!("pin.hud.invert_off").into_owned()
+                }
+            },
+            cx,
+        );
+    }
+
+    fn toggle_pin_effect(
+        &mut self,
+        id: u64,
+        flip: impl FnOnce(&mut super::Pin) -> String,
+        cx: &mut Context<Self>,
+    ) {
         self.menu = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            pin.invert = !pin.invert;
-            let on = pin.invert;
+        let is_annot = self.annotating_id() == Some(id);
+        let msg = if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
             pin.dirty_raster = true;
-            pin.rebuild_visuals();
-            let msg = if on {
-                crate::i18n::t!("pin.hud.invert_on").into_owned()
-            } else {
-                crate::i18n::t!("pin.hud.invert_off").into_owned()
-            };
+            let msg = flip(pin);
+            if !is_annot {
+                pin.rebuild_visuals();
+            }
+            Some(msg)
+        } else {
+            None
+        };
+        if let Some(msg) = msg {
+            if is_annot {
+                self.flush_annot_visuals(cx);
+            }
             self.show_hud(id, msg, cx);
             self.sync_pin_to_history(id);
         }
@@ -265,9 +291,8 @@ impl PinBoard {
 
     pub(super) fn toggle_collapse(&mut self, id: u64, cx: &mut Context<Self>) {
         self.menu = None;
-        if self.annotating == Some(id) {
-            self.finish_pin_annotation_state(id);
-            self.annotating = None;
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
         }
         if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
             if let Some(saved) = pin.collapsed.take() {
@@ -283,9 +308,8 @@ impl PinBoard {
 
     pub(super) fn toggle_ghost(&mut self, id: u64, cx: &mut Context<Self>) {
         self.menu = None;
-        if self.annotating == Some(id) {
-            self.finish_pin_annotation_state(id);
-            self.annotating = None;
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
         }
         if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
             pin.ghost = !pin.ghost;
@@ -403,8 +427,8 @@ impl PinSurface {
     pub(super) fn copy_selected(&mut self, cx: &mut Context<Self>) {
         let target = self.board.update(cx, |board, cx| {
             let id = board.selected_id()?;
-            if board.annotating == Some(id) {
-                board.finish_pin_annotation_state(id);
+            if board.annotating_id() == Some(id) {
+                board.flush_annot_visuals(cx);
             }
             board.menu = None;
             cx.notify();
@@ -450,8 +474,8 @@ impl PinSurface {
     pub(super) fn save_selected(&mut self, cx: &mut Context<Self>) {
         let target = self.board.update(cx, |board, cx| {
             let id = board.selected_id()?;
-            if board.annotating == Some(id) {
-                board.finish_pin_annotation_state(id);
+            if board.annotating_id() == Some(id) {
+                board.flush_annot_visuals(cx);
             }
             board.menu = None;
             cx.notify();
@@ -578,6 +602,9 @@ impl PinSurface {
     pub(super) fn ocr_selected(&mut self, cx: &mut Context<Self>) {
         let target = self.board.update(cx, |board, cx| {
             let id = board.selected_id()?;
+            if board.annotating_id() == Some(id) {
+                board.flush_annot_visuals(cx);
+            }
             board.menu = None;
             cx.notify();
             board.crop_of(id).map(|crop| (id, crop))
@@ -616,6 +643,9 @@ impl PinSurface {
     pub(super) fn qr_selected(&mut self, cx: &mut Context<Self>) {
         let target = self.board.update(cx, |board, cx| {
             let id = board.selected_id()?;
+            if board.annotating_id() == Some(id) {
+                board.flush_annot_visuals(cx);
+            }
             board.menu = None;
             cx.notify();
             board.crop_of(id).map(|crop| (id, crop))

@@ -153,25 +153,11 @@ impl SettingsWindow {
         };
 
         // Storage & caches
-        let (notify_files, notify_bytes) = crate::notify::cache_stats();
+        let (notify_files, _) = crate::notify::cache_stats();
         let notify_cache_dir = crate::notify::cache_dir_display()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "?".into());
-        let notify_cache_desc = if notify_files == 0 {
-            format!(
-                "{} · {notify_cache_dir}",
-                crate::i18n::t!("settings.advanced.cache_empty")
-            )
-        } else {
-            format!(
-                "{} · {notify_cache_dir}",
-                crate::i18n::t!(
-                    "settings.advanced.cache_stats",
-                    size = super::layout::format_bytes(notify_bytes),
-                    count = notify_files
-                )
-            )
-        };
+        let notify_cache_desc = notify_cache_dir;
         let notify_cache_actions = {
             let entity = entity.clone();
             div()
@@ -232,24 +218,7 @@ impl SettingsWindow {
             .disabled(!has_last)
         };
 
-        let (ocr_files, ocr_bytes) = crate::ocr::cache_stats();
-        let ocr_cache_desc = if ocr_files == 0 {
-            format!(
-                "{} · {}",
-                crate::i18n::t!("settings.advanced.cache_empty"),
-                crate::ocr::model_dir_display()
-            )
-        } else {
-            format!(
-                "{} · {}",
-                crate::i18n::t!(
-                    "settings.advanced.cache_stats",
-                    size = super::layout::format_bytes(ocr_bytes),
-                    count = ocr_files
-                ),
-                crate::ocr::model_dir_display()
-            )
-        };
+        let ocr_cache_desc = crate::ocr::model_dir_display();
         let ocr_cache_open = super::layout::action_button(
             cx,
             "advanced-ocr-cache-open",
@@ -275,7 +244,6 @@ impl SettingsWindow {
             div()
                 .flex()
                 .items_center()
-                .gap_1p5()
                 .px_3()
                 .py_1()
                 .rounded_full()
@@ -289,11 +257,6 @@ impl SettingsWindow {
                 } else {
                     cx.theme().muted_foreground
                 })
-                .child(div().size_1p5().rounded_full().bg(if active {
-                    cx.theme().primary
-                } else {
-                    cx.theme().muted_foreground.opacity(0.6)
-                }))
                 .child(text)
         };
         let copy_diag_label = if self.advanced_page.copied_diag_flash {
@@ -378,8 +341,8 @@ impl SettingsWindow {
                 Some(crate::i18n::t!("settings.general.group.files").as_ref()),
                 Some(reload_btn),
                 vec![
-                    self.file_row("settings.toml", ConfigFile::Settings, true, cx),
-                    self.file_row("theme.toml", ConfigFile::Theme, false, cx),
+                    self.file_row("settings.toml", ConfigFile::Settings, cx),
+                    self.file_row("theme.toml", ConfigFile::Theme, cx),
                 ],
             ))
             .child(card_group(
@@ -471,54 +434,18 @@ impl SettingsWindow {
         page_body("page-general").child(body)
     }
 
-    /// Pairs the file name, disk presence status, and resolved path with its editor actions.
-    fn file_row(
-        &self,
-        name: &'static str,
-        file: ConfigFile,
-        include_open_dir: bool,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    /// Pairs the file name and resolved path with its open-file action.
+    fn file_row(&self, name: &'static str, file: ConfigFile, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity();
         let path_ref = match file {
             ConfigFile::Settings => self.path.as_ref(),
             ConfigFile::Theme => self.appearance.path.as_ref(),
         };
-        let exists = path_ref.is_some_and(|p| p.exists());
-        let status = if exists {
-            crate::i18n::t!("settings.advanced.file_present")
-        } else {
-            crate::i18n::t!("settings.advanced.file_default")
-        };
         let desc = path_ref
-            .map(|path| format!("{status} · {}", path.display()))
+            .map(|path| path.display().to_string())
             .unwrap_or_default();
 
-        let mut actions = div().flex().items_center().gap_1p5().flex_shrink_0();
-        if include_open_dir
-            && let Some(dir) = path_ref.and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        {
-            actions = actions.child(super::layout::action_button(
-                cx,
-                "advanced-open-config-dir",
-                crate::i18n::t!("settings.advanced.open_dir").to_string(),
-                move |_, _, _| {
-                    if let Err(err) = std::fs::create_dir_all(&dir) {
-                        crate::notify::send(
-                            crate::i18n::t!("settings.general.open_failed.title").as_ref(),
-                            crate::i18n::t!(
-                                "settings.general.open_failed.body",
-                                error = err.to_string()
-                            )
-                            .as_ref(),
-                        );
-                    } else {
-                        open_external(dir.display().to_string());
-                    }
-                },
-            ));
-        }
-        actions = actions.child(
+        let actions = div().flex().items_center().gap_1p5().flex_shrink_0().child(
             super::layout::action_button(
                 cx,
                 name,

@@ -530,19 +530,6 @@ pub fn bench_main() -> i32 {
             run("erase-sweep-20x100pt", workload);
             ran += 1;
         }
-
-        {
-            let workload: Workload = Box::new(move || {
-                let mut a = primed.render_snapshot();
-                a.toggle(ShapeKind::EraserRect);
-                a.begin(point(px(200.), px(150.)), sel, false);
-                a.drag_to(point(px(1720.), px(930.)), sel, false);
-                a.end();
-                vec![a.committed().len() as u8]
-            });
-            run("erase-rect-20x100pt", workload);
-            ran += 1;
-        }
     }
 
     if ran == 0 {

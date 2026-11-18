@@ -57,13 +57,10 @@ Overlay chrome uses a strict **two-zone non-intersecting contract**:
 
 Shotori separates **chrome appearance** from **brush configuration**:
 
-1. **UI Style Preset (`src/model/settings/style.rs`, `settings.toml` `ui_style`)**:
-   - Orthogonal `UiStyle` (`classic` | `capsule`) controls chrome geometry and
-     material treatment (frosted capsule bars, concentric rounded controls,
-     circular SDF-masked loupe, elevated jewel handles) independently of the
-     active color palette.
-2. **Overlay & Chrome Palette (`src/ui/theme/`, `theme.toml`)**:
-   - Stored as `Theme` (`Copy` struct of `0xRRGGBBAA` `u32` colors +
+1. **Overlay & Chrome Palette (`src/ui/theme/`, `theme.toml`)**:
+   - Frosted capsule chrome (floating bars, concentric rounded controls,
+     circular SDF-masked loupe, elevated jewel handles) derives all colors
+     from `Theme` (`Copy` struct of `0xRRGGBBAA` `u32` colors +
      `dim_opacity: f32`), installed once at startup via `theme::set` and
      read via `theme::c()`.
    - `theme.toml` picks a `base` (`shotori-dark`, `shotori-light`,
@@ -73,12 +70,12 @@ Shotori separates **chrome appearance** from **brush configuration**:
      unless those keys are also explicitly overridden.
    - Any change to `ColorKey` or `ThemeFile` in `src/ui/theme/load.rs`
      **must** update [`docs/theme.example.toml`](../theme.example.toml).
-3. **`gpui-component` Shell Sync (`ui::settings::sync_shell_theme(cx)`)**:
+2. **`gpui-component` Shell Sync (`ui::settings::sync_shell_theme(cx)`)**:
    - Both `SettingsWindow` and `Overlay` (which hosts `ColorPickerState`
      popovers from `gpui-component`) call `sync_shell_theme(cx)` so
      component popovers, selects, inputs, and tooltips match the active
      Shotori palette instead of `gpui-component`'s stock theme.
-4. **Annotation Swatch Board (`src/model/settings.rs`)**:
+3. **Annotation Swatch Board (`src/model/settings.rs`)**:
    - The 7 brush colors (`PALETTE = 7`, `DEFAULT_ANNOTATION_COLORS`,
      `[toolbar] colors` in `settings.toml`) are user tool configuration,
      **not** theme fields. Palette slots are opaque (`0xRRGGBBFF`) so

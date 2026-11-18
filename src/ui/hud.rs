@@ -6,16 +6,15 @@
 use gpui_kit::*;
 
 use crate::model::placement::label_anchor;
-use crate::model::selection::{HANDLE_VIS, Handle};
+use crate::model::selection::Handle;
 use crate::model::session::EraserChrome;
-use crate::model::settings::UiStyle;
 use crate::ui::theme;
 
 /// Paint the dim layer and border together. Separate positioned divs snap
 /// their origins and sizes independently during layout; at fractional DPI
 /// their edges can differ by a device pixel. Painting shared edges bypasses
 /// that layout rounding and lets GPUI snap each absolute edge consistently.
-pub(crate) fn selection_backdrop(style: UiStyle, sel: Option<Bounds<Pixels>>) -> impl IntoElement {
+pub(crate) fn selection_backdrop(sel: Option<Bounds<Pixels>>) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |viewport, (), window, _| {
@@ -40,30 +39,19 @@ pub(crate) fn selection_backdrop(style: UiStyle, sel: Option<Bounds<Pixels>>) ->
                     window.paint_quad(fill(strip, rgba(theme::c().dim())));
                 }
             }
-            match style {
-                UiStyle::Classic => {
-                    window.paint_quad(outline(
-                        border,
-                        rgba(theme::c().accent),
-                        BorderStyle::default(),
-                    ));
-                }
-                UiStyle::Capsule => {
-                    // Dual-contrast capsule crop frame: active theme accent border on
-                    // `border`, plus an outward 1px dark contrast hairline so bright
-                    // accents stay crisp over light wallpapers.
-                    window.paint_quad(outline(
-                        border,
-                        rgba(theme::c().accent),
-                        BorderStyle::default(),
-                    ));
-                    let outer = Bounds::new(
-                        point(border.origin.x - px(1.), border.origin.y - px(1.)),
-                        size(border.size.width + px(2.), border.size.height + px(2.)),
-                    );
-                    window.paint_quad(outline(outer, rgba(0x00000040), BorderStyle::default()));
-                }
-            }
+            // Dual-contrast capsule crop frame: active theme accent border on
+            // `border`, plus an outward 1px dark contrast hairline so bright
+            // accents stay crisp over light wallpapers.
+            window.paint_quad(outline(
+                border,
+                rgba(theme::c().accent),
+                BorderStyle::default(),
+            ));
+            let outer = Bounds::new(
+                point(border.origin.x - px(1.), border.origin.y - px(1.)),
+                size(border.size.width + px(2.), border.size.height + px(2.)),
+            );
+            window.paint_quad(outline(outer, rgba(0x00000040), BorderStyle::default()));
         },
     )
     .absolute()
@@ -72,23 +60,18 @@ pub(crate) fn selection_backdrop(style: UiStyle, sel: Option<Bounds<Pixels>>) ->
     .size_full()
 }
 
-/// Hover highlight for window snapping: a bare 2px accent outline in Classic,
-/// or a soft translucent accent wash with rounded corners in Capsule style.
-pub(crate) fn hover_outline(style: UiStyle, b: Bounds<Pixels>) -> impl IntoElement {
-    let base = div()
+/// Hover highlight for window snapping: soft translucent accent wash with rounded corners.
+pub(crate) fn hover_outline(b: Bounds<Pixels>) -> impl IntoElement {
+    div()
         .absolute()
         .left(b.origin.x)
         .top(b.origin.y)
         .w(b.size.width)
         .h(b.size.height)
+        .rounded(px(6.))
         .border_2()
-        .border_color(rgba(theme::c().accent));
-    match style {
-        UiStyle::Classic => base,
-        UiStyle::Capsule => base
-            .rounded(px(6.))
-            .bg(rgba(theme::alpha(theme::c().accent, 0x1A))),
-    }
+        .border_color(rgba(theme::c().accent))
+        .bg(rgba(theme::alpha(theme::c().accent, 0x1A)))
 }
 
 /// Cursor shape for a resize grab, by handle.
@@ -101,77 +84,52 @@ pub(crate) fn handle_cursor(h: Handle) -> CursorStyle {
     }
 }
 
-/// Paint one resize-handle dot centered on `p` (window-local): a solid
-/// accent-orange circle, [`HANDLE_VIS`] px across, no outline. Owner of
-/// the REGION selection's handle look (the dim backdrop and the solid
-/// border it sits on — issue #18 deliberately kept it solid: a white
-/// chip there read as clutter). When `deemphasized` is true (a mark is
-/// selected inside the crop, issue #33), the region's 8 dots recede to
-/// a quieter diameter and reduced alpha so they stay legible in
-/// peripheral vision without competing with the selected mark's handles.
-fn paint_handle_dot(style: UiStyle, window: &mut Window, p: Point<Pixels>, deemphasized: bool) {
-    match style {
-        UiStyle::Classic => {
-            let diameter = if deemphasized { 5. } else { HANDLE_VIS };
-            let half = diameter / 2.;
-            let b = Bounds::new(
-                point(p.x - px(half), p.y - px(half)),
-                size(px(diameter), px(diameter)),
-            );
-            let color = if deemphasized {
-                (theme::c().accent & 0xffff_ff00) | 0x73
-            } else {
-                theme::c().accent
-            };
-            // Corner radius = half the edge turns the quad into a circle.
-            window.paint_quad(fill(b, rgba(color)).corner_radii(half));
-        }
-        UiStyle::Capsule => {
-            // Elevated white circular handle with a jewel-like accent core.
-            let (shadow_r, outer_r, inner_r, shadow_col, ring_col, core_col) = if deemphasized {
-                (
-                    4.0,
-                    3.25,
-                    1.5,
-                    0x0000_0024,
-                    0xFFFF_FFA6,
-                    (theme::c().accent & 0xFFFF_FF00) | 0x80,
-                )
-            } else {
-                (5.5, 4.5, 2.25, 0x0000_0042, 0xFFFF_FFFF, theme::c().accent)
-            };
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(p.x - px(shadow_r), p.y - px(shadow_r) + px(0.75)),
-                        size(px(shadow_r * 2.), px(shadow_r * 2.)),
-                    ),
-                    rgba(shadow_col),
-                )
-                .corner_radii(shadow_r),
-            );
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(p.x - px(outer_r), p.y - px(outer_r)),
-                        size(px(outer_r * 2.), px(outer_r * 2.)),
-                    ),
-                    rgba(ring_col),
-                )
-                .corner_radii(outer_r),
-            );
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(p.x - px(inner_r), p.y - px(inner_r)),
-                        size(px(inner_r * 2.), px(inner_r * 2.)),
-                    ),
-                    rgba(core_col),
-                )
-                .corner_radii(inner_r),
-            );
-        }
-    }
+/// Paint one resize-handle dot centered on `p` (window-local): elevated white
+/// ring with a theme-accent core, softened while an annotation mark is selected
+/// (#33) so the mark's handles stay dominant.
+fn paint_handle_dot(window: &mut Window, p: Point<Pixels>, deemphasized: bool) {
+    let (shadow_r, outer_r, inner_r, shadow_col, ring_col, core_col) = if deemphasized {
+        (
+            4.0,
+            3.25,
+            1.5,
+            0x0000_0024,
+            0xFFFF_FFA6,
+            (theme::c().accent & 0xFFFF_FF00) | 0x80,
+        )
+    } else {
+        (5.5, 4.5, 2.25, 0x0000_0042, 0xFFFF_FFFF, theme::c().accent)
+    };
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(p.x - px(shadow_r), p.y - px(shadow_r) + px(0.75)),
+                size(px(shadow_r * 2.), px(shadow_r * 2.)),
+            ),
+            rgba(shadow_col),
+        )
+        .corner_radii(shadow_r),
+    );
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(p.x - px(outer_r), p.y - px(outer_r)),
+                size(px(outer_r * 2.), px(outer_r * 2.)),
+            ),
+            rgba(ring_col),
+        )
+        .corner_radii(outer_r),
+    );
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(p.x - px(inner_r), p.y - px(inner_r)),
+                size(px(inner_r * 2.), px(inner_r * 2.)),
+            ),
+            rgba(core_col),
+        )
+        .corner_radii(inner_r),
+    );
 }
 
 /// Paint one ANNOTATION handle dot centered on `p` (window-local), styled
@@ -224,7 +182,6 @@ fn paint_shape_handle_dot(
 /// shadow an existing affordance. `cursor_active` false (text editor /
 /// setup dialog open) leaves the cursor to whoever owns focus.
 pub(crate) fn selection_handles(
-    style: UiStyle,
     sel: Option<Bounds<Pixels>>,
     visible: bool,
     deemphasized: bool,
@@ -258,7 +215,7 @@ pub(crate) fn selection_handles(
                 (cx, bt),
                 (r, bt),
             ] {
-                paint_handle_dot(style, window, point(px(x), px(y)), deemphasized);
+                paint_handle_dot(window, point(px(x), px(y)), deemphasized);
             }
         },
     )
@@ -295,36 +252,27 @@ pub(crate) fn format_size_label(
 }
 
 /// Full-output alignment crosshairs intersecting at `pointer` (window-local).
-pub(crate) fn crosshair_guides(
-    style: UiStyle,
-    pointer: Point<Pixels>,
-    ws: Size<Pixels>,
-) -> impl IntoElement {
-    let color = match style {
-        UiStyle::Classic => rgba((theme::c().accent & 0xffffff00) | 0xb3),
-        UiStyle::Capsule => rgba((theme::c().accent & 0xffffff00) | 0x99),
-    };
+pub(crate) fn crosshair_guides(pointer: Point<Pixels>, ws: Size<Pixels>) -> impl IntoElement {
+    let color = rgba((theme::c().accent & 0xffffff00) | 0x99);
     canvas(
         |_, _, _| (),
         move |viewport, (), window, _| {
             let px_x = viewport.origin.x + pointer.x;
             let px_y = viewport.origin.y + pointer.y;
-            if style == UiStyle::Capsule {
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(viewport.origin.x, px_y + px(1.)),
-                        size(ws.width, px(1.)),
-                    ),
-                    rgba(0x00000038),
-                ));
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(px_x + px(1.), viewport.origin.y),
-                        size(px(1.), ws.height),
-                    ),
-                    rgba(0x00000038),
-                ));
-            }
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(viewport.origin.x, px_y + px(1.)),
+                    size(ws.width, px(1.)),
+                ),
+                rgba(0x00000038),
+            ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px_x + px(1.), viewport.origin.y),
+                    size(px(1.), ws.height),
+                ),
+                rgba(0x00000038),
+            ));
             window.paint_quad(fill(
                 Bounds::new(point(viewport.origin.x, px_y), size(ws.width, px(1.))),
                 color,
@@ -341,77 +289,48 @@ pub(crate) fn crosshair_guides(
     .size_full()
 }
 
-/// Selection size label. The label tries above the selection,
-/// then below, and when neither fits (a selection spanning the screen
-/// height) it is drawn INSIDE the selection box — overlaid beats
-/// off-screen. It must NOT live inside the border box when avoidable: a
-/// narrow selection would clamp the label's width to the selection's,
-/// wrapping "W × H" into a one-character-per-line tower. As a sibling
-/// anchored to the overlay root it stays content-sized.
-pub(crate) fn selection_label(
-    style: UiStyle,
-    b: Bounds<Pixels>,
-    ws: Size<Pixels>,
-    text: String,
-) -> AnyElement {
-    let (label_x, label_y) = label_anchor(&b, ws);
-    match style {
-        UiStyle::Classic => div()
-            .absolute()
-            .left(px(label_x))
-            .top(px(label_y))
-            .px_2()
-            .py(px(2.))
-            .rounded(px(4.))
-            .bg(rgba(theme::c().accent))
-            .text_size(px(12.))
-            .text_color(rgba(theme::c().accent_text()))
-            .child(text)
-            .into_any_element(),
-        UiStyle::Capsule => {
-            // Center the frosted stadium capsule over the selection's horizontal
-            // midpoint while preserving the exact two-zone vertical `label_y`.
-            const WRAP_W: f32 = 240.;
-            let t = theme::c();
-            let mid_x = f32::from(b.left()) + f32::from(b.size.width) * 0.5;
-            let win_w = f32::from(ws.width);
-            let wrap_x = (mid_x - WRAP_W * 0.5).clamp(6., (win_w - WRAP_W - 6.).max(6.));
-            let mut wrapper = div()
-                .absolute()
-                .left(px(wrap_x))
-                .top(px(label_y))
-                .w(px(WRAP_W.min((win_w - 12.).max(1.))))
-                .flex();
-            wrapper = if mid_x < 84. {
-                wrapper.justify_start()
-            } else if mid_x > win_w - 84. {
-                wrapper.justify_end()
-            } else {
-                wrapper.justify_center()
-            };
-            wrapper
-                .child(
-                    div()
-                        .h(px(24.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .rounded_full()
-                        .bg(rgba(t.capsule_surface()))
-                        .border_1()
-                        .border_color(rgba(t.capsule_border()))
-                        .shadow(vec![
-                            BoxShadow::new(px(0.), px(2.), rgba(0x00000038).into())
-                                .blur_radius(px(8.)),
-                        ])
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgba(t.toolbar_text))
-                        .child(text),
-                )
-                .into_any_element()
-        }
-    }
+/// Selection size label centered above (or inside) the selection while
+/// keeping both two-zone invariants intact.
+pub(crate) fn selection_label(b: Bounds<Pixels>, ws: Size<Pixels>, text: String) -> AnyElement {
+    let (_, label_y) = label_anchor(&b, ws);
+    const WRAP_W: f32 = 240.;
+    let t = theme::c();
+    let mid_x = f32::from(b.left()) + f32::from(b.size.width) * 0.5;
+    let win_w = f32::from(ws.width);
+    let wrap_x = (mid_x - WRAP_W * 0.5).clamp(6., (win_w - WRAP_W - 6.).max(6.));
+    let mut wrapper = div()
+        .absolute()
+        .left(px(wrap_x))
+        .top(px(label_y))
+        .w(px(WRAP_W.min((win_w - 12.).max(1.))))
+        .flex();
+    wrapper = if mid_x < 84. {
+        wrapper.justify_start()
+    } else if mid_x > win_w - 84. {
+        wrapper.justify_end()
+    } else {
+        wrapper.justify_center()
+    };
+    wrapper
+        .child(
+            div()
+                .h(px(24.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(rgba(t.capsule_surface()))
+                .border_1()
+                .border_color(rgba(t.capsule_border()))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(2.), rgba(0x00000038).into()).blur_radius(px(8.)),
+                ])
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgba(t.toolbar_text))
+                .child(text),
+        )
+        .into_any_element()
 }
 
 /// The lens source follows the pointer even when raster preview work is pending.
@@ -527,50 +446,30 @@ fn paint_annotation_polygon(window: &mut Window, points: &[Point<Pixels>]) {
     }
 }
 
-/// The eraser's pointer chrome (issue #14): a double-stroke ring
-/// tracing the brush footprint — dark on the outside, white just
-/// inside, readable over any capture — or the area eraser's dashed
-/// rect while its gesture is in flight. Pure rendering of
+/// The brush eraser's pointer chrome (issue #14): a double-stroke
+/// ring tracing the brush footprint — dark on the outside, white just
+/// inside, readable over any capture. Pure rendering of
 /// [`crate::model::session::EraserChrome`]; the erase criterion and
 /// this circle share one radius (`Annotations::erase_radius`).
 pub(crate) fn eraser_chrome(chrome: EraserChrome) -> impl IntoElement {
     canvas(
         move |_, _, _| (),
-        move |viewport, (), window, _| match chrome {
-            EraserChrome::Ring { center, radius } => {
-                let center = center + viewport.origin;
-                let mut ring = |r: f32, color| {
-                    let mut builder = PathBuilder::stroke(px(1.));
-                    for i in 0..32 {
-                        let a0 = i as f32 * std::f32::consts::TAU / 32.;
-                        let (s, c) = a0.sin_cos();
-                        builder.line_to(center + point(px(c * r), px(s * r)));
-                    }
-                    builder.close();
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, color);
-                    }
-                };
-                ring(radius, rgba(0xcc202020));
-                ring((radius - 1.).max(0.5), rgba(0xffffffff));
-            }
-            EraserChrome::Rect(b) => {
-                let mut b = b;
-                b.origin += viewport.origin;
-                let mut builder = PathBuilder::stroke(px(1.)).dash_array(&[px(4.), px(3.)]);
-                builder.add_polygon(
-                    &[
-                        point(b.left(), b.top()),
-                        point(b.right(), b.top()),
-                        point(b.right(), b.bottom()),
-                        point(b.left(), b.bottom()),
-                    ],
-                    true,
-                );
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, rgba(0xffffffff));
+        move |viewport, (), window, _| {
+            let center = chrome.center + viewport.origin;
+            let mut ring = |r: f32, color| {
+                let mut builder = PathBuilder::stroke(px(1.));
+                for i in 0..32 {
+                    let a0 = i as f32 * std::f32::consts::TAU / 32.;
+                    let (s, c) = a0.sin_cos();
+                    builder.line_to(center + point(px(c * r), px(s * r)));
                 }
-            }
+                builder.close();
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
+                }
+            };
+            ring(chrome.radius, rgba(0xcc202020));
+            ring((chrome.radius - 1.).max(0.5), rgba(0xffffffff));
         },
     )
     .absolute()
@@ -653,7 +552,6 @@ fn loupe_frame(focus: Point<Pixels>, outward: (f32, f32), ws: Size<Pixels>) -> B
 /// the window 1:1. Inert by design: a drag owns the pointer through
 /// the window-level listeners, and this element claims no events.
 pub(crate) fn magnifier_loupe(
-    style: UiStyle,
     image: std::sync::Arc<RenderImage>,
     loupe: crate::model::session::Loupe,
     ws: Size<Pixels>,
@@ -665,141 +563,90 @@ pub(crate) fn magnifier_loupe(
     let (fx, fy) = (f32::from(loupe.focus.x), f32::from(loupe.focus.y));
     let img_left = side / 2. - fx * zoom;
     let img_top = side / 2. - fy * zoom;
-    let cross = rgba(theme::c().accent);
-    let el = match style {
-        UiStyle::Classic => div()
-            .id("shotori-loupe")
-            .absolute()
-            .left(frame.origin.x)
-            .top(frame.origin.y)
-            .w(frame.size.width)
-            .h(frame.size.height)
-            .overflow_hidden()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(rgba(theme::c().accent))
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(2.), rgba(0x00000059).into()).blur_radius(px(12.)),
-            ])
-            .child(
-                img(image)
-                    .absolute()
-                    .left(px(img_left))
-                    .top(px(img_top))
-                    .w(px(f32::from(ws.width) * zoom))
-                    .h(px(f32::from(ws.height) * zoom))
-                    .object_fit(ObjectFit::Fill),
+    // Circular GPU-masked lens: `window.paint_image` applies SDF corner
+    // radii directly to `viewport` while sampling the zoomed sub-rect,
+    // avoiding rectangular `ContentMask` corner bleed with zero copies.
+    let radius = side * 0.5;
+    let full_w = f32::from(ws.width) * zoom;
+    let full_h = f32::from(ws.height) * zoom;
+    let accent = theme::c().accent;
+    let el = div()
+        .id("shotori-loupe")
+        .absolute()
+        .left(frame.origin.x)
+        .top(frame.origin.y)
+        .w(frame.size.width)
+        .h(frame.size.height)
+        .rounded_full()
+        .shadow(theme::capsule_floating_shadow())
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |viewport, (), window, _| {
+                    window.paint_quad(fill(viewport, rgba(0x161618FF)).corner_radii(radius));
+                    let image_bounds = Bounds::new(
+                        viewport.origin + point(px(img_left), px(img_top)),
+                        size(px(full_w), px(full_h)),
+                    );
+                    if let Err(err) = window.paint_image(
+                        viewport,
+                        image_bounds,
+                        Corners::all(px(radius)),
+                        image.clone(),
+                        0,
+                        false,
+                    ) {
+                        eprintln!("[shotori] circular loupe paint failed: {err}");
+                    }
+                    // Center pixel aperture + delicate crosshairs with a clear center gap
+                    let cx = viewport.origin.x + px(radius);
+                    let cy = viewport.origin.y + px(radius);
+                    let cell = zoom.max(4.);
+                    let half_cell = cell * 0.5;
+                    let arm = (radius - half_cell - 10.).max(6.);
+                    let guide = rgba(0xFFFFFF99);
+                    for seg in [
+                        Bounds::new(
+                            point(cx - px(half_cell + arm), cy - px(0.5)),
+                            size(px(arm - 2.), px(1.)),
+                        ),
+                        Bounds::new(
+                            point(cx + px(half_cell + 2.), cy - px(0.5)),
+                            size(px(arm - 2.), px(1.)),
+                        ),
+                        Bounds::new(
+                            point(cx - px(0.5), cy - px(half_cell + arm)),
+                            size(px(1.), px(arm - 2.)),
+                        ),
+                        Bounds::new(
+                            point(cx - px(0.5), cy + px(half_cell + 2.)),
+                            size(px(1.), px(arm - 2.)),
+                        ),
+                    ] {
+                        window.paint_quad(fill(seg, guide));
+                    }
+                    let cell_box = Bounds::new(
+                        point(cx - px(half_cell), cy - px(half_cell)),
+                        size(px(cell), px(cell)),
+                    );
+                    window.paint_quad(outline(cell_box, rgba(accent), BorderStyle::default()));
+                    // Double glass rim: subtle outer contrast + crisp inner white ring
+                    window.paint_quad(
+                        outline(viewport, rgba(0x0000004D), BorderStyle::default())
+                            .corner_radii(radius),
+                    );
+                    let inner_rim = Bounds::new(
+                        viewport.origin + point(px(1.), px(1.)),
+                        size(px(side - 2.), px(side - 2.)),
+                    );
+                    window.paint_quad(
+                        outline(inner_rim, rgba(0xFFFFFFD9), BorderStyle::default())
+                            .corner_radii((radius - 1.).max(0.)),
+                    );
+                },
             )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(side / 2. - 0.5))
-                    .top_0()
-                    .w(px(1.))
-                    .h(px(side))
-                    .bg(cross),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(side / 2. - 0.5))
-                    .w(px(side))
-                    .h(px(1.))
-                    .bg(cross),
-            ),
-        UiStyle::Capsule => {
-            // Circular GPU-masked lens: `window.paint_image` applies SDF corner
-            // radii directly to `viewport` while sampling the zoomed sub-rect,
-            // avoiding rectangular `ContentMask` corner bleed with zero copies.
-            let radius = side * 0.5;
-            let full_w = f32::from(ws.width) * zoom;
-            let full_h = f32::from(ws.height) * zoom;
-            let accent = theme::c().accent;
-            div()
-                .id("shotori-loupe")
-                .absolute()
-                .left(frame.origin.x)
-                .top(frame.origin.y)
-                .w(frame.size.width)
-                .h(frame.size.height)
-                .rounded_full()
-                .shadow(theme::capsule_floating_shadow())
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |viewport, (), window, _| {
-                            window
-                                .paint_quad(fill(viewport, rgba(0x161618FF)).corner_radii(radius));
-                            let image_bounds = Bounds::new(
-                                viewport.origin + point(px(img_left), px(img_top)),
-                                size(px(full_w), px(full_h)),
-                            );
-                            if let Err(err) = window.paint_image(
-                                viewport,
-                                image_bounds,
-                                Corners::all(px(radius)),
-                                image.clone(),
-                                0,
-                                false,
-                            ) {
-                                eprintln!("[shotori] circular loupe paint failed: {err}");
-                            }
-                            // Center pixel aperture + delicate crosshairs with a clear center gap
-                            let cx = viewport.origin.x + px(radius);
-                            let cy = viewport.origin.y + px(radius);
-                            let cell = zoom.max(4.);
-                            let half_cell = cell * 0.5;
-                            let arm = (radius - half_cell - 10.).max(6.);
-                            let guide = rgba(0xFFFFFF99);
-                            for seg in [
-                                Bounds::new(
-                                    point(cx - px(half_cell + arm), cy - px(0.5)),
-                                    size(px(arm - 2.), px(1.)),
-                                ),
-                                Bounds::new(
-                                    point(cx + px(half_cell + 2.), cy - px(0.5)),
-                                    size(px(arm - 2.), px(1.)),
-                                ),
-                                Bounds::new(
-                                    point(cx - px(0.5), cy - px(half_cell + arm)),
-                                    size(px(1.), px(arm - 2.)),
-                                ),
-                                Bounds::new(
-                                    point(cx - px(0.5), cy + px(half_cell + 2.)),
-                                    size(px(1.), px(arm - 2.)),
-                                ),
-                            ] {
-                                window.paint_quad(fill(seg, guide));
-                            }
-                            let cell_box = Bounds::new(
-                                point(cx - px(half_cell), cy - px(half_cell)),
-                                size(px(cell), px(cell)),
-                            );
-                            window.paint_quad(outline(
-                                cell_box,
-                                rgba(accent),
-                                BorderStyle::default(),
-                            ));
-                            // Double glass rim: subtle outer contrast + crisp inner white ring
-                            window.paint_quad(
-                                outline(viewport, rgba(0x0000004D), BorderStyle::default())
-                                    .corner_radii(radius),
-                            );
-                            let inner_rim = Bounds::new(
-                                viewport.origin + point(px(1.), px(1.)),
-                                size(px(side - 2.), px(side - 2.)),
-                            );
-                            window.paint_quad(
-                                outline(inner_rim, rgba(0xFFFFFFD9), BorderStyle::default())
-                                    .corner_radii((radius - 1.).max(0.)),
-                            );
-                        },
-                    )
-                    .size_full(),
-                )
-        }
-    };
+            .size_full(),
+        );
     if cap_cfg.reduce_motion {
         el.into_any_element()
     } else {
@@ -879,7 +726,6 @@ mod tests {
     }
 
     struct BackdropHarness {
-        style: super::UiStyle,
         selection: Option<Bounds<Pixels>>,
     }
 
@@ -893,7 +739,7 @@ mod tests {
             gpui_kit::div()
                 .relative()
                 .size_full()
-                .child(super::selection_backdrop(self.style, self.selection))
+                .child(super::selection_backdrop(self.selection))
         }
     }
 
@@ -902,59 +748,50 @@ mod tests {
     // zero produces a bright seam, two produce a dark seam.
     #[gpui_kit::test]
     fn backdrop_has_no_gaps_or_overlaps_at_fractional_dpi(cx: &mut gpui_kit::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|_, _| BackdropHarness {
-            style: super::UiStyle::Classic,
-            selection: None,
-        });
+        let (view, cx) = cx.add_window_view(|_, _| BackdropHarness { selection: None });
         cx.update(|window, _| window.resize(ws(120., 100.)));
-        for style in super::UiStyle::ALL {
-            for scale in [1., 1.25, 1.5, 1.75, 2.] {
-                cx.simulate_scale_factor_change(scale);
-                let selections = [
-                    None,
-                    Some(bounds(15., 21., 60., 50.)),
-                    Some(bounds(16., 22., 61., 49.)),
-                    Some(bounds(15., 23., 60., 50.)),
-                    Some(bounds(0., 0., 60., 50.)),
-                    Some(bounds(60., 50., 60., 50.)),
-                    Some(bounds(0., 0., 120., 100.)),
-                    // A global selection can continue beyond this output. Its
-                    // border must stay at the real edges, not the monitor seam.
-                    Some(bounds(-30., 10., 180., 80.)),
-                    Some(bounds(10., -30., 100., 160.)),
-                ];
-                for selection in selections {
-                    view.update(cx, |view, cx| {
-                        view.style = style;
-                        view.selection = selection;
-                        cx.notify();
-                    });
-                    let quads = cx.update(|window, cx| {
-                        window.draw(cx).clear(cx);
-                        window.painted_quads()
-                    });
-                    let border = quads.iter().find(|q| q.border_widths.top.0 > 0.);
-                    assert_eq!(border.is_some(), selection.is_some());
-                    let contains =
-                        |b: &gpui_kit::Bounds<gpui_kit::ScaledPixels>, x: f32, y: f32| {
-                            x >= b.left().0 && x < b.right().0 && y >= b.top().0 && y < b.bottom().0
-                        };
-                    for y in 0..(100. * scale) as usize {
-                        for x in 0..(120. * scale) as usize {
-                            let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
-                            let inside = border.is_some_and(|q| contains(&q.bounds, x, y));
-                            let layers = quads
-                                .iter()
-                                .filter(|q| {
-                                    q.border_widths.top.0 == 0. && contains(&q.bounds, x, y)
-                                })
-                                .count();
-                            assert_eq!(
-                                layers,
-                                usize::from(!inside),
-                                "style={style:?}, scale={scale}, selection={selection:?}, pixel=({x}, {y})"
-                            );
-                        }
+        for scale in [1., 1.25, 1.5, 1.75, 2.] {
+            cx.simulate_scale_factor_change(scale);
+            let selections = [
+                None,
+                Some(bounds(15., 21., 60., 50.)),
+                Some(bounds(16., 22., 61., 49.)),
+                Some(bounds(15., 23., 60., 50.)),
+                Some(bounds(0., 0., 60., 50.)),
+                Some(bounds(60., 50., 60., 50.)),
+                Some(bounds(0., 0., 120., 100.)),
+                // A global selection can continue beyond this output. Its
+                // border must stay at the real edges, not the monitor seam.
+                Some(bounds(-30., 10., 180., 80.)),
+                Some(bounds(10., -30., 100., 160.)),
+            ];
+            for selection in selections {
+                view.update(cx, |view, cx| {
+                    view.selection = selection;
+                    cx.notify();
+                });
+                let quads = cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.painted_quads()
+                });
+                let border = quads.iter().find(|q| q.border_widths.top.0 > 0.);
+                assert_eq!(border.is_some(), selection.is_some());
+                let contains = |b: &gpui_kit::Bounds<gpui_kit::ScaledPixels>, x: f32, y: f32| {
+                    x >= b.left().0 && x < b.right().0 && y >= b.top().0 && y < b.bottom().0
+                };
+                for y in 0..(100. * scale) as usize {
+                    for x in 0..(120. * scale) as usize {
+                        let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                        let inside = border.is_some_and(|q| contains(&q.bounds, x, y));
+                        let layers = quads
+                            .iter()
+                            .filter(|q| q.border_widths.top.0 == 0. && contains(&q.bounds, x, y))
+                            .count();
+                        assert_eq!(
+                            layers,
+                            usize::from(!inside),
+                            "scale={scale}, selection={selection:?}, pixel=({x}, {y})"
+                        );
                     }
                 }
             }
@@ -964,7 +801,6 @@ mod tests {
     #[gpui_kit::test]
     fn capsule_selection_border_tracks_active_theme_accent(cx: &mut gpui_kit::TestAppContext) {
         let (_view, cx) = cx.add_window_view(|_, _| BackdropHarness {
-            style: super::UiStyle::Capsule,
             selection: Some(bounds(15., 21., 60., 50.)),
         });
         cx.update(|window, _| window.resize(ws(120., 100.)));
@@ -994,7 +830,6 @@ mod tests {
     }
 
     struct HandleHarness {
-        style: super::UiStyle,
         selection: Option<Bounds<Pixels>>,
         visible: bool,
     }
@@ -1014,7 +849,6 @@ mod tests {
                 .relative()
                 .size_full()
                 .child(super::selection_handles(
-                    self.style,
                     self.selection,
                     self.visible,
                     false,
@@ -1024,45 +858,36 @@ mod tests {
         }
     }
 
-    // The handle restyle (issue #18): eight solid accent CIRCLES, not
-    // white squares with an accent outline. Encodes circle-ness (every
-    // corner radius = half the edge), the accent fill, the absent
-    // outline, and the dot centers landing on the selection's true
-    // edges (the border's contract). See/grab separation — dot smaller
-    // than HANDLE_HIT — is held in selection.rs.
     #[gpui_kit::test]
-    fn selection_handles_paint_solid_accent_circles(cx: &mut gpui_kit::TestAppContext) {
+    fn selection_handles_paint_elevated_jewel_circles(cx: &mut gpui_kit::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| HandleHarness {
-            style: super::UiStyle::Classic,
             selection: Some(bounds(100., 100., 80., 60.)),
             visible: true,
         });
         cx.update(|window, _| window.resize(ws(400., 400.)));
-        // Pin scale 1: the default test scale is 2, and the exact-value
-        // assertions below (dot diameter, centers) are logical px.
         cx.simulate_scale_factor_change(1.);
         let quads = cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             window.painted_quads()
         });
-        assert_eq!(quads.len(), 8);
+        assert_eq!(quads.len(), 24);
+        let white_bg: Background = rgba(0xFFFFFFFF).into();
         let expected_bg: Background = rgba(super::theme::c().accent).into();
+        let rings: Vec<_> = quads.iter().filter(|q| q.background == white_bg).collect();
+        let cores: Vec<_> = quads
+            .iter()
+            .filter(|q| q.background == expected_bg)
+            .collect();
+        assert_eq!(rings.len(), 8);
+        assert_eq!(cores.len(), 8);
         let mut centers: Vec<(f32, f32)> = Vec::new();
-        for q in &quads {
+        for q in rings {
             let (w, h) = (q.bounds.size.width.0, q.bounds.size.height.0);
-            assert_eq!((w, h), (super::HANDLE_VIS, super::HANDLE_VIS));
-            // circle: radius is half the edge, on every corner
+            assert_eq!((w, h), (9., 9.));
             assert_eq!(q.corner_radii.top_left.0, w / 2.);
-            assert_eq!(q.corner_radii.bottom_right.0, w / 2.);
-            // solid dot: accent fill, no outline
-            assert_eq!(q.background, expected_bg);
             assert_eq!(q.border_widths.top.0, 0.);
             centers.push((q.bounds.origin.x.0 + w / 2., q.bounds.origin.y.0 + h / 2.));
         }
-        // 4 corners + 4 edge midpoints of the selection. Quads get
-        // their origins floored to device pixels, so centers may sit
-        // half a pixel off the anchor — match within 1 px, not exactly
-        // (dots are 40 px apart here; the tolerance is unambiguous).
         let (l, r, t, b) = (100., 180., 100., 160.);
         let (mx, my) = ((l + r) / 2., (t + b) / 2.);
         let expected: Vec<(f32, f32)> = vec![
@@ -1099,33 +924,6 @@ mod tests {
             window.painted_quads()
         });
         assert!(quads.is_empty());
-
-        // Capsule style: 8 handles × 3 circular quads (shadow + white ring + accent core)
-        view.update(cx, |view, cx| {
-            view.style = super::UiStyle::Capsule;
-            view.visible = true;
-            cx.notify();
-        });
-        let capsule_quads = cx.update(|window, cx| {
-            window.draw(cx).clear(cx);
-            window.painted_quads()
-        });
-        assert_eq!(capsule_quads.len(), 24);
-        let white_bg: Background = rgba(0xFFFFFFFF).into();
-        assert_eq!(
-            capsule_quads
-                .iter()
-                .filter(|q| q.background == white_bg)
-                .count(),
-            8
-        );
-        assert_eq!(
-            capsule_quads
-                .iter()
-                .filter(|q| q.background == expected_bg)
-                .count(),
-            8
-        );
     }
 
     #[gpui_kit::test]
@@ -1144,7 +942,6 @@ mod tests {
                         .relative()
                         .size_full()
                         .child(super::selection_handles(
-                            super::UiStyle::Classic,
                             Some(bounds(100., 100., 80., 60.)),
                             true,
                             true,
@@ -1161,11 +958,25 @@ mod tests {
             window.draw(cx).clear(cx);
             window.painted_quads()
         });
-        assert_eq!(quads.len(), 8);
-        let expected_bg: Background = rgba((super::theme::c().accent & 0xffff_ff00) | 0x73).into();
-        for q in &quads {
-            assert_eq!((q.bounds.size.width.0, q.bounds.size.height.0), (5., 5.));
-            assert_eq!(q.background, expected_bg);
+        assert_eq!(quads.len(), 24);
+        let expected_ring: Background = rgba(0xFFFF_FFA6).into();
+        let expected_core: Background =
+            rgba((super::theme::c().accent & 0xffff_ff00) | 0x80).into();
+        let rings: Vec<_> = quads
+            .iter()
+            .filter(|q| q.background == expected_ring)
+            .collect();
+        let cores: Vec<_> = quads
+            .iter()
+            .filter(|q| q.background == expected_core)
+            .collect();
+        assert_eq!(rings.len(), 8);
+        assert_eq!(cores.len(), 8);
+        for q in rings {
+            assert_eq!((q.bounds.size.width.0, q.bounds.size.height.0), (6.0, 6.0));
+        }
+        for q in cores {
+            assert_eq!((q.bounds.size.width.0, q.bounds.size.height.0), (3., 3.));
         }
     }
 }

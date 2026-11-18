@@ -328,4 +328,42 @@ mod tests {
             [btn(B::Copy), ToolbarItem::Separator, ToolbarItem::Separator]
         );
     }
+
+    #[test]
+    fn pin_tool_row_tracks_configured_tools_without_capture_exits_or_orphaned_separators() {
+        use ToolbarButton as B;
+        let btn = ToolbarItem::Button;
+        let mut s = Settings::default();
+        s.set_row(vec![
+            ToolbarItem::Separator,
+            btn(B::Arrow),
+            btn(B::Copy),
+            ToolbarItem::Separator,
+            btn(B::Save),
+            btn(B::Rectangle),
+            ToolbarItem::Separator,
+            btn(B::Clear),
+            ToolbarItem::Separator,
+            btn(B::Cancel),
+        ]);
+        assert_eq!(
+            s.pin_tool_row(),
+            vec![
+                btn(B::Arrow),
+                ToolbarItem::Separator,
+                btn(B::Rectangle),
+                ToolbarItem::Separator,
+                btn(B::Clear),
+            ]
+        );
+
+        // When every annotation tool is removed from the row, fall back to all Tools.
+        s.set_row(vec![btn(B::Copy), btn(B::Cancel)]);
+        let fallback = s.pin_tool_row();
+        assert!(!fallback.is_empty());
+        assert!(fallback.iter().all(|item| matches!(
+            item,
+            ToolbarItem::Button(b) if b.cluster() == ToolbarCluster::Tools
+        )));
+    }
 }

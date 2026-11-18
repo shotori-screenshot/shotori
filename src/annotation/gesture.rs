@@ -22,17 +22,13 @@ impl Annotations {
             return;
         }
         self.pressed = true;
-        if matches!(self.tool, Some(ShapeKind::Eraser | ShapeKind::EraserRect)) {
-            // Object eraser (issues #14, #41): whole-shape deletion, no
-            // draft shape, no pixel mask. A new gesture never merges into
-            // the previous sweep's history entry.
+        if self.tool == Some(ShapeKind::Eraser) {
+            // Object eraser (issue #14): whole-shape deletion, no draft
+            // shape, no pixel mask. A new gesture never merges into the
+            // previous sweep's history entry.
             self.eraser_entry_open = false;
-            if self.tool == Some(ShapeKind::EraserRect) {
-                self.eraser = Some(EraserGesture::Rect { start: p, end: p });
-            } else {
-                self.eraser = Some(EraserGesture::Stroke { last: p });
-                self.erase_sample(p);
-            }
+            self.eraser = Some(EraserGesture { last: p });
+            self.erase_sample(p);
             return;
         }
         if self.tool == Some(ShapeKind::Polyline) && self.draft.is_some() {
@@ -149,7 +145,7 @@ impl Annotations {
     ) -> bool {
         // Copy the gesture out (it is `Copy`) — the sampling below
         // needs `&mut self` for the removals themselves.
-        if let Some(EraserGesture::Stroke { last }) = self.eraser {
+        if let Some(EraserGesture { last }) = self.eraser {
             // Brush sweep: interpolate along the segment since the
             // last sample — two pointer events far apart must still
             // erase every piece of ink between them.
@@ -168,17 +164,7 @@ impl Annotations {
                 );
                 changed |= self.erase_sample(sample);
             }
-            self.eraser = Some(EraserGesture::Stroke { last: end });
-            return changed;
-        }
-        if let Some(EraserGesture::Rect { start, end: cur }) = self.eraser {
-            // Area sweep: track the rect; deletion happens on release.
-            let end = point(
-                p.x.clamp(selection.left(), selection.right()),
-                p.y.clamp(selection.top(), selection.bottom()),
-            );
-            let changed = cur != end;
-            self.eraser = Some(EraserGesture::Rect { start, end });
+            self.eraser = Some(EraserGesture { last: end });
             return changed;
         }
         let Some(draft) = self.draft.as_mut() else {
@@ -331,15 +317,8 @@ impl Annotations {
         // The eraser gesture closes regardless of `pressed` — an undo
         // mid-sweep already cleared the flag, and a stale gesture must
         // never leak into the next tool's drags.
-        if let Some(gesture) = self.eraser.take() {
+        if self.eraser.take().is_some() {
             self.eraser_entry_open = false;
-            if pressed && let EraserGesture::Rect { start, end } = gesture {
-                let area = Bounds::from_corners(
-                    point(start.x.min(end.x), start.y.min(end.y)),
-                    point(start.x.max(end.x), start.y.max(end.y)),
-                );
-                self.erase_rect(area);
-            }
             return;
         }
         if !pressed {

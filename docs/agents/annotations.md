@@ -26,7 +26,7 @@ before editing `src/annotation*`, `src/model/session/annotations.rs`,
 | `annotation/text.rs` | `cosmic-text` multilingual shaping, `TextStyle` (font, bold/italic, HSLA outline & background, padding, radius, `TextWrap`) |
 | `annotation/spotlight.rs` | Rectangle/ellipse cutout regions, shared dimming mask/opacity, optional outline, wheel modifiers |
 | `annotation/magnifier.rs` | Rectangular loupe source + destination lens, `1..=8` zoom, 4 `LensConnector` styles, shadow, antialiasing, annotation-sampling toggle |
-| `annotation/eraser.rs` | Whole-object brush (`Eraser`) and rectangle (`EraserRect`) mark erasure bound to mark visibility/history |
+| `annotation/eraser.rs` | Whole-object brush (`Eraser`) mark erasure bound to mark visibility/history |
 | `annotation/raster.rs` | Authoritative CPU RGBA8 pixel compositor shared by canvas caches and exported images, plus `BakedLayer` dual-matte sprite extraction for zero-reupload GPU drag planes |
 | `ui/toolbar/*_options.rs` | Secondary toolbar row controls (`annot_options`, `geometry_options`, `line_options`, `number_options`, `spotlight_options`, `text_options`) |
 

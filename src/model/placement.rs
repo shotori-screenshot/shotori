@@ -15,7 +15,7 @@
 use gpui_kit::*;
 
 use crate::model::session::ScrollRect;
-use crate::model::settings::{Settings, UiStyle};
+use crate::model::settings::Settings;
 
 /// Rough label width covering the widest "3072 × 1920" + padding; the
 /// height matches the rendered chip.
@@ -26,84 +26,26 @@ pub(crate) const LABEL_H: f32 = 24.;
 /// flush against the border line looks glued-on (user-reported).
 const INSET: f32 = 12.;
 
-/// Options-row width budget, including text font/size, enabled outline and
-/// background controls, and the complete palette. Rendered-control regression
-/// tests verify this budget; placement must also reserve the configured first row.
-pub(crate) const TB_W: f32 = 672.;
-/// Toolbar width for the SINGLE-ROW state (no tool active): row one's
-/// natural content width, measured via test probe
-/// (`toolbar_hugs_its_content`): the full TB_W leaves a ~70px dead
-/// hole between the tool cluster and the action cluster, which the
-/// flex_1 spacer widens into a visible gap (user-reported). Re-based
-/// 562 → 595 when the clear-all button joined the tool cluster
-/// (issue #15), 595 → 627 when the select button took the first slot,
-/// and 627 → 660 for the scroll button (2026-10-06): one button pitch
-/// per addition (probe-measured).
-pub(crate) const TB_W_ROW1: f32 = 660.;
 /// Width of one drag-grip strip at the toolbar's left/right edge.
 pub(crate) const GRIP_W: f32 = 12.;
 /// Visual stroke of the scroll-capture region frame (logical px).
 pub(crate) const FRAME_STROKE: f32 = 2.;
-/// The bar rows' horizontal padding. The grip elements sit INSIDE that
-/// padding on row one — `session::toolbar_grips` uses the same constant
-/// so the cursor strip and the element rect stay identical.
-pub(crate) const BAR_PAD: f32 = 5.;
-/// Single-row height (tools inactive)
-pub(crate) const ROW_H: f32 = 38.;
-/// Two-row height (the tall case used for placement decisions)
-pub(crate) const TB_H: f32 = ROW_H * 2. + 6.;
 
-/// Frosted capsule preset geometry: taller rows with concentric 8px-radius
-/// 32px buttons inside a 14px-radius 44px bar (`14 - 6 = 8`).
-pub(crate) const CAPSULE_ROW_H: f32 = 44.;
-pub(crate) const CAPSULE_BAR_PAD: f32 = 8.;
-pub(crate) const CAPSULE_ROW_GAP: f32 = 8.;
-pub(crate) const CAPSULE_TB_H: f32 = CAPSULE_ROW_H * 2. + CAPSULE_ROW_GAP;
-pub(crate) const CAPSULE_TB_W: f32 = 748.;
-pub(crate) const CAPSULE_BTN_SIZE: f32 = 32.;
-pub(crate) const CAPSULE_BTN_GAP: f32 = 3.;
-const CAPSULE_BTN_PITCH: f32 = CAPSULE_BTN_SIZE + CAPSULE_BTN_GAP;
-const CAPSULE_SEP_PITCH: f32 = 11. + CAPSULE_BTN_GAP;
-
-/// How a [`UiStyle`] anchors its primary toolbar relative to the selection.
-///
-/// Separating anchor strategy from color tokens keeps layout extensible:
-/// `Classic` aligns left below the box, `Capsule` centers a floating capsule
-/// below the box, and a future edge-hugging rail preset can add an
-/// edge-wrapping rail mode without touching palettes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ToolbarAnchorMode {
-    BelowLeft,
-    BelowCenter,
-}
-
-pub(crate) const fn anchor_mode_for(style: UiStyle) -> ToolbarAnchorMode {
-    match style {
-        UiStyle::Classic => ToolbarAnchorMode::BelowLeft,
-        UiStyle::Capsule => ToolbarAnchorMode::BelowCenter,
-    }
-}
-
-pub(crate) const fn row_height_for(style: UiStyle) -> f32 {
-    match style {
-        UiStyle::Classic => ROW_H,
-        UiStyle::Capsule => CAPSULE_ROW_H,
-    }
-}
-
-pub(crate) const fn bar_pad_for(style: UiStyle) -> f32 {
-    match style {
-        UiStyle::Classic => BAR_PAD,
-        UiStyle::Capsule => CAPSULE_BAR_PAD,
-    }
-}
-
-pub(crate) const fn row_gap_for(style: UiStyle) -> f32 {
-    match style {
-        UiStyle::Classic => 6.,
-        UiStyle::Capsule => CAPSULE_ROW_GAP,
-    }
-}
+/// Unified frosted capsule toolbar geometry: concentric 8px-radius 32px
+/// controls inside a 14px-radius 44px bar (`14 - 6 = 8`).
+pub(crate) const ROW_H: f32 = 44.;
+pub(crate) const BAR_PAD: f32 = 8.;
+pub(crate) const ROW_GAP: f32 = 8.;
+pub(crate) const TB_H: f32 = ROW_H * 2. + ROW_GAP;
+pub(crate) const TB_W: f32 = 748.;
+pub(crate) const BTN_SIZE: f32 = 32.;
+pub(crate) const BTN_GAP: f32 = 3.;
+const BTN_PITCH: f32 = BTN_SIZE + BTN_GAP;
+const SEP_PITCH: f32 = 11. + BTN_GAP;
+pub(crate) const TOOLBAR_GAP: f32 = 10.;
+/// Floor for the degenerate everything-hidden bar (grips + padding +
+/// slack) — the basis must stay positive for the clamps.
+const ROW1_W_MIN: f32 = 48.;
 
 /// Breathing room kept between the lowest element and the screen edge —
 /// "fits at exactly zero margin" still looks glued on (measured).
@@ -125,37 +67,18 @@ pub(crate) fn label_anchor(b: &Bounds<Pixels>, ws: Size<Pixels>) -> (f32, f32) {
     (x, y)
 }
 
-/// Toolbar placement: BELOW the selection, or — when the selection
+/// Toolbar placement: centered BELOW the selection, or — when the selection
 /// reaches the bottom of the screen — INSIDE the box. Horizontally clamped;
-/// `width`/`height` are the toolbar's current size basis (see [`toolbar_size_for`]).
-#[cfg(test)]
+/// `width`/`height` are the toolbar's current size basis (see [`toolbar_size`]).
 pub(crate) fn toolbar_anchor(
     b: &Bounds<Pixels>,
     ws: Size<Pixels>,
     width: f32,
     height: f32,
 ) -> (f32, f32) {
-    toolbar_anchor_for(UiStyle::Classic, b, ws, width, height)
-}
-
-pub(crate) fn toolbar_anchor_for(
-    style: UiStyle,
-    b: &Bounds<Pixels>,
-    ws: Size<Pixels>,
-    width: f32,
-    height: f32,
-) -> (f32, f32) {
-    let gap = match style {
-        UiStyle::Classic => 8.,
-        UiStyle::Capsule => 10.,
-    };
+    let gap = TOOLBAR_GAP;
     let inside = f32::from(b.bottom()) + height + gap + EDGE_B > f32::from(ws.height);
-    let raw_x = match anchor_mode_for(style) {
-        ToolbarAnchorMode::BelowLeft => f32::from(b.left()) + if inside { INSET } else { 0. },
-        ToolbarAnchorMode::BelowCenter => {
-            f32::from(b.left()) + f32::from(b.size.width) * 0.5 - width * 0.5
-        }
-    };
+    let raw_x = f32::from(b.left()) + f32::from(b.size.width) * 0.5 - width * 0.5;
     let x = raw_x.clamp(8., (f32::from(ws.width) - width - 8.).max(8.));
     let y = if inside {
         f32::from(b.bottom()) - height - gap
@@ -165,28 +88,17 @@ pub(crate) fn toolbar_anchor_for(
     (x, y.clamp(8., (f32::from(ws.height) - height - 8.).max(8.)))
 }
 
-/// The toolbar's full rect: [`toolbar_anchor_for`] plus the width clamp the
+/// The toolbar's full rect: [`toolbar_anchor`] plus the width clamp the
 /// render side applies (the state's base width, or the window minus
 /// breathing room on narrow screens). One source of truth for render,
 /// cursor hit-tests and the drag clamp — they cannot drift apart.
-#[cfg(test)]
 pub(crate) fn toolbar_bounds(
     b: &Bounds<Pixels>,
     ws: Size<Pixels>,
     width: f32,
     height: f32,
 ) -> Bounds<Pixels> {
-    toolbar_bounds_for(UiStyle::Classic, b, ws, width, height)
-}
-
-pub(crate) fn toolbar_bounds_for(
-    style: UiStyle,
-    b: &Bounds<Pixels>,
-    ws: Size<Pixels>,
-    width: f32,
-    height: f32,
-) -> Bounds<Pixels> {
-    let (x, y) = toolbar_anchor_for(style, b, ws, width, height);
+    let (x, y) = toolbar_anchor(b, ws, width, height);
     let w = width.min((f32::from(ws.width) - 16.).max(1.));
     Bounds {
         origin: point(px(x), px(y)),
@@ -196,56 +108,14 @@ pub(crate) fn toolbar_bounds_for(
 
 /// Reserve both rows while editing. The configured tool row can be wider than
 /// the options row; neither may extend beyond the shared drag/placement bounds.
-#[cfg(test)]
 pub(crate) fn toolbar_size(annotating: bool, settings: &Settings) -> (f32, f32) {
-    toolbar_size_for(UiStyle::Classic, annotating, settings)
-}
-
-pub(crate) fn toolbar_size_for(
-    style: UiStyle,
-    annotating: bool,
-    settings: &Settings,
-) -> (f32, f32) {
-    let row1 = row1_basis_for(style, settings);
-    match style {
-        UiStyle::Classic => {
-            if annotating {
-                (TB_W.max(row1), TB_H)
-            } else {
-                (row1, ROW_H)
-            }
-        }
-        UiStyle::Capsule => {
-            if annotating {
-                (CAPSULE_TB_W.max(row1), CAPSULE_TB_H)
-            } else {
-                (row1, CAPSULE_ROW_H)
-            }
-        }
+    let row1 = row1_basis(settings);
+    if annotating {
+        (TB_W.max(row1), TB_H)
+    } else {
+        (row1, ROW_H)
     }
 }
-
-/// One row-one button's footprint: the 30px control plus the 2px flex
-/// gap that dies with it.
-const BTN_PITCH: f32 = 32.;
-/// A separator's footprint: 1px stroke + 2×4px margins + one gap.
-const SEP_PITCH: f32 = 11.;
-/// The flex gap the one spacer CHILD occupied in the row the anchor
-/// was measured against (the spacer itself rendered zero-width; only
-/// its gap remains as a footprint now that the variant is gone).
-const GONE_SPACER_GAP: f32 = 2.;
-/// The composition of the row TB_W_ROW1 was probe-measured against:
-/// 19 buttons, one zero-width spacer child, one separator — the
-/// pre-customization toolbar. Pinned EXPLICITLY because the factory
-/// row later gained the settings gear: keying the anchor off
-/// ALL.len() silently rebased it, and a 32px-short basis put the
-/// right grip's hand-cursor rect over the buttons instead of the
-/// rendered grip (user-reported — grips derive from this basis).
-const ANCHOR_BUTTONS: f32 = 19.;
-const ANCHOR_SEPARATORS: f32 = 1.;
-/// Floor for the degenerate everything-hidden bar (grips + padding +
-/// slack) — the basis must stay positive for the clamps.
-const ROW1_W_MIN: f32 = 48.;
 
 /// The default (factory-row) single-row width basis — what the tests
 /// assert against and what a fresh install renders.
@@ -254,32 +124,37 @@ pub(crate) fn default_row1_basis() -> f32 {
     row1_basis(&crate::model::settings::Settings::default())
 }
 
-/// The configured row's width basis, as exact per-child deltas from
-/// the probe-measured anchor (see TB_W_ROW1's comment: totals are
-/// measured, never re-derived from first principles — but a delta per
-/// removed/added child is exact geometry). Today's factory row: 20
-/// buttons and two separators, no spacer child →
-/// 660 - 2 + 32 + 11 = 701.
+/// Single-row width basis for the capsule toolbar: `2px` border + `16px`
+/// horizontal padding + `24px` two grips + `3px` grip-to-grip gap = `45px`
+/// base, plus `35px` per button and `14px` per separator.
 pub(crate) fn row1_basis(settings: &Settings) -> f32 {
     let buttons = settings.row1_button_count() as f32;
     let separators = settings.row1_separator_count() as f32;
-    (TB_W_ROW1 - GONE_SPACER_GAP
-        + BTN_PITCH * (buttons - ANCHOR_BUTTONS)
-        + SEP_PITCH * (separators - ANCHOR_SEPARATORS))
-        .max(ROW1_W_MIN)
+    (45. + BTN_PITCH * buttons + SEP_PITCH * separators).max(ROW1_W_MIN)
 }
 
-/// Style-dispatched single-row width basis. For `Capsule`: `2px` border +
-/// `16px` horizontal padding + `24px` two grips + `3px` grip-to-grip gap
-/// = `45px` base, plus `35px` per button and `14px` per separator.
-pub(crate) fn row1_basis_for(style: UiStyle, settings: &Settings) -> f32 {
-    match style {
-        UiStyle::Classic => row1_basis(settings),
-        UiStyle::Capsule => {
-            let buttons = settings.row1_button_count() as f32;
-            let separators = settings.row1_separator_count() as f32;
-            (45. + CAPSULE_BTN_PITCH * buttons + CAPSULE_SEP_PITCH * separators).max(ROW1_W_MIN)
-        }
+/// Single-row width basis for the floating pin's annotation toolbar (no grips):
+/// `2px` border + `16px` horizontal padding - `3px` trailing gap = `15px`
+/// base (with `+2px` rounding margin), plus `35px` per button and `14px` per separator.
+pub(crate) fn pin_row1_basis(settings: &Settings) -> f32 {
+    let items = settings.pin_tool_row();
+    let buttons = items
+        .iter()
+        .filter(|item| matches!(item, crate::model::settings::ToolbarItem::Button(_)))
+        .count() as f32;
+    let separators = items
+        .iter()
+        .filter(|item| matches!(item, crate::model::settings::ToolbarItem::Separator))
+        .count() as f32;
+    (17. + BTN_PITCH * buttons + SEP_PITCH * separators).max(ROW1_W_MIN)
+}
+
+pub(crate) fn pin_toolbar_size(has_options: bool, settings: &Settings) -> (f32, f32) {
+    let row1 = pin_row1_basis(settings);
+    if has_options {
+        (TB_W.max(row1), TB_H)
+    } else {
+        (row1, ROW_H)
     }
 }
 
@@ -599,11 +474,11 @@ mod tests {
     // Explicit imports (same reason as selection.rs: avoid gpui's test
     // macro shadowing the built-in #[test])
     use super::{
-        FRAME_CHIP_GAP, FRAME_CHIP_H, FRAME_CHIP_W, FRAME_TB_H, FRAME_TB_W, LABEL_H, ROW_H,
-        SCROLL_PANEL_GAP, SCROLL_PANEL_MARGIN, SCROLL_PANEL_MIN_W, SCROLL_PANEL_W, ScrollPanelDock,
-        TB_H, TB_W, TB_W_ROW1, clamp_moved_rect, frame_grab_chip, frame_strokes, frame_toolbar,
-        label_anchor, plan_scroll_panel, scroll_panel_margins, scroll_panel_width, toolbar_anchor,
-        toolbar_size,
+        BTN_PITCH, FRAME_CHIP_GAP, FRAME_CHIP_H, FRAME_CHIP_W, FRAME_TB_H, FRAME_TB_W, LABEL_H,
+        ROW_H, SCROLL_PANEL_GAP, SCROLL_PANEL_MARGIN, SCROLL_PANEL_MIN_W, SCROLL_PANEL_W,
+        SEP_PITCH, ScrollPanelDock, TB_H, TB_W, TOOLBAR_GAP, clamp_moved_rect, default_row1_basis,
+        frame_grab_chip, frame_strokes, frame_toolbar, label_anchor, plan_scroll_panel,
+        scroll_panel_margins, scroll_panel_width, toolbar_anchor, toolbar_size,
     };
     use crate::model::session::ScrollRect;
     use gpui_kit::{Bounds, Pixels, point, px, size};
@@ -647,23 +522,28 @@ mod tests {
 
     #[test]
     fn toolbar_sits_below_by_default() {
-        let (x, y) = toolbar_anchor(&bounds(50., 100., 300., 200.), screen(), TB_W_ROW1, ROW_H);
-        assert_eq!((x, y), (50., 308.));
+        let basis = default_row1_basis();
+        let (x, y) = toolbar_anchor(&bounds(600., 100., 300., 200.), screen(), basis, ROW_H);
+        assert_eq!((x, y), (750. - basis * 0.5, 300. + TOOLBAR_GAP));
     }
 
     #[test]
-    fn toolbar_goes_inside_bottom_left_when_reaching_the_bottom() {
+    fn toolbar_goes_inside_when_reaching_the_bottom() {
         // two-row toolbar (annotating): the tall case
-        let (x, y) = toolbar_anchor(&bounds(50., 300., 300., 780.), screen(), TB_W, TB_H);
-        assert_eq!((x, y), (50. + 12., 1080. - TB_H - 8.));
+        let (x, y) = toolbar_anchor(&bounds(600., 300., 300., 780.), screen(), TB_W, TB_H);
+        assert_eq!((x, y), (750. - TB_W * 0.5, 1080. - TB_H - TOOLBAR_GAP));
     }
 
     #[test]
     fn toolbar_clamps_horizontally() {
-        // a selection hugging the right edge: the toolbar pins into the screen
-        let b = bounds(1800., 500., 100., 200.);
-        let (x, _) = toolbar_anchor(&b, screen(), TB_W, TB_H);
-        assert_eq!(x, 1920. - super::TB_W - 8.);
+        // selections hugging either edge clamp within the screen margin
+        let left_box = bounds(10., 200., 80., 200.);
+        let (lx, _) = toolbar_anchor(&left_box, screen(), 500., ROW_H);
+        assert_eq!(lx, 8.);
+
+        let right_box = bounds(1800., 500., 100., 200.);
+        let (rx, _) = toolbar_anchor(&right_box, screen(), TB_W, TB_H);
+        assert_eq!(rx, 1920. - TB_W - 8.);
     }
 
     #[test]
@@ -679,6 +559,7 @@ mod tests {
     #[test]
     fn toolbar_size_follows_the_configured_row() {
         use crate::model::settings::{DEFAULT_ROW, Settings, ToolbarButton, ToolbarItem};
+        let baseline = default_row1_basis();
         // three buttons off: row one shrinks by exactly three pitches
         let mut s = Settings::default();
         s.set_row(
@@ -696,13 +577,7 @@ mod tests {
                 .collect(),
         );
         let (w, h) = toolbar_size(false, &s);
-        // 18 buttons (3 off the 21-button factory) + 2 separators,
-        // against the 19-button/1-separator anchor:
-        // 660 - 2 + 32*(18-19) + 11*(2-1)
-        assert_eq!(
-            w,
-            TB_W_ROW1 - super::GONE_SPACER_GAP - super::BTN_PITCH + super::SEP_PITCH
-        );
+        assert_eq!(w, baseline - 3. * BTN_PITCH);
         assert_eq!(h, ROW_H);
         // Both rows contribute to the editing bounds
         assert_eq!(
@@ -719,10 +594,7 @@ mod tests {
                 .chain([ToolbarItem::Separator])
                 .collect(),
         );
-        assert_eq!(
-            toolbar_size(false, &s).0,
-            TB_W_ROW1 - super::GONE_SPACER_GAP + 2. * super::BTN_PITCH + 2. * super::SEP_PITCH
-        );
+        assert_eq!(toolbar_size(false, &s).0, baseline + SEP_PITCH);
 
         // empty row (hide everything): the floor keeps the basis positive
         let mut s = Settings::default();
@@ -743,55 +615,21 @@ mod tests {
                 }
                 let b = bounds(50., top, 300., bottom - top);
                 let (_, ly) = label_anchor(&b, screen());
-                for (style, w, h) in [
-                    (super::UiStyle::Classic, TB_W, TB_H),
-                    (
-                        super::UiStyle::Capsule,
-                        super::CAPSULE_TB_W,
-                        super::CAPSULE_TB_H,
-                    ),
-                ] {
-                    let (_, ty) = super::toolbar_anchor_for(style, &b, screen(), w, h);
-                    assert!(ly >= 0., "label off-screen for {b:?} ({style:?})");
-                    assert!(
-                        ty >= 0. && ty + h <= 1080.,
-                        "toolbar off-screen for {b:?} ({style:?})"
-                    );
-                    assert!(
-                        ly + LABEL_H <= ty,
-                        "zones overlap for {b:?} ({style:?}): label {}..{}, toolbar {ty}..{}",
-                        ly,
-                        ly + LABEL_H,
-                        ty + h
-                    );
-                }
+                let (_, ty) = toolbar_anchor(&b, screen(), TB_W, TB_H);
+                assert!(ly >= 0., "label off-screen for {b:?}");
+                assert!(
+                    ty >= 0. && ty + TB_H <= 1080.,
+                    "toolbar off-screen for {b:?}"
+                );
+                assert!(
+                    ly + LABEL_H <= ty,
+                    "zones overlap for {b:?}: label {}..{}, toolbar {ty}..{}",
+                    ly,
+                    ly + LABEL_H,
+                    ty + TB_H
+                );
             }
         }
-    }
-
-    #[test]
-    fn capsule_toolbar_centers_horizontally_and_clamps_near_edges() {
-        use super::{CAPSULE_ROW_H, CAPSULE_TB_H, CAPSULE_TB_W, UiStyle, toolbar_anchor_for};
-        let b = bounds(600., 200., 400., 300.); // center x = 800
-        let (x, y) = toolbar_anchor_for(UiStyle::Capsule, &b, screen(), 500., CAPSULE_ROW_H);
-        assert_eq!((x, y), (800. - 250., 510.));
-
-        // Near left screen edge: clamps to 8px margin
-        let left_box = bounds(10., 200., 80., 200.);
-        let (lx, _) =
-            toolbar_anchor_for(UiStyle::Capsule, &left_box, screen(), 500., CAPSULE_ROW_H);
-        assert_eq!(lx, 8.);
-
-        // Near right screen edge: clamps to 1920 - width - 8
-        let right_box = bounds(1800., 200., 100., 200.);
-        let (rx, _) = toolbar_anchor_for(
-            UiStyle::Capsule,
-            &right_box,
-            screen(),
-            CAPSULE_TB_W,
-            CAPSULE_TB_H,
-        );
-        assert_eq!(rx, 1920. - CAPSULE_TB_W - 8.);
     }
 
     fn rect(x: i32, y: i32) -> ScrollRect {

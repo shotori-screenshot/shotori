@@ -1,25 +1,19 @@
 //! The object eraser (issues #14, #41): whole-shape deletion by brush
-//! sweep or rectangle. Unlike drawing tools it carries no draft shape
-//! and never masks pixels — the gesture state is the sweep itself, and
-//! its only output is whole-mark removals folded into one reversible
+//! sweep. Unlike drawing tools it carries no draft shape and never masks
+//! pixels — the gesture state is the sweep itself, and its only output is
+//! whole-mark removals folded into one reversible
 //! [`super::history::HistoryEntry::Remove`] step per gesture.
 
 use super::{Annotations, ShapeKind};
-use gpui_kit::{Bounds, Pixels, Point, point, px};
+use gpui_kit::{Pixels, Point};
 
-/// An object-eraser gesture in flight (issues #14, #41).
+/// A brush object-eraser gesture in flight (issues #14, #41).
+/// `last` is the previous sample; the segment to the next one is
+/// interpolated so a fast flick cannot jump over thin ink between two
+/// pointer events.
 #[derive(Clone, Copy)]
-pub(super) enum EraserGesture {
-    /// Brush sweep. `last` is the previous sample; the segment to the
-    /// next one is interpolated so a fast flick cannot jump over thin
-    /// ink between two pointer events.
-    Stroke { last: Point<Pixels> },
-    /// Area sweep: the dragged rectangle, committed on release (the
-    /// bounds are only final when the pointer comes up).
-    Rect {
-        start: Point<Pixels>,
-        end: Point<Pixels>,
-    },
+pub(super) struct EraserGesture {
+    pub(super) last: Point<Pixels>,
 }
 
 impl Annotations {
@@ -28,19 +22,6 @@ impl Annotations {
     /// circle, so what you see is what erases.
     pub(crate) fn erase_radius(&self) -> f32 {
         self.size_of(ShapeKind::Eraser) / 2.
-    }
-
-    /// The area eraser's in-flight rect in selection-global
-    /// coordinates (the dashed chrome outline). `None` outside the
-    /// gesture.
-    pub(crate) fn eraser_rect_bounds(&self) -> Option<Bounds<Pixels>> {
-        match self.eraser {
-            Some(EraserGesture::Rect { start, end }) => Some(Bounds::from_corners(
-                point(start.x.min(end.x), start.y.min(end.y)),
-                point(start.x.max(end.x), start.y.max(end.y)),
-            )),
-            _ => None,
-        }
     }
 
     /// One brush sample: delete every shape whose visible ink the
@@ -59,33 +40,13 @@ impl Annotations {
             .collect();
         self.remove_shapes(indices, true)
     }
-
-    /// The area eraser's release: delete every shape whose visible ink
-    /// bounds intersect the dragged rect, recorded as a single
-    /// [`super::history::HistoryEntry::Remove`] step.
-    pub(super) fn erase_rect(&mut self, area: Bounds<Pixels>) -> bool {
-        if area.size.width <= px(0.) || area.size.height <= px(0.) {
-            return false;
-        }
-        let indices: Vec<usize> = self
-            .shapes
-            .iter()
-            .enumerate()
-            .filter(|(_, shape)| {
-                let inter = shape.ink_bounds().intersect(&area);
-                inter.size.width > px(0.) && inter.size.height > px(0.)
-            })
-            .map(|(ix, _)| ix)
-            .collect();
-        self.remove_shapes(indices, false)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::annotation::LensOption;
-    use gpui_kit::size;
+    use gpui_kit::{Bounds, point, px, size};
 
     fn selection() -> Bounds<Pixels> {
         Bounds::new(point(px(0.), px(0.)), size(px(240.), px(180.)))
@@ -191,53 +152,6 @@ mod tests {
         a.begin(point(px(40.), px(10.)), selection(), false);
         a.end();
         assert!(a.committed().is_empty());
-    }
-
-    #[test]
-    fn rect_eraser_deletes_intersecting_ink_bounds_on_release_only() {
-        let mut a = Annotations::default();
-        draw_rectangle(&mut a, 10., 10., 30., 40.);
-        a.toggle(ShapeKind::Line);
-        a.begin(point(px(15.), px(55.)), selection(), false);
-        a.drag_to(point(px(45.), px(55.)), selection(), false);
-        a.end();
-        a.toggle(ShapeKind::Text);
-        a.add_text(
-            Bounds::new(point(px(120.), px(120.)), size(px(80.), px(24.))),
-            "far".into(),
-        );
-        let before = a.committed().to_vec();
-        let history_len = a.history.len();
-
-        a.toggle(ShapeKind::EraserRect);
-        a.begin(point(px(5.), px(5.)), selection(), false);
-        a.drag_to(point(px(50.), px(65.)), selection(), false);
-        // Nothing is deleted while the dashed area is still being dragged.
-        assert_eq!(a.committed().len(), 3);
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.committed()[0].text.as_deref(), Some("far"));
-        assert_eq!(a.history.len(), history_len + 1);
-
-        // Zero-area click on a mark deletes nothing and records nothing.
-        let h = a.history.len();
-        a.begin(point(px(130.), px(130.)), selection(), false);
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.history.len(), h);
-
-        // Uncommitted drag cancelled by undo leaves history intact.
-        a.begin(point(px(110.), px(110.)), selection(), false);
-        a.drag_to(point(px(210.), px(160.)), selection(), false);
-        a.undo();
-        a.end();
-        assert_eq!(a.committed().len(), 1);
-        assert_eq!(a.history.len(), h);
-
-        a.undo();
-        assert_eq!(a.committed(), before.as_slice());
-        a.redo();
-        assert_eq!(a.committed().len(), 1);
     }
 
     #[test]

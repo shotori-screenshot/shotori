@@ -14,19 +14,13 @@ use gpui_kit::{
 
 #[derive(IntoElement)]
 pub(super) struct TextOptions {
-    style: UiStyle,
     session: Entity<ScreenshotSession>,
     focus: FocusHandle,
 }
 
 impl TextOptions {
-    pub(super) fn new(
-        style: UiStyle,
-        session: &Entity<ScreenshotSession>,
-        focus: &FocusHandle,
-    ) -> Self {
+    pub(super) fn new(session: &Entity<ScreenshotSession>, focus: &FocusHandle) -> Self {
         Self {
-            style,
             session: session.clone(),
             focus: focus.clone(),
         }
@@ -237,19 +231,17 @@ fn rgba_value(value: Hsla) -> u32 {
 
 impl RenderOnce for TextOptions {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let ui_style = self.style;
         let session = self.session.clone();
         let return_focus = self.focus.clone();
-        let state = window.use_keyed_state("annotation-text-controls", cx, |window, cx| {
-            TextControls::new(session, return_focus, window, cx)
-        });
+        let state = window.use_keyed_state(
+            ("annotation-text-controls", self.session.entity_id()),
+            cx,
+            |window, cx| TextControls::new(session, return_focus, window, cx),
+        );
         state.update(cx, |controls, _| controls.return_focus = self.focus.clone());
         let controls = state.read(cx);
         let style = self.session.read(cx).annotations().text_style().clone();
-        let mut row = div()
-            .flex()
-            .items_center()
-            .gap(px(if ui_style == UiStyle::Capsule { 3. } else { 2. }));
+        let mut row = div().flex().items_center().gap(px(3.));
         for (id, active, icon, change) in [
             (
                 "toolbar.text_bold",
@@ -287,18 +279,17 @@ impl RenderOnce for TextOptions {
         ] {
             let session = self.session.clone();
             row = row.child(
-                control_for(
-                    ui_style,
+                control(
                     id.trim_start_matches("toolbar.").into(),
                     crate::i18n::t!(id).into_owned(),
+                    active,
                     self.focus.clone(),
                     move |_, cx| edit(&session, cx, change),
                 )
-                .selected(active)
                 .child(annot_options::menu_icon_colored(
                     icon,
                     18.,
-                    icon_tint(ui_style, active),
+                    icon_tint(active),
                 )),
             );
             // Keep each enabled color next to its toggle. Nesting a picker inside
@@ -318,12 +309,9 @@ impl RenderOnce for TextOptions {
                     _ => None,
                 };
                 if let Some((picker, selector, label)) = color {
-                    row = row.child(
-                        div().debug_selector(move || selector.into()).child(
-                            ColorPicker::new(picker, crate::i18n::t!(label).into_owned())
-                                .capsule_ring(ui_style == UiStyle::Capsule),
-                        ),
-                    );
+                    row = row.child(div().debug_selector(move || selector.into()).child(
+                        ColorPicker::new(picker, crate::i18n::t!(label).into_owned()),
+                    ));
                 }
             }
         }
@@ -331,16 +319,13 @@ impl RenderOnce for TextOptions {
             let padding = controls.padding.clone();
             let radius = controls.radius.clone();
             let t = theme::c();
-            let mut pop = Popover::new("text-background-options").p(px(0.));
-            pop = match ui_style {
-                UiStyle::Classic => pop.bg(rgba(t.toolbar_bg)),
-                UiStyle::Capsule => pop
-                    .rounded(px(12.))
-                    .bg(rgba(t.capsule_sheet_surface()))
-                    .border_1()
-                    .border_color(rgba(t.capsule_border()))
-                    .shadow(theme::capsule_floating_shadow()),
-            };
+            let pop = Popover::new("text-background-options")
+                .p(px(0.))
+                .rounded(px(12.))
+                .bg(rgba(t.capsule_sheet_surface()))
+                .border_1()
+                .border_color(rgba(t.capsule_border()))
+                .shadow(theme::capsule_floating_shadow());
             row = row.child(
                 pop.on_open_change({
                     let session = self.session.clone();
@@ -355,10 +340,10 @@ impl RenderOnce for TextOptions {
                     }
                 })
                 .trigger(
-                    control_for(
-                        ui_style,
+                    control(
                         "text-background-options".into(),
                         crate::i18n::t!("toolbar.text_background_settings").into_owned(),
+                        false,
                         self.focus.clone(),
                         |_, _| {},
                     )
@@ -391,7 +376,7 @@ impl RenderOnce for TextOptions {
                                         .whitespace_nowrap()
                                         .child(crate::i18n::t!(key).into_owned()),
                                 )
-                                .child(size_control_for(ui_style, &sc, ""))
+                                .child(size_control(&sc, ""))
                         }),
                     )
                 }),

@@ -184,25 +184,6 @@ gpui_kit::actions!(
         NextPin,
         PrevPin,
         TogglePinAnnotate,
-        ExitPinAnnotate,
-        PinUndo,
-        PinRedo,
-        PinDeleteMark,
-        PinClearMarks,
-        PinSizeDown,
-        PinSizeUp,
-        PinToolSelect,
-        PinToolRect,
-        PinToolEllipse,
-        PinToolArrow,
-        PinToolLine,
-        PinToolPencil,
-        PinToolHighlighter,
-        PinToolMosaic,
-        PinToolBlur,
-        PinToolNumber,
-        PinToolText,
-        PinToolEraser,
         ClosePinHistory,
         RefreshPinHistory
     ]
@@ -300,32 +281,7 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         ),
         KeyBinding::new("shift-up", PinNudge { dx: 0, dy: -10 }, Some("ShotoriPin")),
         KeyBinding::new("shift-down", PinNudge { dx: 0, dy: 10 }, Some("ShotoriPin")),
-        // In-pin annotation mode: Esc exits annotation (innermost first), never closing the pin
-        KeyBinding::new("escape", ExitPinAnnotate, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("escape", ExitPinAnnotate, Some("ShotoriPinText")),
-        KeyBinding::new("ctrl-z", PinUndo, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("ctrl-y", PinRedo, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("ctrl-shift-z", PinRedo, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("delete", PinDeleteMark, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("backspace", PinDeleteMark, Some("ShotoriPinAnnotate")),
-        KeyBinding::new(
-            "ctrl-shift-delete",
-            PinClearMarks,
-            Some("ShotoriPinAnnotate"),
-        ),
-        KeyBinding::new("[", PinSizeDown, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("]", PinSizeUp, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("v", PinToolSelect, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("r", PinToolRect, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("e", PinToolEllipse, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("a", PinToolArrow, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("l", PinToolLine, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("b", PinToolPencil, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("h", PinToolHighlighter, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("m", PinToolMosaic, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("n", PinToolNumber, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("t", PinToolText, Some("ShotoriPinAnnotate")),
-        KeyBinding::new("d", PinToolEraser, Some("ShotoriPinAnnotate")),
+        // In-pin annotation mode keeps pin export chords alongside shared canvas shortcuts
         KeyBinding::new("ctrl-c", CopyPin, Some("ShotoriPinAnnotate")),
         KeyBinding::new("ctrl-s", SavePin, Some("ShotoriPinAnnotate")),
         // Pin history toplevel window
@@ -342,19 +298,22 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
     // `cx.bind_keys` holds the mutable borrow for the duration of the
     // call.
     let mut unbound: Vec<&'static str> = Vec::new();
-    let configurable: Vec<KeyBinding> = CONFIGURABLE_KEYS
-        .iter()
-        .filter_map(|(id, factory)| {
-            let keystroke = keys.get(*id).map(String::as_str).unwrap_or(factory);
-            match overlay_binding(cx, id, keystroke) {
-                Some(binding) => Some(binding),
-                None => {
-                    unbound.push(*id);
-                    None
+    let mut configurable: Vec<KeyBinding> = Vec::new();
+    for &(id, factory) in CONFIGURABLE_KEYS {
+        let keystroke = keys.get(id).map(String::as_str).unwrap_or(factory);
+        match overlay_binding(cx, id, keystroke) {
+            Some(binding) => {
+                configurable.push(binding);
+                if ANNOTATION_KEYS.iter().any(|&(aid, _)| aid == id)
+                    && let Some(pin_binding) =
+                        context_binding(cx, id, keystroke, "ShotoriPinAnnotate")
+                {
+                    configurable.push(pin_binding);
                 }
             }
-        })
-        .collect();
+            None => unbound.push(id),
+        }
+    }
     cx.bind_keys(configurable);
     unbound
 }
@@ -401,12 +360,16 @@ fn overlay_action(id: &str) -> Option<Box<dyn Action>> {
 /// is a hard error now. `KeyBinding::load` is the dynamic entry point:
 /// it resolves `secondary-` from the host OS.
 fn overlay_binding(cx: &App, id: &str, keystroke: &str) -> Option<KeyBinding> {
+    context_binding(cx, id, keystroke, "ShotoriOverlay")
+}
+
+fn context_binding(cx: &App, id: &str, keystroke: &str, context: &str) -> Option<KeyBinding> {
     let action = overlay_action(id)?;
     // The context is a compile-time literal, so a parse failure means
     // gpui changed its context syntax — drop the binding instead of
     // registering it context-free (`tests::overlay_context_parses`
     // fails first, which is the signal to fix it).
-    let predicate = KeyBindingContextPredicate::parse("ShotoriOverlay").ok()?;
+    let predicate = KeyBindingContextPredicate::parse(context).ok()?;
     // Same reasoning one level down: `resolve_keys` already rejected
     // unparseable chords, so an error here is unreachable for shipped
     // settings — skip rather than panic on a hand-edited file.
@@ -603,46 +566,35 @@ fn known_key_ids() -> String {
 /// `backspace`, `ctrl-shift-backspace`). Bound inside [`bind_keys`]
 /// BEFORE `CONFIGURABLE_KEYS` so user overrides shadow them cleanly.
 fn bind_fixed_annotation_keys(cx: &mut App) {
+    for context in ["ShotoriOverlay", "ShotoriPinAnnotate"] {
+        cx.bind_keys([
+            KeyBinding::new("left", Nudge { dx: -1, dy: 0 }, Some(context)),
+            KeyBinding::new("right", Nudge { dx: 1, dy: 0 }, Some(context)),
+            KeyBinding::new("up", Nudge { dx: 0, dy: -1 }, Some(context)),
+            KeyBinding::new("down", Nudge { dx: 0, dy: 1 }, Some(context)),
+            KeyBinding::new("shift-left", Nudge { dx: -10, dy: 0 }, Some(context)),
+            KeyBinding::new("shift-right", Nudge { dx: 10, dy: 0 }, Some(context)),
+            KeyBinding::new("shift-up", Nudge { dx: 0, dy: -10 }, Some(context)),
+            KeyBinding::new("shift-down", Nudge { dx: 0, dy: 10 }, Some(context)),
+            KeyBinding::new("ctrl-shift-z", RedoAnnotation, Some(context)),
+            KeyBinding::new("backspace", DeleteAnnotation, Some(context)),
+            // Ctrl+Shift mirrors the Delete/Backspace pair without touching
+            // the plain keys' shape-granular delete (issue #15)
+            KeyBinding::new("ctrl-shift-backspace", ClearAnnotations, Some(context)),
+            KeyBinding::new("ctrl-d", DuplicateAnnotation, Some(context)),
+            KeyBinding::new("ctrl-]", BringForward, Some(context)),
+            KeyBinding::new("ctrl-[", SendBackward, Some(context)),
+            KeyBinding::new("ctrl-shift-]", BringToFront, Some(context)),
+            KeyBinding::new("ctrl-shift-[", SendToBack, Some(context)),
+            KeyBinding::new("[", StepSizeDown, Some(context)),
+            KeyBinding::new("]", StepSizeUp, Some(context)),
+        ]);
+    }
     cx.bind_keys([
-        KeyBinding::new("left", Nudge { dx: -1, dy: 0 }, Some("ShotoriOverlay")),
-        KeyBinding::new("right", Nudge { dx: 1, dy: 0 }, Some("ShotoriOverlay")),
-        KeyBinding::new("up", Nudge { dx: 0, dy: -1 }, Some("ShotoriOverlay")),
-        KeyBinding::new("down", Nudge { dx: 0, dy: 1 }, Some("ShotoriOverlay")),
-        KeyBinding::new(
-            "shift-left",
-            Nudge { dx: -10, dy: 0 },
-            Some("ShotoriOverlay"),
-        ),
-        KeyBinding::new(
-            "shift-right",
-            Nudge { dx: 10, dy: 0 },
-            Some("ShotoriOverlay"),
-        ),
-        KeyBinding::new("shift-up", Nudge { dx: 0, dy: -10 }, Some("ShotoriOverlay")),
-        KeyBinding::new(
-            "shift-down",
-            Nudge { dx: 0, dy: 10 },
-            Some("ShotoriOverlay"),
-        ),
+        KeyBinding::new("escape", EscapeOverlay, Some("ShotoriPinAnnotate")),
         KeyBinding::new("escape", EscapeOverlay, Some("ShotoriTextEditing")),
         KeyBinding::new("enter", FinishPolyline, Some("PolylineDrawing")),
-        KeyBinding::new("ctrl-shift-z", RedoAnnotation, Some("ShotoriOverlay")),
-        KeyBinding::new("backspace", DeleteAnnotation, Some("ShotoriOverlay")),
         KeyBinding::new("backspace", PopPolylineVertex, Some("PolylineDrawing")),
-        // Ctrl+Shift mirrors the Delete/Backspace pair without touching
-        // the plain keys' shape-granular delete (issue #15)
-        KeyBinding::new(
-            "ctrl-shift-backspace",
-            ClearAnnotations,
-            Some("ShotoriOverlay"),
-        ),
-        KeyBinding::new("ctrl-d", DuplicateAnnotation, Some("ShotoriOverlay")),
-        KeyBinding::new("ctrl-]", BringForward, Some("ShotoriOverlay")),
-        KeyBinding::new("ctrl-[", SendBackward, Some("ShotoriOverlay")),
-        KeyBinding::new("ctrl-shift-]", BringToFront, Some("ShotoriOverlay")),
-        KeyBinding::new("ctrl-shift-[", SendToBack, Some("ShotoriOverlay")),
-        KeyBinding::new("[", StepSizeDown, Some("ShotoriOverlay")),
-        KeyBinding::new("]", StepSizeUp, Some("ShotoriOverlay")),
     ]);
 }
 
@@ -652,10 +604,15 @@ fn bind_fixed_annotation_keys(cx: &mut App) {
 /// leaving the factory chord bound alongside the custom one.
 pub fn init_annotation_keybindings(cx: &mut App) {
     bind_fixed_annotation_keys(cx);
-    let defaults: Vec<KeyBinding> = ANNOTATION_KEYS
-        .iter()
-        .filter_map(|(id, factory)| overlay_binding(cx, id, factory))
-        .collect();
+    let mut defaults: Vec<KeyBinding> = Vec::new();
+    for &(id, factory) in ANNOTATION_KEYS {
+        if let Some(binding) = overlay_binding(cx, id, factory) {
+            defaults.push(binding);
+        }
+        if let Some(binding) = context_binding(cx, id, factory, "ShotoriPinAnnotate") {
+            defaults.push(binding);
+        }
+    }
     cx.bind_keys(defaults);
 }
 

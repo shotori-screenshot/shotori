@@ -95,9 +95,6 @@ impl Overlay {
         }
 
         session.update(cx, |session, cx| {
-            if let Some(style) = crate::ui::e2e::debug_ui_style() {
-                session.set_ui_style(style);
-            }
             session.set_size(&capture.output_name, window.bounds().size);
             if let Selection::Selected { bounds } = crate::ui::e2e::debug_selection(debug_targeted)
             {

@@ -140,7 +140,6 @@ impl Render for Overlay {
             }
         });
         let shared = self.session.read(cx);
-        let ui_style = shared.ui_style();
         let selection = shared.selection();
         let sel = shared.local_bounds(&self.capture.output_name).map(round_px);
         let backdrop = shared
@@ -290,19 +289,7 @@ impl Render for Overlay {
                 this.toggle_tool(crate::annotation::ShapeKind::Highlighter, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleEraser, window, cx| {
-                this.finish_text(true, window, cx);
-                window.focus(&this.focus_handle, cx);
-                this.session.update(cx, |s, cx| {
-                    let kind = if s.annotations().tool()
-                        == Some(crate::annotation::ShapeKind::EraserRect)
-                    {
-                        crate::annotation::ShapeKind::EraserRect
-                    } else {
-                        crate::annotation::ShapeKind::Eraser
-                    };
-                    s.toggle_annotation_tool(kind);
-                    cx.notify();
-                });
+                this.toggle_tool(crate::annotation::ShapeKind::Eraser, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSpotlight, window, cx| {
                 this.toggle_tool(crate::annotation::ShapeKind::Spotlight, window, cx);
@@ -506,9 +493,10 @@ impl Render for Overlay {
             ));
 
         // ⑥ First-run OCR setup dialog (confirm / progress), topmost
-        let setup_el: Option<AnyElement> = self.ocr_setup.as_ref().map(|s| {
-            crate::ui::ocr_setup::setup_card(ui_style, s, &self.setup_focus).into_any_element()
-        });
+        let setup_el: Option<AnyElement> = self
+            .ocr_setup
+            .as_ref()
+            .map(|s| crate::ui::ocr_setup::setup_card(s, &self.setup_focus).into_any_element());
 
         base
             // Close always exits; Escape owns interaction cancellation.
@@ -831,13 +819,12 @@ impl Render for Overlay {
             // rect — pointer affordances, above the marks they erase.
             .children(eraser.map(eraser_chrome))
             // Paint the border above the export-backed preview as well as vector marks.
-            .child(selection_backdrop(ui_style, backdrop))
+            .child(selection_backdrop(backdrop))
             // ②¼ Resize handles (above the border; the toolbar paints later
             // and stays on top). Drawn whenever the selection is finalized
             // or being edited — not during a fresh drag; softened while an
             // annotation mark is selected so the mark's handles lead (#33).
             .child(selection_handles(
-                ui_style,
                 backdrop,
                 selection.is_selected() || selection.is_editing(),
                 has_selected_marks,
@@ -846,9 +833,9 @@ impl Render for Overlay {
             ))
             // ②½ Window-snap hover outline (above the dim, below all
             // selection chrome: it is a hint, not a selection)
-            .children(hover.map(|b| hover_outline(ui_style, b)))
+            .children(hover.map(hover_outline))
             // ②⅝ Alignment crosshair guides across the active output
-            .children(crosshair_ptr.map(|p| crosshair_guides(ui_style, p, ws)))
+            .children(crosshair_ptr.map(|p| crosshair_guides(p, ws)))
             // ②¾ Window-level pointer listeners (see `pointer_event_sink`)
             .child(pointer_event_sink(input_view))
             // ③ Size label stays independent so narrow selections cannot wrap it.
@@ -858,7 +845,7 @@ impl Render for Overlay {
             // unwrap with a second geometry source.
             .children(sel.filter(|_| active).and_then(|b| {
                 format_size_label(capture_cfg.size_label, b.size, global_origin, phys_scale)
-                    .map(|text| selection_label(ui_style, b, ws, text))
+                    .map(|text| selection_label(b, ws, text))
             }))
             .children(self.text_editing.as_ref().map(|editor| editor.render()))
             // ④ Toolbar: appears only after release (no flicker while dragging).
@@ -873,7 +860,6 @@ impl Render for Overlay {
                 {
                     let swatch_picker = self.swatch_editor_seed(window, cx);
                     Some(selection_toolbar(
-                        ui_style,
                         rect,
                         self.capture.output_name.clone().into(),
                         self.session.read(cx).annotations(),
@@ -896,7 +882,7 @@ impl Render for Overlay {
             .children(
                 loupe
                     .filter(|_| capture_cfg.loupe)
-                    .map(|l| magnifier_loupe(ui_style, self.frozen.clone(), l, ws)),
+                    .map(|l| magnifier_loupe(self.frozen.clone(), l, ws)),
             )
             .children(
                 self.text_editing

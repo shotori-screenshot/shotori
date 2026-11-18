@@ -434,7 +434,7 @@ impl SettingsWindow {
                                 .truncate()
                                 .child(model.label()),
                         )
-                        .child(super::style_cards::selection_circle(selected, cx)),
+                        .child(super::layout::selection_circle(selected, cx)),
                 )
                 .child(
                     div()

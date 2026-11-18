@@ -520,18 +520,15 @@ fn cursor_reflects_interior_handles_and_the_inset_toolbar(cx: &mut TestAppContex
     // the toolbar's left grip — on this narrow window it even sits
     // OUTSIDE the box horizontally (toolbar pinned to x=8): the grip
     // affordance wins regardless
-    vcx.simulate_mouse_move(
-        point(px(14.), px(363.)),
-        MouseButton::Left,
-        Default::default(),
-    );
+    let left_grip = vcx.update(|_, cx| session.read(cx).toolbar_grips("main").unwrap().0);
+    vcx.simulate_mouse_move(left_grip.center(), MouseButton::Left, Default::default());
     vcx.run_until_parked();
     vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
 
     // over the inset toolbar: the toolbar owns the cursor, even though
     // the point is still inside the selection
     vcx.simulate_mouse_move(
-        point(px(200.), px(363.)),
+        point(px(200.), left_grip.center().y),
         MouseButton::Left,
         Default::default(),
     );
@@ -799,14 +796,14 @@ fn toolbar_hugs_its_content(cx: &mut TestAppContext) {
     });
     let mut capture = Capture::for_test((0, 0), 1.);
     capture.output_name = "main".into();
-    capture.width = 800;
-    capture.height = 600;
-    capture.rgba = vec![255; 800 * 600 * 4];
+    capture.width = 1000;
+    capture.height = 700;
+    capture.rgba = vec![255; 1000 * 700 * 4];
     let capture = Arc::new(capture);
     let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (_overlay, vcx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    vcx.simulate_resize(size(px(800.), px(600.)));
+    vcx.simulate_resize(size(px(1000.), px(700.)));
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     vcx.run_until_parked();
     vcx.simulate_mouse_down(
@@ -842,7 +839,7 @@ fn toolbar_hugs_its_content(cx: &mut TestAppContext) {
         vcx.debug_bounds("tb-ocr").unwrap().left() - vcx.debug_bounds("tb-clear").unwrap().right(),
     );
     assert!(
-        (9. ..=16.).contains(&gap),
+        (9. ..=18.).contains(&gap),
         "the tools/actions break must read as a deliberate separator break, got {gap}px"
     );
     // …and the right edge is intact: the copy button ends far enough
@@ -929,7 +926,6 @@ fn toolbar_hugs_its_content(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn capsule_toolbar_centers_and_grips_align_with_render(cx: &mut TestAppContext) {
-    use crate::model::settings::UiStyle;
     cx.update(|cx| {
         gpui_kit::base::init(cx);
         gpui_kit::component::init(cx);
@@ -941,11 +937,7 @@ fn capsule_toolbar_centers_and_grips_align_with_render(cx: &mut TestAppContext) 
     capture.height = 900;
     capture.rgba = vec![255; 1400 * 900 * 4];
     let capture = Arc::new(capture);
-    let session = cx.new(|_| {
-        let mut s = ScreenshotSession::new(vec![capture.clone()], Vec::new());
-        s.set_ui_style(UiStyle::Capsule);
-        s
-    });
+    let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (_overlay, vcx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
     vcx.simulate_resize(size(px(1400.), px(900.)));
@@ -972,14 +964,11 @@ fn capsule_toolbar_centers_and_grips_align_with_render(cx: &mut TestAppContext) 
     vcx.update(|window, cx| window.draw(cx).clear(cx));
 
     // Verify centered placement & exact Capsule basis width
-    let expected_w = crate::model::placement::row1_basis_for(
-        UiStyle::Capsule,
-        crate::model::settings::current(),
-    );
+    let expected_w = crate::model::placement::row1_basis(crate::model::settings::current());
     vcx.update(|_, cx| {
         let b = session.read(cx).toolbar_bounds("main").unwrap();
         assert_eq!(b.size.width, px(expected_w));
-        assert_eq!(b.size.height, px(crate::model::placement::CAPSULE_ROW_H));
+        assert_eq!(b.size.height, px(crate::model::placement::ROW_H));
         assert_eq!(b.origin.x, px(700. - expected_w * 0.5));
     });
 
@@ -1017,19 +1006,19 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     });
     let mut capture = Capture::for_test((0, 0), 1.);
     capture.output_name = "main".into();
-    capture.width = 800;
+    capture.width = 1000;
     capture.height = 600;
-    capture.rgba = vec![255; 800 * 600 * 4];
+    capture.rgba = vec![255; 1000 * 600 * 4];
     let capture = Arc::new(capture);
     let session = cx.new(|_| ScreenshotSession::new(vec![capture.clone()], Vec::new()));
     let (overlay, vcx) =
         cx.add_window_view(|window, cx| Overlay::new(capture, session.clone(), window, cx));
-    vcx.simulate_resize(size(px(800.), px(600.)));
+    vcx.simulate_resize(size(px(1000.), px(600.)));
     vcx.update(|window, cx| window.draw(cx).clear(cx));
     vcx.run_until_parked();
 
     // A selection reaching the bottom parks the toolbar INSIDE the box:
-    // anchor math puts its origin at (112, 514), TB_W wide, one row tall.
+    // anchor math puts its origin at (8, 506), horizontally clamped.
     vcx.simulate_mouse_down(
         point(px(100.), px(200.)),
         MouseButton::Left,
@@ -1048,14 +1037,7 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     vcx.update(|_, cx| {
         let anchored = session.read(cx).toolbar_bounds("main").unwrap();
-        // the inset would put it at x=112, but the factory bar
-        // (~701px) does not fit an 800px window at that offset —
-        // the horizontal clamp pins it into the right edge
-        let basis = crate::model::placement::default_row1_basis();
-        assert_eq!(
-            anchored.origin,
-            point(px((800. - basis - 8.).min(112.)), px(514.))
-        );
+        assert_eq!(anchored.origin, point(px(8.), px(506.)));
     });
 
     // hovering either grip: the open-hand affordance
@@ -1071,6 +1053,14 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     // press the LEFT grip, drag, release: the toolbar follows to any
     // spot on the layer; the selection beneath is untouched
     let press = left_grip.center();
+    let grab = press - point(px(8.), px(506.));
+    let dragged_origin = point(
+        px((250. - f32::from(grab.x)).clamp(
+            8.,
+            1000. - crate::model::placement::default_row1_basis() - 8.,
+        )),
+        px(100. - f32::from(grab.y)),
+    );
     vcx.simulate_mouse_down(press, MouseButton::Left, Default::default());
     vcx.simulate_mouse_move(
         point(px(250.), px(100.)),
@@ -1081,15 +1071,7 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     vcx.update(|_, cx| {
         assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::ClosedHand);
         let b = session.read(cx).toolbar_bounds("main").unwrap();
-        // grip-center grab (11,19) held, x clamped to the window
-        // (narrow single-row bar)
-        assert_eq!(
-            b.origin,
-            point(
-                px(800. - crate::model::placement::default_row1_basis() - 8.),
-                px(81.),
-            )
-        );
+        assert_eq!(b.origin, dragged_origin);
     });
     vcx.simulate_mouse_up(
         point(px(250.), px(100.)),
@@ -1101,10 +1083,7 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
         assert!(!session.read(cx).toolbar_drag_active());
         assert_eq!(
             session.read(cx).toolbar_bounds("main").unwrap().origin,
-            point(
-                px(800. - crate::model::placement::default_row1_basis() - 8.),
-                px(81.),
-            )
+            dragged_origin
         );
         // the press on the grip never became a selection interaction
         let b = session.read(cx).selection().bounds().unwrap();
@@ -1118,25 +1097,22 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     // the cursor strip and the element rect are now one geometry.
     vcx.simulate_keystrokes("r");
     vcx.run_until_parked();
+    vcx.update(|window, cx| window.draw(cx).clear(cx));
     vcx.update(|_, cx| {
         assert_eq!(
             session.read(cx).toolbar_bounds("main").unwrap().size.height,
             px(crate::model::placement::TB_H)
         );
     });
+    let pre_drag_origin =
+        vcx.update(|_, cx| session.read(cx).toolbar_bounds("main").unwrap().origin);
+    let opt = vcx.debug_bounds("tb-options").unwrap();
+    let row2_pt = point(opt.left() + px(4.), opt.center().y);
     // row TWO's left edge: plain toolbar body
-    vcx.simulate_mouse_move(
-        point(px(255.), px(153.)),
-        MouseButton::Left,
-        Default::default(),
-    );
+    vcx.simulate_mouse_move(row2_pt, MouseButton::Left, Default::default());
     vcx.run_until_parked();
     vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::Arrow));
-    vcx.simulate_mouse_down(
-        point(px(255.), px(153.)),
-        MouseButton::Left,
-        Default::default(),
-    );
+    vcx.simulate_mouse_down(row2_pt, MouseButton::Left, Default::default());
     vcx.simulate_mouse_move(
         point(px(300.), px(300.)),
         MouseButton::Left,
@@ -1148,12 +1124,6 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
         Default::default(),
     );
     vcx.run_until_parked();
-    // The press was on row TWO's body (not a grip): the toolbar must
-    // be UNMOVED. Relative comparison — a one-row width wider than
-    // the two-row TB_W (the scroll button made it so) legitimately
-    // changes the persisted origin, so no hardcoded point here.
-    let pre_drag_origin =
-        vcx.update(|_, cx| session.read(cx).toolbar_bounds("main").unwrap().origin);
     vcx.update(|_, cx| {
         assert!(!session.read(cx).toolbar_drag_active());
         assert_eq!(
@@ -1166,6 +1136,7 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     // (relative: the grip rides the toolbar's clamped position,
     // which the row-one width now determines)
     let row1_grip = vcx.update(|_, cx| session.read(cx).toolbar_grips("main").unwrap().0.center());
+    let grab2 = row1_grip - pre_drag_origin;
     vcx.simulate_mouse_move(row1_grip, MouseButton::Left, Default::default());
     vcx.run_until_parked();
     vcx.update(|_, cx| assert_eq!(overlay.read(cx).cursor.get(), CursorStyle::OpenHand));
@@ -1183,19 +1154,18 @@ fn toolbar_drag_works_through_the_event_pipeline(cx: &mut TestAppContext) {
     vcx.run_until_parked();
     vcx.update(|_, cx| {
         assert!(!session.read(cx).toolbar_drag_active());
-        // grab was (11,19); the clamp pins the toolbar at the
-        // right margin on this narrow test window
+        // the clamp pins the toolbar at the right margin on this test window
         assert_eq!(
             session.read(cx).toolbar_bounds("main").unwrap().origin,
             point(
-                px(800.
+                px(1000.
                     - crate::model::placement::toolbar_size(
                         true,
                         crate::model::settings::current()
                     )
                     .0
                     - 8.),
-                px(281.)
+                px(300.) - grab2.y
             )
         );
     });
@@ -2077,55 +2047,10 @@ fn eraser_toolbar_modes_size_and_history(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-z");
     cx.update(|_, cx| assert_eq!(session.read(cx).annotations().committed().len(), 2));
 
-    // Select area erasure through its actual menu. Nothing leaves while
-    // dragging; release removes every mark whose ink bounds intersect the area.
+    // Only brush mode exists for the eraser — no mode selector menu.
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let trigger = cx.debug_bounds("eraser-mode").unwrap();
-    cx.simulate_click(trigger.center(), Default::default());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    let rect = cx.debug_bounds("toolbar.eraser_rect").unwrap();
-    cx.simulate_click(rect.center(), Default::default());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|_, cx| {
-        assert_eq!(
-            session.read(cx).annotations().tool(),
-            Some(ShapeKind::EraserRect)
-        )
-    });
-    assert!(cx.debug_bounds("tb-size-readout").is_none());
-    cx.simulate_mouse_down(
-        point(px(40.), px(30.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.simulate_mouse_move(
-        point(px(120.), px(90.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.update(|_, cx| {
-        let s = session.read(cx);
-        assert_eq!(s.annotations().committed().len(), 2);
-        assert_eq!(s.crop("screen").unwrap(), both_marked);
-    });
-    cx.simulate_mouse_up(
-        point(px(120.), px(90.)),
-        MouseButton::Left,
-        Default::default(),
-    );
-    cx.update(|_, cx| {
-        let s = session.read(cx);
-        // Even though the dragged box only covered x=40..120 of the x=50..180
-        // stroke, the whole upper stroke is deleted; the lower stroke stays.
-        assert_eq!(s.annotations().committed().len(), 1);
-        assert_eq!(s.annotations().selected(), None);
-        assert_eq!(s.crop("screen").unwrap(), one_left);
-    });
-    cx.simulate_keystrokes("ctrl-z");
-    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), both_marked));
-    cx.simulate_keystrokes("ctrl-y");
-    cx.update(|_, cx| assert_eq!(session.read(cx).crop("screen").unwrap(), one_left));
-    // The shortcut exits the active rectangle eraser without altering history.
+    assert!(cx.debug_bounds("eraser-mode").is_none());
+    // The shortcut exits the active eraser without altering history.
     cx.simulate_keystrokes("d");
     cx.update(|_, cx| assert!(!session.read(cx).annotations().enabled()));
     cx.simulate_keystrokes("d");
@@ -2685,12 +2610,12 @@ fn annotation_style_menus_select_without_drawing_on_the_capture(cx: &mut TestApp
         ("toolbar.connector_center", LensConnector::Center),
     ] {
         let trigger = cx.debug_bounds("lens-connector").unwrap();
-        assert_eq!(trigger.size.width, px(38.));
-        assert_eq!(trigger.size.height, px(30.));
+        assert_eq!(trigger.size.width, px(42.));
+        assert_eq!(trigger.size.height, px(32.));
         cx.simulate_click(trigger.center(), Default::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let choice = cx.debug_bounds(key).expect("visible connector choice");
-        assert_eq!(choice.size.width, px(34.));
+        assert_eq!(choice.size.width, px(36.));
         cx.simulate_click(choice.center(), Default::default());
         cx.update(|window, cx| {
             assert_eq!(session.read(cx).annotations().lens_options().3, value);

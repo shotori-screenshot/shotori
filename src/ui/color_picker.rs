@@ -18,7 +18,6 @@ pub(super) struct ColorPicker {
     label: SharedString,
     selected: bool,
     opacity: bool,
-    capsule_ring: bool,
 }
 
 impl ColorPicker {
@@ -28,7 +27,6 @@ impl ColorPicker {
             label: label.into(),
             selected: false,
             opacity: true,
-            capsule_ring: false,
         }
     }
 
@@ -43,12 +41,6 @@ impl ColorPicker {
         self
     }
 
-    /// Render the trigger as an Capsule-style circular swatch with a concentric ring.
-    pub(super) fn capsule_ring(mut self, capsule_ring: bool) -> Self {
-        self.capsule_ring = capsule_ring;
-        self
-    }
-
     fn swatch(&self, id: impl Into<ElementId>, color: Hsla, cx: &App) -> ColorSwatch {
         let selected = self.state.read(cx).value() == Some(color);
         let state = self.state.clone();
@@ -58,16 +50,28 @@ impl ColorPicker {
         } else {
             cx.theme().transparent
         };
+        let inner_border = rgba(if cx.theme().is_dark() {
+            0xFFFF_FF22
+        } else {
+            0x0000_0024
+        });
         ColorSwatch::new(id, color)
             .selected(selected)
             .size_6()
             .flex_shrink_0()
             .border_2()
             .border_color(ring)
-            .hover(move |style| style.border_color(hover))
+            .hover(move |style| style.border_color(if selected { ring } else { hover }))
             .active(|style| style.border_color(cx.theme().primary))
             .focus_visible(|style| style.border_color(cx.theme().ring))
-            .child(div().size_full().bg(color))
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(2.))
+                    .bg(color)
+                    .border_1()
+                    .border_color(inner_border),
+            )
             .on_click(move |color, _, window, cx| {
                 state.update(cx, |state, cx| state.select_color(color, window, cx));
             })
@@ -178,7 +182,7 @@ impl ColorPicker {
                         Slider::new(state)
                             .w_full()
                             .bg(cx.theme().transparent)
-                            .text_color(cx.theme().foreground),
+                            .text_color(cx.theme().slider_thumb),
                     ),
             )
             .child(
@@ -319,7 +323,7 @@ impl RenderOnce for ColorPicker {
                     .on_open_change(move |open: &bool, _, cx| {
                         popup_state.update(cx, |state, cx| state.set_open(*open, cx))
                     })
-                    .trigger(if self.capsule_ring {
+                    .trigger({
                         let t = crate::ui::theme::c();
                         let active = self.selected || open || focused;
                         Button::new("swatch-trigger")
@@ -334,7 +338,11 @@ impl RenderOnce for ColorPicker {
                                 rgba(0x00000000)
                             })
                             .hover(move |s| {
-                                s.border_color(rgba(crate::ui::theme::alpha(t.toolbar_text, 0x66)))
+                                s.border_color(if active {
+                                    rgba(t.accent)
+                                } else {
+                                    rgba(crate::ui::theme::alpha(t.toolbar_text, 0x66))
+                                })
                             })
                             .focus_visible(move |s| s.border_color(rgba(t.accent)))
                             .child(
@@ -345,21 +353,6 @@ impl RenderOnce for ColorPicker {
                                     .border_1()
                                     .border_color(rgba(t.swatch_border)),
                             )
-                    } else {
-                        Button::new("swatch-trigger")
-                            .debug_selector(|| "color-picker-trigger".into())
-                            .focusable(false)
-                            .size_6()
-                            .rounded_sm()
-                            .bg(color)
-                            .border_1()
-                            .border_color(if self.selected || open || focused {
-                                cx.theme().ring
-                            } else {
-                                cx.theme().transparent
-                            })
-                            .hover(|s| s.border_color(cx.theme().foreground))
-                            .focus_visible(|s| s.border_color(cx.theme().ring))
                     })
                     .children(open.then(|| self.content(window, cx))),
             )
@@ -370,7 +363,7 @@ impl RenderOnce for ColorPicker {
 mod tests {
     use super::ColorPicker;
     use gpui_kit::base::ColorPickerState;
-    use gpui_kit::component::{Root, theme};
+    use gpui_kit::component::{ActiveTheme, Root, theme};
     use gpui_kit::{
         AppContext, Context, Entity, Focusable, IntoElement, Modifiers, Render, RenderOnce,
         TestAppContext, Window, hsla,
@@ -500,5 +493,38 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         cx.update(|_, cx| assert!(!state.read(cx).is_open()));
+    }
+
+    #[gpui_kit::test]
+    fn light_theme_palette_renders_pale_swatches_with_hairline_and_keeps_selection_on_hover(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+            gpui_kit::component::theme::Theme::change(
+                gpui_kit::component::theme::ThemeMode::Light,
+                None,
+                cx,
+            );
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| PickerFixture {
+            state: cx.new(|cx| ColorPickerState::new(window, cx)),
+            palette_only: true,
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(!cx.theme().is_dark());
+        });
+
+        let pale = cx
+            .debug_bounds("palette-0-10")
+            .expect("lightest pale tile (stone 50) should render");
+        cx.simulate_click(pale.center(), Modifiers::default());
+        cx.simulate_mouse_move(pale.center(), None, Modifiers::default());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(view.read(cx).state.read(cx).value(), Some(theme::stone(50)));
+        });
     }
 }

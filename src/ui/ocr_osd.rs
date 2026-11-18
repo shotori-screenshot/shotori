@@ -22,48 +22,26 @@ pub(crate) struct OcrOsd;
 
 impl Render for OcrOsd {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        use crate::model::settings::UiStyle;
-        let style = crate::ui::e2e::debug_ui_style()
-            .unwrap_or_else(|| crate::model::settings::current().ui_style());
         let t = theme::c();
-        let pill = match style {
-            UiStyle::Classic => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_4()
-                .py_2()
-                .rounded_lg()
-                .bg(rgba(t.chip_bg))
-                .border_1()
-                .border_color(rgba(t.accent))
-                .child(spinner())
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(rgba(t.hint_text))
-                        .child(crate::i18n::t!("osd.ocr_running").to_string()),
-                ),
-            UiStyle::Capsule => div()
-                .flex()
-                .items_center()
-                .gap(px(9.))
-                .px_4()
-                .py(px(7.))
-                .rounded_full()
-                .bg(rgba(t.capsule_sheet_surface()))
-                .border_1()
-                .border_color(rgba(t.capsule_border()))
-                .shadow(theme::capsule_floating_shadow())
-                .child(spinner())
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgba(t.toolbar_text))
-                        .child(crate::i18n::t!("osd.ocr_running").to_string()),
-                ),
-        };
+        let pill = div()
+            .flex()
+            .items_center()
+            .gap(px(9.))
+            .px_4()
+            .py(px(7.))
+            .rounded_full()
+            .bg(rgba(t.capsule_sheet_surface()))
+            .border_1()
+            .border_color(rgba(t.capsule_border()))
+            .shadow(theme::capsule_floating_shadow())
+            .child(spinner())
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgba(t.toolbar_text))
+                    .child(crate::i18n::t!("osd.ocr_running").to_string()),
+            );
         div()
             .size_full()
             .flex()

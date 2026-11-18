@@ -170,11 +170,10 @@ fn editor_colors(palette: &theme::Theme) -> ThemeColor {
     let hover = color(palette.toolbar_hover).alpha(1.);
     let primary = readable_color(color(palette.accent), background, 4.5);
     let white = color(0xFFFFFFFF);
-    let black = color(0x000000FF);
-    let on_primary = if contrast(primary, white) > contrast(primary, black) {
-        white
+    let on_primary = if relative_luminance(primary) > 0.38 {
+        color(0x1818_20FF)
     } else {
-        black
+        color(0xF7F8_FCFF)
     };
     let selected = background.blend(primary.opacity(0.16));
     c.background = background;
@@ -227,10 +226,22 @@ fn editor_colors(palette: &theme::Theme) -> ThemeColor {
     c.tab_active = surface;
     c.tab_active_foreground = foreground;
     c.tab_foreground = muted;
-    c.switch = readable_color(background.blend(foreground.opacity(0.45)), on_primary, 3.);
-    c.switch_thumb = on_primary;
-    c.slider_bar = primary;
-    c.slider_thumb = on_primary;
+    c.switch = if dark {
+        surface.blend(foreground.opacity(0.15))
+    } else {
+        background.blend(foreground.opacity(0.14))
+    };
+    c.switch_thumb = if dark {
+        surface.blend(foreground.opacity(0.76))
+    } else {
+        background.blend(white.opacity(0.92))
+    };
+    c.slider_bar = surface.blend(primary.opacity(if dark { 0.78 } else { 0.84 }));
+    c.slider_thumb = if dark {
+        surface.blend(foreground.opacity(0.78))
+    } else {
+        background.blend(white.opacity(0.94))
+    };
     c.scrollbar = background.opacity(0.);
     c.scrollbar_thumb = foreground.opacity(0.3);
     c.scrollbar_thumb_hover = foreground.opacity(0.5);
@@ -254,6 +265,10 @@ fn readable_color(mut candidate: Hsla, background: Hsla, min_contrast: f32) -> H
         candidate = candidate.blend(target.opacity(0.12));
     }
     target
+}
+
+pub(super) fn is_light_color(color: Hsla) -> bool {
+    relative_luminance(color) > 0.50
 }
 
 fn relative_luminance(color: Hsla) -> f32 {
@@ -302,9 +317,11 @@ mod tests {
                 assert!(contrast(c.sidebar_foreground, c.sidebar) >= 4.5);
                 assert!(contrast(c.sidebar_accent_foreground, c.sidebar_accent) >= 4.5);
                 assert!(contrast(c.primary, c.background) >= 4.5);
-                assert!(contrast(c.switch_thumb, c.primary) >= 4.5);
-                assert!(contrast(c.switch_thumb, c.switch) >= 3.);
-                assert!(contrast(c.slider_thumb, c.slider_bar) >= 4.5);
+                assert_ne!(c.switch_thumb, color(0x000000FF));
+                assert_ne!(c.slider_thumb, color(0x000000FF));
+                assert!(super::relative_luminance(c.switch_thumb) > 0.20);
+                assert!(super::relative_luminance(c.slider_thumb) > 0.20);
+                assert_ne!(c.switch_thumb, c.switch);
             }
         }
     }

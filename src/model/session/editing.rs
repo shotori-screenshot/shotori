@@ -436,7 +436,6 @@ mod tests {
             ShapeKind::Mosaic,
             ShapeKind::Blur,
             ShapeKind::Eraser,
-            ShapeKind::EraserRect,
         ] {
             let mut s = session();
             s.edit_annotations(|a| {
@@ -469,7 +468,6 @@ mod tests {
             ShapeKind::Line,
             ShapeKind::Pencil,
             ShapeKind::Polyline,
-            ShapeKind::EraserRect,
             ShapeKind::Select,
         ] {
             let mut s = session();

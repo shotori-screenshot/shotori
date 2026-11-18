@@ -177,10 +177,7 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
-                .child(crate::ui::hud::selection_backdrop(
-                    crate::model::settings::UiStyle::Classic,
-                    Some(self.selection),
-                ))
+                .child(crate::ui::hud::selection_backdrop(Some(self.selection)))
                 .child(self.editor.render())
         }
     }
@@ -316,8 +313,8 @@ mod tests {
             outlines.dedup();
             assert_eq!(
                 outlines.len(),
-                1,
-                "only the screenshot selection has a border"
+                2,
+                "only the screenshot selection border and its outer contrast hairline render"
             );
             view.update(cx, |s, _| {
                 assert!(s.editor.actual_bounds().right() <= selection.right());

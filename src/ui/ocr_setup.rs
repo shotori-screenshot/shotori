@@ -11,7 +11,6 @@ use std::sync::atomic::Ordering;
 use gpui_kit::base::Button;
 use gpui_kit::*;
 
-use crate::model::settings::UiStyle;
 use crate::ocr::DownloadProgress;
 use crate::ui::theme;
 
@@ -98,7 +97,7 @@ impl OcrSetup {
 
 /// The setup card: dim backdrop + centered card, rendered above everything
 /// else in the overlay. Clicks inside are swallowed (no new selections).
-pub(crate) fn setup_card(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
+pub(crate) fn setup_card(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
     div()
         .id("shotori-ocr-setup")
         .key_context("ShotoriOcrSetup")
@@ -140,7 +139,7 @@ pub(crate) fn setup_card(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -
         .on_mouse_down(MouseButton::Left, swallow)
         .on_mouse_down(MouseButton::Middle, swallow)
         .on_mouse_down(MouseButton::Right, swallow)
-        .child(card_body(style, setup, focus))
+        .child(card_body(setup, focus))
 }
 
 /// Shared stop_propagation handler for the modal's button swallowing.
@@ -148,7 +147,7 @@ fn swallow(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 
-fn card_body(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
+fn card_body(setup: &OcrSetup, focus: &SetupFocus) -> impl IntoElement {
     const CARD_W: f32 = 460.;
 
     let (title, body, buttons): (String, Vec<AnyElement>, Vec<AnyElement>) = match &setup.stage {
@@ -158,58 +157,32 @@ fn card_body(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -> impl IntoE
             // separate statements, and text_line flattens \n — one run-on
             // paragraph here read badly with long cache paths.
             vec![
-                text_line(
-                    style,
-                    &crate::i18n::t!(
-                        "ocr.setup.confirm",
-                        model = crate::model::settings::current().ocr_model().label()
-                    ),
+                text_line(&crate::i18n::t!(
+                    "ocr.setup.confirm",
+                    model = crate::model::settings::current().ocr_model().label()
+                )),
+                text_line(&crate::i18n::t!(
+                    "ocr.setup.stored_at",
+                    dir = crate::ocr::model_dir_display()
+                )),
+            ],
+            // Alert sheet button order: Cancel on the left, Primary action on the right
+            vec![
+                action_button(
+                    false,
+                    "ocr-setup-no",
+                    crate::i18n::t!("ocr.setup.cancel").as_ref(),
+                    OcrSetupCancel,
+                    &focus.cancel,
                 ),
-                text_line(
-                    style,
-                    &crate::i18n::t!("ocr.setup.stored_at", dir = crate::ocr::model_dir_display()),
+                action_button(
+                    true,
+                    "ocr-setup-go",
+                    crate::i18n::t!("ocr.setup.download").as_ref(),
+                    OcrSetupConfirm,
+                    &focus.confirm,
                 ),
             ],
-            if style == UiStyle::Capsule {
-                // Alert sheet button order: Cancel on the left, Primary action on the right
-                vec![
-                    action_button(
-                        style,
-                        false,
-                        "ocr-setup-no",
-                        crate::i18n::t!("ocr.setup.cancel").as_ref(),
-                        OcrSetupCancel,
-                        &focus.cancel,
-                    ),
-                    action_button(
-                        style,
-                        true,
-                        "ocr-setup-go",
-                        crate::i18n::t!("ocr.setup.download").as_ref(),
-                        OcrSetupConfirm,
-                        &focus.confirm,
-                    ),
-                ]
-            } else {
-                vec![
-                    action_button(
-                        style,
-                        true,
-                        "ocr-setup-go",
-                        crate::i18n::t!("ocr.setup.download").as_ref(),
-                        OcrSetupConfirm,
-                        &focus.confirm,
-                    ),
-                    action_button(
-                        style,
-                        false,
-                        "ocr-setup-no",
-                        crate::i18n::t!("ocr.setup.cancel").as_ref(),
-                        OcrSetupCancel,
-                        &focus.cancel,
-                    ),
-                ]
-            },
         ),
         Stage::Downloading => {
             let p = &setup.progress;
@@ -235,20 +208,16 @@ fn card_body(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -> impl IntoE
             (
                 crate::i18n::t!("ocr.setup.downloading").to_string(),
                 vec![
-                    text_line(style, &overall),
-                    text_line(style, &format!("{file} ({idx}/{})", p.file_count)),
-                    progress_bar(style, pct, CARD_W - 64.),
-                    text_line(
-                        style,
-                        &if total > 0 {
-                            format!("{} / {}", mb(bytes), mb(total))
-                        } else {
-                            mb(bytes)
-                        },
-                    ),
+                    text_line(&overall),
+                    text_line(&format!("{file} ({idx}/{})", p.file_count)),
+                    progress_bar(pct, CARD_W - 64.),
+                    text_line(&if total > 0 {
+                        format!("{} / {}", mb(bytes), mb(total))
+                    } else {
+                        mb(bytes)
+                    }),
                 ],
                 vec![action_button(
-                    style,
                     false,
                     "ocr-setup-abort",
                     crate::i18n::t!("ocr.setup.cancel").as_ref(),
@@ -259,110 +228,68 @@ fn card_body(style: UiStyle, setup: &OcrSetup, focus: &SetupFocus) -> impl IntoE
         }
         Stage::Failed(msg) => (
             crate::i18n::t!("ocr.setup.failed").to_string(),
-            vec![text_line(style, &truncate(msg, 320))],
-            if style == UiStyle::Capsule {
-                vec![
-                    action_button(
-                        style,
-                        false,
-                        "ocr-setup-close",
-                        crate::i18n::t!("ocr.setup.close").as_ref(),
-                        OcrSetupCancel,
-                        &focus.cancel,
-                    ),
-                    action_button(
-                        style,
-                        true,
-                        "ocr-setup-retry",
-                        crate::i18n::t!("ocr.setup.retry").as_ref(),
-                        OcrSetupConfirm,
-                        &focus.confirm,
-                    ),
-                ]
-            } else {
-                vec![
-                    action_button(
-                        style,
-                        true,
-                        "ocr-setup-retry",
-                        crate::i18n::t!("ocr.setup.retry").as_ref(),
-                        OcrSetupConfirm,
-                        &focus.confirm,
-                    ),
-                    action_button(
-                        style,
-                        false,
-                        "ocr-setup-close",
-                        crate::i18n::t!("ocr.setup.close").as_ref(),
-                        OcrSetupCancel,
-                        &focus.cancel,
-                    ),
-                ]
-            },
+            vec![text_line(&truncate(msg, 320))],
+            vec![
+                action_button(
+                    false,
+                    "ocr-setup-close",
+                    crate::i18n::t!("ocr.setup.close").as_ref(),
+                    OcrSetupCancel,
+                    &focus.cancel,
+                ),
+                action_button(
+                    true,
+                    "ocr-setup-retry",
+                    crate::i18n::t!("ocr.setup.retry").as_ref(),
+                    OcrSetupConfirm,
+                    &focus.confirm,
+                ),
+            ],
         ),
     };
 
     let t = theme::c();
-    let mut card = div()
+    let card = div()
         .w(px(CARD_W))
         .flex()
         .flex_col()
         .gap_2()
         .on_mouse_down(MouseButton::Left, swallow)
         .on_mouse_down(MouseButton::Middle, swallow)
-        .on_mouse_down(MouseButton::Right, swallow);
-    card = match style {
-        UiStyle::Classic => card
-            .rounded(px(14.))
-            .bg(rgba(t.chip_bg))
-            .border_1()
-            .border_color(rgba(t.accent))
-            .p_4(),
-        UiStyle::Capsule => card
-            .rounded(px(18.))
-            .bg(rgba(t.capsule_sheet_surface()))
-            .border_1()
-            .border_color(rgba(t.capsule_border()))
-            .shadow(theme::capsule_floating_shadow())
-            .p_5(),
-    };
-    let mut title_el = div().text_size(px(15.)).child(title);
-    title_el = match style {
-        UiStyle::Classic => title_el.text_color(rgba(t.btn_text)),
-        UiStyle::Capsule => title_el
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgba(t.toolbar_text)),
-    };
+        .on_mouse_down(MouseButton::Right, swallow)
+        .rounded(px(18.))
+        .bg(rgba(t.capsule_sheet_surface()))
+        .border_1()
+        .border_color(rgba(t.capsule_border()))
+        .shadow(theme::capsule_floating_shadow())
+        .p_5();
+    let title_el = div()
+        .text_size(px(15.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgba(t.toolbar_text))
+        .child(title);
     card.child(title_el)
         .children(body)
         .child(div().flex().justify_end().gap_2().pt_2().children(buttons))
 }
 
-fn text_line(style: UiStyle, s: &str) -> AnyElement {
-    let fg = match style {
-        UiStyle::Classic => theme::c().hint_text,
-        UiStyle::Capsule => theme::c().hint_text,
-    };
+fn text_line(s: &str) -> AnyElement {
     div()
         .text_size(px(13.))
-        .text_color(rgba(fg))
+        .text_color(rgba(theme::c().hint_text))
         .line_height(px(19.))
         .child(s.replace('\n', " "))
         .into_any_element()
 }
 
-fn progress_bar(style: UiStyle, pct: f32, w: f32) -> AnyElement {
-    let h = if style == UiStyle::Capsule { 6. } else { 8. };
+fn progress_bar(pct: f32, w: f32) -> AnyElement {
+    let h = 6.;
     let r = h * 0.5;
     div()
         .w(px(w))
         .h(px(h))
         .rounded(px(r))
-        .bg(rgba(if style == UiStyle::Capsule {
-            theme::alpha(theme::c().toolbar_border, 0x88)
-        } else {
-            theme::c().btn_hover_bg
-        }))
+        .bg(rgba(theme::alpha(theme::c().toolbar_border, 0x88)))
         .overflow_hidden()
         .child(
             div()
@@ -375,7 +302,6 @@ fn progress_bar(style: UiStyle, pct: f32, w: f32) -> AnyElement {
 }
 
 fn action_button<A: Action + Clone + 'static>(
-    style: UiStyle,
     primary: bool,
     id: &'static str,
     label: &str,
@@ -393,40 +319,27 @@ fn action_button<A: Action + Clone + 'static>(
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(action.clone()), cx);
         });
-    let styled = match style {
-        UiStyle::Classic => base
-            .px_3()
-            .py_1()
-            .rounded(px(6.))
-            .text_color(rgba(t.btn_text))
+    let styled = if primary {
+        base.px_4()
+            .py(px(5.))
+            .rounded(px(8.))
+            .font_weight(FontWeight::MEDIUM)
+            .bg(rgba(t.accent))
+            .text_color(rgba(t.capsule_on_accent()))
             .border_1()
-            .border_color(rgba(t.pin_border))
-            .hover(move |s| s.bg(rgba(t.btn_hover_bg)))
-            .focus_visible(move |s| s.border_color(rgba(t.accent))),
-        UiStyle::Capsule => {
-            if primary {
-                base.px_4()
-                    .py(px(5.))
-                    .rounded(px(8.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .bg(rgba(t.accent))
-                    .text_color(rgba(t.capsule_on_accent()))
-                    .border_1()
-                    .border_color(rgba(t.accent))
-                    .hover(move |s| s.opacity(0.92))
-                    .focus_visible(move |s| s.border_color(rgba(t.toolbar_text)))
-            } else {
-                base.px_4()
-                    .py(px(5.))
-                    .rounded(px(8.))
-                    .bg(rgba(t.capsule_hover()))
-                    .text_color(rgba(t.toolbar_text))
-                    .border_1()
-                    .border_color(rgba(t.capsule_border()))
-                    .hover(move |s| s.bg(rgba(t.toolbar_hover)))
-                    .focus_visible(move |s| s.border_color(rgba(t.accent)))
-            }
-        }
+            .border_color(rgba(t.accent))
+            .hover(move |s| s.opacity(0.92))
+            .focus_visible(move |s| s.border_color(rgba(t.toolbar_text)))
+    } else {
+        base.px_4()
+            .py(px(5.))
+            .rounded(px(8.))
+            .bg(rgba(t.capsule_hover()))
+            .text_color(rgba(t.toolbar_text))
+            .border_1()
+            .border_color(rgba(t.capsule_border()))
+            .hover(move |s| s.bg(rgba(t.toolbar_hover)))
+            .focus_visible(move |s| s.border_color(rgba(t.accent)))
     };
     styled.child(label.to_string()).into_any_element()
 }
@@ -534,10 +447,7 @@ mod keyboard_tests {
                 .on_action(cx.listener(|this, _: &CopyBehindDialog, _, _| {
                     this.copies += 1;
                 }))
-                .children(
-                    (!self.closed)
-                        .then(|| setup_card(super::UiStyle::Classic, &self.setup, &self.focus)),
-                )
+                .children((!self.closed).then(|| setup_card(&self.setup, &self.focus)))
         }
     }
 

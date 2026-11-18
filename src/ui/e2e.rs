@@ -253,13 +253,6 @@ pub(crate) fn debug_editing_scene(
     }
 }
 
-/// Optional override for headless UI style reviews (`SHOTORI_DEBUG_UI_STYLE=classic|capsule`).
-pub(crate) fn debug_ui_style() -> Option<crate::model::settings::UiStyle> {
-    std::env::var("SHOTORI_DEBUG_UI_STYLE")
-        .ok()
-        .and_then(|value| crate::model::settings::UiStyle::from_id(value.trim()))
-}
-
 /// Which settings page to open on. `None` (unset or unknown name) keeps
 /// the normal default — the settings window maps the name itself.
 pub(crate) fn debug_settings_page() -> Option<String> {

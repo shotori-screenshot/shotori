@@ -39,7 +39,6 @@ use gpui_kit::{Bounds, Path, PathBuilder, Pixels, Point, point, px, size};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShapeKind {
     Eraser,
-    EraserRect,
     Text,
     Number,
     Pencil,
@@ -121,6 +120,52 @@ impl Shape {
             *point += delta;
         }
         self.set_number_tip(self.number_tip().map(|tip| tip + delta));
+    }
+
+    /// Project a shape from `(0, 0..base)` local coordinates onto a zoomed
+    /// floating view at `origin` for HUD chrome rendering.
+    pub(crate) fn scaled_for_display(&self, zoom: f32, origin: Point<Pixels>) -> Self {
+        let scale_pt =
+            |p: Point<Pixels>| origin + point(px(f32::from(p.x) * zoom), px(f32::from(p.y) * zoom));
+        let mut out = self.clone();
+        out.bounds = Bounds::new(
+            scale_pt(self.bounds.origin),
+            size(
+                px(f32::from(self.bounds.size.width) * zoom),
+                px(f32::from(self.bounds.size.height) * zoom),
+            ),
+        );
+        for p in &mut out.points {
+            *p = scale_pt(*p);
+        }
+        match &mut out.parameters {
+            ShapeParameters::Geometry { width, radius, .. } => {
+                *width *= zoom;
+                *radius *= zoom;
+            }
+            ShapeParameters::Stroke { width, .. } => {
+                *width *= zoom;
+            }
+            ShapeParameters::Highlighter { width, .. } => {
+                *width *= zoom;
+            }
+            ShapeParameters::Text { font_size } => {
+                *font_size *= zoom;
+            }
+            ShapeParameters::Badge { diameter, tip, .. } => {
+                *diameter *= zoom;
+                *tip = tip.map(scale_pt);
+            }
+            ShapeParameters::Magnifier(lens) => {
+                lens.offset = point(
+                    px(f32::from(lens.offset.x) * zoom),
+                    px(f32::from(lens.offset.y) * zoom),
+                );
+                lens.border *= zoom;
+            }
+            ShapeParameters::Spotlight { .. } | ShapeParameters::Filter { .. } => {}
+        }
+        out
     }
 
     pub(crate) fn size(&self) -> f32 {
@@ -426,8 +471,8 @@ impl Annotations {
             ShapeKind::Eraser => self.preset.eraser,
             ShapeKind::Number => self.preset.number,
             ShapeKind::Text => self.preset.text,
-            // area/selection modes have no size to remember
-            ShapeKind::EraserRect | ShapeKind::Select => 0.,
+            // selection mode has no size to remember
+            ShapeKind::Select => 0.,
         }
     }
     /// Remember a kind's size, clamped to its family's [`SizeSpec`].
@@ -449,8 +494,8 @@ impl Annotations {
             ShapeKind::Eraser => &mut self.preset.eraser,
             ShapeKind::Number => &mut self.preset.number,
             ShapeKind::Text => &mut self.preset.text,
-            // nothing to remember for area/selection modes
-            ShapeKind::EraserRect | ShapeKind::Select => return,
+            // nothing to remember for selection mode
+            ShapeKind::Select => return,
         };
         *slot = v;
     }
@@ -527,6 +572,7 @@ impl Annotations {
             .as_ref()
             .is_some_and(|d| d.shape.kind == ShapeKind::Text)
     }
+    #[cfg(test)]
     pub(crate) fn add_text(&mut self, bounds: Bounds<Pixels>, value: String) {
         if value.trim().is_empty() {
             return;
@@ -725,7 +771,7 @@ impl Annotations {
         let Some(tool) = self.tool else {
             return false;
         };
-        if matches!(tool, ShapeKind::EraserRect | ShapeKind::Select) {
+        if tool == ShapeKind::Select {
             return false;
         }
         let spec = size_spec(tool);

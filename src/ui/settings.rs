@@ -803,7 +803,6 @@ static SIDEBAR_LOGO: std::sync::LazyLock<std::sync::Arc<RenderImage>> =
 mod layout;
 mod palette;
 mod shell;
-mod style_cards;
 mod theme_cards;
 use layout::{card_group, card_row, page_body, page_header};
 use shell::resize_handles;
@@ -897,27 +896,6 @@ mod color_surface_tests {
             Some("~/Pictures/Direct")
         );
         assert_eq!(loaded.export().format, ExportFormat::Webp);
-
-        // Verify clicking the Capsule UI style card on Appearance writes through
-        // to settings.toml and live-updates the Capture toolbar preview cleanly.
-        cx.update(|window, cx| {
-            view.update(cx, |this, cx| this.select_section(Section::Appearance, cx));
-            window.draw(cx).clear(cx);
-        });
-        let capsule_card = cx
-            .debug_bounds("style-choice-capsule")
-            .expect("Capsule style card should render on Appearance");
-        cx.simulate_click(capsule_card.center(), Default::default());
-        cx.update(|window, cx| {
-            view.update(cx, |this, cx| this.select_section(Section::Capture, cx));
-            window.draw(cx).clear(cx);
-        });
-        let (reloaded, style_warnings) = Settings::load(Some(&path));
-        assert!(style_warnings.is_empty());
-        assert_eq!(
-            reloaded.ui_style(),
-            crate::model::settings::UiStyle::Capsule
-        );
     }
 
     #[gpui_kit::test]

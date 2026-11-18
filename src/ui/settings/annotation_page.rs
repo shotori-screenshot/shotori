@@ -450,7 +450,13 @@ impl SettingsWindow {
                     } else {
                         cx.theme().transparent
                     })
-                    .hover(move |st| st.border_color(primary))
+                    .hover(move |st| {
+                        if is_selected {
+                            st
+                        } else {
+                            st.border_color(primary)
+                        }
+                    })
                     .focus_visible(move |st| st.border_color(ring))
                     .child(
                         div()
@@ -568,7 +574,7 @@ impl SettingsWindow {
         let mut palette_row = div().flex().items_center().gap_1p5();
         for (ix, picker) in self.annotation_page.swatches.iter().enumerate() {
             let label = crate::i18n::t!("settings.annotation.swatch_n", n = ix + 1).to_string();
-            palette_row = palette_row.child(ColorPicker::new(picker, label).capsule_ring(true));
+            palette_row = palette_row.child(ColorPicker::new(picker, label));
         }
 
         let body = super::layout::content_column()

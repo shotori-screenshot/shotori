@@ -49,9 +49,9 @@ pub struct Theme {
     pub chip_bg: u32,
     /// Hint bar / chip text.
     pub hint_text: u32,
-    /// Classic (dark chip) button text.
+    /// Legacy chip button text (kept for theme.toml backwards compatibility).
     pub btn_text: u32,
-    /// Classic button hover background.
+    /// Legacy button hover background (kept for theme.toml backwards compatibility).
     pub btn_hover_bg: u32,
 
     /// Floating annotation toolbar. dark uses dark surfaces (the
@@ -482,6 +482,7 @@ impl Theme {
         self.toolbar_selected = u32::from_be_bytes([tint(0), tint(1), tint(2), 255]);
     }
 
+    #[cfg(test)]
     pub(crate) fn accent_text(&self) -> u32 {
         if contrast(0xFFFFFFFF, self.accent) >= 4.5 {
             0xFFFFFFFF
@@ -490,6 +491,7 @@ impl Theme {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_text(&self) -> u32 {
         if contrast(self.accent, self.toolbar_selected) >= 4.5 {
             self.accent
@@ -513,8 +515,8 @@ impl Theme {
         luminance(self.toolbar_bg) < 0.5
     }
 
-    /// Translucent frosted surface fill for [`crate::model::settings::UiStyle::Capsule`]
-    /// floating capsules (toolbar, dimension pill, scroll deck).
+    /// Translucent frosted surface fill for floating capsules (toolbar,
+    /// dimension pill, scroll deck).
     pub(crate) fn capsule_surface(&self) -> u32 {
         alpha(self.toolbar_bg, if self.is_dark() { 0xE6 } else { 0xEB })
     }
@@ -727,6 +729,7 @@ fn luminance(color: u32) -> f32 {
     linear(0) * 0.2126 + linear(1) * 0.7152 + linear(2) * 0.0722
 }
 
+#[cfg(test)]
 fn contrast(a: u32, b: u32) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)

@@ -21,17 +21,6 @@ pub(super) struct ToolbarDrag {
 }
 
 impl ScreenshotSession {
-    pub(crate) fn ui_style(&self) -> crate::model::settings::UiStyle {
-        self.ui_style
-    }
-
-    pub(crate) fn set_ui_style(&mut self, style: crate::model::settings::UiStyle) {
-        if self.ui_style != style {
-            self.ui_style = style;
-            self.toolbar_grips_reported = None;
-        }
-    }
-
     // ── Toolbar geometry + dragging ────────────────────────────────
     // One source of truth: render, the cursor hit-test and the drag
     // clamp all read THIS, so the three cannot drift apart.
@@ -47,8 +36,7 @@ impl ScreenshotSession {
         let sel = self
             .local_bounds(name)
             .map(crate::model::placement::round_px)?;
-        let (width, height) = crate::model::placement::toolbar_size_for(
-            self.ui_style,
+        let (width, height) = crate::model::placement::toolbar_size(
             // the placement basis must match the settings row's own
             // visibility gate (edit_kind), not "a tool is lit": the
             // select tool shows no settings row until a shape is
@@ -57,8 +45,7 @@ impl ScreenshotSession {
             self.annotations.edit_kind().is_some(),
             crate::model::settings::current(),
         );
-        let mut b =
-            crate::model::placement::toolbar_bounds_for(self.ui_style, &sel, ws, width, height);
+        let mut b = crate::model::placement::toolbar_bounds(&sel, ws, width, height);
         if let Some(pos) = self.toolbar_pos {
             b.origin = point(
                 px(f32::from(pos.x).clamp(
@@ -96,32 +83,24 @@ impl ScreenshotSession {
     /// path of [`ScreenshotSession::toolbar_grips`], kept exact to the
     /// grip element's intended geometry (`bar_pad_for` inset, `row_height_for` tall).
     fn derived_toolbar_grips(&self, name: &str) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
-        let style = self.ui_style;
         let b = self.toolbar_bounds(name)?;
         let (w, h) = (
             px(crate::model::placement::GRIP_W),
-            px(crate::model::placement::row_height_for(style)),
+            px(crate::model::placement::ROW_H),
         );
-        let pad = px(crate::model::placement::bar_pad_for(style));
-        let (bar_left, bar_right) = match crate::model::placement::anchor_mode_for(style) {
-            crate::model::placement::ToolbarAnchorMode::BelowLeft => (b.left(), b.right()),
-            crate::model::placement::ToolbarAnchorMode::BelowCenter => {
-                let row1_w = crate::model::placement::row1_basis_for(
-                    style,
-                    crate::model::settings::current(),
-                )
-                .min(f32::from(b.size.width));
-                let inset = (f32::from(b.size.width) - row1_w).max(0.) * 0.5;
-                (b.left() + px(inset), b.left() + px(inset + row1_w))
-            }
-        };
+        let pad = px(crate::model::placement::BAR_PAD);
+        let row1_w = crate::model::placement::row1_basis(crate::model::settings::current())
+            .min(f32::from(b.size.width));
+        let inset = (f32::from(b.size.width) - row1_w).max(0.) * 0.5;
+        let bar_left = b.left() + px(inset);
+        let bar_right = b.left() + px(inset + row1_w);
         Some((
             Bounds {
-                origin: point(bar_left + pad, b.origin.y),
+                origin: point(bar_left + px(1.) + pad, b.origin.y),
                 size: size(w, h),
             },
             Bounds {
-                origin: point(bar_right - pad - w, b.origin.y),
+                origin: point(bar_right - px(1.) - pad - w, b.origin.y),
                 size: size(w, h),
             },
         ))
@@ -191,8 +170,7 @@ impl ScreenshotSession {
             return false;
         };
         self.pointer_global = Some(self.to_global(name, local));
-        let (base_w, height) = crate::model::placement::toolbar_size_for(
-            self.ui_style,
+        let (base_w, height) = crate::model::placement::toolbar_size(
             self.annotations.edit_kind().is_some(),
             crate::model::settings::current(),
         );
@@ -254,31 +232,31 @@ mod tests {
         s.begin("right", point(px(50.), px(50.)));
         s.end("right", point(px(200.), px(150.))); // (50,50)-(200,150), right is host
 
-        // anchored below the box by default; grips line both edges of ROW ONE
+        // centered below the box (clamped at 8px left margin); grips line both edges of ROW ONE
         let anchored = s.toolbar_bounds("right").unwrap();
-        assert_eq!(anchored.origin, point(px(50.), px(158.)));
+        assert_eq!(anchored.origin, point(px(8.), px(160.)));
         assert_eq!(
             anchored.size.width,
             px(crate::model::placement::default_row1_basis())
         );
         let (lg, rg) = s.toolbar_grips("right").unwrap();
         let pad = px(crate::model::placement::BAR_PAD);
-        // the strips are the grip ELEMENTS' rects: inset by the bar
+        // the strips are the grip ELEMENTS' rects: inset by 1px border + bar
         // padding, one row tall — pixel-identical to what renders
-        assert_eq!(lg.left(), anchored.left() + pad);
-        assert_eq!(rg.right(), anchored.right() - pad);
+        assert_eq!(lg.left(), anchored.left() + px(1.) + pad);
+        assert_eq!(rg.right(), anchored.right() - px(1.) - pad);
         assert_eq!(lg.size.width, px(crate::model::placement::GRIP_W));
         assert_eq!(lg.size.height, px(crate::model::placement::ROW_H));
         // a different output hosts nothing
         assert!(s.toolbar_bounds("left").is_none());
 
         // drag from the middle of the left grip: toolbar follows, no jump
-        let press = point(px(56.), px(177.)); // grab = (6, 19)
+        let press = lg.center(); // grab = (15, 22)
         assert!(s.toolbar_drag_begin("right", press));
         assert!(s.toolbar_drag_active());
         assert!(s.toolbar_drag_move("right", point(px(200.), px(120.))));
         let b = s.toolbar_bounds("right").unwrap();
-        assert_eq!(b.origin, point(px(194.), px(101.)));
+        assert_eq!(b.origin, point(px(185.), px(98.)));
         assert_eq!(b.size, anchored.size); // size never changes
         // unchanged position reports false (no duplicate notify)
         assert!(!s.toolbar_drag_move("right", point(px(200.), px(120.))));
@@ -304,11 +282,11 @@ mod tests {
         assert_eq!(s.toolbar_bounds("right").unwrap(), anchored);
 
         // a completed drag stays put…
-        assert!(s.toolbar_drag_begin("right", point(px(56.), px(177.))));
+        assert!(s.toolbar_drag_begin("right", press));
         assert!(s.toolbar_drag_move("right", point(px(300.), px(300.))));
         s.toolbar_drag_end();
         let dropped = s.toolbar_bounds("right").unwrap().origin;
-        assert_eq!(dropped, point(px(294.), px(281.)));
+        assert_eq!(dropped, point(px(285.), px(278.)));
         // …and Esc with no drag in flight does NOT move it (stage two: quit)
         s.cancel_drag();
         assert_eq!(s.toolbar_bounds("right").unwrap().origin, dropped);
@@ -321,7 +299,8 @@ mod tests {
         s.begin("right", point(px(50.), px(50.)));
         s.end("right", point(px(200.), px(150.)));
         let anchored = s.toolbar_bounds("right").unwrap().origin;
-        assert!(s.toolbar_drag_begin("right", point(px(56.), px(177.))));
+        let press_right = s.toolbar_grips("right").unwrap().0.center();
+        assert!(s.toolbar_drag_begin("right", press_right));
         assert!(s.toolbar_drag_move("right", point(px(400.), px(500.))));
         s.toolbar_drag_end();
         let dragged = s.toolbar_bounds("right").unwrap().origin;
@@ -343,10 +322,11 @@ mod tests {
         s.set_size("left", size(px(1200.), px(800.)));
         s.begin("left", point(px(300.), px(50.)));
         s.end("left", point(px(700.), px(150.)));
-        assert!(s.toolbar_drag_begin("left", point(px(306.), px(177.))));
+        let press_left = s.toolbar_grips("left").unwrap().0.center();
+        assert!(s.toolbar_drag_begin("left", press_left));
         assert!(s.toolbar_drag_move("left", point(px(400.), px(500.))));
         s.toolbar_drag_end();
-        assert!(s.toolbar_bounds("left").unwrap().origin.y > px(158.)); // dragged
+        assert!(s.toolbar_bounds("left").unwrap().origin.y > px(160.)); // dragged
         // selection replaced from the right screen → left re-anchors
         s.begin("right", point(px(50.), px(50.)));
         s.end("right", point(px(200.), px(150.)));
@@ -355,30 +335,25 @@ mod tests {
 
     #[test]
     fn capsule_style_centers_toolbar_below_selection_and_aligns_grips() {
-        use crate::model::settings::UiStyle;
         let mut s = session();
-        s.set_ui_style(UiStyle::Capsule);
         s.set_size("right", size(px(1400.), px(900.)));
         // Selection centered at x = 700 (500..900), y = 100..300
         s.begin("right", point(px(500.), px(100.)));
         s.end("right", point(px(900.), px(300.)));
 
         let b = s.toolbar_bounds("right").unwrap();
-        let expected_w = crate::model::placement::row1_basis_for(
-            UiStyle::Capsule,
-            crate::model::settings::current(),
-        );
+        let expected_w = crate::model::placement::row1_basis(crate::model::settings::current());
         assert_eq!(
             b.size,
-            size(px(expected_w), px(crate::model::placement::CAPSULE_ROW_H))
+            size(px(expected_w), px(crate::model::placement::ROW_H))
         );
         assert_eq!(b.origin.x, px(700. - expected_w * 0.5));
         assert_eq!(b.origin.y, px(310.));
 
         let (lg, rg) = s.toolbar_grips("right").unwrap();
-        let pad = px(crate::model::placement::CAPSULE_BAR_PAD);
-        assert_eq!(lg.left(), b.left() + pad);
-        assert_eq!(rg.right(), b.right() - pad);
-        assert_eq!(lg.size.height, px(crate::model::placement::CAPSULE_ROW_H));
+        let pad = px(crate::model::placement::BAR_PAD);
+        assert_eq!(lg.left(), b.left() + px(1.) + pad);
+        assert_eq!(rg.right(), b.right() - px(1.) - pad);
+        assert_eq!(lg.size.height, px(crate::model::placement::ROW_H));
     }
 }

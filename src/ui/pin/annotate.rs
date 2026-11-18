@@ -1,64 +1,35 @@
-//! In-pin secondary canvas annotation: pointer mapping onto base-local
-//! coordinates, live/committed rasterization, inline text prompt, and the
-//! floating two-row annotation toolbar.
+//! In-pin secondary canvas annotation backed by the main overlay's
+//! [`ScreenshotSession`] pipeline: user-configured row-1 tools (without explicit
+//! undo/redo or exit buttons), shared Row-2 option menus/sliders/swatches,
+//! inline `TextEditor`, base-local pointer mapping, and right-click tool/mode exit.
 
-use gpui_kit::assets::IconName;
-use gpui_kit::base::Button;
+use gpui_kit::base::GlobalState;
 use gpui_kit::base::input::InputEvent;
-use gpui_kit::component::Icon;
+use gpui_kit::component::color_picker::ColorPickerState;
 use gpui_kit::*;
 
-use crate::actions::{
-    ExitPinAnnotate, PinClearMarks, PinDeleteMark, PinRedo, PinSizeDown, PinSizeUp, PinToolArrow,
-    PinToolEllipse, PinToolEraser, PinToolHighlighter, PinToolLine, PinToolMosaic, PinToolNumber,
-    PinToolPencil, PinToolRect, PinToolSelect, PinToolText, PinUndo,
-};
 use crate::annotation::ShapeKind;
-use crate::model::settings::PALETTE;
-use crate::ui::text_input::TextInput;
-use crate::ui::theme;
+use crate::model::placement::{TOOLBAR_GAP, pin_toolbar_size};
+use crate::model::session::ScreenshotSession;
+use crate::ui::text_editor::TextEditor;
+use crate::ui::toolbar::{SizeSlider, u32_to_hsla};
 
 use super::{PinBoard, PinSurface};
 
-pub(super) const ANNOT_BAR_W: f32 = 468.;
-pub(super) const ANNOT_BAR_H: f32 = 72.;
-const ANNOT_GAP: f32 = 6.;
-const TEXT_PROMPT_W: f32 = 280.;
-const TEXT_PROMPT_H: f32 = 38.;
-
-/// Active pointer gesture inside an annotating pin's base-local space.
-#[derive(Clone)]
-pub(super) enum PinAnnotGesture {
-    /// Drawing a new mark (`Annotations::begin` / `drag_to` / `end`).
-    Draw { pin_id: u64 },
-    /// Dragging an existing selected mark in Select mode.
-    MoveMark {
-        pin_id: u64,
-        ix: usize,
-        start_base: Point<Pixels>,
-        before: crate::annotation::Shape,
-    },
-    /// Dragging a handle on the selected mark.
-    MoveHandle {
-        pin_id: u64,
-        ix: usize,
-        anchor: usize,
-        before: crate::annotation::Shape,
-    },
-}
-
-/// Layer-shell-safe inline text entry box anchored over an annotating pin.
-pub(super) struct PinTextPrompt {
+/// Active annotation session owned by `PinBoard` for one editing pin.
+pub(super) struct PinAnnotSession {
     pub pin_id: u64,
-    /// Insertion anchor in the pin's base-local logical space.
-    pub base_anchor: Point<Pixels>,
-    /// Desktop-global bounds of the floating input pill.
-    pub global_bounds: Bounds<Pixels>,
-    pub input: Entity<TextInput>,
-    pub _sub: Subscription,
+    pub session: Entity<ScreenshotSession>,
+    pub pointer_down_active: bool,
+    pub _session_sub: Subscription,
 }
 
 impl PinBoard {
+    /// Id of the pin currently in interactive annotation mode, if any.
+    pub(super) fn annotating_id(&self) -> Option<u64> {
+        self.annot_session.as_ref().map(|a| a.pin_id)
+    }
+
     /// Choose the single output that hosts the annotation bar for `pin_rect`
     /// (the output with the largest overlap area, avoiding duplicate bars).
     pub(super) fn host_output_for(&self, pin_rect: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
@@ -75,11 +46,15 @@ impl PinBoard {
             .map(|(_, out)| out)
     }
 
-    /// Global bounds of the floating annotation toolbar when `annotating` is active
+    /// Global bounds of the floating annotation toolbar when `annot_session` is active
     /// and `output` is the chosen host output.
-    pub(super) fn annot_bar_bounds_on(&self, output: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
-        let id = self.annotating?;
-        let pin = self.pins.iter().find(|p| p.id == id)?;
+    pub(super) fn annot_bar_bounds_on(
+        &self,
+        output: Bounds<Pixels>,
+        cx: &App,
+    ) -> Option<Bounds<Pixels>> {
+        let annot = self.annot_session.as_ref()?;
+        let pin = self.pins.iter().find(|p| p.id == annot.pin_id)?;
         if pin.collapsed.is_some() || pin.ghost || self.hidden {
             return None;
         }
@@ -87,22 +62,26 @@ impl PinBoard {
         if host.origin != output.origin {
             return None;
         }
-        let w = ANNOT_BAR_W.min((f32::from(output.size.width) - 12.).max(120.));
-        let h = ANNOT_BAR_H.min((f32::from(output.size.height) - 12.).max(36.));
+        let settings = crate::model::settings::current();
+        let has_options = annot.session.read(cx).annotations().edit_kind().is_some();
+        let (pref_w, pref_h) = pin_toolbar_size(has_options, settings);
+        let w = pref_w.min((f32::from(output.size.width) - 16.).max(1.));
+        let h = pref_h.min((f32::from(output.size.height) - 16.).max(1.));
         let out_l = f32::from(output.left());
         let out_t = f32::from(output.top());
         let out_r = f32::from(output.right());
         let out_b = f32::from(output.bottom());
 
-        let x = f32::from(pin.rect.left()).clamp(out_l + 6., (out_r - w - 6.).max(out_l + 6.));
-        let below_y = f32::from(pin.rect.bottom()) + ANNOT_GAP;
-        let above_y = f32::from(pin.rect.top()) - ANNOT_GAP - h;
-        let y = if below_y + h <= out_b - 6. {
+        let center_x = f32::from(pin.rect.left()) + f32::from(pin.rect.size.width) * 0.5 - w * 0.5;
+        let x = center_x.clamp(out_l + 8., (out_r - w - 8.).max(out_l + 8.));
+        let below_y = f32::from(pin.rect.bottom()) + TOOLBAR_GAP;
+        let above_y = f32::from(pin.rect.top()) - TOOLBAR_GAP - h;
+        let y = if below_y + h + 12. <= out_b {
             below_y
-        } else if above_y >= out_t + 6. {
+        } else if above_y >= out_t + 8. {
             above_y
         } else {
-            (out_b - h - 8.).max(out_t + 6.)
+            (out_b - h - 8.).max(out_t + 8.)
         };
         Some(Bounds::new(point(px(x), px(y)), size(px(w), px(h))))
     }
@@ -113,788 +92,812 @@ impl PinBoard {
         };
         self.menu = None;
         self.drag = None;
-        self.annot_gesture = None;
-        self.text_prompt = None;
-        if self.annotating == Some(id) {
-            self.finish_pin_annotation_state(id);
-            self.annotating = None;
+        if self.annotating_id() == Some(id) {
+            self.exit_annotate(cx);
         } else {
-            if let Some(prev) = self.annotating.take() {
-                self.finish_pin_annotation_state(prev);
-            }
-            if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-                if let Some(collapsed) = pin.collapsed.take() {
-                    pin.rect = crate::model::pin::expand_bounds(pin.rect, collapsed, &self.outputs);
-                }
-                pin.ghost = false;
-                if pin.annotations.tool().is_none() {
-                    pin.annotations.toggle(ShapeKind::Rectangle);
-                }
-            }
-            self.raise(id);
-            self.annotating = Some(id);
-            self.show_hud(id, crate::i18n::t!("pin.hud.annotating").into_owned(), cx);
+            self.enter_annotate(id, cx);
         }
+    }
+
+    pub(super) fn enter_annotate(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.exit_annotate(cx);
+        let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        if let Some(collapsed) = pin.collapsed.take() {
+            pin.rect = crate::model::pin::expand_bounds(pin.rect, collapsed, &self.outputs);
+        }
+        pin.ghost = false;
+        let mut annotations = std::mem::take(&mut pin.annotations);
+        if annotations.tool().is_none() {
+            let initial = crate::ui::toolbar::initial_pin_tool(crate::model::settings::current());
+            annotations.toggle(initial);
+        }
+        let (w, h, ref orig) = *pin.base_crop;
+        let orig_rgba = orig.clone();
+        let base_size = pin.base;
+        let session =
+            cx.new(|_| ScreenshotSession::for_pin(w, h, orig_rgba, base_size, annotations));
+        let sub = cx.observe(&session, |board, _, cx| {
+            board.sync_annot_visuals_from_session(cx);
+        });
+        self.annot_session = Some(PinAnnotSession {
+            pin_id: id,
+            session,
+            pointer_down_active: false,
+            _session_sub: sub,
+        });
+        self.raise(id);
+        self.show_hud(id, crate::i18n::t!("pin.hud.annotating").into_owned(), cx);
         cx.notify();
     }
 
-    pub(super) fn exit_annotate_step(&mut self, cx: &mut Context<Self>) {
-        if self.text_prompt.take().is_some() {
-            cx.notify();
-            return;
-        }
-        self.annot_gesture = None;
-        let Some(id) = self.annotating else {
-            return;
+    /// Leave pin annotation mode, moving edited annotations back onto the pin
+    /// and flushing updated visuals and disk history.
+    pub(super) fn exit_annotate(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(annot) = self.annot_session.take() else {
+            return false;
         };
-        let cancelled_inner = self
-            .pins
-            .iter_mut()
-            .find(|p| p.id == id)
-            .is_some_and(|pin| {
-                if pin.annotations.selected_count() > 0
-                    && !pin.annotations.is_pressed()
-                    && pin.annotations.draft_shape().is_none()
-                {
-                    pin.annotations.deselect();
-                    true
-                } else if pin.annotations.finish_interaction() {
-                    pin.rebuild_visuals();
-                    true
-                } else {
-                    false
-                }
-            });
-        if !cancelled_inner {
-            self.finish_pin_annotation_state(id);
-            self.annotating = None;
-        }
-        cx.notify();
-    }
-
-    pub(super) fn finish_pin_annotation_state(&mut self, id: u64) {
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            pin.annotations.finish_polyline();
-            let _ = pin.annotations.cancel();
-            pin.annotations.deselect();
-            pin.rebuild_visuals();
-            self.sync_pin_to_history(id);
-        }
-    }
-
-    pub(super) fn select_annot_tool(&mut self, kind: ShapeKind, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
-            return;
-        };
-        self.text_prompt = None;
-        self.annot_gesture = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            pin.annotations.finish_interaction();
-            pin.annotations.toggle(kind);
-            pin.rebuild_visuals();
-        }
-        cx.notify();
-    }
-
-    pub(super) fn set_annot_color(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
-            return;
-        };
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            pin.annotations.set_color(ix);
+        let pin_id = annot.pin_id;
+        let session = annot.session;
+        drop(annot._session_sub);
+        let annotations = session.update(cx, |s, _| s.take_annotations());
+        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
+            pin.annotations = annotations;
             pin.dirty_raster = true;
             pin.rebuild_visuals();
+            self.sync_pin_to_history(pin_id);
         }
         cx.notify();
+        true
     }
 
-    pub(super) fn step_annot_size(&mut self, up: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
+    pub(super) fn sync_annot_visuals_from_session(&mut self, cx: &mut Context<Self>) {
+        let Some(annot) = self.annot_session.as_ref() else {
             return;
         };
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            let area = Bounds::new(point(px(0.), px(0.)), pin.base);
-            let mut changed = false;
-            pin.annotations.edit_within(area, |a| {
-                changed = a.step_size(up);
-            });
-            if changed {
+        let pin_id = annot.pin_id;
+        let session = annot.session.clone();
+        let (live, is_dragging_complete) = {
+            let s = session.read(cx);
+            let live = s.is_body_moving()
+                || s.handle_drag_anchor().is_some()
+                || s.annotations().is_pressed()
+                || s.annotations().is_drawing_polyline()
+                || s.annotations().has_text_preview();
+            (live, !live)
+        };
+        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
+            let annotations = session.read(cx).annotations();
+            if live {
+                pin.rebuild_live_preview_from(annotations);
+            } else {
                 pin.dirty_raster = true;
-                pin.rebuild_visuals();
+                pin.rebuild_visuals_from(annotations);
             }
         }
-        cx.notify();
-    }
-
-    pub(super) fn annot_undo(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
-            return;
-        };
-        self.annot_gesture = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            let _ = pin.annotations.undo();
-            pin.dirty_raster = true;
-            pin.rebuild_visuals();
+        if is_dragging_complete {
+            self.sync_pin_to_history(pin_id);
         }
         cx.notify();
     }
 
-    pub(super) fn annot_redo(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
+    pub(super) fn flush_annot_visuals(&mut self, cx: &App) {
+        let Some(annot) = self.annot_session.as_ref() else {
             return;
         };
-        self.annot_gesture = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id) {
-            let _ = pin.annotations.redo();
+        let pin_id = annot.pin_id;
+        let session = annot.session.clone();
+        let annotations = session.read(cx).annotations();
+        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
             pin.dirty_raster = true;
-            pin.rebuild_visuals();
+            pin.rebuild_visuals_from(annotations);
         }
-        cx.notify();
     }
 
-    pub(super) fn annot_delete(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
-            return;
-        };
-        self.annot_gesture = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id)
-            && pin.annotations.delete_selected()
-        {
-            pin.dirty_raster = true;
-            pin.rebuild_visuals();
-        }
-        cx.notify();
-    }
-
-    pub(super) fn annot_clear(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.annotating else {
-            return;
-        };
-        self.annot_gesture = None;
-        if let Some(pin) = self.pins.iter_mut().find(|p| p.id == id)
-            && pin.annotations.clear_all()
-        {
-            pin.dirty_raster = true;
-            pin.rebuild_visuals();
-        }
-        cx.notify();
-    }
-
-    pub(super) fn annot_pointer_move(&mut self, global: Point<Pixels>, shift: bool) -> bool {
-        let Some(gesture) = self.annot_gesture.clone() else {
+    pub(super) fn annot_pointer_move(
+        &mut self,
+        global: Point<Pixels>,
+        shift: bool,
+        alt: bool,
+        cx: &mut App,
+    ) -> bool {
+        let Some(annot) = self.annot_session.as_ref() else {
             return false;
         };
-        match gesture {
-            PinAnnotGesture::Draw { pin_id } => {
-                if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
-                    let base_pt = pin.global_to_base(global);
-                    let area = Bounds::new(point(px(0.), px(0.)), pin.base);
-                    pin.annotations.drag_to(base_pt, area, shift);
-                    pin.rebuild_live_preview();
-                    return true;
-                }
-            }
-            PinAnnotGesture::MoveMark {
-                pin_id,
-                ix,
-                start_base,
-                before,
-            } => {
-                if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
-                    let base_pt = pin.global_to_base(global);
-                    let raw_delta = base_pt - start_base;
-                    let box_before = before.selection_box();
-                    let min_dx = -f32::from(box_before.left());
-                    let max_dx = f32::from(pin.base.width - box_before.right());
-                    let min_dy = -f32::from(box_before.top());
-                    let max_dy = f32::from(pin.base.height - box_before.bottom());
-                    let clamped = point(
-                        px(crate::model::pin::clamp_to(
-                            f32::from(raw_delta.x),
-                            min_dx,
-                            max_dx,
-                        )),
-                        px(crate::model::pin::clamp_to(
-                            f32::from(raw_delta.y),
-                            min_dy,
-                            max_dy,
-                        )),
-                    );
-                    pin.annotations.place_shape(ix, &before, clamped);
-                    pin.dirty_raster = true;
-                    pin.rebuild_visuals();
-                    return true;
-                }
-            }
-            PinAnnotGesture::MoveHandle {
-                pin_id,
-                ix,
-                anchor,
-                before,
-            } => {
-                if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
-                    let base_pt = pin.global_to_base(global);
-                    let area = Bounds::new(point(px(0.), px(0.)), pin.base);
-                    pin.annotations
-                        .place_handle_with(ix, anchor, &before, base_pt, area, shift);
-                    pin.dirty_raster = true;
-                    pin.rebuild_visuals();
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub(super) fn annot_pointer_up(&mut self, global: Point<Pixels>, shift: bool) -> bool {
-        let _ = self.annot_pointer_move(global, shift);
-        let Some(gesture) = self.annot_gesture.take() else {
+        let pin_id = annot.pin_id;
+        let pointer_down = annot.pointer_down_active;
+        let session = annot.session.clone();
+        let Some(pin) = self.pins.iter().find(|p| p.id == pin_id) else {
             return false;
         };
-        match gesture {
-            PinAnnotGesture::Draw { pin_id } => {
-                if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
-                    pin.annotations.end();
-                    pin.dirty_raster = true;
-                    pin.rebuild_visuals();
-                    self.sync_pin_to_history(pin_id);
-                }
+        let base_pt = pin.global_to_base_unclamped(global);
+        let moved = session.update(cx, |s, cx| {
+            let changed = s.pointer_move_with("pin", base_pt, shift, alt);
+            if changed || s.eraser_ring_follows_pointer() {
+                cx.notify();
             }
-            PinAnnotGesture::MoveMark {
-                pin_id, ix, before, ..
-            }
-            | PinAnnotGesture::MoveHandle {
-                pin_id, ix, before, ..
-            } => {
-                if let Some(pin) = self.pins.iter_mut().find(|p| p.id == pin_id) {
-                    pin.annotations.commit_move(ix, before);
-                    pin.dirty_raster = true;
-                    pin.rebuild_visuals();
-                    self.sync_pin_to_history(pin_id);
-                }
-            }
+            changed
+        });
+        moved || pointer_down
+    }
+
+    pub(super) fn annot_pointer_up(
+        &mut self,
+        global: Point<Pixels>,
+        shift: bool,
+        alt: bool,
+        cx: &mut App,
+    ) -> bool {
+        let Some(annot) = self.annot_session.as_mut() else {
+            return false;
+        };
+        if !annot.pointer_down_active {
+            return false;
         }
+        annot.pointer_down_active = false;
+        let pin_id = annot.pin_id;
+        let session = annot.session.clone();
+        let Some(pin) = self.pins.iter().find(|p| p.id == pin_id) else {
+            return false;
+        };
+        let base_pt = pin.global_to_base_unclamped(global);
+        session.update(cx, |s, cx| {
+            s.pointer_up_with("pin", base_pt, shift, alt);
+            cx.notify();
+        });
+        self.sync_pin_to_history(pin_id);
         true
     }
 }
 
 impl PinSurface {
+    /// Observe the active pin's `ScreenshotSession` for text style edits.
+    pub(super) fn ensure_annot_session_observer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_session = self
+            .board
+            .read(cx)
+            .annot_session
+            .as_ref()
+            .map(|a| (a.pin_id, a.session.clone()));
+        let Some((pin_id, session)) = current_session else {
+            self.annot_session_sub = None;
+            return;
+        };
+        let sid = session.entity_id();
+        if self
+            .annot_session_sub
+            .as_ref()
+            .is_some_and(|(existing, _)| *existing == sid)
+        {
+            return;
+        }
+        let sub = cx.observe_in(&session, window, move |this, session, _window, cx| {
+            if let Some(editor) = &mut this.text_editing
+                && this.number_edit.is_none()
+            {
+                let zoom = this
+                    .board
+                    .read(cx)
+                    .pins
+                    .iter()
+                    .find(|p| p.id == pin_id)
+                    .map(|p| p.zoom_factor())
+                    .unwrap_or(1.);
+                let a = session.read(cx).annotations();
+                let style = a.text_style().clone();
+                if editor.sync_style(a.text_size() * zoom, a.color().0, &style, cx) {
+                    let accepted_size = editor.font_size / zoom;
+                    let accepted_style = editor.style.clone();
+                    session.update(cx, |s, cx| {
+                        s.edit_annotation_settings(|a| {
+                            a.apply_size(accepted_size);
+                            a.set_text_style(accepted_style);
+                        });
+                        cx.notify();
+                    });
+                    this.refresh_pin_text(cx);
+                }
+            }
+            cx.notify();
+        });
+        self.annot_session_sub = Some((sid, sub));
+    }
+
+    pub(super) fn active_annot_session(
+        &self,
+        cx: &App,
+    ) -> Option<(u64, Entity<ScreenshotSession>)> {
+        self.board
+            .read(cx)
+            .annot_session
+            .as_ref()
+            .map(|a| (a.pin_id, a.session.clone()))
+    }
+
+    /// Seed the inline swatch color-picker state for Row 2 without emitting events.
+    pub(super) fn annot_swatch_editor_seed(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ColorPickerState>> {
+        let picker = self.swatch_picker.clone()?;
+        let (_, session) = self.active_annot_session(cx)?;
+        let target = u32_to_hsla(session.read(cx).annotations().color().0);
+        let stale = {
+            let state = picker.read(cx);
+            !state.is_open() && state.value() != Some(target)
+        };
+        if stale {
+            picker.update(cx, |state, cx| state.set_value(target, window, cx));
+        }
+        Some(picker)
+    }
+
+    /// Build or synchronize Row 2's continuous size slider against the active session.
+    pub(super) fn annot_size_slider(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<SizeSlider> {
+        let (_, session) = self.active_annot_session(cx)?;
+        let edit = {
+            let a = session.read(cx).annotations();
+            a.edit_kind().map(|kind| {
+                (
+                    (kind, a.editing_filter_brush_size()),
+                    a.current_size_spec(),
+                    a.current_edit_size(),
+                )
+            })
+        };
+        edit.map(|(kind, spec, current)| {
+            let reusable = match self.slider.as_ref() {
+                Some((k, state)) if *k == kind => Some(state.clone()),
+                _ => None,
+            };
+            let state = if let Some(state) = reusable {
+                if (state.read(cx).value().start() - current).abs() > f32::EPSILON {
+                    state.update(cx, |s, cx| s.set_value(current, window, cx));
+                }
+                state
+            } else {
+                let state = cx.new(|_| {
+                    gpui_kit::base::slider::SliderState::new()
+                        .min(spec.min)
+                        .max(spec.max)
+                        .step(1.)
+                        .default_value(current)
+                });
+                let board = self.board.clone();
+                let sub = cx.subscribe(
+                    &state,
+                    move |_, _, event: &gpui_kit::base::slider::SliderEvent, cx| {
+                        let Some(sess) = board
+                            .read(cx)
+                            .annot_session
+                            .as_ref()
+                            .map(|a| a.session.clone())
+                        else {
+                            return;
+                        };
+                        match event {
+                            gpui_kit::base::slider::SliderEvent::Change(v) => {
+                                sess.update(cx, |s, cx| {
+                                    s.edit_annotation_settings(|a| a.apply_size(v.start()));
+                                    cx.notify();
+                                });
+                            }
+                            gpui_kit::base::slider::SliderEvent::Release(_) => {
+                                sess.update(cx, |s, _| {
+                                    s.edit_annotation_settings(|a| a.end_size_drag());
+                                });
+                            }
+                        }
+                    },
+                );
+                self.slider_sub = Some(sub);
+                self.slider = Some((kind, state.clone()));
+                state
+            };
+            let percentage = state.read(cx).percentage().end;
+            SizeSlider {
+                state,
+                percentage,
+                current,
+            }
+        })
+    }
+
+    pub(super) fn toggle_pin_tool(
+        &mut self,
+        kind: ShapeKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_pin_text(true, window, cx);
+        window.focus(&self.focus_handle, cx);
+        let Some((_, session)) = self.active_annot_session(cx) else {
+            return;
+        };
+        session.update(cx, |s, cx| {
+            s.toggle_annotation_tool(kind);
+            cx.notify();
+        });
+    }
+
+    pub(super) fn handle_annot_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_editing.is_some() {
+            let commit = self.number_edit.is_none();
+            self.finish_pin_text(commit, window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        let Some((_, session)) = self.active_annot_session(cx) else {
+            return;
+        };
+        let interrupted = session.update(cx, |s, cx| {
+            let interrupted = s.escape_interaction();
+            cx.notify();
+            interrupted
+        });
+        if !interrupted {
+            self.board.update(cx, |b, cx| {
+                b.exit_annotate(cx);
+            });
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Right-click while annotating: never open the pin context menu; instead
+    /// mirror the main overlay's exit flow (commit text -> finish polyline /
+    /// exit active tool & selection -> exit pin annotation mode).
+    pub(super) fn handle_annot_right_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if GlobalState::is_in_deferred_context(cx) {
+            return;
+        }
+        if self.text_editing.is_some() {
+            self.finish_pin_text(true, window, cx);
+            return;
+        }
+        window.focus(&self.focus_handle, cx);
+        let Some((_, session)) = self.active_annot_session(cx) else {
+            return;
+        };
+        let had_active_tool_or_selection = {
+            let a = session.read(cx).annotations();
+            a.tool().is_some() || a.selected_index().is_some() || a.is_drawing_polyline()
+        };
+        if had_active_tool_or_selection {
+            session.update(cx, |s, cx| {
+                s.finish_or_exit_annotation();
+                cx.notify();
+            });
+        } else {
+            self.board.update(cx, |b, cx| {
+                b.exit_annotate(cx);
+            });
+        }
+    }
+
+    /// Handle a left press inside the annotating pin. Returns `true` if consumed
+    /// by annotation interaction; `false` if the caller should fall back to
+    /// dragging the pin (no active tool and empty canvas hit).
     pub(super) fn handle_annot_mouse_down(
         &mut self,
         pin_id: u64,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let global = event.position + self.output.bounds.origin;
-        // Commit any open text prompt before starting a new stroke.
-        self.commit_pin_text_prompt(window, cx);
+        self.finish_pin_text(true, window, cx);
 
-        let tool_is_text = self
+        let Some((base_pt, pin_local, zoom, session)) = self
+            .board
+            .read(cx)
+            .annot_session
+            .as_ref()
+            .filter(|a| a.pin_id == pin_id)
+            .and_then(|a| {
+                let pin = self.board.read(cx).pins.iter().find(|p| p.id == pin_id)?;
+                Some((
+                    pin.global_to_base_unclamped(global),
+                    pin.rect.origin - self.output.bounds.origin,
+                    pin.zoom_factor(),
+                    a.session.clone(),
+                ))
+            })
+        else {
+            return false;
+        };
+
+        let tool = session.read(cx).annotations().tool();
+        if event.click_count >= 2
+            && matches!(tool, None | Some(ShapeKind::Select | ShapeKind::Text))
+        {
+            let hit_text = session
+                .read(cx)
+                .annotations()
+                .hit_test(base_pt)
+                .and_then(|ix| {
+                    (session.read(cx).annotations().shape_kind(ix) == Some(ShapeKind::Text))
+                        .then_some(ix)
+                });
+            if let Some(ix) = hit_text {
+                self.start_pin_edit_text(pin_id, ix, base_pt, pin_local, zoom, window, cx);
+                return true;
+            }
+        }
+
+        if tool == Some(ShapeKind::Text)
+            && session
+                .read(cx)
+                .annotations()
+                .interaction_hit_test(base_pt)
+                .is_none()
+        {
+            self.start_pin_text(pin_id, base_pt, pin_local, zoom, window, cx);
+            return true;
+        }
+
+        if event.click_count == 2 {
+            let straightened = session.update(cx, |s, cx| {
+                let ok = s.straighten_at_double_click("pin", base_pt);
+                if ok {
+                    cx.notify();
+                }
+                ok
+            });
+            if straightened {
+                return true;
+            }
+        }
+
+        if event.click_count == 2
+            && let Some((ix, badge_base_origin)) =
+                session.read(cx).number_at_double_click("pin", base_pt)
+        {
+            self.start_pin_number_edit(pin_id, ix, badge_base_origin, pin_local, zoom, window, cx);
+            return true;
+        }
+
+        if session
+            .read(cx)
+            .pin_consumes_press(base_pt, event.modifiers.shift)
+        {
+            self.board.update(cx, |b, _| {
+                if let Some(annot) = &mut b.annot_session {
+                    annot.pointer_down_active = true;
+                }
+            });
+            session.update(cx, |s, cx| {
+                s.pointer_down("pin", base_pt, event.modifiers.alt, event.modifiers.shift);
+                cx.notify();
+            });
+            return true;
+        }
+
+        if session.read(cx).annotations().selected_count() > 0 {
+            session.update(cx, |s, cx| {
+                s.edit_annotations(|a| a.deselect());
+                cx.notify();
+            });
+        }
+        false
+    }
+
+    fn subscribe_pin_text(
+        &mut self,
+        input: &Entity<crate::ui::text_input::TextInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.text_subscription =
+            Some(
+                cx.subscribe_in(input, window, |this, _, event, window, cx| {
+                    if matches!(event, gpui_kit::base::input::InputEvent::Change) {
+                        this.refresh_pin_text(cx);
+                    }
+                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                        this.finish_pin_text(true, window, cx);
+                    }
+                }),
+            );
+    }
+
+    fn start_pin_text(
+        &mut self,
+        pin_id: u64,
+        base_pt: Point<Pixels>,
+        pin_local: Point<Pixels>,
+        zoom: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, session)) = self
+            .active_annot_session(cx)
+            .filter(|(id, _)| *id == pin_id)
+        else {
+            return;
+        };
+        session.update(cx, |s, _| {
+            s.edit_annotations(|a| a.deselect());
+        });
+        let font_size = session.read(cx).annotations().text_size();
+        let Some(bounds_base) = session.read(cx).text_bounds("pin", base_pt, font_size) else {
+            return;
+        };
+        let color = session.read(cx).annotations().color().0;
+        let style = session.read(cx).annotations().text_style().clone();
+        let scaled_bounds = Bounds::new(
+            bounds_base.origin,
+            size(
+                px(f32::from(bounds_base.size.width) * zoom),
+                px(f32::from(bounds_base.size.height) * zoom),
+            ),
+        );
+        let editor_local = pin_local
+            + point(
+                px(f32::from(bounds_base.origin.x) * zoom),
+                px(f32::from(bounds_base.origin.y) * zoom),
+            );
+        let mut editor = TextEditor::new(scaled_bounds, editor_local, font_size * zoom, color, cx);
+        editor.sync_style(font_size * zoom, color, &style, cx);
+        self.subscribe_pin_text(editor.input(), window, cx);
+        self.text_editing = Some(editor);
+        self.refresh_pin_text(cx);
+        session.update(cx, |s, cx| {
+            s.set_blocked(true);
+            cx.notify();
+        });
+        cx.defer_in(window, |this, window, cx| {
+            if let Some(editor) = &this.text_editing {
+                editor.focus(window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_pin_number_edit(
+        &mut self,
+        pin_id: u64,
+        ix: usize,
+        badge_base_origin: Point<Pixels>,
+        pin_local: Point<Pixels>,
+        zoom: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, session)) = self
+            .active_annot_session(cx)
+            .filter(|(id, _)| *id == pin_id)
+        else {
+            return;
+        };
+        let Some(shape) = session.read(cx).annotations().committed().get(ix).cloned() else {
+            return;
+        };
+        let diameter = f32::from(shape.bounds.size.width);
+        let scaled_bounds = Bounds::new(
+            shape.bounds.origin,
+            size(
+                px(f32::from(shape.bounds.size.width) * zoom),
+                px(f32::from(shape.bounds.size.height) * zoom),
+            ),
+        );
+        let editor_local = pin_local
+            + point(
+                px(f32::from(badge_base_origin.x) * zoom),
+                px(f32::from(badge_base_origin.y) * zoom),
+            );
+        let editor = TextEditor::new_with_text(
+            scaled_bounds,
+            editor_local,
+            diameter * 0.55 * zoom,
+            shape.color,
+            &shape.number.unwrap_or(1).to_string(),
+            None,
+            cx,
+        );
+        self.subscribe_pin_text(editor.input(), window, cx);
+        self.text_editing = Some(editor);
+        self.number_edit = Some((ix, shape));
+        session.update(cx, |s, cx| {
+            s.set_blocked(true);
+            cx.notify();
+        });
+        cx.defer_in(window, |this, window, cx| {
+            if let Some(editor) = &this.text_editing {
+                editor.focus(window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_pin_edit_text(
+        &mut self,
+        pin_id: u64,
+        ix: usize,
+        click_base: Point<Pixels>,
+        pin_local: Point<Pixels>,
+        zoom: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, session)) = self
+            .active_annot_session(cx)
+            .filter(|(id, _)| *id == pin_id)
+        else {
+            return;
+        };
+        let (shape, available_base, unrotated_click_scaled) = {
+            let s = session.read(cx);
+            let Some(shape) = s.annotations().shape(ix).cloned() else {
+                return;
+            };
+            let unrotated_click = shape.rotated_point(click_base, true);
+            let Some(available) = s.text_bounds("pin", shape.bounds.origin, shape.size()) else {
+                return;
+            };
+            let click_scaled = pin_local
+                + point(
+                    px(f32::from(unrotated_click.x) * zoom),
+                    px(f32::from(unrotated_click.y) * zoom),
+                );
+            (shape, available, click_scaled)
+        };
+        let text = shape.text.as_deref().unwrap_or("");
+        let font_size = shape.size();
+        let color = shape.color;
+        let scaled_bounds = Bounds::new(
+            available_base.origin,
+            size(
+                px(f32::from(available_base.size.width) * zoom),
+                px(f32::from(available_base.size.height) * zoom),
+            ),
+        );
+        let editor_local = pin_local
+            + point(
+                px(f32::from(available_base.origin.x) * zoom),
+                px(f32::from(available_base.origin.y) * zoom),
+            );
+        let mut editor = TextEditor::new_with_text(
+            scaled_bounds,
+            editor_local,
+            font_size * zoom,
+            color,
+            text,
+            None,
+            cx,
+        );
+        let mut upright_style = shape.text_style.clone();
+        upright_style.rotation = 0.;
+        editor.sync_style(font_size * zoom, color, &upright_style, cx);
+        editor.place_caret(unrotated_click_scaled, cx);
+        let started = session.update(cx, |s, cx| {
+            let ok = s.begin_text_edit(ix);
+            if ok {
+                cx.notify();
+            }
+            ok
+        });
+        if !started {
+            return;
+        }
+        self.subscribe_pin_text(editor.input(), window, cx);
+        self.text_editing = Some(editor);
+        self.refresh_pin_text(cx);
+        cx.defer_in(window, |this, window, cx| {
+            if let Some(editor) = &this.text_editing {
+                editor.focus(window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    pub(super) fn refresh_pin_text(&mut self, cx: &mut Context<Self>) {
+        let Some((pin_id, session)) = self.active_annot_session(cx) else {
+            return;
+        };
+        let zoom = self
             .board
             .read(cx)
             .pins
             .iter()
             .find(|p| p.id == pin_id)
-            .is_some_and(|p| p.annotations.tool() == Some(ShapeKind::Text));
-
-        if tool_is_text {
-            self.open_pin_text_prompt(pin_id, global, window, cx);
+            .map(|p| p.zoom_factor())
+            .unwrap_or(1.);
+        let Some(editor) = &mut self.text_editing else {
             return;
-        }
-
-        self.board.update(cx, |board, cx| {
-            let Some(pin) = board.pins.iter_mut().find(|p| p.id == pin_id) else {
-                return;
-            };
-            let base_pt = pin.global_to_base(global);
-            let area = Bounds::new(point(px(0.), px(0.)), pin.base);
-
-            // Check handles on a single selected mark first.
-            if let Some(sel_ix) = pin.annotations.selected_index()
-                && pin.annotations.selected_count() == 1
-                && let Some(shape) = pin.annotations.shape(sel_ix).cloned()
-                && let Some(anchor) = shape.handle_at(base_pt)
-            {
-                board.annot_gesture = Some(PinAnnotGesture::MoveHandle {
-                    pin_id,
-                    ix: sel_ix,
-                    anchor,
-                    before: shape,
+        };
+        editor.refresh(cx);
+        let value = editor.value(cx);
+        if let Some((ix, _)) = &self.number_edit {
+            if let Ok(v) = value.trim().parse::<u32>() {
+                session.update(cx, |s, cx| {
+                    s.preview_number_edit(*ix, v);
+                    cx.notify();
                 });
-                cx.notify();
-                return;
             }
-
-            // Pick/move existing shape when Select mode (or clicking an already selected frame).
-            if let Some(hit_ix) = pin.annotations.interaction_hit_test(base_pt) {
-                pin.annotations.select_index(hit_ix);
-                if let Some(before) = pin.annotations.shape(hit_ix).cloned() {
-                    board.annot_gesture = Some(PinAnnotGesture::MoveMark {
-                        pin_id,
-                        ix: hit_ix,
-                        start_base: base_pt,
-                        before,
-                    });
-                }
+        } else {
+            let mut bounds = editor.actual_bounds();
+            bounds.size = size(
+                px((f32::from(bounds.size.width) / zoom).max(1.)),
+                px((f32::from(bounds.size.height) / zoom).max(1.)),
+            );
+            session.update(cx, |s, cx| {
+                s.preview_text(bounds, value);
                 cx.notify();
-                return;
-            }
-
-            if matches!(pin.annotations.tool(), None | Some(ShapeKind::Select)) {
-                pin.annotations.deselect();
-                cx.notify();
-                return;
-            }
-
-            pin.annotations.begin(base_pt, area, false);
-            pin.rebuild_live_preview();
-            board.annot_gesture = Some(PinAnnotGesture::Draw { pin_id });
-            cx.notify();
-        });
+            });
+        }
+        cx.notify();
     }
 
-    fn open_pin_text_prompt(
+    pub(super) fn finish_pin_text(
         &mut self,
-        pin_id: u64,
-        global: Point<Pixels>,
+        commit: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((base_anchor, color, font_size)) = self.board.update(cx, |board, _| {
-            let pin = board.pins.iter().find(|p| p.id == pin_id)?;
-            Some((
-                pin.global_to_base(global),
-                pin.annotations.color().0,
-                pin.annotations.text_size(),
-            ))
-        }) else {
+        let Some(editor) = self.text_editing.take() else {
             return;
         };
-
-        let out = self.output.bounds;
-        let w = TEXT_PROMPT_W.min((f32::from(out.size.width) - 12.).max(100.));
-        let x = f32::from(global.x).clamp(
-            f32::from(out.left()) + 6.,
-            (f32::from(out.right()) - w - 6.).max(f32::from(out.left()) + 6.),
-        );
-        let y = f32::from(global.y).clamp(
-            f32::from(out.top()) + 6.,
-            (f32::from(out.bottom()) - TEXT_PROMPT_H - 6.).max(f32::from(out.top()) + 6.),
-        );
-        let prompt_bounds = Bounds::new(point(px(x), px(y)), size(px(w), px(TEXT_PROMPT_H)));
-
-        let input = cx.new(|cx| {
-            let mut ti = TextInput::new_with_initial("", w - 16., 28., 15., cx);
-            ti.set_color(color, cx);
-            ti
-        });
-        let _ = font_size;
-        let sub = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                this.commit_pin_text_prompt(window, cx);
-            }
-        });
-        let focus_target = input.clone();
-        self.board.update(cx, |board, cx| {
-            board.text_prompt = Some(PinTextPrompt {
-                pin_id,
-                base_anchor,
-                global_bounds: prompt_bounds,
-                input,
-                _sub: sub,
-            });
-            cx.notify();
-        });
-        focus_target.update(cx, |ti, cx| ti.focus(window, cx));
-    }
-
-    pub(super) fn commit_pin_text_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let taken = self.board.update(cx, |board, _| board.text_prompt.take());
-        let Some(prompt) = taken else {
+        self.text_subscription.take();
+        editor
+            .input()
+            .update(cx, |input, cx| input.discard_preedit(cx));
+        let Some((pin_id, session)) = self.active_annot_session(cx) else {
+            self.number_edit = None;
             return;
         };
-        prompt.input.update(cx, |ti, cx| ti.discard_preedit(cx));
-        let value = prompt.input.read(cx).value();
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            let committed_text = trimmed.to_owned();
-            self.board.update(cx, |board, cx| {
-                if let Some(pin) = board.pins.iter_mut().find(|p| p.id == prompt.pin_id) {
-                    let fsz = pin.annotations.text_size();
-                    let style = pin.annotations.text_style().clone();
-                    let max_w = (f32::from(pin.base.width) - f32::from(prompt.base_anchor.x))
-                        .max(48.)
-                        .min(f32::from(pin.base.width));
-                    let max_h = (f32::from(pin.base.height) - f32::from(prompt.base_anchor.y))
-                        .max(fsz * 1.5)
-                        .min(f32::from(pin.base.height));
-                    let buf = crate::annotation::text::styled_buffer(
-                        &committed_text,
-                        max_w,
-                        max_h,
-                        fsz,
-                        &style,
-                    );
-                    let mut text_w = 0.0_f32;
-                    let mut text_h = 0.0_f32;
-                    for run in buf.layout_runs() {
-                        text_w = text_w.max(run.line_w);
-                        text_h = text_h.max(run.line_top + run.line_height);
+        let zoom = self
+            .board
+            .read(cx)
+            .pins
+            .iter()
+            .find(|p| p.id == pin_id)
+            .map(|p| p.zoom_factor())
+            .unwrap_or(1.);
+        if let Some((ix, before)) = self.number_edit.take() {
+            let value = editor.value(cx);
+            let parsed = commit
+                .then(|| value.trim().parse::<u32>().ok())
+                .flatten()
+                .filter(|v| *v > 0);
+            session.update(cx, |s, cx| {
+                s.set_blocked(false);
+                s.edit_annotations(|a| match parsed {
+                    Some(v) => {
+                        a.preview_number(ix, v);
+                        a.commit_move(ix, before);
                     }
-                    let inset = style.inset() * 2. + 6.;
-                    let box_w = (text_w + inset).clamp(24., f32::from(pin.base.width));
-                    let box_h = (text_h + inset).clamp(fsz * 1.4, f32::from(pin.base.height));
-                    let bx = f32::from(prompt.base_anchor.x)
-                        .clamp(0., (f32::from(pin.base.width) - box_w).max(0.));
-                    let by = f32::from(prompt.base_anchor.y)
-                        .clamp(0., (f32::from(pin.base.height) - box_h).max(0.));
-                    pin.annotations.add_text(
-                        Bounds::new(point(px(bx), px(by)), size(px(box_w), px(box_h))),
-                        committed_text,
-                    );
-                    pin.dirty_raster = true;
-                    pin.rebuild_visuals();
-                    board.sync_pin_to_history(prompt.pin_id);
-                }
+                    None => a.preview_number(ix, before.number.unwrap_or(1)),
+                });
                 cx.notify();
             });
         } else {
-            self.board.update(cx, |_, cx| cx.notify());
+            let mut bounds = editor.actual_bounds();
+            bounds.size = size(
+                px((f32::from(bounds.size.width) / zoom).max(1.)),
+                px((f32::from(bounds.size.height) / zoom).max(1.)),
+            );
+            let value = editor.value(cx);
+            session.update(cx, |s, cx| {
+                s.preview_text(bounds, value);
+                s.finish_text_edit(commit);
+                cx.notify();
+            });
         }
         window.focus(&self.focus_handle, cx);
-    }
-
-    pub(super) fn render_annot_bar(
-        &self,
-        bar_global: Bounds<Pixels>,
-        cx: &mut Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let state = self.board.read(cx);
-        let id = state.annotating?;
-        let pin = state.pins.iter().find(|p| p.id == id)?;
-        let active_tool = pin.annotations.tool();
-        let active_swatch = pin
-            .annotations
-            .active_swatch_index()
-            .unwrap_or_else(|| pin.annotations.color_index());
-        let cur_size = pin.annotations.current_edit_size().round() as u32;
-        let palette_colors = *crate::model::settings::current().annotation_colors();
-        let capsule = crate::ui::e2e::debug_ui_style()
-            .unwrap_or_else(|| crate::model::settings::current().ui_style())
-            == crate::model::settings::UiStyle::Capsule;
-        let c = theme::c();
-        let hover_bg = if capsule {
-            c.capsule_hover()
-        } else {
-            c.toolbar_hover
-        };
-        let btn_radius = if capsule { px(8.) } else { px(4.) };
-        let local = bar_global.origin - self.output.bounds.origin;
-
-        let tool_btn = |btn_id: &'static str,
-                        kind: ShapeKind,
-                        icon: IconName,
-                        action: fn() -> Box<dyn Action>| {
-            let selected = active_tool == Some(kind);
-            let sel_bg = if capsule {
-                c.accent
-            } else {
-                c.toolbar_selected
-            };
-            let icon_col = if selected && capsule {
-                c.capsule_on_accent()
-            } else {
-                c.toolbar_text
-            };
-            Button::new(btn_id)
-                .debug_selector(move || btn_id.into())
-                .w(px(28.))
-                .h(px(28.))
-                .rounded(btn_radius)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(if selected { sel_bg } else { 0x0000_0000 }))
-                .hover(move |s| s.bg(rgba(if selected { sel_bg } else { hover_bg })))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                .child(Icon::new(icon).size_4().text_color(rgba(icon_col)))
-        };
-
-        let act_btn = |btn_id: &'static str,
-                       icon: IconName,
-                       action: fn() -> Box<dyn Action>,
-                       accent: bool| {
-            Button::new(btn_id)
-                .debug_selector(move || btn_id.into())
-                .w(px(28.))
-                .h(px(28.))
-                .rounded(if accent && capsule {
-                    px(14.)
-                } else {
-                    btn_radius
-                })
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(if accent { c.accent } else { 0x0000_0000 }))
-                .hover(move |s| s.bg(rgba(if accent { c.accent } else { hover_bg })))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                .child(Icon::new(icon).size_4().text_color(rgba(if accent {
-                    if capsule {
-                        c.capsule_on_accent()
-                    } else {
-                        0xFFFF_FFFF
-                    }
-                } else {
-                    c.toolbar_text
-                })))
-        };
-
-        let sep = || {
-            div().w(px(1.)).h(px(18.)).mx_0p5().bg(rgba(if capsule {
-                c.capsule_border()
-            } else {
-                c.toolbar_border
-            }))
-        };
-
-        let row1 = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_0p5()
-            .child(tool_btn(
-                "pin-tool-select",
-                ShapeKind::Select,
-                IconName::Scan,
-                || Box::new(PinToolSelect),
-            ))
-            .child(tool_btn(
-                "pin-tool-rect",
-                ShapeKind::Rectangle,
-                IconName::Square,
-                || Box::new(PinToolRect),
-            ))
-            .child(tool_btn(
-                "pin-tool-ellipse",
-                ShapeKind::Ellipse,
-                IconName::Circle,
-                || Box::new(PinToolEllipse),
-            ))
-            .child(tool_btn(
-                "pin-tool-arrow",
-                ShapeKind::Arrow,
-                IconName::ArrowUpRight,
-                || Box::new(PinToolArrow),
-            ))
-            .child(tool_btn(
-                "pin-tool-line",
-                ShapeKind::Line,
-                IconName::Slash,
-                || Box::new(PinToolLine),
-            ))
-            .child(tool_btn(
-                "pin-tool-pencil",
-                ShapeKind::Pencil,
-                IconName::Pencil,
-                || Box::new(PinToolPencil),
-            ))
-            .child(tool_btn(
-                "pin-tool-hl",
-                ShapeKind::Highlighter,
-                IconName::Highlighter,
-                || Box::new(PinToolHighlighter),
-            ))
-            .child(tool_btn(
-                "pin-tool-mosaic",
-                ShapeKind::Mosaic,
-                IconName::SquareDashed,
-                || Box::new(PinToolMosaic),
-            ))
-            .child(tool_btn(
-                "pin-tool-number",
-                ShapeKind::Number,
-                IconName::ListOrdered,
-                || Box::new(PinToolNumber),
-            ))
-            .child(tool_btn(
-                "pin-tool-text",
-                ShapeKind::Text,
-                IconName::Type,
-                || Box::new(PinToolText),
-            ))
-            .child(tool_btn(
-                "pin-tool-eraser",
-                ShapeKind::Eraser,
-                IconName::Eraser,
-                || Box::new(PinToolEraser),
-            ))
-            .child(sep())
-            .child(act_btn(
-                "pin-annot-undo",
-                IconName::Undo2,
-                || Box::new(PinUndo),
-                false,
-            ))
-            .child(act_btn(
-                "pin-annot-redo",
-                IconName::Redo2,
-                || Box::new(PinRedo),
-                false,
-            ))
-            .child(act_btn(
-                "pin-annot-clear",
-                IconName::Trash,
-                || Box::new(PinClearMarks),
-                false,
-            ))
-            .child(act_btn(
-                "pin-annot-done",
-                IconName::Check,
-                || Box::new(ExitPinAnnotate),
-                true,
-            ));
-
-        let mut swatches = div().flex().items_center().gap_1p5();
-        for (ix, &swatch_rgba) in palette_colors.iter().enumerate().take(PALETTE) {
-            let is_sel = ix == active_swatch;
-            let board_handle = self.board.clone();
-            swatches = swatches.child(
-                div()
-                    .id(("pin-swatch", ix))
-                    .w(px(18.))
-                    .h(px(18.))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgba(swatch_rgba))
-                    .border(px(if is_sel { 2. } else { 1. }))
-                    .border_color(rgba(if is_sel { c.accent } else { c.toolbar_border }))
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        board_handle.update(cx, |b, cx| b.set_annot_color(ix, cx));
-                        cx.stop_propagation();
-                    }),
-            );
-        }
-
-        let size_cluster = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(act_btn(
-                "pin-size-down",
-                IconName::Minus,
-                || Box::new(PinSizeDown),
-                false,
-            ))
-            .child(
-                div()
-                    .min_w(px(28.))
-                    .text_center()
-                    .text_xs()
-                    .text_color(rgba(c.toolbar_text))
-                    .child(format!("{cur_size}px")),
-            )
-            .child(act_btn(
-                "pin-size-up",
-                IconName::Plus,
-                || Box::new(PinSizeUp),
-                false,
-            ))
-            .child(act_btn(
-                "pin-mark-del",
-                IconName::X,
-                || Box::new(PinDeleteMark),
-                false,
-            ));
-
-        let row2 = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_1()
-            .child(swatches)
-            .child(size_cluster);
-
-        let mut bar = div()
-            .id("pin-annot-bar")
-            .debug_selector(|| "pin-annot-bar".into())
-            .absolute()
-            .left(local.x)
-            .top(local.y)
-            .w(bar_global.size.width)
-            .h(bar_global.size.height)
-            .px_2()
-            .py_1()
-            .flex()
-            .flex_col()
-            .justify_between()
-            .border_1()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        bar = if capsule {
-            bar.rounded(px(14.))
-                .border_color(rgba(c.capsule_border()))
-                .bg(rgba(c.capsule_surface()))
-                .shadow(theme::capsule_floating_shadow())
-        } else {
-            bar.rounded_md()
-                .border_color(rgba(c.toolbar_border))
-                .bg(rgba(c.toolbar_bg))
-        };
-        Some(bar.child(row1).child(row2))
-    }
-
-    pub(super) fn render_text_prompt(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let state = self.board.read(cx);
-        let prompt = state.text_prompt.as_ref()?;
-        if !self.output.bounds.contains(&prompt.global_bounds.origin) {
-            return None;
-        }
-        let capsule = crate::ui::e2e::debug_ui_style()
-            .unwrap_or_else(|| crate::model::settings::current().ui_style())
-            == crate::model::settings::UiStyle::Capsule;
-        let c = theme::c();
-        let local = prompt.global_bounds.origin - self.output.bounds.origin;
-        let input = prompt.input.clone();
-        Some(
-            div()
-                .id("pin-text-prompt")
-                .debug_selector(|| "pin-text-prompt".into())
-                .absolute()
-                .left(local.x)
-                .top(local.y)
-                .w(prompt.global_bounds.size.width)
-                .h(prompt.global_bounds.size.height)
-                .px_2()
-                .py_1()
-                .rounded(if capsule { px(10.) } else { px(6.) })
-                .border_1()
-                .border_color(rgba(c.accent))
-                .bg(rgba(if capsule {
-                    c.capsule_sheet_surface()
-                } else {
-                    c.toolbar_bg
-                }))
-                .shadow(if capsule {
-                    theme::capsule_floating_shadow()
-                } else {
-                    Vec::new()
-                })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div().relative().size_full().child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(4.))
-                            .right(px(0.))
-                            .bottom(px(2.))
-                            .child(input),
-                    ),
-                ),
-        )
+        cx.notify();
     }
 }

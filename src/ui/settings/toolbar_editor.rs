@@ -173,15 +173,14 @@ impl SettingsWindow {
                 }
             },
         );
-        let ui_style = self.settings.ui_style();
-        let mut bar = toolbar::bar_for(ui_style)
+        let mut bar = toolbar::bar()
             // the strip lays its child out as a flex ROW item: `flex_none`
             // (no grow, no shrink) keeps the bar at its content width —
             // wider rows overflow the strip and scroll, they must never
             // be stretched (gaps inflate) or squeezed (buttons compress)
             .flex_none()
             .on_drop(bar_fallback)
-            .child(grip_end(ui_style, "pv-grip-left").on_drag_move(pin_start));
+            .child(grip_end("pv-grip-left").on_drag_move(pin_start));
         for (j, (i, item)) in shown.iter().enumerate() {
             // `slot` derives from `drag`, so Some(slot) implies the
             // drag mirror is present — the footprint is the carried
@@ -189,16 +188,16 @@ impl SettingsWindow {
             if slot == Some(j)
                 && let Some(d) = drag
             {
-                bar = bar.child(insertion_slot(ui_style, item_footprint(ui_style, d.item)));
+                bar = bar.child(insertion_slot(item_footprint(d.item)));
             }
-            bar = bar.child(self.preview_item(ui_style, *i, j, *item, cx));
+            bar = bar.child(self.preview_item(*i, j, *item, cx));
         }
         if slot == Some(shown.len())
             && let Some(d) = drag
         {
-            bar = bar.child(insertion_slot(ui_style, item_footprint(ui_style, d.item)));
+            bar = bar.child(insertion_slot(item_footprint(d.item)));
         }
-        bar.child(grip_end(ui_style, "pv-grip-right").on_drag_move(pin_end))
+        bar.child(grip_end("pv-grip-right").on_drag_move(pin_end))
     }
 
     /// Record what the drag carries and the slot it aims; notifies
@@ -231,7 +230,6 @@ impl SettingsWindow {
     /// displayed row, so the gap preview and the eventual drop agree.
     fn preview_item(
         &self,
-        ui_style: crate::model::settings::UiStyle,
         i: usize,
         j: usize,
         item: ToolbarItem,
@@ -272,8 +270,7 @@ impl SettingsWindow {
             ToolbarItem::Button(button) => match toolbar::meta_for(button) {
                 Some(meta) => {
                     let remove = cx.entity();
-                    toolbar::preview_control_for(
-                        ui_style,
+                    toolbar::preview_control(
                         meta,
                         self.settings.keys(),
                         &self.focus,
@@ -290,7 +287,6 @@ impl SettingsWindow {
                 None => div().into_any_element(),
             },
             ToolbarItem::Separator => layout_visual(
-                ui_style,
                 format!("pv-separator-{i}").into(),
                 payload,
                 cx,
@@ -298,27 +294,9 @@ impl SettingsWindow {
                 hover,
                 drop,
                 div()
-                    .w(px(
-                        if ui_style == crate::model::settings::UiStyle::Capsule {
-                            1.
-                        } else {
-                            2.
-                        },
-                    ))
-                    .h(px(
-                        if ui_style == crate::model::settings::UiStyle::Capsule {
-                            20.
-                        } else {
-                            18.
-                        },
-                    ))
-                    .bg(rgba(
-                        if ui_style == crate::model::settings::UiStyle::Capsule {
-                            theme::c().capsule_border()
-                        } else {
-                            theme::c().toolbar_border
-                        },
-                    )),
+                    .w(px(1.))
+                    .h(px(20.))
+                    .bg(rgba(theme::c().capsule_border())),
             ),
         }
     }
@@ -656,13 +634,13 @@ impl SettingsWindow {
 /// as a grip (dragging the PREVIEW bar around would be a lie — it has
 /// no placement), but it carries the drag-move target that pins the
 /// insertion point to its end of the bar.
-fn grip_end(style: crate::model::settings::UiStyle, id: &'static str) -> Stateful<Div> {
+fn grip_end(id: &'static str) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
         .items_center()
-        .px(px(crate::model::placement::bar_pad_for(style)))
-        .child(toolbar::grip_visual(style))
+        .px(px(crate::model::placement::BAR_PAD))
+        .child(toolbar::grip_visual())
 }
 
 /// The drag-ghost constructor gpui calls when a drag starts. A fn
@@ -683,12 +661,11 @@ fn ghost_constructor(
 /// replaces the lifted item; a palette insert grows it by one
 /// footprint, bounded, unlike the old per-slot strips that grew the
 /// bar ~350px and pushed the right grip off the window).
-fn insertion_slot(style: crate::model::settings::UiStyle, footprint: Pixels) -> Div {
-    let capsule = style == crate::model::settings::UiStyle::Capsule;
+fn insertion_slot(footprint: Pixels) -> Div {
     div()
         .w(footprint)
-        .h(px(if capsule { 28. } else { 26. }))
-        .rounded(px(if capsule { 8. } else { 5. }))
+        .h(px(28.))
+        .rounded(px(8.))
         .flex_shrink_0()
         .border_1()
         .border_color(rgba(theme::c().accent))
@@ -699,14 +676,9 @@ fn insertion_slot(style: crate::model::settings::UiStyle, footprint: Pixels) -> 
 /// reserves. Must track the real visuals' footprints (`control`'s
 /// button width, `layout_visual`'s 18px separator hit shell) or the
 /// bar visibly changes width when a drag lifts an item.
-fn item_footprint(style: crate::model::settings::UiStyle, item: ToolbarItem) -> Pixels {
+fn item_footprint(item: ToolbarItem) -> Pixels {
     match item {
-        ToolbarItem::Button(_) => match style {
-            crate::model::settings::UiStyle::Classic => px(30.),
-            crate::model::settings::UiStyle::Capsule => {
-                px(crate::model::placement::CAPSULE_BTN_SIZE)
-            }
-        },
+        ToolbarItem::Button(_) => px(crate::model::placement::BTN_SIZE),
         ToolbarItem::Separator => px(18.),
     }
 }
@@ -727,7 +699,6 @@ fn drag_payload(event: &DragMoveEvent<DraggedItem>, cx: &App) -> (ToolbarItem, O
 /// own.
 #[allow(clippy::too_many_arguments)]
 fn layout_visual(
-    style: crate::model::settings::UiStyle,
     id: SharedString,
     payload: DraggedItem,
     cx: &Context<SettingsWindow>,
@@ -736,22 +707,15 @@ fn layout_visual(
     drop: impl Fn(&DraggedItem, &mut Window, &mut App) + 'static,
     visual: impl IntoElement,
 ) -> AnyElement {
-    let capsule = style == crate::model::settings::UiStyle::Capsule;
     div()
         .id(id)
         .flex()
         .items_center()
         .justify_center()
         .w(px(18.))
-        .h(px(crate::model::placement::row_height_for(style) - 8.))
-        .rounded(px(if capsule { 8. } else { 4. }))
-        .hover(move |s| {
-            s.bg(rgba(if capsule {
-                theme::c().capsule_hover()
-            } else {
-                theme::c().toolbar_hover
-            }))
-        })
+        .h(px(crate::model::placement::ROW_H - 8.))
+        .rounded(px(8.))
+        .hover(move |s| s.bg(rgba(theme::c().capsule_hover())))
         .on_drag(payload, ghost_constructor)
         .on_drag_move(hover)
         .on_drop(drop)

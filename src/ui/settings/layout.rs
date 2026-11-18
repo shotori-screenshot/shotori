@@ -57,6 +57,22 @@ pub(super) fn settings_switch(
             cx,
         )
     };
+    let s = super::palette::surfaces(cx);
+    let dark = cx.theme().is_dark();
+    let white: Hsla = rgba(0xFFFF_FFFF).into();
+    let thumb_bg = if checked {
+        if super::palette::is_light_color(cx.theme().slider_bar) {
+            s.card_bg
+        } else if dark {
+            cx.theme().switch_thumb.blend(white.opacity(0.32))
+        } else {
+            white
+        }
+    } else if dark {
+        cx.theme().switch_thumb.opacity(0.84)
+    } else {
+        cx.theme().switch_thumb
+    };
     Switch::new(id.clone())
         .checked(checked)
         .accessibility_label(label)
@@ -69,10 +85,22 @@ pub(super) fn settings_switch(
                 .h(geometry.height)
                 .rounded_full()
                 .bg(if checked {
-                    cx.theme().primary
+                    cx.theme().slider_bar
                 } else {
                     cx.theme().switch
                 })
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if checked {
+                            cx.theme().primary.opacity(0.35)
+                        } else {
+                            s.hairline
+                        }),
+                )
                 .child(
                     div()
                         .absolute()
@@ -84,10 +112,12 @@ pub(super) fn settings_switch(
                             SwitchThumb::new(checked)
                                 .size_full()
                                 .rounded_full()
-                                .bg(cx.theme().switch_thumb)
+                                .bg(thumb_bg)
+                                .border_1()
+                                .border_color(rgba(if dark { 0x0000_0024 } else { 0x0000_0014 }))
                                 .shadow(vec![
-                                    BoxShadow::new(px(0.), px(1.), rgba(0x0000_0030).into())
-                                        .blur_radius(px(2.)),
+                                    BoxShadow::new(px(0.), px(1.), rgba(0x0000_0020).into())
+                                        .blur_radius(px(1.5)),
                                 ]),
                         ),
                 )
@@ -105,6 +135,25 @@ pub(super) fn settings_switch(
                     )
                 }),
         )
+}
+
+/// Checked indicator circle rendered on active selection cards.
+pub(super) fn selection_circle(selected: bool, cx: &App) -> Div {
+    let mut circle = div()
+        .size_5()
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center();
+    if selected {
+        circle = circle.bg(cx.theme().primary).child(
+            Icon::new(IconName::Check)
+                .size_3()
+                .text_color(cx.theme().primary_foreground),
+        );
+    }
+    circle
 }
 
 pub(super) fn content_column() -> Div {
@@ -214,8 +263,7 @@ pub(super) fn card_group_with_action(
         .border_1()
         .border_color(s.hairline)
         .bg(s.card_bg)
-        .shadow(s.card_shadow)
-        .overflow_hidden();
+        .shadow(s.card_shadow);
     for (ix, row) in rows.into_iter().enumerate() {
         if ix > 0 {
             body = body.child(div().mx(px(18.)).h(px(1.)).bg(s.divider));
@@ -362,12 +410,10 @@ pub(super) fn slider_control_disabled(
         .gap_3()
         .w_full()
         .child(
-            div().w(rems(9.)).flex_shrink_0().child(
-                ThemedSlider::new(state)
-                    .horizontal()
-                    .disabled(disabled)
-                    .bg(cx.theme().primary),
-            ),
+            div()
+                .w(rems(9.))
+                .flex_shrink_0()
+                .child(ThemedSlider::new(state).horizontal().disabled(disabled)),
         )
         .child(
             div()

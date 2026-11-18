@@ -16,13 +16,15 @@ use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOpti
 use gpui_kit::*;
 
 pub use crate::actions::{ClosePin, CopyPin, DismissPinMenu, OpenPinMenu, ResetPinZoom};
-use crate::annotation::Annotations;
-use crate::model::pin::{
-    CollapsedPin, apply_color_effects, center_square_crop, clamp_to, expand_bounds,
-};
+use crate::annotation::{Annotations, Shape, ShapeKind};
+use crate::model::pin::{CollapsedPin, apply_color_effects, center_square_crop, expand_bounds};
 pub use crate::model::pin::{MIN_VISIBLE, clamp_origin, snap_pin_origin};
 use crate::model::pin_history::PinHistoryStore;
 use crate::ui::image_util;
+use crate::ui::toolbar::{hsla_to_u32, u32_to_hsla};
+use gpui_kit::base::GlobalState;
+use gpui_kit::base::slider::SliderState;
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 
 /// Zoom range: from a postage stamp to deep-pixel-peeping.
 const ZOOM_MIN: f32 = 0.05;
@@ -224,20 +226,18 @@ impl Pin {
         (self.base_crop.0 as f32 / f32::from(self.base.width).max(1.)).max(0.1)
     }
 
-    /// Map a desktop-global logical point onto this pin's base-local logical space.
-    pub(super) fn global_to_base(&self, global: Point<Pixels>) -> Point<Pixels> {
-        let zoom = (f32::from(self.rect.size.width) / f32::from(self.base.width).max(1.)).max(0.01);
-        let bx = clamp_to(
-            f32::from(global.x - self.rect.origin.x) / zoom,
-            0.,
-            f32::from(self.base.width),
-        );
-        let by = clamp_to(
-            f32::from(global.y - self.rect.origin.y) / zoom,
-            0.,
-            f32::from(self.base.height),
-        );
-        point(px(bx), px(by))
+    pub(super) fn zoom_factor(&self) -> f32 {
+        (f32::from(self.rect.size.width) / f32::from(self.base.width).max(1.)).max(0.01)
+    }
+
+    /// Map a desktop-global logical point onto this pin's base-local logical space
+    /// without clamping outside pointers onto the image edge.
+    pub(super) fn global_to_base_unclamped(&self, global: Point<Pixels>) -> Point<Pixels> {
+        let zoom = self.zoom_factor();
+        point(
+            px(f32::from(global.x - self.rect.origin.x) / zoom),
+            px(f32::from(global.y - self.rect.origin.y) / zoom),
+        )
     }
 
     /// Bake committed annotations permanently onto `base_crop` and reset `annotations`
@@ -262,7 +262,28 @@ impl Pin {
     }
 
     /// Recompute `composited_crop`, `image`, and `thumb_image` from `base_crop`
-    /// + committed annotations + color effects.
+    /// + committed annotations in `annotations` + color effects.
+    pub(super) fn rebuild_visuals_from(&mut self, annotations: &Annotations) {
+        let (w, h, ref orig) = *self.base_crop;
+        let mut pixels = orig.clone();
+        if !annotations.committed().is_empty() {
+            let scale = self.physical_scale();
+            Annotations::rasterize_shapes(
+                annotations.committed().iter(),
+                &mut pixels,
+                w,
+                h,
+                point(px(0.), px(0.)),
+                scale,
+            );
+        }
+        apply_color_effects(&mut pixels, self.grayscale, self.invert);
+        let (tw, th, thumb_rgba) = center_square_crop(w, h, &pixels);
+        self.image = image_util::rgba_to_render_image(pixels.clone(), w, h);
+        self.thumb_image = image_util::rgba_to_render_image(thumb_rgba, tw, th);
+        self.composited_crop = Arc::new((w, h, pixels));
+    }
+
     pub(super) fn rebuild_visuals(&mut self) {
         let (w, h, ref orig) = *self.base_crop;
         let mut pixels = orig.clone();
@@ -285,12 +306,11 @@ impl Pin {
     }
 
     /// Fast live-draft preview during pointer drag in annotation mode.
-    pub(super) fn rebuild_live_preview(&mut self) {
+    pub(super) fn rebuild_live_preview_from(&mut self, annotations: &Annotations) {
         let (w, h, ref orig) = *self.base_crop;
         let mut pixels = orig.clone();
         let scale = self.physical_scale();
-        self.annotations
-            .rasterize(&mut pixels, w, h, point(px(0.), px(0.)), scale);
+        annotations.rasterize(&mut pixels, w, h, point(px(0.), px(0.)), scale);
         apply_color_effects(&mut pixels, self.grayscale, self.invert);
         self.image = image_util::rgba_to_render_image(pixels, w, h);
     }
@@ -301,9 +321,7 @@ struct PinBoard {
     next_id: u64,
     drag: Option<PinDrag>,
     menu: Option<(u64, Point<Pixels>)>,
-    annotating: Option<u64>,
-    annot_gesture: Option<annotate::PinAnnotGesture>,
-    text_prompt: Option<annotate::PinTextPrompt>,
+    annot_session: Option<annotate::PinAnnotSession>,
     closed_stack: Vec<ClosedPin>,
     history_store: Option<PinHistoryStore>,
     hidden: bool,
@@ -320,9 +338,7 @@ impl PinBoard {
             next_id: 0,
             drag: None,
             menu: None,
-            annotating: None,
-            annot_gesture: None,
-            text_prompt: None,
+            annot_session: None,
             closed_stack: Vec::new(),
             history_store: None,
             hidden: false,
@@ -398,7 +414,7 @@ impl PinBoard {
     pub(super) fn selected_id(&self) -> Option<u64> {
         self.menu
             .map(|(id, _)| id)
-            .or(self.annotating)
+            .or_else(|| self.annotating_id())
             .or_else(|| self.pins.iter().rev().find(|p| !p.ghost).map(|p| p.id))
             .or_else(|| self.pins.last().map(|pin| pin.id))
     }
@@ -524,8 +540,14 @@ struct PinSurface {
     board: Entity<PinBoard>,
     focus_handle: FocusHandle,
     output: PinOutput,
-    _subscription: Subscription,
-    _activation: Subscription,
+    swatch_picker: Option<Entity<ColorPickerState>>,
+    slider: Option<((ShapeKind, bool), Entity<SliderState>)>,
+    slider_sub: Option<Subscription>,
+    text_editing: Option<crate::ui::text_editor::TextEditor>,
+    text_subscription: Option<Subscription>,
+    number_edit: Option<(usize, Shape)>,
+    annot_session_sub: Option<(EntityId, Subscription)>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl PinSurface {
@@ -535,16 +557,67 @@ impl PinSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::ui::settings::sync_shell_theme(cx);
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let subscription = cx.observe(&board, |_, _, cx| cx.notify());
         let activation = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        let appearance = window.observe_window_appearance(|_, cx| {
+            crate::ui::settings::sync_shell_theme(cx);
+            cx.refresh_windows();
+        });
+        let focus_restore = cx.on_focus_lost(window, |this, window, cx| {
+            if !GlobalState::is_in_deferred_context(cx) {
+                if let Some(editor) = &this.text_editing {
+                    editor.focus(window, cx);
+                } else if this.board.read(cx).menu.is_some()
+                    || this.board.read(cx).annotating_id().is_some()
+                {
+                    window.focus(&this.focus_handle, cx);
+                }
+            }
+        });
+        let initial_color = crate::model::settings::current().annotation_colors()[0];
+        let swatch_picker = cx
+            .new(|cx| ColorPickerState::new(window, cx).default_value(u32_to_hsla(initial_color)));
+        let swatch_sub =
+            cx.subscribe_in(&swatch_picker, window, |this, picker, event, window, cx| {
+                if let ColorPickerEvent::Change(Some(hsla)) = event
+                    && let Some((_, session)) = this.active_annot_session(cx)
+                {
+                    let ix = session.read(cx).annotations().color_index();
+                    let color = hsla_to_u32(*hsla);
+                    if hsla.a != 1. {
+                        picker.update(cx, |state, cx| {
+                            state.set_value(u32_to_hsla(color), window, cx);
+                        });
+                    }
+                    crate::model::settings::set_annotation_color(ix, color);
+                    session.update(cx, |s, cx| {
+                        s.edit_annotation_settings(|a| a.set_color(ix));
+                        cx.notify();
+                    });
+                    cx.notify();
+                }
+            });
         Self {
             board,
             focus_handle,
             output,
-            _subscription: subscription,
-            _activation: activation,
+            swatch_picker: Some(swatch_picker),
+            slider: None,
+            slider_sub: None,
+            text_editing: None,
+            text_subscription: None,
+            number_edit: None,
+            annot_session_sub: None,
+            _subscriptions: vec![
+                subscription,
+                activation,
+                appearance,
+                focus_restore,
+                swatch_sub,
+            ],
         }
     }
 }
@@ -842,6 +915,7 @@ mod interaction_tests {
     fn board(cx: &mut TestAppContext) -> Entity<PinBoard> {
         cx.update(|cx| {
             gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
             crate::actions::bind_keys(cx, &crate::actions::default_keys());
         });
         cx.new(|_| {
@@ -1264,13 +1338,17 @@ mod interaction_tests {
         });
 
         // 5. In-pin annotation (`a`): draw a rectangle, undo (`ctrl-z`), redo (`ctrl-y`),
-        //    and verify `escape` exits annotation mode WITHOUT closing the pin!
+        //    and verify two-step `escape` (exit tool -> exit annotation) WITHOUT closing the pin!
         vcx.simulate_keystrokes("a");
         vcx.update(|window, cx| {
-            assert_eq!(board.read(cx).annotating, Some(2));
+            assert_eq!(board.read(cx).annotating_id(), Some(2));
             window.draw(cx).clear(cx);
         });
-        assert!(vcx.debug_bounds("pin-annot-bar").is_some());
+        assert!(vcx.debug_bounds("shotori-pin-toolbar").is_some());
+        assert!(vcx.debug_bounds("tb-rectangle").is_some());
+        assert!(vcx.debug_bounds("tb-undo").is_none());
+        assert!(vcx.debug_bounds("tb-redo").is_none());
+        assert!(vcx.debug_bounds("tb-copy").is_none());
         vcx.simulate_mouse_down(
             point(px(90.), px(60.)),
             MouseButton::Left,
@@ -1287,8 +1365,18 @@ mod interaction_tests {
             Default::default(),
         );
         vcx.update(|_, cx| {
-            let top = board.read(cx).pins.last().unwrap();
-            assert_eq!(top.annotations.committed().len(), 1);
+            let b = board.read(cx);
+            let committed = b
+                .annot_session
+                .as_ref()
+                .unwrap()
+                .session
+                .read(cx)
+                .annotations()
+                .committed()
+                .len();
+            assert_eq!(committed, 1);
+            let top = b.pins.last().unwrap();
             assert!(
                 top.composited_crop.2.iter().any(|&b| b != 255),
                 "committed annotation must composite into the pin's exported pixels"
@@ -1299,10 +1387,12 @@ mod interaction_tests {
             assert_eq!(
                 board
                     .read(cx)
-                    .pins
-                    .last()
+                    .annot_session
+                    .as_ref()
                     .unwrap()
-                    .annotations
+                    .session
+                    .read(cx)
+                    .annotations()
                     .committed()
                     .len(),
                 0
@@ -1310,6 +1400,42 @@ mod interaction_tests {
         });
         vcx.simulate_keystrokes("ctrl-y");
         vcx.update(|_, cx| {
+            assert_eq!(
+                board
+                    .read(cx)
+                    .annot_session
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .read(cx)
+                    .annotations()
+                    .committed()
+                    .len(),
+                1
+            );
+        });
+        // First Escape exits the active tool while remaining in annotation mode;
+        // second Escape leaves annotation mode while keeping both pins open.
+        vcx.simulate_keystrokes("escape");
+        vcx.update(|window, cx| {
+            let b = board.read(cx);
+            assert_eq!(b.annotating_id(), Some(2));
+            assert!(
+                b.annot_session
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .read(cx)
+                    .annotations()
+                    .tool()
+                    .is_none()
+            );
+            window.draw(cx).clear(cx);
+        });
+        vcx.simulate_keystrokes("escape");
+        vcx.update(|_, cx| {
+            assert!(board.read(cx).annotating_id().is_none());
+            assert_eq!(board.read(cx).pins.len(), 2);
             assert_eq!(
                 board
                     .read(cx)
@@ -1322,12 +1448,6 @@ mod interaction_tests {
                 1
             );
         });
-        // Escape leaves annotation mode while keeping both pins open.
-        vcx.simulate_keystrokes("escape");
-        vcx.update(|_, cx| {
-            assert!(board.read(cx).annotating.is_none());
-            assert_eq!(board.read(cx).pins.len(), 2);
-        });
 
         // 6. Close top pin (`escape`) and restore it with `ctrl-shift-t`!
         vcx.simulate_keystrokes("escape");
@@ -1338,6 +1458,121 @@ mod interaction_tests {
             assert_eq!(state.pins.len(), 2);
             assert_eq!(state.pins.last().unwrap().opacity, 90);
         });
+    }
+
+    #[gpui_kit::test]
+    fn pin_annotation_right_click_exits_without_menu_and_unfocused_pin_keeps_border(
+        cx: &mut TestAppContext,
+    ) {
+        let board = board(cx);
+        board.update(cx, |board, cx| {
+            board.add(spec(10., 10.), cx);
+            board.add(spec(70., 50.), cx);
+        });
+        let (_, vcx) = cx.add_window_view(|window, cx| {
+            PinSurface::new(
+                board.clone(),
+                PinOutput {
+                    bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+                    display_id: None,
+                    scale: 1.0,
+                },
+                window,
+                cx,
+            )
+        });
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Unfocused pin 1 and focused pin 2 both keep their 1px frame (`102x62` around `100x60`).
+        let p1 = vcx.debug_bounds("pin-image-1").unwrap();
+        let p2 = vcx.debug_bounds("pin-image-2").unwrap();
+        assert_eq!(p1.size, size(px(102.), px(62.)));
+        assert_eq!(p2.size, size(px(102.), px(62.)));
+
+        // Enter annotation mode: right-click exits active tool -> exits annotation without menu.
+        vcx.simulate_keystrokes("a");
+        vcx.update(|window, cx| {
+            let b = board.read(cx);
+            assert_eq!(b.annotating_id(), Some(2));
+            assert!(
+                b.annot_session
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .read(cx)
+                    .annotations()
+                    .tool()
+                    .is_some()
+            );
+            window.draw(cx).clear(cx);
+        });
+        assert!(vcx.debug_bounds("shotori-pin-toolbar").is_some());
+        assert!(vcx.debug_bounds("tb-undo").is_none());
+        assert!(vcx.debug_bounds("tb-redo").is_none());
+
+        // 1st right-click: clears active tool, NEVER opens menu.
+        vcx.simulate_mouse_down(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.simulate_mouse_up(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.update(|window, cx| {
+            let b = board.read(cx);
+            assert!(b.menu.is_none());
+            assert_eq!(b.annotating_id(), Some(2));
+            assert!(
+                b.annot_session
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .read(cx)
+                    .annotations()
+                    .tool()
+                    .is_none()
+            );
+            window.draw(cx).clear(cx);
+        });
+
+        // 2nd right-click: exits annotation mode cleanly, still NEVER opens menu.
+        vcx.simulate_mouse_down(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.simulate_mouse_up(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.update(|window, cx| {
+            let b = board.read(cx);
+            assert!(b.menu.is_none());
+            assert!(b.annotating_id().is_none());
+            window.draw(cx).clear(cx);
+        });
+
+        // 3rd right-click (now in standard pin mode): opens `pin-menu` as normal.
+        vcx.simulate_mouse_down(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.simulate_mouse_up(
+            point(px(90.), px(60.)),
+            MouseButton::Right,
+            Default::default(),
+        );
+        vcx.update(|window, cx| {
+            assert!(board.read(cx).menu.is_some());
+            window.draw(cx).clear(cx);
+        });
+        assert!(vcx.debug_bounds("pin-menu").is_some());
     }
 
     #[test]

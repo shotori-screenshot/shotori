@@ -7,25 +7,14 @@ use gpui_kit::{
 
 #[derive(IntoElement)]
 pub(super) struct ToolbarRow {
-    style: crate::model::settings::UiStyle,
     id: &'static str,
     width: Pixels,
     content: Div,
 }
 
 impl ToolbarRow {
-    pub(super) fn new(
-        style: crate::model::settings::UiStyle,
-        id: &'static str,
-        width: Pixels,
-        content: Div,
-    ) -> Self {
-        Self {
-            style,
-            id,
-            width,
-            content,
-        }
+    pub(super) fn new(id: &'static str, width: Pixels, content: Div) -> Self {
+        Self { id, width, content }
     }
 }
 
@@ -37,8 +26,8 @@ impl RenderOnce for ToolbarRow {
         div()
             .relative()
             .max_w(self.width)
-            .rounded(super::bar_radius_for(self.style))
-            .shadow(super::bar_shadow_for(self.style))
+            .rounded(super::bar_radius())
+            .shadow(super::bar_shadow())
             .child(
                 div()
                     .id(id)

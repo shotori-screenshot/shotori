@@ -14,14 +14,12 @@ const BORDER: &str = "<path d='M5 5V19M5 12H29'/>";
 const NONE: &str = "<path d='M11 6L23 18M23 6L11 18'/>";
 
 pub(super) fn geometry_fill_menu(
-    style: UiStyle,
     value: GeometryFill,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "geometry-fill",
         "toolbar.geometry_fill",
         value,
@@ -54,14 +52,12 @@ pub(super) fn geometry_fill_menu(
 }
 
 pub(super) fn connector_menu(
-    style: UiStyle,
     value: LensConnector,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "lens-connector",
         "toolbar.lens_connector",
         value,
@@ -87,14 +83,12 @@ pub(super) fn connector_menu(
 }
 
 pub(super) fn line_menu(
-    style: UiStyle,
     value: LineStyle,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "line-style",
         "toolbar.line_style",
         value,
@@ -131,14 +125,12 @@ pub(super) fn preview(path: &str, color: u32) -> Svg {
 }
 
 pub(super) fn arrow_menu(
-    style: UiStyle,
     value: ArrowStyle,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "arrow-style",
         "toolbar.arrow_style",
         value,
@@ -207,15 +199,13 @@ fn arrow_preview(style: ArrowStyle, color: u32) -> Svg {
 
 /// Numeral previews use paths so they do not depend on an SVG font resolver.
 pub(super) fn number_menu(
-    style: UiStyle,
     value: crate::annotation::NumberFormat,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     use crate::annotation::NumberFormat;
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "number-format",
         "toolbar.number_format",
         value,
@@ -248,14 +238,12 @@ pub(super) fn number_menu(
 }
 
 pub(super) fn pencil_angle_menu(
-    style: UiStyle,
     value: u16,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     let session = session.clone();
-    choice_menu_for(
-        style,
+    choice_menu(
         "pencil-angle",
         "toolbar.pencil_angle",
         value,
@@ -291,7 +279,6 @@ pub(super) fn pencil_angle_menu(
 
 /// Highlighter area and blend are independent choices in the reference toolbar.
 pub(super) fn highlighter_menus(
-    style: UiStyle,
     annotations: &crate::annotation::Annotations,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
@@ -303,9 +290,8 @@ pub(super) fn highlighter_menus(
     div()
         .flex()
         .items_center()
-        .gap(px(if style == UiStyle::Capsule { 3. } else { 2. }))
-        .child(choice_menu_for(
-            style,
+        .gap(px(3.))
+        .child(choice_menu(
             "highlighter-area",
             "toolbar.highlighter_area",
             options.rectangle,
@@ -330,8 +316,7 @@ pub(super) fn highlighter_menus(
                 });
             },
         ))
-        .child(choice_menu_for(
-            style,
+        .child(choice_menu(
             "highlighter-blend",
             "toolbar.highlighter_blend",
             options.blend,
@@ -359,20 +344,15 @@ pub(super) fn highlighter_menus(
 }
 
 pub(super) fn line_end_menus(
-    style: UiStyle,
     ends: crate::annotation::LineEnds,
     session: &Entity<ScreenshotSession>,
     focus: &FocusHandle,
 ) -> impl IntoElement {
     use crate::annotation::EndMarker;
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap(px(if style == UiStyle::Capsule { 3. } else { 2. }));
+    let mut row = div().flex().items_center().gap(px(3.));
     for start in [true, false] {
         let session = session.clone();
-        row = row.child(choice_menu_for(
-            style,
+        row = row.child(choice_menu(
             if start { "line-start" } else { "line-end" },
             if start {
                 "toolbar.line_start"
@@ -427,8 +407,7 @@ pub(super) fn line_end_menus(
     }
     let cap_session = session.clone();
     let join_session = session.clone();
-    row.child(choice_menu_for(
-        style,
+    row.child(choice_menu(
         "line-caps",
         "toolbar.line_caps",
         ends.square_caps,
@@ -457,8 +436,7 @@ pub(super) fn line_end_menus(
             });
         },
     ))
-    .child(choice_menu_for(
-        style,
+    .child(choice_menu(
         "line-joins",
         "toolbar.line_joins",
         ends.sharp_joins,

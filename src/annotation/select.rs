@@ -275,9 +275,7 @@ impl Annotations {
                 {
                     *area = super::FilterArea::Brush { diameter: v };
                 }
-            } else if !matches!(next.kind, ShapeKind::EraserRect | ShapeKind::Select)
-                && super::size_spec(next.kind) == spec
-            {
+            } else if next.kind != ShapeKind::Select && super::size_spec(next.kind) == spec {
                 resize_shape(&mut next, v);
             }
             next
@@ -300,8 +298,7 @@ impl Annotations {
                 if brush {
                     matches!(s.filter_area(), Some(super::FilterArea::Brush { .. }))
                 } else {
-                    !matches!(s.kind, ShapeKind::EraserRect | ShapeKind::Select)
-                        && super::size_spec(s.kind) == spec
+                    s.kind != ShapeKind::Select && super::size_spec(s.kind) == spec
                 }
             })
             .collect();

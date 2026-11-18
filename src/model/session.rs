@@ -87,17 +87,13 @@ pub(crate) struct Loupe {
     pub(crate) outward: (f32, f32),
 }
 
-/// The eraser's pointer chrome (issue #14), already mapped into the
-/// asking window's local coordinates. The ring shows exactly the
-/// circle deletion tests against ("what you see is what erases");
-/// the rect is the in-flight area sweep, dashed as a promise rather
-/// than a selection.
+/// The brush eraser's pointer chrome (issue #14), already mapped into
+/// the asking window's local coordinates. The ring shows exactly the
+/// circle deletion tests against ("what you see is what erases").
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum EraserChrome {
-    /// Brush footprint: center + radius, logical px.
-    Ring { center: Point<Pixels>, radius: f32 },
-    /// The area eraser's dragged rectangle.
-    Rect(Bounds<Pixels>),
+pub(crate) struct EraserChrome {
+    pub(crate) center: Point<Pixels>,
+    pub(crate) radius: f32,
 }
 
 impl Screen {
@@ -225,9 +221,6 @@ pub struct ScreenshotSession {
     /// grabbed an endpoint/vertex/corner of the selected shape.
     handle_drag: Option<HandleDrag>,
     blocked: bool,
-    /// Visual & layout chrome preset for this session (seeded from settings,
-    /// overridable per-session in debug/test runs without mutating globals).
-    pub(super) ui_style: crate::model::settings::UiStyle,
     /// The user-dragged toolbar position (window-local to the ACTIVE
     /// output); None → the placement anchor decides. Reset by a NEW
     /// selection or a change of host window — moving/resizing the
@@ -299,7 +292,6 @@ impl ScreenshotSession {
             moving: None,
             handle_drag: None,
             blocked: false,
-            ui_style: crate::model::settings::current().ui_style(),
             toolbar_pos: None,
             toolbar_drag: None,
             toolbar_grips_reported: None,
@@ -320,6 +312,46 @@ impl ScreenshotSession {
             preview_display: None,
             geometry_revision: 0,
         }
+    }
+
+    /// Dedicated single-screen session backing in-pin annotation (`output_name = "pin"`).
+    /// Base coordinates span `(0, 0 .. logical_size.width, logical_size.height)`.
+    pub(crate) fn for_pin(
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        logical_size: Size<Pixels>,
+        annotations: crate::annotation::Annotations,
+    ) -> Self {
+        let capture = Arc::new(Capture {
+            output_name: "pin".into(),
+            logical_pos: (0, 0),
+            logical_size: Some((
+                f32::from(logical_size.width).round().max(1.) as i32,
+                f32::from(logical_size.height).round().max(1.) as i32,
+            )),
+            scale: 1.,
+            transform: crate::platform::capture::Transform::Normal,
+            width: width.max(1),
+            height: height.max(1),
+            rgba,
+        });
+        let mut session = Self::new(vec![capture], Vec::new());
+        session.set_size("pin", logical_size);
+        session.selection = Selection::Selected {
+            bounds: Bounds::new(point(px(0.), px(0.)), logical_size),
+        };
+        session.active_output = Some("pin".into());
+        session.annotations = annotations;
+        session
+    }
+
+    pub(crate) fn take_annotations(&mut self) -> crate::annotation::Annotations {
+        self.finish_nudge();
+        self.cancel_annotation();
+        self.annotations.finish_polyline();
+        self.annotations.deselect();
+        std::mem::take(&mut self.annotations)
     }
 
     /// Resolve an output name to its screen. Names come from the calling
@@ -2758,7 +2790,6 @@ mod tests {
             ShapeKind::Mosaic,
             ShapeKind::Eraser,
             ShapeKind::Pencil,
-            ShapeKind::EraserRect,
             ShapeKind::Highlighter,
         ] {
             s.edit_annotations(|a| a.toggle(kind));
@@ -2780,11 +2811,11 @@ mod tests {
         s.cancel_annotation();
         assert_preview_matches_export(&s);
         assert_eq!(s.crop("left").unwrap().2, completed);
-        for _ in 0..6 {
+        for _ in 0..5 {
             s.undo();
             assert_preview_matches_export(&s);
         }
-        for _ in 0..6 {
+        for _ in 0..5 {
             s.redo();
             assert_preview_matches_export(&s);
         }
@@ -2795,11 +2826,10 @@ mod tests {
     }
 
     #[test]
-    fn eraser_chrome_rings_only_on_the_pointed_output_and_rect_spans() {
+    fn eraser_chrome_rings_only_on_the_pointed_output() {
         use crate::annotation::ShapeKind;
         let mut s = session();
         s.select_all();
-        let sel = s.selection.bounds().unwrap();
         s.set_size("left", size(px(100.), px(60.)));
         s.set_size("right", size(px(96.), px(60.)));
         s.edit_annotations(|a| a.toggle(ShapeKind::Eraser));
@@ -2807,31 +2837,15 @@ mod tests {
         // every other output's unclamped mapping falls outside its
         // own window and must stay silent
         s.pointer_move("left", point(px(50.), px(30.)), false);
-        assert!(matches!(
-            s.eraser_chrome("left"),
-            Some(super::EraserChrome::Ring { .. })
-        ));
+        assert!(s.eraser_chrome("left").is_some());
         assert_eq!(s.eraser_chrome("right"), None);
-        // the area gesture is global: each output shows its slice
-        s.edit_annotations(|a| {
-            a.toggle(ShapeKind::EraserRect);
-            a.begin(point(px(-40.), px(40.)), sel, false);
-            a.drag_to(point(px(30.), px(50.)), sel, false);
-        });
-        for name in ["left", "right"] {
-            assert!(
-                matches!(s.eraser_chrome(name), Some(super::EraserChrome::Rect(_))),
-                "{name}"
-            );
-        }
-        s.edit_annotations(|a| a.end());
-        assert_eq!(s.eraser_chrome("left"), None);
     }
 
     #[test]
     fn eraser_deletes_touched_marks_across_outputs_and_undo_restores() {
         use crate::annotation::ShapeKind;
-        for kind in [ShapeKind::Eraser, ShapeKind::EraserRect] {
+        {
+            let kind = ShapeKind::Eraser;
             let mut s = session();
             s.begin("left", point(px(80.), px(20.)));
             s.end("right", point(px(40.), px(90.)));

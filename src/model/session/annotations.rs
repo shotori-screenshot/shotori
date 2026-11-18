@@ -231,6 +231,44 @@ impl ScreenshotSession {
             .then(|| (ix, shape.bounds.origin - origin))
     }
 
+    /// Whether a press at `base_pt` inside a pin's `(0..w, 0..h)` bounds
+    /// belongs to annotation interaction (draw tool, select/marquee, handle, or
+    /// existing mark) rather than moving the floating pin itself.
+    pub(crate) fn pin_consumes_press(&self, base_pt: Point<Pixels>, shift: bool) -> bool {
+        if self.blocked {
+            return false;
+        }
+        let Some(selection) = self.selection.bounds() else {
+            return false;
+        };
+        if !shift
+            && self.annotations.selected_count() == 1
+            && self
+                .annotations
+                .selected()
+                .and_then(|s| s.handle_at(base_pt))
+                .is_some()
+        {
+            return true;
+        }
+        if selection.contains(&base_pt)
+            && self.annotations.parks_click_select()
+            && if shift && !self.annotations.enabled() {
+                self.annotations
+                    .hit_test(base_pt)
+                    .or_else(|| self.annotations.interaction_hit_test(base_pt))
+            } else {
+                self.annotations.interaction_hit_test(base_pt)
+            }
+            .is_some()
+        {
+            return true;
+        }
+        self.annotations.enabled()
+            || ((self.annotations.tool() == Some(crate::annotation::ShapeKind::Select) || shift)
+                && selection.contains(&base_pt))
+    }
+
     /// `shift` is the multi-select modifier: Shift+click toggles the
     /// hit shape in/out of the selection, and Shift+drag on blank
     /// canvas adds the marquee's hits to the existing selection.
@@ -944,29 +982,16 @@ impl ScreenshotSession {
             && self.annotations.tool() == Some(crate::annotation::ShapeKind::Eraser)
     }
 
-    /// The eraser's pointer chrome for one output (issue #14): the
-    /// brush ring while the tool is live (center in this window's
-    /// local coordinates), or the dragged area rect while an area
-    /// gesture is in flight. None when the eraser is inactive or
-    /// blocked, when the ring's pointer sits outside the selection
-    /// (idle — no erase can start there), or when a rect does not
-    /// reach this output.
+    /// The brush eraser's pointer chrome for one output (issue #14):
+    /// the brush ring while the tool is live (center in this window's
+    /// local coordinates). None when the eraser is inactive or blocked,
+    /// or when the ring's pointer sits outside the selection.
     pub(crate) fn eraser_chrome(&self, name: &str) -> Option<EraserChrome> {
         use crate::annotation::ShapeKind;
-        if self.blocked {
+        if self.blocked || self.annotations.tool() != Some(ShapeKind::Eraser) {
             return None;
         }
         let selection = self.selection.bounds()?;
-        let origin = self.screen(name).bounds().origin;
-        if let Some(area) = self.annotations.eraser_rect_bounds() {
-            let mut b = area.intersect(&selection);
-            b.origin -= origin;
-            return (f32::from(b.size.width) > 0. && f32::from(b.size.height) > 0.)
-                .then_some(EraserChrome::Rect(b));
-        }
-        if self.annotations.tool() != Some(ShapeKind::Eraser) {
-            return None;
-        }
         let center = self.pointer_in(name)?;
         // Only the output whose window actually contains the pointer
         // rings — the unclamped mapping lies outside every other
@@ -978,7 +1003,7 @@ impl ScreenshotSession {
             x >= 0. && x <= f32::from(size.width) && y >= 0. && y <= f32::from(size.height);
         let active = self.pointer_global.is_some_and(|p| selection.contains(&p))
             || self.annotations.is_pressed();
-        (over_window && active).then(|| EraserChrome::Ring {
+        (over_window && active).then(|| EraserChrome {
             center,
             radius: self.annotations.erase_radius(),
         })

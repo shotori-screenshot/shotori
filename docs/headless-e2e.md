@@ -76,8 +76,7 @@ With `SHOTORI_DEBUG_TARGET=HEADLESS-1` and
 to inspect annotation hover outlines, handles, multi-selection, sequence
 badges, magnifiers, spotlights, text styles, crop reselection, and
 cancellation. Held-drag async preview transitions can also be replayed with
-`SHOTORI_DEBUG_ACTION=spotlightdraw|lensdrag`, and chrome presets can be forced
-without touching `settings.toml` via `SHOTORI_DEBUG_UI_STYLE=classic|capsule`.
+`SHOTORI_DEBUG_ACTION=spotlightdraw|lensdrag`.
 Use an isolated compositor and configuration directory.
 
 ### Reviewing inline text

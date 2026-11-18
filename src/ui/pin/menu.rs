@@ -24,20 +24,11 @@ use super::PinBoard;
 pub(super) const MENU_W: f32 = 244.;
 
 impl PinBoard {
-    pub(super) fn render_menu_on(
-        &self,
-        output: Bounds<Pixels>,
-        capsule: bool,
-    ) -> Option<Stateful<Div>> {
+    pub(super) fn render_menu_on(&self, output: Bounds<Pixels>) -> Option<Stateful<Div>> {
         let (pin_id, position) = self.menu.filter(|(_, pos)| output.contains(pos))?;
         let pin = self.pins.iter().find(|p| p.id == pin_id)?;
         let c = theme::c();
-        let hover_bg = if capsule {
-            c.capsule_hover()
-        } else {
-            c.toolbar_hover
-        };
-        let row_radius = if capsule { px(6.) } else { px(4.) };
+        let row_radius = px(6.);
 
         let zoom_pct = ((f32::from(pin.rect.size.width) / f32::from(pin.base.width).max(1.)) * 100.)
             .round() as u32;
@@ -46,7 +37,7 @@ impl PinBoard {
         let is_ghost = pin.ghost;
         let is_gray = pin.grayscale;
         let is_inv = pin.invert;
-        let is_annot = self.annotating == Some(pin_id);
+        let is_annot = self.annotating_id() == Some(pin_id);
         let has_any_ghost = self.pins.iter().any(|p| p.ghost);
         let can_restore = !self.closed_stack.is_empty()
             || self
@@ -87,19 +78,13 @@ impl PinBoard {
                         icon: IconName,
                         active: bool,
                         action: fn() -> Box<dyn Action>| {
-            let sel_bg = if capsule {
-                c.accent
-            } else {
-                c.toolbar_selected
-            };
-            let icon_col = if active && capsule {
-                c.capsule_on_accent()
-            } else {
-                c.toolbar_text
-            };
+            let sel_bg = c.accent;
+            let on_accent = c.capsule_on_accent();
+            let icon_col = if active { on_accent } else { c.toolbar_text };
             Button::new(id)
                 .debug_selector(move || id.into())
                 .accessibility_label(label)
+                .cursor_pointer()
                 .w(px(if compact { 22. } else { 25. }))
                 .h(px(strip_h))
                 .rounded(row_radius)
@@ -107,10 +92,11 @@ impl PinBoard {
                 .items_center()
                 .justify_center()
                 .bg(rgba(if active { sel_bg } else { 0x0000_0000 }))
-                .hover(move |s| s.bg(rgba(if active { sel_bg } else { hover_bg })))
+                .text_color(rgba(icon_col))
+                .hover(move |s| s.bg(rgba(sel_bg)).text_color(rgba(on_accent)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
-                .child(Icon::new(icon).size_3p5().text_color(rgba(icon_col)))
+                .child(Icon::new(icon).size_3p5())
         };
 
         let strip = div()
@@ -208,22 +194,22 @@ impl PinBoard {
                     .child(
                         Button::new("pin-opacity-down")
                             .debug_selector(|| "pin-opacity-down".into())
+                            .cursor_pointer()
                             .w(px(20.))
                             .h(px(bar_h - 2.))
                             .rounded_sm()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                            .text_color(rgba(c.toolbar_text))
+                            .hover(move |s| {
+                                s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
+                            })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(StepPinOpacityDown), cx);
                             })
-                            .child(
-                                Icon::new(IconName::Minus)
-                                    .size_3()
-                                    .text_color(rgba(c.toolbar_text)),
-                            ),
+                            .child(Icon::new(IconName::Minus).size_3()),
                     )
                     .child(
                         div()
@@ -234,35 +220,37 @@ impl PinBoard {
                     .child(
                         Button::new("pin-opacity-up")
                             .debug_selector(|| "pin-opacity-up".into())
+                            .cursor_pointer()
                             .w(px(20.))
                             .h(px(bar_h - 2.))
                             .rounded_sm()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                            .text_color(rgba(c.toolbar_text))
+                            .hover(move |s| {
+                                s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
+                            })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(StepPinOpacityUp), cx);
                             })
-                            .child(
-                                Icon::new(IconName::Plus)
-                                    .size_3()
-                                    .text_color(rgba(c.toolbar_text)),
-                            ),
+                            .child(Icon::new(IconName::Plus).size_3()),
                     ),
             )
             .child(
                 Button::new("pin-zoom")
                     .debug_selector(|| "pin-zoom".into())
                     .accessibility_label(crate::i18n::t!("pin.menu.reset_zoom").as_ref())
+                    .cursor_pointer()
                     .px_1p5()
                     .h(px(bar_h - 2.))
                     .rounded_sm()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .hover(|s| s.bg(rgba(c.toolbar_hover)))
+                    .text_color(rgba(c.toolbar_text))
+                    .hover(move |s| s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent())))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(ResetPinZoom), cx))
                     .child(format!(
@@ -271,11 +259,7 @@ impl PinBoard {
                     )),
             );
 
-        let sep_col = if capsule {
-            c.capsule_border()
-        } else {
-            c.toolbar_border
-        };
+        let sep_col = c.capsule_border();
         let sep = || div().w_full().h(px(sep_h)).bg(rgba(sep_col));
 
         let item = |id: &'static str,
@@ -285,6 +269,7 @@ impl PinBoard {
             Button::new(id)
                 .debug_selector(move || id.into())
                 .accessibility_label(label)
+                .cursor_pointer()
                 .w_full()
                 .h(px(item_h))
                 .px_2()
@@ -294,13 +279,7 @@ impl PinBoard {
                 .justify_between()
                 .text_xs()
                 .text_color(rgba(c.toolbar_text))
-                .hover(move |s| {
-                    if capsule {
-                        s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
-                    } else {
-                        s.bg(rgba(hover_bg))
-                    }
-                })
+                .hover(move |s| s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent())))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action(), cx))
                 .child(label.to_string())
@@ -321,6 +300,7 @@ impl PinBoard {
                 Button::new("pin-history")
                     .debug_selector(|| "pin-history".into())
                     .accessibility_label(crate::i18n::t!("pin.menu.history").as_ref())
+                    .cursor_pointer()
                     .flex_1()
                     .h_full()
                     .px_2()
@@ -330,13 +310,7 @@ impl PinBoard {
                     .justify_between()
                     .text_xs()
                     .text_color(rgba(c.toolbar_text))
-                    .hover(move |s| {
-                        if capsule {
-                            s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent()))
-                        } else {
-                            s.bg(rgba(hover_bg))
-                        }
-                    })
+                    .hover(move |s| s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent())))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenPinHistory), cx))
                     .child(crate::i18n::t!("pin.menu.history").to_string())
@@ -346,6 +320,7 @@ impl PinBoard {
                 Button::new("pin-restore-last")
                     .debug_selector(|| "pin-restore-last".into())
                     .accessibility_label(crate::i18n::t!("pin.menu.restore_closed").as_ref())
+                    .cursor_pointer()
                     .px_1p5()
                     .h_full()
                     .rounded(row_radius)
@@ -354,16 +329,12 @@ impl PinBoard {
                     .gap_1()
                     .text_xs()
                     .text_color(rgba(c.accent))
-                    .hover(move |s| s.bg(rgba(hover_bg)))
+                    .hover(move |s| s.bg(rgba(c.accent)).text_color(rgba(c.capsule_on_accent())))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(RestoreClosedPin), cx);
                     })
-                    .child(
-                        Icon::new(IconName::Undo2)
-                            .size_3()
-                            .text_color(rgba(c.accent)),
-                    )
+                    .child(Icon::new(IconName::Undo2).size_3())
             }));
 
         let mut menu_div = div()
@@ -381,18 +352,11 @@ impl PinBoard {
             .overflow_hidden()
             .border_1()
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-        menu_div = if capsule {
-            menu_div
-                .rounded(px(12.))
-                .border_color(rgba(c.capsule_border()))
-                .bg(rgba(c.capsule_sheet_surface()))
-                .shadow(theme::capsule_floating_shadow())
-        } else {
-            menu_div
-                .rounded_md()
-                .border_color(rgba(c.toolbar_border))
-                .bg(rgba(c.toolbar_bg))
-        };
+        menu_div = menu_div
+            .rounded(px(12.))
+            .border_color(rgba(c.capsule_border()))
+            .bg(rgba(c.capsule_sheet_surface()))
+            .shadow(theme::capsule_floating_shadow());
         let mut menu_div = menu_div
             .child(strip)
             .child(sep())
@@ -451,23 +415,19 @@ impl PinBoard {
 }
 
 /// Compact top-left status badge inside a floating pin (zoom %, opacity %, OCR…).
-pub(super) fn render_hud_pill(text: &str, capsule: bool) -> Div {
+pub(super) fn render_hud_pill(text: &str) -> Div {
     let c = theme::c();
-    let mut pill = div().absolute().left(px(6.)).top(px(6.)).px_2().py_0p5();
-    pill = if capsule {
-        pill.rounded_full()
-            .bg(rgba(c.capsule_surface()))
-            .border_1()
-            .border_color(rgba(c.capsule_border()))
-            .text_xs()
-            .text_color(rgba(c.toolbar_text))
-    } else {
-        pill.rounded_sm()
-            .bg(rgba((c.chip_bg & 0xFFFF_FF00) | 0xE6))
-            .border_1()
-            .border_color(rgba(c.toolbar_border))
-            .text_xs()
-            .text_color(rgba(c.btn_text))
-    };
-    pill.child(text.to_owned())
+    div()
+        .absolute()
+        .left(px(6.))
+        .top(px(6.))
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .bg(rgba(c.capsule_surface()))
+        .border_1()
+        .border_color(rgba(c.capsule_border()))
+        .text_xs()
+        .text_color(rgba(c.toolbar_text))
+        .child(text.to_owned())
 }

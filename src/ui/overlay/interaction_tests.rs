@@ -698,7 +698,6 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
             ShapeKind::Mosaic,
             ShapeKind::Blur,
             ShapeKind::Eraser,
-            ShapeKind::EraserRect,
             ShapeKind::Magnifier,
             ShapeKind::Spotlight,
             ShapeKind::Text,

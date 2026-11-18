@@ -202,15 +202,6 @@ settings:
     reloaded:
       en: Reloaded ✓
       zh-CN: 已重新加载 ✓
-    open_dir:
-      en: Open folder
-      zh-CN: 打开目录
-    file_present:
-      en: Saved on disk
-      zh-CN: 已写入磁盘
-    file_default:
-      en: Using defaults (created on edit)
-      zh-CN: 当前使用默认值（编辑时自动创建）
     group:
       storage:
         en: Caches & local state
@@ -564,24 +555,6 @@ settings:
         en: Replace line breaks with spaces before copying recognized text
         zh-CN: 复制识别结果前将换行符替换为空格，适合粘贴段落文本
   appearance:
-    ui_style:
-      en: Interface style
-      zh-CN: 界面风格
-    style:
-      classic:
-        title:
-          en: Classic
-          zh-CN: 经典
-        body:
-          en: Compact floating strip with dot-matrix grips, accent handles and square swatches
-          zh-CN: 紧凑悬浮条、点阵拖动手柄、强调色控制点与方形色块
-      capsule:
-        title:
-          en: Capsule
-          zh-CN: 胶囊
-        body:
-          en: Centered frosted capsule, concentric rounded controls, circular loupe and ring swatches
-          zh-CN: 居中半透明胶囊栏、同心圆角控件、圆形像素放大镜与圆环色盘
     shotori_light:
       en: Shotori Light
       zh-CN: Shotori Light
@@ -1787,12 +1760,6 @@ toolbar:
   eraser:
     en: Eraser
     zh-CN: 橡皮擦
-  eraser_brush:
-    en: Brush eraser
-    zh-CN: 笔刷橡皮擦
-  eraser_rect:
-    en: Rectangle eraser
-    zh-CN: 矩形橡皮擦
   color_label:
     en: "Color: %{name}"
     zh-CN: "颜色：%{name}"
