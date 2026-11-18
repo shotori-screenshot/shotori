@@ -17,7 +17,7 @@ Match the verification tier to what your change touches.
 >   pixel/font leaf crates (`[profile.test.package."*"] opt-level = 0`), keeping
 >   `scroll_sheet` and rasterizer tests fast (~5 s) while sharing cached `dev`
 >   dependency artifacts with `cargo build`.
-> - `#[gpui_kit::test]` works cleanly on pinned `gpui-kit 0.8` (see
+> - `#[gpui_kit::test]` works cleanly on pinned `gpui-kit 0.10` (see
 >   `src/ui/text_input.rs`, `src/ui/text_editor.rs`,
 >   `src/ui/overlay/interaction_tests.rs`,
 >   `src/ui/overlay/multi_output_tests.rs`, `src/model/session.rs`). If a

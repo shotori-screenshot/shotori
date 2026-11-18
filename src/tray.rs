@@ -148,7 +148,7 @@ fn icon() -> gpui_tray::Result<Icon> {
     .map_err(|error| gpui_tray::Error::InvalidIcon(error.to_string()))?
     .into_rgba8();
     let (width, height) = image.dimensions();
-    Icon::from_rgba(image.into_raw(), width, height)
+    Icon::from_rgba(image.into_raw(), width, height).build()
 }
 
 mod instance_lock {

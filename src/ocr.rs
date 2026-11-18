@@ -355,7 +355,8 @@ fn init_engine() -> anyhow::Result<Mutex<rapidocr_core::RapidOcr>> {
                         .with_context(|| format!("removing corrupt model {}", path.display()))?;
                 }
             }
-            Err(e.context("OCR engine init failed; retry OCR to repair missing models"))
+            Err(anyhow::Error::new(e)
+                .context("OCR engine init failed; retry OCR to repair missing models"))
         }
     }
 }
