@@ -14,10 +14,18 @@ workspaces.
 3. Read the module header (`//!`) and neighboring tests in the target file
    before designing edits.
 
-## 2. Parallel Workspaces (`jj` + Colocated Git)
+## 2. Version Control & Parallel Workspaces (`jj`-Only)
 
-Shotori uses colocated Jujutsu (`.jj`) + Git worktrees for parallel agent
-streams (e.g. `../shotori-ui`, `../shotori-annotation`,
+Shotori is a colocated Jujutsu (`.jj`) + Git repository. **Always use `jj`
+for every version-control operation** (`jj status`, `jj log`, `jj diff`,
+`jj commit` / `jj describe`, `jj squash`, `jj rebase`, `jj bookmark set`,
+`jj git fetch`, `jj git push`) — **never** run mutating `git` commands
+(`git commit`, `git checkout`, `git branch`, `git merge`, `git push`,
+`git reset`). Mutating `.git` directly leaves `jj`'s working-copy `@`
+pointing at the old parent so the next `jj` command snapshots the working
+tree into an orphaned side-branch change.
+
+For parallel agent streams (e.g. `../shotori-ui`, `../shotori-annotation`,
 `../shotori-tests`, `../shotori-docs`):
 
 ```bash
@@ -26,7 +34,6 @@ jj workspace add ../shotori-<topic> -r main
 
 # Inspect active workspaces and their working-copy commits:
 jj workspace list
-git worktree list
 ```
 
 ### Multi-Agent Isolation Rules

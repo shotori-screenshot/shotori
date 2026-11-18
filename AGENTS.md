@@ -185,6 +185,12 @@ libxkbcommon-dev libwayland-dev`.
 
 ## Documentation Duties & Rules Hygiene
 
+- **Use `jj` exclusively for all VCS operations** (`jj status`, `jj diff`,
+  `jj commit` / `jj describe`, `jj bookmark set`, `jj git fetch`,
+  `jj git push`) — never mutate commits, branches, or working trees with
+  raw `git` commands in this colocated repo (running `git commit` behind
+  `jj`'s back leaves `@` on the old parent and snapshots a duplicate
+  side-branch commit on the next `jj` invocation).
 - **Never edit `README.md` or `README.zh-CN.md`** (maintainer-owned;
   note user-visible changes in commit/PR descriptions instead).
 - Keep [`docs/settings.example.toml`](docs/settings.example.toml),
