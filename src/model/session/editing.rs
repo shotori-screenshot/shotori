@@ -105,6 +105,9 @@ impl ScreenshotSession {
             if delta == point(px(0.), px(0.)) {
                 return false;
             }
+            if matches!(self.nudge, Some(NudgeGesture::Selection { .. })) {
+                self.finish_nudge();
+            }
             self.nudge.get_or_insert_with(|| NudgeGesture::Shapes {
                 before: current.clone(),
             });
@@ -116,6 +119,9 @@ impl ScreenshotSession {
             let delta = movement_delta(selection, desktop, delta);
             if delta == point(px(0.), px(0.)) {
                 return false;
+            }
+            if matches!(self.nudge, Some(NudgeGesture::Shapes { .. })) {
+                self.finish_nudge();
             }
             self.nudge
                 .get_or_insert(NudgeGesture::Selection { before: selection });
@@ -136,13 +142,22 @@ impl ScreenshotSession {
         if self.blocked
             || !self.selection.is_selected()
             || self.selection_gesture.is_some()
+            || self.moving.is_some()
+            || self.handle_drag.is_some()
+            || self.pending_click.is_some()
+            || self.marquee.is_some()
             || self.toolbar_drag.is_some()
+            || self.annotations.is_pressed()
+            || self.annotations.is_drawing_polyline()
         {
             return false;
         }
         let Some(desktop) = self.desktop_bounds() else {
             return false;
         };
+        if matches!(self.nudge, Some(NudgeGesture::Shapes { .. })) {
+            self.finish_nudge();
+        }
         let Some(before) = self.selection.bounds() else {
             return false;
         };
@@ -941,5 +956,72 @@ mod tests {
             assert!(b.left() >= px(0.) && b.top() >= px(0.), "{b:?}");
             assert!(b.right() <= px(400.) && b.bottom() <= px(300.), "{b:?}");
         }
+    }
+
+    #[test]
+    fn interleaved_shape_nudge_and_selection_zoom_preserve_both_undo_entries() {
+        // 1. Shape nudge followed immediately by wheel zoom, then shape nudge again.
+        let mut s = session();
+        s.edit_annotations(|a| {
+            a.select_index(0);
+        });
+        let orig_crop = s.selection.bounds().unwrap();
+        let orig_shape = s.annotations.committed()[0].clone();
+
+        assert!(s.nudge(p(6., 4.)));
+        assert!(s.nudge(p(4., 2.)));
+        let nudged_shape_1 = s.annotations.committed()[0].clone();
+        assert_eq!(
+            nudged_shape_1.bounds.origin,
+            orig_shape.bounds.origin + p(10., 6.)
+        );
+
+        // Wheel-zooming while a shape is selected flushes the shape nudge first.
+        assert!(s.zoom_selection(1));
+        assert!(s.zoom_selection(1));
+        let zoomed_crop = s.selection.bounds().unwrap();
+        assert_ne!(zoomed_crop, orig_crop);
+
+        // Nudging the selected shape again flushes the selection zoom first.
+        assert!(s.nudge(p(-3., 5.)));
+        s.finish_nudge();
+        let nudged_shape_2 = s.annotations.committed()[0].clone();
+        assert_eq!(
+            nudged_shape_2.bounds.origin,
+            nudged_shape_1.bounds.origin + p(-3., 5.)
+        );
+
+        // Undo 1: reverts second shape nudge.
+        s.undo();
+        assert_eq!(s.annotations.committed()[0], nudged_shape_1);
+        assert_eq!(s.selection.bounds(), Some(zoomed_crop));
+
+        // Undo 2: reverts wheel zoom.
+        s.undo();
+        assert_eq!(s.selection.bounds(), Some(orig_crop));
+        assert_eq!(s.annotations.committed()[0], nudged_shape_1);
+
+        // Undo 3: reverts first shape nudge.
+        s.undo();
+        assert_eq!(s.annotations.committed()[0], orig_shape);
+        assert_eq!(s.selection.bounds(), Some(orig_crop));
+
+        // Redo all three in order.
+        s.redo();
+        assert_eq!(s.annotations.committed()[0], nudged_shape_1);
+        s.redo();
+        assert_eq!(s.selection.bounds(), Some(zoomed_crop));
+        s.redo();
+        assert_eq!(s.annotations.committed()[0], nudged_shape_2);
+
+        // 2. Active annotation gestures block zoom_selection just like nudge.
+        s.edit_annotations(|a| {
+            a.select_index(0);
+        });
+        let handle = s.annotations.committed()[0].handle_points()[0];
+        s.pointer_down("screen", handle, false, false);
+        assert!(s.handle_drag.is_some());
+        assert!(!s.zoom_selection(1));
+        s.pointer_up("screen", handle, false);
     }
 }
