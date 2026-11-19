@@ -229,7 +229,9 @@ impl Overlay {
     }
 
     /// Ctrl+Q / toolbar [QR]: scan the raw captured selection for QR codes,
-    /// copy decoded payload(s) to the clipboard, and notify.
+    /// copy decoded payload(s) to the clipboard, and notify. Every failure
+    /// outcome tears the overlay down too — behind the frozen mask a failed
+    /// scan leaves nothing to do, so lingering reads as a hang (issue #54).
     pub(super) fn qr_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.session.read(cx).blocked() {
             return;
@@ -478,6 +480,11 @@ async fn scan_qr_to_clipboard(
         });
     });
 
+    // Every failure quits as well: behind the frozen overlay a failed
+    // scan leaves nothing worth staying for (no Ctrl+S fallback like a
+    // copy failure has), so a lingering mask only reads as a hang
+    // (issue #54). Success quits too unless keep_open_after_copy opts
+    // into keeping the session.
     match outcome {
         QrScanOutcome::Empty => {
             println!("[shotori] QR scan {w}x{h} (from {name}): no QR code found");
@@ -485,6 +492,7 @@ async fn scan_qr_to_clipboard(
                 crate::i18n::t!("notify.qr.empty.title").as_ref(),
                 crate::i18n::t!("notify.qr.empty.body").as_ref(),
             );
+            cx.update(|cx| cx.quit());
         }
         QrScanOutcome::Copied {
             count,
@@ -508,6 +516,7 @@ async fn scan_qr_to_clipboard(
                 crate::i18n::t!("notify.qr.copy_failed.title").as_ref(),
                 crate::i18n::t!("notify.qr.copy_failed.body").as_ref(),
             );
+            cx.update(|cx| cx.quit());
         }
         QrScanOutcome::ScanFailed(e) => {
             eprintln!("[shotori] QR scan failed: {e:#}");
@@ -516,6 +525,7 @@ async fn scan_qr_to_clipboard(
                 crate::i18n::t!("notify.qr.failed.title").as_ref(),
                 crate::i18n::t!("notify.qr.failed.body", reason = reason).as_ref(),
             );
+            cx.update(|cx| cx.quit());
         }
     }
 }
