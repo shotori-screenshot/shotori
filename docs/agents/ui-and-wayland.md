@@ -45,9 +45,10 @@ Overlay chrome uses a strict **two-zone non-intersecting contract**:
     default buttons or row-two option controls grow, update the constants
     in `model/placement.rs` and keep the probe tests green
     (`toolbar_hugs_its_content` and the 35-geometry placement sweep).
-  - Narrow selections/screens: toolbar rows must remain reachable via
-    horizontal scrolling (`ui/toolbar/row.rs`), and both rows must stay
-    clamped within display bounds.
+  - Narrow selections/screens: toolbar rows stay strictly single-row with no
+    scrollbar; trailing controls that exceed the display's available width
+    spill into a `...` overflow popover (`ui/toolbar/row.rs`), and both rows
+    stay clamped within display bounds.
 - **Hit-testing & cursor alignment**: drag grips (`GRIP_W`, `BAR_PAD`),
   resize handles, and toolbar hover regions MUST read the exact bounds
   functions on `ScreenshotSession` / `placement.rs`. Never infer hit

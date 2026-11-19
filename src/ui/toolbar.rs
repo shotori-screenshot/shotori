@@ -12,7 +12,7 @@ mod number_options;
 mod row;
 mod spotlight_options;
 mod text_options;
-use annot_options::annot_options;
+use annot_options::annot_options_items;
 use gpui_kit::{
     assets::IconName,
     base::{
@@ -112,7 +112,8 @@ gpui_kit::assets::icon_assets!(
         RefreshCw,
         Images,
         Eye,
-        EyeOff
+        EyeOff,
+        Ellipsis
     ]
 );
 
@@ -171,6 +172,7 @@ fn own_icon_colored(path: &'static str, color: u32) -> Svg {
 /// The active tool's size-slider bundle. The overlay owns the
 /// SliderState entity (rebuilt per tool spec) and passes it down;
 /// this module only renders.
+#[derive(Clone)]
 pub(crate) struct SizeSlider {
     pub(crate) state: Entity<SliderState>,
     /// The value's 0..1 position on the track, for the thumb.
@@ -544,33 +546,42 @@ fn row_items(
     annotations: &crate::annotation::Annotations,
     focus: &FocusHandle,
     settings: &crate::model::settings::Settings,
-) -> Vec<AnyElement> {
+) -> Vec<row::OverflowItem> {
     use crate::model::settings::ToolbarItem;
+    let keys = settings.keys().clone();
     items
         .iter()
-        .map(|item| match item {
+        .filter_map(|item| match item {
             ToolbarItem::Button(button) => {
                 // owned: the click closure must outlive the borrowed row
                 let button = *button;
-                let Some(meta) = meta_for(button) else {
-                    // unreachable: BUTTONS covers every ToolbarButton
-                    // (button_table_matches_the_settings_vocabulary)
-                    return div().into_any_element();
-                };
+                let meta = meta_for(button)?;
                 let selected = selected_state(button, annotations);
-                control(
-                    meta.debug_id.into(),
-                    meta.tooltip_for(settings.keys()),
+                let tooltip = meta.tooltip_for(&keys);
+                let focus = focus.clone();
+                Some(row::OverflowItem::control(
+                    BTN_SIZE,
                     selected,
-                    focus.clone(),
-                    move |window, cx| {
-                        window.dispatch_action(action_for(button), cx);
+                    move |popup, _, _| {
+                        let popup = popup.clone();
+                        control(
+                            meta.debug_id.into(),
+                            tooltip.clone(),
+                            selected,
+                            focus.clone(),
+                            move |window, cx| {
+                                if let Some(popup) = &popup {
+                                    popup.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                                window.dispatch_action(action_for(button), cx);
+                            },
+                        )
+                        .child(meta.icon.svg_for(selected))
+                        .into_any_element()
                     },
-                )
-                .child(meta.icon.svg_for(selected))
-                .into_any_element()
+                ))
             }
-            ToolbarItem::Separator => separator().into_any_element(),
+            ToolbarItem::Separator => Some(row::OverflowItem::separator()),
         })
         .collect()
 }
@@ -634,6 +645,9 @@ pub(crate) fn selection_toolbar(
     // row one below reads it, placement's width basis reads the same.
     let settings = crate::model::settings::current();
 
+    let row1_bottom = rect.origin.y + px(ROW_H);
+    let row2_bottom = rect.origin.y + px(ROW_H * 2. + ROW_GAP);
+
     div()
         .id("shotori-toolbar")
         .absolute()
@@ -646,19 +660,27 @@ pub(crate) fn selection_toolbar(
         .items_center()
         .gap(px(ROW_GAP))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(row::ToolbarRow::new(
-            "toolbar-actions-scroll",
-            rect.size.width,
-            bar()
-                .child(grip("tb-grip-left", output.clone(), session.clone()))
-                .children(row_items(settings.row(), annotations, &focus, settings))
-                .child(grip("tb-grip-right", output, session.clone())),
-        ))
+        .child(
+            row::ToolbarRow::new(
+                "toolbar-actions",
+                "toolbar-actions-more",
+                focus.clone(),
+                row1_bottom,
+                row_items(settings.row(), annotations, &focus, settings),
+            )
+            .leading(
+                GRIP_W,
+                grip("tb-grip-left", output.clone(), session.clone()),
+            )
+            .trailing(GRIP_W, grip("tb-grip-right", output, session.clone())),
+        )
         .children(edit_kind.is_some().then(|| {
             row::ToolbarRow::new(
-                "annotation-options-scroll",
-                rect.size.width,
-                annot_options(
+                "tb-options",
+                "annotation-options-more",
+                focus.clone(),
+                row2_bottom,
+                annot_options_items(
                     edit_kind,
                     annotations,
                     &session,
@@ -688,6 +710,8 @@ pub(crate) fn pin_annotation_toolbar(
         .unwrap_or_else(|| annotations.color().0);
     let settings = crate::model::settings::current();
     let pin_row = settings.pin_tool_row();
+    let row1_bottom = rect.origin.y + px(ROW_H);
+    let row2_bottom = rect.origin.y + px(ROW_H * 2. + ROW_GAP);
 
     div()
         .id("shotori-pin-toolbar")
@@ -703,15 +727,19 @@ pub(crate) fn pin_annotation_toolbar(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(row::ToolbarRow::new(
-            "pin-toolbar-actions-scroll",
-            rect.size.width,
-            bar().children(row_items(&pin_row, annotations, &focus, settings)),
+            "pin-toolbar-actions",
+            "pin-toolbar-actions-more",
+            focus.clone(),
+            row1_bottom,
+            row_items(&pin_row, annotations, &focus, settings),
         ))
         .children(edit_kind.is_some().then(|| {
             row::ToolbarRow::new(
-                "pin-annotation-options-scroll",
-                rect.size.width,
-                annot_options(
+                "tb-options",
+                "pin-annotation-options-more",
+                focus.clone(),
+                row2_bottom,
+                annot_options_items(
                     edit_kind,
                     annotations,
                     &session,
@@ -934,21 +962,19 @@ pub(crate) fn preview_control(
     .child(meta.icon.svg())
 }
 
-/// Corner radius of the outer floating bar — shared between the scroll
-/// wrapper's shadow silhouette (`ToolbarRow`) and the bar fill container.
+/// Corner radius of the outer floating bar.
 pub(crate) fn bar_radius() -> Pixels {
     px(14.)
 }
 
-/// Outer elevation shadow painted outside any `overflow_x_scroll` clip mask.
+/// Outer elevation shadow applied to floating toolbar rows (`ToolbarRow`).
 pub(crate) fn bar_shadow() -> Vec<BoxShadow> {
     theme::capsule_floating_shadow()
 }
 
 /// The bar container — shared with the settings editor's preview.
-/// Callers inside horizontal scroll containers attach `bar_shadow` on
-/// the outer non-scrolling wrapper so rectangular scroll masks never slice
-/// drop shadows outside rounded corners.
+/// Floating rows attach [`bar_shadow`] on top so the settings preview card
+/// keeps its flat inset styling.
 pub(crate) fn bar() -> Div {
     let t = theme::c();
     div()

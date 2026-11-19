@@ -711,10 +711,13 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let options = cx.debug_bounds("tb-options").unwrap();
-            let viewport = cx.debug_bounds("annotation-options-scroll").unwrap();
             assert!(
-                options.right() <= viewport.right(),
-                "{kind:?}: {options:?} exceeds {viewport:?}"
+                cx.debug_bounds("annotation-options-more").is_none(),
+                "{kind:?}: wide output must not overflow options into `...`"
+            );
+            assert!(
+                cx.debug_bounds("toolbar-actions-more").is_none(),
+                "{kind:?}: wide output must not overflow main row into `...`"
             );
             assert!(
                 options.size.width <= px(crate::model::placement::TB_W),
@@ -728,8 +731,8 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
                 assert!(options.right() <= bounds.right());
             });
         }
-        // Resize with the widest text options active, then use the actual
-        // scrollbar track to expose and click the final palette entry.
+        // Resize with the widest text options active, then open the `...`
+        // overflow popover to expose and click the final palette entry.
         cx.simulate_resize(size(px(480.), px(700.)));
         cx.update(|_, cx| {
             session.update(cx, |s, cx| {
@@ -737,7 +740,7 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
                 s.edit_annotations(|a| {
                     a.add_text(
                         gpui_kit::Bounds::new(point(px(40.), px(60.)), size(px(160.), px(40.))),
-                        "Selection survives scrolling".into(),
+                        "Selection survives overflow".into(),
                     );
                     a.select_index(0);
                 });
@@ -746,34 +749,31 @@ fn toolbar_rows_fit_and_narrow_outputs_keep_trailing_controls_reachable(cx: &mut
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let strip = cx.debug_bounds("annotation-options-scroll").unwrap();
+        let strip = cx.debug_bounds("tb-options").unwrap();
         assert!(strip.right() <= px(472.));
-        let scroll_end = point(strip.right() - px(2.), strip.bottom() - px(2.));
-        cx.simulate_click(scroll_end, Default::default());
+        let more = cx.debug_bounds("annotation-options-more").unwrap();
+        cx.simulate_click(more.center(), Default::default());
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let color = cx.debug_bounds("tb-color-6").unwrap();
-        assert!(
-            color.right() <= strip.right(),
-            "last color not exposed by scrollbar: {color:?} vs {strip:?}"
-        );
         cx.simulate_click(color.center(), Default::default());
         cx.update(|_, cx| {
             let a = session.read(cx).annotations();
             assert_eq!(a.selected_index(), Some(0));
             assert_eq!(a.color_index(), 6);
         });
-        // The main row obeys the same viewport and can expose its right grip.
-        let strip = cx.debug_bounds("toolbar-actions-scroll").unwrap();
-        cx.simulate_click(
-            point(strip.right() - px(2.), strip.bottom() - px(2.)),
-            Default::default(),
-        );
+        // The main row stays bounded within the narrow display, keeps its
+        // right grip visible inline, and moves trailing actions into `...`.
+        let actions = cx.debug_bounds("toolbar-actions").unwrap();
+        assert!(actions.right() <= px(472.));
+        let grip = cx.debug_bounds("tb-grip-right").unwrap();
+        assert!(grip.right() <= actions.right());
+        assert!(grip.left() >= actions.left());
+        let more = cx.debug_bounds("toolbar-actions-more").unwrap();
+        cx.simulate_click(more.center(), Default::default());
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let grip = cx.debug_bounds("tb-grip-right").unwrap();
-        assert!(grip.right() <= strip.right());
-        assert!(grip.left() >= strip.left());
+        assert!(cx.debug_bounds("tb-copy").is_some());
     });
 }
 

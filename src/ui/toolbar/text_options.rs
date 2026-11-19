@@ -12,21 +12,6 @@ use gpui_kit::{
     },
 };
 
-#[derive(IntoElement)]
-pub(super) struct TextOptions {
-    session: Entity<ScreenshotSession>,
-    focus: FocusHandle,
-}
-
-impl TextOptions {
-    pub(super) fn new(session: &Entity<ScreenshotSession>, focus: &FocusHandle) -> Self {
-        Self {
-            session: session.clone(),
-            focus: focus.clone(),
-        }
-    }
-}
-
 struct TextControls {
     return_focus: FocusHandle,
     font: Entity<SelectState<SearchableVec<String>>>,
@@ -229,107 +214,150 @@ fn rgba_value(value: Hsla) -> u32 {
     (hsla_to_u32(value) & 0xffffff00) | alpha
 }
 
-impl RenderOnce for TextOptions {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let session = self.session.clone();
-        let return_focus = self.focus.clone();
-        let state = window.use_keyed_state(
-            ("annotation-text-controls", self.session.entity_id()),
-            cx,
-            |window, cx| TextControls::new(session, return_focus, window, cx),
-        );
-        state.update(cx, |controls, _| controls.return_focus = self.focus.clone());
-        let controls = state.read(cx);
-        let style = self.session.read(cx).annotations().text_style().clone();
-        let mut row = div().flex().items_center().gap(px(3.));
-        for (id, active, icon, change) in [
-            (
-                "toolbar.text_bold",
-                style.bold,
-                IconName::Bold,
-                (|s: &mut TextStyle| s.bold = !s.bold) as fn(&mut TextStyle),
-            ),
-            ("toolbar.text_italic", style.italic, IconName::Italic, |s| {
-                s.italic = !s.italic
-            }),
-            (
-                "toolbar.text_outline",
-                style.outline.is_some(),
-                IconName::TypeOutline,
-                |s| {
-                    s.outline = if s.outline.is_some() {
-                        None
-                    } else {
-                        Some(0xffffffff)
-                    }
-                },
-            ),
-            (
-                "toolbar.text_background",
-                style.background.is_some(),
-                IconName::SquareDashed,
-                |s| {
-                    s.background = if s.background.is_some() {
-                        None
-                    } else {
-                        Some(0xffffffff)
-                    }
-                },
-            ),
-        ] {
-            let session = self.session.clone();
-            row = row.child(
+fn controls_state(
+    session: &Entity<ScreenshotSession>,
+    focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<TextControls> {
+    let init_session = session.clone();
+    let return_focus = focus.clone();
+    let state = window.use_keyed_state(
+        ("annotation-text-controls", session.entity_id()),
+        cx,
+        |window, cx| TextControls::new(init_session, return_focus, window, cx),
+    );
+    state.update(cx, |controls, _| controls.return_focus = focus.clone());
+    state
+}
+
+pub(super) fn append_items(
+    annotations: &crate::annotation::Annotations,
+    session: &Entity<ScreenshotSession>,
+    focus: &FocusHandle,
+    items: &mut Vec<row::OverflowItem>,
+) {
+    let style = annotations.text_style().clone();
+    for (id, active, icon, change) in [
+        (
+            "toolbar.text_bold",
+            style.bold,
+            IconName::Bold,
+            (|s: &mut TextStyle| s.bold = !s.bold) as fn(&mut TextStyle),
+        ),
+        ("toolbar.text_italic", style.italic, IconName::Italic, |s| {
+            s.italic = !s.italic
+        }),
+        (
+            "toolbar.text_outline",
+            style.outline.is_some(),
+            IconName::TypeOutline,
+            |s| {
+                s.outline = if s.outline.is_some() {
+                    None
+                } else {
+                    Some(0xffffffff)
+                }
+            },
+        ),
+        (
+            "toolbar.text_background",
+            style.background.is_some(),
+            IconName::SquareDashed,
+            |s| {
+                s.background = if s.background.is_some() {
+                    None
+                } else {
+                    Some(0xffffffff)
+                }
+            },
+        ),
+    ] {
+        let btn_session = session.clone();
+        let btn_focus = focus.clone();
+        items.push(row::OverflowItem::control(
+            BTN_SIZE,
+            active,
+            move |_, _, _| {
+                let session = btn_session.clone();
                 control(
                     id.trim_start_matches("toolbar.").into(),
                     crate::i18n::t!(id).into_owned(),
                     active,
-                    self.focus.clone(),
+                    btn_focus.clone(),
                     move |_, cx| edit(&session, cx, change),
                 )
                 .child(annot_options::menu_icon_colored(
                     icon,
                     18.,
                     icon_tint(active),
-                )),
-            );
-            // Keep each enabled color next to its toggle. Nesting a picker inside
-            // another popover lets the parent dismiss before a palette click finishes.
-            if active {
-                let color = match id {
-                    "toolbar.text_outline" => Some((
-                        &controls.outline,
-                        "text-outline-color",
-                        "toolbar.text_outline_color",
-                    )),
-                    "toolbar.text_background" => Some((
-                        &controls.background,
-                        "text-background-color",
-                        "toolbar.text_background_color",
-                    )),
-                    _ => None,
-                };
-                if let Some((picker, selector, label)) = color {
-                    row = row.child(div().debug_selector(move || selector.into()).child(
-                        ColorPicker::new(picker, crate::i18n::t!(label).into_owned()),
-                    ));
+                ))
+                .into_any_element()
+            },
+        ));
+        if active {
+            let color = match id {
+                "toolbar.text_outline" => {
+                    Some((false, "text-outline-color", "toolbar.text_outline_color"))
                 }
+                "toolbar.text_background" => Some((
+                    true,
+                    "text-background-color",
+                    "toolbar.text_background_color",
+                )),
+                _ => None,
+            };
+            if let Some((is_bg, selector, label)) = color {
+                let picker_session = session.clone();
+                let picker_focus = focus.clone();
+                items.push(row::OverflowItem::control(
+                    28.,
+                    false,
+                    move |_, window, cx| {
+                        let state = controls_state(&picker_session, &picker_focus, window, cx);
+                        let picker = {
+                            let controls = state.read(cx);
+                            if is_bg {
+                                controls.background.clone()
+                            } else {
+                                controls.outline.clone()
+                            }
+                        };
+                        div()
+                            .debug_selector(move || selector.into())
+                            .child(ColorPicker::new(
+                                &picker,
+                                crate::i18n::t!(label).into_owned(),
+                            ))
+                            .into_any_element()
+                    },
+                ));
             }
         }
-        if style.background.is_some() {
-            let padding = controls.padding.clone();
-            let radius = controls.radius.clone();
-            let t = theme::c();
-            let pop = Popover::new("text-background-options")
-                .p(px(0.))
-                .rounded(px(12.))
-                .bg(rgba(t.capsule_sheet_surface()))
-                .border_1()
-                .border_color(rgba(t.capsule_border()))
-                .shadow(theme::capsule_floating_shadow());
-            row = row.child(
+    }
+    if style.background.is_some() {
+        let bg_session = session.clone();
+        let bg_focus = focus.clone();
+        items.push(row::OverflowItem::control(
+            BTN_SIZE,
+            false,
+            move |_, window, cx| {
+                let state = controls_state(&bg_session, &bg_focus, window, cx);
+                let (padding, radius) = {
+                    let controls = state.read(cx);
+                    (controls.padding.clone(), controls.radius.clone())
+                };
+                let t = theme::c();
+                let pop = Popover::new("text-background-options")
+                    .p(px(0.))
+                    .rounded(px(12.))
+                    .bg(rgba(t.capsule_sheet_surface()))
+                    .border_1()
+                    .border_color(rgba(t.capsule_border()))
+                    .shadow(theme::capsule_floating_shadow());
                 pop.on_open_change({
-                    let session = self.session.clone();
-                    let focus = self.focus.clone();
+                    let session = bg_session.clone();
+                    let focus = bg_focus.clone();
                     move |open, window, cx| {
                         if !open {
                             window.focus(&focus, cx);
@@ -344,7 +372,7 @@ impl RenderOnce for TextOptions {
                         "text-background-options".into(),
                         crate::i18n::t!("toolbar.text_background_settings").into_owned(),
                         false,
-                        self.focus.clone(),
+                        bg_focus.clone(),
                         |_, _| {},
                     )
                     .on_click(|_, _, _| {})
@@ -379,11 +407,19 @@ impl RenderOnce for TextOptions {
                                 .child(size_control(&sc, ""))
                         }),
                     )
-                }),
-            );
-        }
-        let font = controls.font.clone();
-        row = row.child(
+                })
+                .into_any_element()
+            },
+        ));
+    }
+    let font_session = session.clone();
+    let font_focus = focus.clone();
+    items.push(row::OverflowItem::control(
+        160.,
+        false,
+        move |_, window, cx| {
+            let state = controls_state(&font_session, &font_focus, window, cx);
+            let font = state.read(cx).font.clone();
             Select::new(&font)
                 .id("text-font")
                 .small()
@@ -391,20 +427,29 @@ impl RenderOnce for TextOptions {
                 .menu_width(rems(16.))
                 .menu_max_h(rems(18.))
                 .placeholder(crate::i18n::t!("toolbar.text_font_default").into_owned())
-                .accessibility_label(crate::i18n::t!("toolbar.text_font").into_owned()),
-        );
-        row = row.child(
+                .accessibility_label(crate::i18n::t!("toolbar.text_font").into_owned())
+                .into_any_element()
+        },
+    ));
+    let size_session = session.clone();
+    let size_focus = focus.clone();
+    items.push(row::OverflowItem::control(
+        48.,
+        false,
+        move |_, window, cx| {
+            let state = controls_state(&size_session, &size_focus, window, cx);
+            let size_input = state.read(cx).size.clone();
             div()
                 .debug_selector(|| "tb-size-readout".into())
                 .on_action(|_: &gpui_kit::base::input::Enter, _, cx| cx.stop_propagation())
                 .child(
-                    Input::new(&controls.size)
+                    Input::new(&size_input)
                         .small()
                         .w(px(48.))
                         .appearance(false)
                         .aria_label(crate::i18n::t!("toolbar.text_size").into_owned()),
-                ),
-        );
-        row
-    }
+                )
+                .into_any_element()
+        },
+    ));
 }

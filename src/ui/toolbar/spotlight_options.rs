@@ -2,13 +2,6 @@
 use super::*;
 use gpui_kit::{base::slider::SliderEvent, component::popover::Popover};
 
-#[derive(IntoElement)]
-pub(super) struct SpotlightOptions {
-    pub(super) session: Entity<ScreenshotSession>,
-    pub(super) focus: FocusHandle,
-    pub(super) color: Option<Entity<ColorPickerState>>,
-}
-
 struct OutlineControls {
     width: Entity<SliderState>,
     _subscriptions: Vec<Subscription>,
@@ -47,23 +40,26 @@ impl OutlineControls {
     }
 }
 
-impl RenderOnce for SpotlightOptions {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let session = self.session.clone();
-        let state = window.use_keyed_state(
-            ("annotation-spotlight-controls", self.session.entity_id()),
-            cx,
-            |window, cx| OutlineControls::new(session, window, cx),
-        );
-        let (enabled, width) = self.session.read(cx).annotations().spotlight_outline();
-        let session = self.session.clone();
-        let t = theme::c();
-        let mut row = div().flex().items_center().gap(px(3.)).child(
+pub(super) fn append_items(
+    annotations: &crate::annotation::Annotations,
+    session: &Entity<ScreenshotSession>,
+    focus: &FocusHandle,
+    color: &Option<Entity<ColorPickerState>>,
+    items: &mut Vec<row::OverflowItem>,
+) {
+    let (enabled, width) = annotations.spotlight_outline();
+    let toggle_session = session.clone();
+    let toggle_focus = focus.clone();
+    items.push(row::OverflowItem::control(
+        BTN_SIZE,
+        enabled,
+        move |_, _, _| {
+            let session = toggle_session.clone();
             control(
                 "spotlight-outline".into(),
                 crate::i18n::t!("toolbar.spotlight_outline").into_owned(),
                 enabled,
-                self.focus.clone(),
+                toggle_focus.clone(),
                 move |_, cx| {
                     session.update(cx, |s, cx| {
                         s.edit_annotations(|a| a.set_spotlight_outline(!enabled));
@@ -75,71 +71,82 @@ impl RenderOnce for SpotlightOptions {
                 IconName::SquareDashed,
                 18.,
                 icon_tint(enabled),
-            )),
-        );
-        if enabled {
-            let slider = state.read(cx).width.clone();
-            row = row.child(
-                Popover::new("spotlight-outline-options")
-                    .p(px(0.))
-                    .rounded(px(12.))
-                    .bg(rgba(t.capsule_sheet_surface()))
-                    .border_1()
-                    .border_color(rgba(t.capsule_border()))
-                    .shadow(theme::capsule_floating_shadow())
-                    .on_open_change({
-                        let session = self.session.clone();
-                        let focus = self.focus.clone();
-                        move |open, window, cx| {
-                            if !open {
-                                window.focus(&focus, cx);
-                            }
-                            session.update(cx, |s, _| {
-                                s.edit_annotation_settings(|a| a.end_size_drag());
-                            });
-                        }
-                    })
-                    .trigger(
-                        control(
-                            "spotlight-outline-options".into(),
-                            crate::i18n::t!("toolbar.spotlight_outline_width").into_owned(),
-                            false,
-                            self.focus,
-                            |_, _| {},
-                        )
-                        .on_click(|_, _, _| {})
-                        .w_auto()
-                        .px_1()
-                        .child(
-                            svg()
-                                .data(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><path d='M2 4H16' stroke='black'/><path d='M2 9H16' stroke='black' stroke-width='2'/><path d='M2 14H16' stroke='black' stroke-width='3'/></svg>")
-                                .size(px(18.))
-                                .text_color(rgba(t.toolbar_text)),
-                        )
-                        .child(format!("{width:.0}")),
-                    )
-                    .content(move |_, _, cx| {
-                        let sc = SizeSlider {
-                            current: slider.read(cx).value().start(),
-                            percentage: slider.read(cx).percentage().end,
-                            state: slider.clone(),
-                        };
-                        annotation_menu_panel()
-                            .flex()
-                            .items_center()
-                            .child(size_control(&sc, ""))
-                    }),
+            ))
+            .into_any_element()
+        },
+    ));
+    if enabled {
+        let width_session = session.clone();
+        let width_focus = focus.clone();
+        items.push(row::OverflowItem::control(52., false, move |_, window, cx| {
+            let init_session = width_session.clone();
+            let state = window.use_keyed_state(
+                ("annotation-spotlight-controls", width_session.entity_id()),
+                cx,
+                |window, cx| OutlineControls::new(init_session, window, cx),
             );
-            if let Some(color) = self.color {
-                row = row.child(
-                    ColorPicker::new(
-                        &color,
-                        crate::i18n::t!("toolbar.spotlight_outline").into_owned(),
+            let slider = state.read(cx).width.clone();
+            let t = theme::c();
+            Popover::new("spotlight-outline-options")
+                .p(px(0.))
+                .rounded(px(12.))
+                .bg(rgba(t.capsule_sheet_surface()))
+                .border_1()
+                .border_color(rgba(t.capsule_border()))
+                .shadow(theme::capsule_floating_shadow())
+                .on_open_change({
+                    let session = width_session.clone();
+                    let focus = width_focus.clone();
+                    move |open, window, cx| {
+                        if !open {
+                            window.focus(&focus, cx);
+                        }
+                        session.update(cx, |s, _| {
+                            s.edit_annotation_settings(|a| a.end_size_drag());
+                        });
+                    }
+                })
+                .trigger(
+                    control(
+                        "spotlight-outline-options".into(),
+                        crate::i18n::t!("toolbar.spotlight_outline_width").into_owned(),
+                        false,
+                        width_focus.clone(),
+                        |_, _| {},
                     )
-                    .opaque(),
-                );
-            }
+                    .on_click(|_, _, _| {})
+                    .w_auto()
+                    .px_1()
+                    .child(
+                        svg()
+                            .data(b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><path d='M2 4H16' stroke='black'/><path d='M2 9H16' stroke='black' stroke-width='2'/><path d='M2 14H16' stroke='black' stroke-width='3'/></svg>")
+                            .size(px(18.))
+                            .text_color(rgba(t.toolbar_text)),
+                    )
+                    .child(format!("{width:.0}")),
+                )
+                .content(move |_, _, cx| {
+                    let sc = SizeSlider {
+                        current: slider.read(cx).value().start(),
+                        percentage: slider.read(cx).percentage().end,
+                        state: slider.clone(),
+                    };
+                    annotation_menu_panel()
+                        .flex()
+                        .items_center()
+                        .child(size_control(&sc, ""))
+                })
+                .into_any_element()
+        }));
+        if let Some(color) = color.clone() {
+            items.push(row::OverflowItem::control(28., false, move |_, _, _| {
+                ColorPicker::new(
+                    &color,
+                    crate::i18n::t!("toolbar.spotlight_outline").into_owned(),
+                )
+                .opaque()
+                .into_any_element()
+            }));
         }
-        row
     }
 }

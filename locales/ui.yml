@@ -1448,6 +1448,9 @@ scroll:
       en: "Could not start long screenshot capture: %{error}"
       zh-CN: "无法启动长截图捕获：%{error}"
 toolbar:
+  more:
+    en: More
+    zh-CN: 更多
   text_size:
     en: Text size
     zh-CN: 字号

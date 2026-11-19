@@ -1261,17 +1261,20 @@ fn text_input_workflow(cx: &mut TestAppContext) {
     assert_inline_text_caret(&view, cx);
     assert!(cx.debug_bounds("text-editor").unwrap().size.width <= px(9.));
     assert!(cx.debug_bounds("tb-text").is_some());
-    // A narrow output must keep trailing text controls reachable without
-    // committing the active edit or changing the screenshot selection.
-    let strip = cx.debug_bounds("annotation-options-scroll").unwrap();
-    cx.simulate_event(gpui_kit::ScrollEvent {
-        position: strip.center(),
-        delta: gpui_kit::ScrollDelta::Pixels(point(px(-600.), px(0.))),
-        modifiers: Default::default(),
-        touch_phase: gpui_kit::TouchPhase::Moved,
-        source: gpui_kit::ScrollSource::Pointer,
-    });
+    // A narrow output must keep trailing text controls reachable through the
+    // `...` overflow popover without committing the active edit or changing
+    // the screenshot selection.
+    let more = cx.debug_bounds("annotation-options-more").unwrap();
+    cx.simulate_click(more.center(), Default::default());
+    cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    let color = cx.debug_bounds("tb-color-6").unwrap();
+    cx.simulate_click(color.center(), Default::default());
+    cx.update(|_, cx| {
+        assert!(view.read(cx).text_editing.is_some());
+        assert_eq!(session.read(cx).annotations().color_index(), 6);
+    });
+    // Pick swatch 4 (inline on 600px) so the rest of the test keeps a contrasting ink.
     let color = cx.debug_bounds("tb-color-4").unwrap();
     cx.simulate_click(color.center(), Default::default());
     cx.update(|_, cx| session.update(cx, |s, _| s.edit_annotations(|a| a.set_tool_size(16.))));
@@ -2357,13 +2360,9 @@ fn geometry_toolbar_keyboard_and_export(cx: &mut TestAppContext) {
         cx.simulate_resize(size(px(400.), px(400.)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let options = cx.debug_bounds("tb-options").unwrap();
-        cx.simulate_event(gpui_kit::ScrollEvent {
-            position: point(px(200.), options.center().y),
-            delta: gpui_kit::ScrollDelta::Pixels(point(px(-200.), px(0.))),
-            modifiers: Default::default(),
-            touch_phase: Default::default(),
-            source: Default::default(),
-        });
+        let more = cx.debug_bounds("annotation-options-more").unwrap();
+        cx.simulate_click(more.center(), Default::default());
+        cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let button = cx.debug_bounds("tb-color-3").unwrap();
         assert!(

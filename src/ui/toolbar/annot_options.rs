@@ -1,18 +1,21 @@
 //! The annotation settings row — the second toolbar row that appears
-//! when a shape tool is active. Split from toolbar.rs: it reacts to the
-//! SELECTED shape's kind (filter presets / eraser styles / size /
-//! palette), not to the toolbar's own state, and it was a 185-line
-//! closure buried mid-chain in `selection_toolbar`.
+//! when a shape tool is active. Builds overflow-aware [`row::OverflowItem`]
+//! entries so narrow outputs spill trailing controls into the `...` popover
+//! instead of clipping or drawing a scrollbar.
 
 use super::*;
 use crate::annotation::ShapeKind;
 use gpui_kit::prelude::FluentBuilder as _;
 
-/// Builds the settings row for the active `edit_kind`. `session` and
-/// `settings_focus` are shared with the caller's chain; controls clone
-/// what their closures capture.
+const CHOICE_W: f32 = 42.;
+const SIZE_SLIDER_W: f32 = 142.;
+const SWATCH_W: f32 = 28.;
+
+/// Builds the settings row items for the active `edit_kind`. `session` and
+/// `settings_focus` are shared with the caller; controls clone what their
+/// closures capture so items can render either inline or in the `...` popover.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn annot_options(
+pub(super) fn annot_options_items(
     edit_kind: Option<crate::annotation::ShapeKind>,
     annotations: &crate::annotation::Annotations,
     session: &Entity<ScreenshotSession>,
@@ -20,36 +23,61 @@ pub(super) fn annot_options(
     size_slider: &Option<SizeSlider>,
     swatch_picker: &Option<Entity<ColorPickerState>>,
     selected_color: u32,
-) -> Div {
+) -> Vec<row::OverflowItem> {
     let filter_tool = matches!(
         edit_kind,
         Some(crate::annotation::ShapeKind::Mosaic | crate::annotation::ShapeKind::Blur)
     );
     let eraser_tool = edit_kind == Some(crate::annotation::ShapeKind::Eraser);
-    let mut options = bar().debug_selector(|| "tb-options".to_string());
+    let mut items = Vec::new();
+
     if edit_kind == Some(crate::annotation::ShapeKind::Spotlight) {
         let ellipse = annotations.spotlight_ellipse();
-        options = options.child(shape_menu(ellipse, true, session, settings_focus));
-        if let Some(sc) = size_slider {
-            options = options
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .child(crate::i18n::t!("toolbar.spotlight_opacity").into_owned()),
-                )
-                .child(size_control(sc, ""))
-                .child("%");
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W,
+            false,
+            move |_, _, _| shape_menu(ellipse, true, &s, &f).into_any_element(),
+        ));
+        if let Some(sc) = size_slider.clone() {
+            items.push(row::OverflowItem::control(228., false, move |_, _, _| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(BTN_GAP))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .child(crate::i18n::t!("toolbar.spotlight_opacity").into_owned()),
+                    )
+                    .child(size_control(&sc, ""))
+                    .child("%")
+                    .into_any_element()
+            }));
         }
-        return options.child(super::spotlight_options::SpotlightOptions {
-            session: session.clone(),
-            focus: settings_focus.clone(),
-            color: swatch_picker.clone(),
-        });
+        super::spotlight_options::append_items(
+            annotations,
+            session,
+            settings_focus,
+            swatch_picker,
+            &mut items,
+        );
+        return items;
     }
+
     if edit_kind == Some(crate::annotation::ShapeKind::Magnifier) {
         use crate::annotation::LensOption;
         let (ellipse, smooth, marks, connector) = annotations.lens_options();
-        options = options.child(shape_menu(ellipse, false, session, settings_focus));
+        {
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| shape_menu(ellipse, false, &s, &f).into_any_element(),
+            ));
+        }
         for (option, active, key, icon) in [
             (
                 LensOption::Annotations,
@@ -64,14 +92,16 @@ pub(super) fn annot_options(
                 IconName::Sparkles,
             ),
         ] {
-            let session = session.clone();
-            let fg = icon_tint(active);
-            options = options.child(
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(BTN_SIZE, false, move |_, _, _| {
+                let session = s.clone();
+                let fg = icon_tint(active);
                 control(
                     key.into(),
                     crate::i18n::t!(key).into_owned(),
                     active,
-                    settings_focus.clone(),
+                    f.clone(),
                     move |_, cx| {
                         session.update(cx, |s, cx| {
                             s.edit_annotations(|a| a.set_lens_option(option, !active));
@@ -87,237 +117,340 @@ pub(super) fn annot_options(
                         .into_any_element()
                 } else {
                     menu_icon_colored(icon, 18., fg).into_any_element()
-                }),
-            );
+                })
+                .into_any_element()
+            }));
         }
-        options = options.child(super::line_options::connector_menu(
-            connector,
-            session,
-            settings_focus,
-        ));
-        let shadow = annotations.lens_shadow();
-        let shadow_session = session.clone();
-        let shadow_icon = svg()
-            .data(b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'><g fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='2' width='11' height='10' rx='1.5'/><path d='M5 15H15' opacity='.5'/><path d='M7 17H16' opacity='.25'/></g></svg>")
-            .size(px(18.))
-            .text_color(rgba(icon_tint(shadow)));
-        options = options.child(
-            control(
-                "lens-shadow".into(),
-                crate::i18n::t!("toolbar.lens_shadow").into_owned(),
-                shadow,
-                settings_focus.clone(),
-                move |_, cx| {
-                    shadow_session.update(cx, |s, cx| {
-                        s.edit_annotations(|a| a.set_lens_option(LensOption::Shadow, !shadow));
-                        cx.notify();
-                    });
+        {
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| {
+                    super::line_options::connector_menu(connector, &s, &f).into_any_element()
                 },
-            )
-            .child(shadow_icon),
-        );
-        if let Some(sc) = size_slider {
-            options = options.child(size_control(sc, "×"));
-        }
-        if let Some(picker) = swatch_picker {
-            options = options.child(separator()).child(
-                ColorPicker::new(picker, crate::i18n::t!("toolbar.lens_color").into_owned())
-                    .opaque(),
-            );
-        }
-        return options;
-    }
-    if filter_tool {
-        options = options.child(icon_choice_menu(
-            "filter-effect",
-            "toolbar.filter_mosaic",
-            edit_kind.unwrap_or(ShapeKind::Mosaic),
-            &[
-                (
-                    ShapeKind::Mosaic,
-                    "toolbar.filter_mosaic",
-                    OptionIcon::Mosaic,
-                ),
-                (
-                    ShapeKind::Blur,
-                    "toolbar.filter_blur",
-                    OptionIcon::BuiltIn(IconName::MirrorRectangular),
-                ),
-            ],
-            session,
-            settings_focus,
-            |a, kind| a.set_filter_effect(kind),
-        ));
-        let area_kind = annotations.filter_area_kind();
-        let brush = area_kind == crate::annotation::FilterAreaKind::Brush;
-        options = options.child(icon_choice_menu(
-            "filter-area",
-            "toolbar.region_shape",
-            area_kind,
-            &[
-                (
-                    crate::annotation::FilterAreaKind::Rectangle,
-                    "toolbar.filter_rectangle",
-                    OptionIcon::BuiltIn(IconName::Square),
-                ),
-                (
-                    crate::annotation::FilterAreaKind::Ellipse,
-                    "toolbar.filter_ellipse",
-                    OptionIcon::BuiltIn(IconName::Circle),
-                ),
-                (
-                    crate::annotation::FilterAreaKind::Brush,
-                    "toolbar.filter_brush",
-                    OptionIcon::BuiltIn(IconName::Pencil),
-                ),
-            ],
-            session,
-            settings_focus,
-            |a, area_kind| a.set_filter_area_kind(area_kind),
-        ));
-        if brush {
-            options = options.child(icon_choice_menu(
-                "filter-size",
-                "toolbar.filter_strength",
-                annotations.editing_filter_brush_size(),
-                &[
-                    (
-                        false,
-                        "toolbar.filter_strength",
-                        OptionIcon::BuiltIn(IconName::Settings2),
-                    ),
-                    (
-                        true,
-                        "toolbar.filter_diameter",
-                        OptionIcon::BuiltIn(IconName::Circle),
-                    ),
-                ],
-                session,
-                settings_focus,
-                |a, diameter| a.edit_filter_brush_size(diameter),
             ));
         }
-        if let Some(sc) = size_slider {
-            options = options.child(size_control(sc, ""));
-        }
-        return options;
-    }
-
-    if matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)) {
-        options = options.child(super::line_options::geometry_fill_menu(
-            annotations.geometry_fill_mode(),
-            session,
-            settings_focus,
-        ));
-    }
-    if edit_kind == Some(ShapeKind::Highlighter) {
-        options = options.child(super::line_options::highlighter_menus(
-            annotations,
-            session,
-            settings_focus,
-        ));
-    }
-    if edit_kind == Some(ShapeKind::Pencil) {
-        options = options.child(super::line_options::pencil_angle_menu(
-            annotations.pencil_angle(),
-            session,
-            settings_focus,
-        ));
-        let smooth = annotations.pencil_smooth();
-        let session = session.clone();
-        options = options.child(
-            control(
-                "pencil-smooth".into(),
-                crate::i18n::t!("toolbar.pencil_smooth").into_owned(),
-                smooth,
-                settings_focus.clone(),
-                move |_, cx| {
-                    session.update(cx, |s, cx| {
-                        s.edit_annotations(|a| a.set_pencil_smooth(!smooth));
-                        cx.notify();
-                    });
-                },
-            )
-            .child(menu_icon_colored(
-                IconName::Sparkles,
-                18.,
-                icon_tint(smooth),
-            )),
-        );
-    }
-    if edit_kind == Some(ShapeKind::Text) {
-        options = options.child(super::text_options::TextOptions::new(
-            session,
-            settings_focus,
-        ));
-    }
-    if edit_kind == Some(ShapeKind::Number) {
-        let active = annotations.number_fill();
-        let fill_session = session.clone();
-        options = options.child(
-            control(
-                "number-fill".into(),
-                crate::i18n::t!("toolbar.number_fill").into_owned(),
-                active,
-                settings_focus.clone(),
-                move |_, cx| {
-                    fill_session.update(cx, |s, cx| {
-                        s.edit_annotations(|a| a.set_number_fill(!active));
-                        cx.notify();
-                    });
-                },
-            )
-            .child(
-                svg()
-                    .data(if active {
-                        b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><path fill-rule='evenodd' d='M9 2A7 7 0 1 1 9 16A7 7 0 1 1 9 2ZM9.75 5.6L8.65 5.6L6.9 6.8L6.9 8.05L8.35 7.1L8.35 12.5L9.75 12.5Z'/></svg>" as &[u8]
-                    } else {
-                        b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><circle cx='9' cy='9' r='6.25' fill='none' stroke='black' stroke-width='1.5'/><path d='M9.75 5.6H8.65L6.9 6.8V8.05L8.35 7.1V12.5H9.75Z'/></svg>"
-                    })
+        {
+            let shadow = annotations.lens_shadow();
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(BTN_SIZE, false, move |_, _, _| {
+                let shadow_session = s.clone();
+                let shadow_icon = svg()
+                    .data(b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'><g fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='2' width='11' height='10' rx='1.5'/><path d='M5 15H15' opacity='.5'/><path d='M7 17H16' opacity='.25'/></g></svg>")
                     .size(px(18.))
-                    .text_color(rgba(icon_tint(active))),
-            ),
-        );
-        options = options.child(super::line_options::number_menu(
-            annotations.number_format(),
-            session,
-            settings_focus,
-        ));
-        for (up, icon, key) in [
-            (false, IconName::Minus, "toolbar.number_decrease"),
-            (true, IconName::Plus, "toolbar.number_increase"),
-        ] {
-            let session = session.clone();
-            options = options.child(
+                    .text_color(rgba(icon_tint(shadow)));
                 control(
-                    key.into(),
-                    crate::i18n::t!(key).into_owned(),
-                    false,
-                    settings_focus.clone(),
+                    "lens-shadow".into(),
+                    crate::i18n::t!("toolbar.lens_shadow").into_owned(),
+                    shadow,
+                    f.clone(),
                     move |_, cx| {
-                        session.update(cx, |s, cx| {
-                            s.edit_annotations(|a| a.step_number_value(up));
+                        shadow_session.update(cx, |s, cx| {
+                            s.edit_annotations(|a| a.set_lens_option(LensOption::Shadow, !shadow));
                             cx.notify();
                         });
                     },
                 )
-                .child(menu_icon(icon, 18.)),
-            );
+                .child(shadow_icon)
+                .into_any_element()
+            }));
         }
-        options = options.child(super::number_options::NumberValue::new(session));
+        if let Some(sc) = size_slider.clone() {
+            items.push(row::OverflowItem::control(
+                SIZE_SLIDER_W,
+                false,
+                move |_, _, _| size_control(&sc, "×").into_any_element(),
+            ));
+        }
+        if let Some(picker) = swatch_picker.clone() {
+            items.push(row::OverflowItem::separator());
+            items.push(row::OverflowItem::control(
+                SWATCH_W,
+                false,
+                move |_, _, _| {
+                    ColorPicker::new(&picker, crate::i18n::t!("toolbar.lens_color").into_owned())
+                        .opaque()
+                        .into_any_element()
+                },
+            ));
+        }
+        return items;
+    }
+
+    if filter_tool {
+        {
+            let effect = edit_kind.unwrap_or(ShapeKind::Mosaic);
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| {
+                    icon_choice_menu(
+                        "filter-effect",
+                        "toolbar.filter_mosaic",
+                        effect,
+                        &[
+                            (
+                                ShapeKind::Mosaic,
+                                "toolbar.filter_mosaic",
+                                OptionIcon::Mosaic,
+                            ),
+                            (
+                                ShapeKind::Blur,
+                                "toolbar.filter_blur",
+                                OptionIcon::BuiltIn(IconName::MirrorRectangular),
+                            ),
+                        ],
+                        &s,
+                        &f,
+                        |a, kind| a.set_filter_effect(kind),
+                    )
+                    .into_any_element()
+                },
+            ));
+        }
+        let area_kind = annotations.filter_area_kind();
+        let brush = area_kind == crate::annotation::FilterAreaKind::Brush;
+        {
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| {
+                    icon_choice_menu(
+                        "filter-area",
+                        "toolbar.region_shape",
+                        area_kind,
+                        &[
+                            (
+                                crate::annotation::FilterAreaKind::Rectangle,
+                                "toolbar.filter_rectangle",
+                                OptionIcon::BuiltIn(IconName::Square),
+                            ),
+                            (
+                                crate::annotation::FilterAreaKind::Ellipse,
+                                "toolbar.filter_ellipse",
+                                OptionIcon::BuiltIn(IconName::Circle),
+                            ),
+                            (
+                                crate::annotation::FilterAreaKind::Brush,
+                                "toolbar.filter_brush",
+                                OptionIcon::BuiltIn(IconName::Pencil),
+                            ),
+                        ],
+                        &s,
+                        &f,
+                        |a, area_kind| a.set_filter_area_kind(area_kind),
+                    )
+                    .into_any_element()
+                },
+            ));
+        }
+        if brush {
+            let editing_diameter = annotations.editing_filter_brush_size();
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| {
+                    icon_choice_menu(
+                        "filter-size",
+                        "toolbar.filter_strength",
+                        editing_diameter,
+                        &[
+                            (
+                                false,
+                                "toolbar.filter_strength",
+                                OptionIcon::BuiltIn(IconName::Settings2),
+                            ),
+                            (
+                                true,
+                                "toolbar.filter_diameter",
+                                OptionIcon::BuiltIn(IconName::Circle),
+                            ),
+                        ],
+                        &s,
+                        &f,
+                        |a, diameter| a.edit_filter_brush_size(diameter),
+                    )
+                    .into_any_element()
+                },
+            ));
+        }
+        if let Some(sc) = size_slider.clone() {
+            items.push(row::OverflowItem::control(
+                SIZE_SLIDER_W,
+                false,
+                move |_, _, _| size_control(&sc, "").into_any_element(),
+            ));
+        }
+        return items;
+    }
+
+    if matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)) {
+        let mode = annotations.geometry_fill_mode();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W,
+            false,
+            move |_, _, _| super::line_options::geometry_fill_menu(mode, &s, &f).into_any_element(),
+        ));
+    }
+    if edit_kind == Some(ShapeKind::Highlighter) {
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W * 2. + BTN_GAP,
+            false,
+            move |_, _, cx| {
+                super::line_options::highlighter_menus(s.read(cx).annotations(), &s, &f)
+                    .into_any_element()
+            },
+        ));
+    }
+    if edit_kind == Some(ShapeKind::Pencil) {
+        let angle = annotations.pencil_angle();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W,
+            false,
+            move |_, _, _| super::line_options::pencil_angle_menu(angle, &s, &f).into_any_element(),
+        ));
+        let smooth = annotations.pencil_smooth();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            BTN_SIZE,
+            false,
+            move |_, _, _| {
+                let session = s.clone();
+                control(
+                    "pencil-smooth".into(),
+                    crate::i18n::t!("toolbar.pencil_smooth").into_owned(),
+                    smooth,
+                    f.clone(),
+                    move |_, cx| {
+                        session.update(cx, |s, cx| {
+                            s.edit_annotations(|a| a.set_pencil_smooth(!smooth));
+                            cx.notify();
+                        });
+                    },
+                )
+                .child(menu_icon_colored(
+                    IconName::Sparkles,
+                    18.,
+                    icon_tint(smooth),
+                ))
+                .into_any_element()
+            },
+        ));
+    }
+    if edit_kind == Some(ShapeKind::Text) {
+        super::text_options::append_items(annotations, session, settings_focus, &mut items);
+    }
+    if edit_kind == Some(ShapeKind::Number) {
+        let active = annotations.number_fill();
+        {
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(BTN_SIZE, false, move |_, _, _| {
+                let fill_session = s.clone();
+                control(
+                    "number-fill".into(),
+                    crate::i18n::t!("toolbar.number_fill").into_owned(),
+                    active,
+                    f.clone(),
+                    move |_, cx| {
+                        fill_session.update(cx, |s, cx| {
+                            s.edit_annotations(|a| a.set_number_fill(!active));
+                            cx.notify();
+                        });
+                    },
+                )
+                .child(
+                    svg()
+                        .data(if active {
+                            b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><path fill-rule='evenodd' d='M9 2A7 7 0 1 1 9 16A7 7 0 1 1 9 2ZM9.75 5.6L8.65 5.6L6.9 6.8L6.9 8.05L8.35 7.1L8.35 12.5L9.75 12.5Z'/></svg>" as &[u8]
+                        } else {
+                            b"<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 18 18'><circle cx='9' cy='9' r='6.25' fill='none' stroke='black' stroke-width='1.5'/><path d='M9.75 5.6H8.65L6.9 6.8V8.05L8.35 7.1V12.5H9.75Z'/></svg>"
+                        })
+                        .size(px(18.))
+                        .text_color(rgba(icon_tint(active))),
+                )
+                .into_any_element()
+            }));
+        }
+        {
+            let format = annotations.number_format();
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                CHOICE_W,
+                false,
+                move |_, _, _| super::line_options::number_menu(format, &s, &f).into_any_element(),
+            ));
+        }
+        for (up, icon, key) in [
+            (false, IconName::Minus, "toolbar.number_decrease"),
+            (true, IconName::Plus, "toolbar.number_increase"),
+        ] {
+            let s = session.clone();
+            let f = settings_focus.clone();
+            items.push(row::OverflowItem::control(
+                BTN_SIZE,
+                false,
+                move |_, _, _| {
+                    let session = s.clone();
+                    control(
+                        key.into(),
+                        crate::i18n::t!(key).into_owned(),
+                        false,
+                        f.clone(),
+                        move |_, cx| {
+                            session.update(cx, |s, cx| {
+                                s.edit_annotations(|a| a.step_number_value(up));
+                                cx.notify();
+                            });
+                        },
+                    )
+                    .child(menu_icon(icon, 18.))
+                    .into_any_element()
+                },
+            ));
+        }
+        {
+            let s = session.clone();
+            items.push(row::OverflowItem::control(80., false, move |_, _, _| {
+                super::number_options::NumberValue::new(&s).into_any_element()
+            }));
+        }
     }
     if matches!(edit_kind, Some(ShapeKind::Line | ShapeKind::Polyline)) {
-        options = options.child(super::line_options::line_end_menus(
-            annotations.line_ends(),
-            session,
-            settings_focus,
+        let ends = annotations.line_ends();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W * 2. + BTN_GAP,
+            false,
+            move |_, _, _| super::line_options::line_end_menus(ends, &s, &f).into_any_element(),
         ));
     }
     if matches!(edit_kind, Some(ShapeKind::Arrow | ShapeKind::Number)) {
-        options = options.child(super::line_options::arrow_menu(
-            annotations.arrow_style(),
-            session,
-            settings_focus,
+        let arrow = annotations.arrow_style();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W,
+            false,
+            move |_, _, _| super::line_options::arrow_menu(arrow, &s, &f).into_any_element(),
         ));
     }
     if matches!(
@@ -331,46 +464,56 @@ pub(super) fn annot_options(
         )
     ) && (edit_kind != Some(ShapeKind::Arrow) || annotations.arrow_style().supports_line_style())
     {
-        options = options.child(super::line_options::line_menu(
-            annotations.line_style(),
-            session,
-            settings_focus,
+        let line = annotations.line_style();
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(
+            CHOICE_W,
+            false,
+            move |_, _, _| super::line_options::line_menu(line, &s, &f).into_any_element(),
         ));
     }
 
     if edit_kind != Some(ShapeKind::Text)
-        && let Some(sc) = &size_slider
+        && let Some(sc) = size_slider.clone()
     {
-        options = options.child(
-            div()
-                .id("tb-primary-size")
-                .debug_selector(|| "tb-primary-size".into())
-                .when(
-                    matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)),
-                    |row| {
-                        row.tooltip(|_, cx| {
-                            cx.new(|_| {
-                                ToolbarTooltip(
-                                    crate::i18n::t!("toolbar.line_width").into_owned().into(),
-                                )
+        items.push(row::OverflowItem::control(
+            SIZE_SLIDER_W,
+            false,
+            move |_, _, _| {
+                div()
+                    .id("tb-primary-size")
+                    .debug_selector(|| "tb-primary-size".into())
+                    .when(
+                        matches!(edit_kind, Some(ShapeKind::Rectangle | ShapeKind::Ellipse)),
+                        |row| {
+                            row.tooltip(|_, cx| {
+                                cx.new(|_| {
+                                    ToolbarTooltip(
+                                        crate::i18n::t!("toolbar.line_width").into_owned().into(),
+                                    )
+                                })
+                                .into()
                             })
-                            .into()
-                        })
-                    },
-                )
-                .child(size_control(sc, "")),
-        );
-    }
-    if edit_kind == Some(ShapeKind::Rectangle) {
-        options = options.child(super::geometry_options::CornerRadius::new(
-            session,
-            settings_focus,
+                        },
+                    )
+                    .child(size_control(&sc, ""))
+                    .into_any_element()
+            },
         ));
     }
-    if eraser_tool {
-        return options;
+    if edit_kind == Some(ShapeKind::Rectangle) {
+        let s = session.clone();
+        let f = settings_focus.clone();
+        items.push(row::OverflowItem::control(54., false, move |_, _, _| {
+            super::geometry_options::CornerRadius::new(&s, &f).into_any_element()
+        }));
     }
-    options = options.child(separator());
+    if eraser_tool {
+        return items;
+    }
+
+    items.push(row::OverflowItem::separator());
     let active_ix = annotations.active_swatch_index();
     for (ix, color) in crate::model::settings::current()
         .annotation_colors()
@@ -380,64 +523,81 @@ pub(super) fn annot_options(
     {
         let name = crate::model::settings::PALETTE_NAMES[ix];
         if active_ix == Some(ix)
-            && let Some(picker) = &swatch_picker
+            && let Some(picker) = swatch_picker.clone()
         {
-            options = options.child(
-                ColorPicker::new(
-                    picker,
-                    crate::i18n::t!("toolbar.color_edit_aria", name = name).to_string(),
-                )
-                .opaque()
-                .selected(true),
-            );
+            items.push(row::OverflowItem::control(
+                SWATCH_W,
+                false,
+                move |_, _, _| {
+                    ColorPicker::new(
+                        &picker,
+                        crate::i18n::t!("toolbar.color_edit_aria", name = name).to_string(),
+                    )
+                    .opaque()
+                    .selected(true)
+                    .into_any_element()
+                },
+            ));
             continue;
         }
-        let session = session.clone();
+        let s = session.clone();
+        let f = settings_focus.clone();
         let is_selected = selected_color == color;
-        let t = theme::c();
-        let selector = format!("tb-color-{ix}");
-        let label = crate::i18n::t!("toolbar.color_label", name = name).to_string();
-        let tooltip: SharedString = label.clone().into();
-        let focus = settings_focus.clone();
-        let btn = Button::new(SharedString::from(selector.clone()))
-            .debug_selector(move || selector)
-            .accessibility_label(label)
-            .tooltip(move |_, cx| cx.new(|_| ToolbarTooltip(tooltip.clone())).into())
-            .on_click(move |_, window, cx| {
-                window.focus(&focus, cx);
-                session.update(cx, |s, cx| {
-                    s.edit_annotation_settings(|a| a.set_color(ix));
-                    cx.notify();
-                });
-            })
-            .size(px(28.))
-            .flex_shrink_0()
-            .rounded_full()
-            .border_2()
-            .border_color(if is_selected {
-                rgba(t.accent)
-            } else {
-                rgba(0x00000000)
-            })
-            .hover(move |s| {
-                s.border_color(if is_selected {
-                    rgba(t.accent)
-                } else {
-                    rgba(theme::alpha(t.toolbar_text, 0x66))
-                })
-            })
-            .focus_visible(move |s| s.border_color(rgba(t.accent)))
-            .child(
-                div()
-                    .size(px(18.))
+        items.push(row::OverflowItem::control(
+            SWATCH_W,
+            false,
+            move |popup, _, _| {
+                let session = s.clone();
+                let focus = f.clone();
+                let popup = popup.clone();
+                let t = theme::c();
+                let selector = format!("tb-color-{ix}");
+                let label = crate::i18n::t!("toolbar.color_label", name = name).to_string();
+                let tooltip: SharedString = label.clone().into();
+                Button::new(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector)
+                    .accessibility_label(label)
+                    .tooltip(move |_, cx| cx.new(|_| ToolbarTooltip(tooltip.clone())).into())
+                    .on_click(move |_, window, cx| {
+                        if let Some(popup) = &popup {
+                            popup.update(cx, |state, cx| state.dismiss(window, cx));
+                        }
+                        window.focus(&focus, cx);
+                        session.update(cx, |s, cx| {
+                            s.edit_annotation_settings(|a| a.set_color(ix));
+                            cx.notify();
+                        });
+                    })
+                    .size(px(28.))
+                    .flex_shrink_0()
                     .rounded_full()
-                    .bg(rgba(color))
-                    .border_1()
-                    .border_color(rgba(t.swatch_border)),
-            );
-        options = options.child(btn);
+                    .border_2()
+                    .border_color(if is_selected {
+                        rgba(t.accent)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .hover(move |s| {
+                        s.border_color(if is_selected {
+                            rgba(t.accent)
+                        } else {
+                            rgba(theme::alpha(t.toolbar_text, 0x66))
+                        })
+                    })
+                    .focus_visible(move |s| s.border_color(rgba(t.accent)))
+                    .child(
+                        div()
+                            .size(px(18.))
+                            .rounded_full()
+                            .bg(rgba(color))
+                            .border_1()
+                            .border_color(rgba(t.swatch_border)),
+                    )
+                    .into_any_element()
+            },
+        ));
     }
-    options
+    items
 }
 
 #[derive(Clone, Copy)]
@@ -541,6 +701,7 @@ mod tests {
             IconName::Square,
             IconName::Settings2,
             IconName::ChevronDown,
+            IconName::Ellipsis,
             IconName::Sparkles,
             IconName::Pencil,
             IconName::Slash,
