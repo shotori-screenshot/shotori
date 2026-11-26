@@ -313,7 +313,9 @@ mod imp {
 
     /// Save the PNG somewhere a paste target can open it and return the
     /// `file://` URI. The name is stable so repeated copies overwrite one file
-    /// instead of littering the temp directory.
+    /// instead of littering the temp directory — and the file is deliberately
+    /// never deleted: a daemon retiring after a newer copy would otherwise
+    /// unlink the file the live one points at.
     fn publish_image_file(png: &[u8]) -> anyhow::Result<(PathBuf, String)> {
         let path = std::env::temp_dir().join("shotori-clipboard.png");
         std::fs::write(&path, png).context("cannot write the clipboard image file")?;
@@ -475,17 +477,11 @@ mod imp {
         // few dozen bytes per paste and those clients understand it.
         let mut file_view = None;
         if mime == IMAGE_MIME
-            && let Ok((path, uri)) = publish_image_file(&payload)
+            && let Ok((_path, uri)) = publish_image_file(&payload)
         {
             mimes.extend(["text/uri-list".to_string(), "text/html".to_string()]);
-            file_view = Some(FileView {
-                uri,
-                html: format!("<img src=\"{uri}\">"),
-            });
-            // The file itself is intentionally never deleted: the next copy
-            // overwrites this same path, and a daemon retiring after a newer
-            // copy must not unlink the file the live one points at.
-            let _ = path;
+            let html = format!("<img src=\"{uri}\">");
+            file_view = Some(FileView { uri, html });
         }
 
         let mut app = Daemon {
