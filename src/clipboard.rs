@@ -18,8 +18,11 @@ pub enum ClipboardData {
 }
 
 /// Put an image on the clipboard: the PNG bytes are handed to the
-/// resident daemon, which serves `image/png` to paste targets. The raw
-/// pixels are unused on Wayland (kept for a stable internal API).
+/// resident daemon, which serves `image/png` to paste targets — plus a
+/// `text/uri-list`/`text/html` view onto the same bytes saved as a
+/// temporary file, so X11 clients that cannot read a large payload can
+/// still paste. The raw pixels are unused on Wayland (kept for a stable
+/// internal API).
 pub fn copy_image(w: u32, h: u32, rgba: &[u8], png: &[u8]) -> anyhow::Result<()> {
     imp::copy_image(w, h, rgba, png)
 }
@@ -44,6 +47,7 @@ pub use imp::{DAEMON_ARG, daemon_main};
 #[cfg(target_os = "linux")]
 mod imp {
     use std::io::{Read as _, Write as _};
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
     use anyhow::Context as _;
@@ -307,6 +311,31 @@ mod imp {
         }
     }
 
+    /// Save the PNG somewhere a paste target can open it and return the
+    /// `file://` URI. The name is stable so repeated copies overwrite one file
+    /// instead of littering the temp directory.
+    fn publish_image_file(png: &[u8]) -> anyhow::Result<(PathBuf, String)> {
+        let path = std::env::temp_dir().join("shotori-clipboard.png");
+        std::fs::write(&path, png).context("cannot write the clipboard image file")?;
+        let uri = format!("file://{}", percent_encoded(&path));
+        Ok((path, uri))
+    }
+
+    /// Percent-encode everything outside the URI-unreserved set (paths with
+    /// spaces are common, and a raw space makes the URI unparsable).
+    fn percent_encoded(path: &std::path::Path) -> String {
+        let mut out = String::new();
+        for byte in path.to_string_lossy().bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char);
+                }
+                _ => out.push_str(&format!("%{byte:02X}")),
+            }
+        }
+        out
+    }
+
     fn spawn_daemon(mime: &str, data: &[u8]) -> anyhow::Result<()> {
         if data.is_empty() {
             anyhow::bail!("refusing to copy empty data");
@@ -438,9 +467,31 @@ mod imp {
             mimes.extend(["text/plain", "UTF8_STRING", "STRING"].map(String::from));
         }
 
+        // X11 clients behind Xwayland cannot always read a multi-megabyte
+        // image/png payload: everything above one X request (~256 KiB) has to
+        // cross as an INCR transfer, and some clients (chat apps in
+        // particular) never finish it, so pasting a full-screen screenshot
+        // silently does nothing. Offering the same bytes as a file URI costs a
+        // few dozen bytes per paste and those clients understand it.
+        let mut file_view = None;
+        if mime == IMAGE_MIME
+            && let Ok((path, uri)) = publish_image_file(&payload)
+        {
+            mimes.extend(["text/uri-list".to_string(), "text/html".to_string()]);
+            file_view = Some(FileView {
+                uri,
+                html: format!("<img src=\"{uri}\">"),
+            });
+            // The file itself is intentionally never deleted: the next copy
+            // overwrites this same path, and a daemon retiring after a newer
+            // copy must not unlink the file the live one points at.
+            let _ = path;
+        }
+
         let mut app = Daemon {
             payload,
             mimes: mimes.clone(),
+            file_view,
             ..Daemon::default()
         };
         queue.roundtrip(&mut app)?;
@@ -478,12 +529,21 @@ mod imp {
         Ok(())
     }
 
+    /// The image payload saved next to the clipboard so `text/uri-list` and
+    /// `text/html` can point at it.
+    struct FileView {
+        uri: String,
+        html: String,
+    }
+
     #[derive(Default)]
     struct Daemon {
         payload: Vec<u8>,
         /// Every MIME this daemon offers (a paste request matching any of them
         /// gets the data)
         mimes: Vec<String>,
+        /// Extra views onto an image payload: file URI and HTML snippet
+        file_view: Option<FileView>,
         seat: Option<wl_seat::WlSeat>,
         manager: Option<ZwlrDataControlManagerV1>,
         device: Option<ZwlrDataControlDeviceV1>,
@@ -597,12 +657,28 @@ mod imp {
                 // Someone pastes: write the data into the fd they provided (the
                 // compositor hands it over; close when done)
                 zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
-                    if state.mimes.contains(&mime_type) {
-                        let mut file = std::fs::File::from(fd); // fd closed on drop
-                        let _ = file.write_all(&state.payload); // broken pipe etc: ignore
+                    let mut file = std::fs::File::from(fd); // fd closed on drop
+                    match mime_type.as_str() {
+                        // A CRLF-terminated list is what GTK, Qt and Chromium
+                        // parse; a single bare entry is accepted as well.
+                        "text/uri-list" => {
+                            if let Some(view) = &state.file_view {
+                                let uri = view.uri.as_str();
+                                let _ = file.write_all(format!("{uri}\r\n").as_bytes());
+                            }
+                        }
+                        "text/html" => {
+                            if let Some(view) = &state.file_view {
+                                let _ = file.write_all(view.html.as_bytes());
+                            }
+                        }
+                        m if state.mimes.iter().any(|offered| offered == m) => {
+                            let _ = file.write_all(&state.payload); // broken pipe etc: ignore
+                        }
+                        // MIME mismatch: the fd (OwnedFd) drops at the end of
+                        // this branch and closes itself
+                        _ => {}
                     }
-                    // MIME mismatch: the fd (OwnedFd) drops at the end of this
-                    // branch and closes itself
                     let _ = source;
                 }
                 // The clipboard was taken over by someone else: retire
