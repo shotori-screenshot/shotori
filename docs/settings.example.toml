@@ -80,6 +80,12 @@ copy_on_save = false
 # Automatically save a backup file to `save_dir` whenever copying to the clipboard.
 save_on_copy = false
 
+# Also save copied images to a private temp file (`$XDG_RUNTIME_DIR/shotori/clipboard`)
+# and offer `text/uri-list` alongside `image/png`, so X11/Xwayland apps that do not
+# handle incremental (`INCR`) clipboard transfers can still paste large screenshots.
+# Disabled by default so clipboard managers watching `text/*` are not polluted.
+clipboard_file_uri = false
+
 [annotation]
 # Default text-box wrapping mode: "word" | "character" | "none".
 text_wrap = "word"

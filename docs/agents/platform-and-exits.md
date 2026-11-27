@@ -64,9 +64,15 @@ All backends return `SnapRect` in **desktop-global logical coordinates**.
 
 - Wayland requires a live `zwlr_data_control_source_v1` owner to serve
   paste requests. `copy_image` (`image/png`) and `copy_text`
-  (`text/plain;charset=utf-8`) spawn `shotori --clipboard-daemon <mime>`
+  (`text/plain;charset=utf-8`) spawn `shotori --clipboard-daemon <mime> [--file-uri]`
   via `Command::new(current_exe())` (never `fork()` inside a
   multithreaded GPUI/Vulkan process) and pipe bytes over `stdin`.
+- When `[export] clipboard_file_uri = true` (opt-in, default `false`),
+  `copy_image` passes `--file-uri` so the daemon also writes the PNG to
+  a private `0600` file under `$XDG_RUNTIME_DIR/shotori/clipboard/`
+  (`0700`) and offers `text/uri-list`, allowing X11/Xwayland clients
+  that lack `INCR` support to paste large screenshots without polluting
+  `text/*` clipboard managers for everyone else.
 - `Event::Send` streams payloads on a dedicated worker thread using a
   `poll(POLLOUT)` loop (`write_all_nonblock`), never synchronous
   `File::write_all`: wlroots' Xwayland bridge passes an `O_NONBLOCK`

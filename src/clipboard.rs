@@ -18,7 +18,10 @@ pub enum ClipboardData {
 }
 
 /// Put an image on the clipboard: the PNG bytes are handed to the
-/// resident daemon, which serves `image/png` to paste targets. The raw
+/// resident daemon, which serves `image/png` to paste targets — and when
+/// `[export] clipboard_file_uri` is enabled, also saves the PNG to a
+/// private runtime file and offers `text/uri-list` so X11/Xwayland
+/// clients without `INCR` support can paste large screenshots. The raw
 /// pixels are unused on Wayland (kept for a stable internal API).
 pub fn copy_image(w: u32, h: u32, rgba: &[u8], png: &[u8]) -> anyhow::Result<()> {
     imp::copy_image(w, h, rgba, png)
@@ -45,6 +48,9 @@ pub use imp::{DAEMON_ARG, daemon_main};
 mod imp {
     use std::io::{Read as _, Write as _};
     use std::os::fd::{AsFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::Arc;
     use std::thread::JoinHandle;
@@ -64,19 +70,24 @@ mod imp {
 
     /// The argv marker for daemon mode (main.rs dispatches on this)
     pub const DAEMON_ARG: &str = "--clipboard-daemon";
+    /// Optional daemon flag (`argv[3]`) enabling `text/uri-list` file fallback
+    const FILE_URI_ARG: &str = "--file-uri";
     /// Image MIME (accepted by GTK/Qt/browsers alike)
     const IMAGE_MIME: &str = "image/png";
     /// Text MIME (with charset suffix; GTK/Qt paste it correctly)
     const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
     pub fn copy_image(_w: u32, _h: u32, _rgba: &[u8], png: &[u8]) -> anyhow::Result<()> {
+        let offer_file_uri = crate::model::settings::current()
+            .export()
+            .clipboard_file_uri;
         // The daemon serves image/png over zwlr_data_control — only the
         // bytes cross the pipe
-        spawn_daemon(IMAGE_MIME, png)
+        spawn_daemon(IMAGE_MIME, png, offer_file_uri)
     }
 
     pub fn copy_text(text: String) -> anyhow::Result<()> {
-        spawn_daemon(TEXT_MIME, text.as_bytes())
+        spawn_daemon(TEXT_MIME, text.as_bytes(), false)
     }
 
     /// Maximum bytes read from a clipboard offer (128 MiB) so a hostile or
@@ -311,7 +322,178 @@ mod imp {
         }
     }
 
-    fn spawn_daemon(mime: &str, data: &[u8]) -> anyhow::Result<()> {
+    /// Maximum number of temporary clipboard image files retained on disk.
+    const FILE_URI_KEEP: usize = 20;
+    const FILE_URI_PREFIX: &str = "shotori-clipboard-";
+
+    /// Resolve a per-user private directory (`0700`) for `text/uri-list`
+    /// clipboard copies. Prefers `$XDG_RUNTIME_DIR/shotori/clipboard` (tmpfs,
+    /// per-user `0700`, cleared on logout), falling back to XDG cache before
+    /// a dedicated directory under `$TMPDIR`.
+    fn clipboard_file_dir() -> anyhow::Result<PathBuf> {
+        let env_abs = |key: &str| {
+            std::env::var_os(key)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+        };
+        let dir = env_abs("XDG_RUNTIME_DIR")
+            .map(|p| p.join(crate::APP_ID).join("clipboard"))
+            .or_else(|| env_abs("XDG_CACHE_HOME").map(|p| p.join(crate::APP_ID).join("clipboard")))
+            .or_else(|| {
+                env_abs("HOME").map(|p| p.join(".cache").join(crate::APP_ID).join("clipboard"))
+            })
+            .unwrap_or_else(|| std::env::temp_dir().join("shotori-clipboard"));
+        ensure_private_dir(&dir)?;
+        Ok(dir)
+    }
+
+    fn ensure_private_dir(dir: &Path) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "clipboard file directory must be absolute: {}",
+            dir.display()
+        );
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("creating clipboard file directory {}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("securing clipboard file directory {}", dir.display()))?;
+        Ok(())
+    }
+
+    /// Save the PNG into a private `0600` file under the user's runtime
+    /// clipboard directory and return its `file://` URI.
+    ///
+    /// Every copy gets its own file: a target that keeps the URI — a chat
+    /// client showing a sent message, for instance — must keep showing the
+    /// image it was given, not the next screenshot. Old copies are pruned on
+    /// each new one so the directory does not grow without bound.
+    fn publish_image_file(png: &[u8]) -> anyhow::Result<String> {
+        let dir = clipboard_file_dir()?;
+        publish_image_file_in(&dir, png)
+    }
+
+    fn publish_image_file_in(dir: &Path, png: &[u8]) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "clipboard file directory must be absolute: {}",
+            dir.display()
+        );
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        let pid = std::process::id();
+
+        let (path, mut file) = create_unique_clipboard_file(dir, stamp, pid)?;
+        if let Err(err) = file.write_all(png).and_then(|()| file.flush()) {
+            if let Err(rm_err) = std::fs::remove_file(&path)
+                && rm_err.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "[shotori] failed cleaning up partial clipboard file {}: {rm_err}",
+                    path.display()
+                );
+            }
+            return Err(err).context("cannot write the clipboard image file");
+        }
+        prune_old_copies_keeping(dir, FILE_URI_KEEP);
+        Ok(format!("file://{}", percent_encoded_path(&path)))
+    }
+
+    /// Create a fresh `0600` file with `O_CREAT | O_EXCL` so symlinks are never
+    /// followed and rapid same-millisecond copies never collide.
+    fn create_unique_clipboard_file(
+        dir: &Path,
+        stamp_ms: u128,
+        pid: u32,
+    ) -> anyhow::Result<(PathBuf, std::fs::File)> {
+        for attempt in 0u32..64 {
+            let name = if attempt == 0 {
+                format!("{FILE_URI_PREFIX}{stamp_ms:016}-{pid}.png")
+            } else {
+                format!("{FILE_URI_PREFIX}{stamp_ms:016}-{pid}-{attempt}.png")
+            };
+            let path = dir.join(name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => return Ok((path, file)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("cannot create clipboard image file {}", path.display())
+                    });
+                }
+            }
+        }
+        anyhow::bail!(
+            "exhausted unique filenames in clipboard directory {}",
+            dir.display()
+        )
+    }
+
+    /// Keep only the newest `keep` clipboard files, dropping the rest: a chat
+    /// client still pointing at a pruned path re-fetches its image from its own
+    /// server, and bounding the count keeps tmpfs usage strictly capped. Names
+    /// use zero-padded millisecond timestamps, making lexicographical order
+    /// chronological.
+    fn prune_old_copies_keeping(dir: &Path, keep: usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut names: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with(FILE_URI_PREFIX) && name.ends_with(".png")
+            })
+            .collect();
+        names.sort();
+        for name in names.into_iter().rev().skip(keep) {
+            let path = dir.join(name);
+            if let Err(err) = std::fs::remove_file(&path)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "[shotori] failed pruning old clipboard file {}: {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// Percent-encode everything outside the URI-unreserved set directly from
+    /// raw Unix path bytes so spaces, `#`/`?`/`%`, UTF-8, and non-UTF-8 paths
+    /// all round-trip cleanly.
+    fn percent_encoded_path(path: &Path) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let raw = path.as_os_str().as_bytes();
+        let mut out = String::with_capacity(raw.len());
+        for &byte in raw {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(byte as char);
+                }
+                _ => {
+                    out.push('%');
+                    out.push(HEX[(byte >> 4) as usize] as char);
+                    out.push(HEX[(byte & 0x0F) as usize] as char);
+                }
+            }
+        }
+        out
+    }
+
+    fn spawn_daemon(mime: &str, data: &[u8], offer_file_uri: bool) -> anyhow::Result<()> {
         if data.is_empty() {
             anyhow::bail!("refusing to copy empty data");
         }
@@ -329,17 +511,19 @@ mod imp {
         }
 
         let exe = std::env::current_exe().context("cannot locate own executable")?;
-        let mut child = Command::new(exe)
-            .arg(DAEMON_ARG)
+        let mut cmd = Command::new(exe);
+        cmd.arg(DAEMON_ARG)
             .arg(mime) // the daemon decides what to offer based on this
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            // stderr inherited like the notify child: the daemon's
-            // anyhow diagnostics ("no WAYLAND_DISPLAY", protocol
-            // missing) must land somewhere — nulling them turned a
-            // fixable environment problem into an unobservable one.
-            .spawn()
-            .context("failed to spawn clipboard daemon")?;
+            .stdout(Stdio::null());
+        if offer_file_uri {
+            cmd.arg(FILE_URI_ARG);
+        }
+        // stderr inherited like the notify child: the daemon's
+        // anyhow diagnostics ("no WAYLAND_DISPLAY", protocol
+        // missing) must land somewhere — nulling them turned a
+        // fixable environment problem into an unobservable one.
+        let mut child = cmd.spawn().context("failed to spawn clipboard daemon")?;
 
         // Write then close (drop) — the daemon reads stdin to EOF, then offers.
         // A multi-MB payload exceeding the pipe buffer is fine: the daemon is
@@ -406,7 +590,7 @@ mod imp {
 
     // ── The daemon itself ────────────────────────────────────────────
 
-    /// Daemon entry point: `shotori --clipboard-daemon <MIME>`
+    /// Daemon entry point: `shotori --clipboard-daemon <MIME> [--file-uri]`
     /// Read stdin fully → connect to compositor, offer the data → serve paste
     /// requests until overridden
     pub fn daemon_main() -> anyhow::Result<()> {
@@ -419,6 +603,7 @@ mod imp {
             .nth(2)
             .map(|a| a.to_string_lossy().into_owned())
             .unwrap_or_else(|| IMAGE_MIME.to_string());
+        let offer_file_uri = std::env::args_os().skip(3).any(|arg| arg == FILE_URI_ARG);
 
         let mut payload = Vec::new();
         std::io::stdin()
@@ -442,9 +627,33 @@ mod imp {
             mimes.extend(["text/plain", "UTF8_STRING", "STRING"].map(String::from));
         }
 
+        // Opt-in X11 compatibility (`[export] clipboard_file_uri = true`):
+        // X11 clients behind Xwayland that do not implement INCR selection
+        // transfers cannot read an `image/png` payload larger than ~256 KiB.
+        // Offering `text/uri-list` pointing at a private per-user PNG lets
+        // those clients paste large screenshots without touching INCR.
+        // Intentionally omits `text/html` (which causes broken `file://` image
+        // icons in web/rich-text editors) and stays opt-in so `wl-paste --type
+        // text --watch cliphist store` is not polluted by default.
+        let mut uri_list_payload = None;
+        if mime == IMAGE_MIME && offer_file_uri {
+            match publish_image_file(&payload) {
+                Ok(uri) => {
+                    mimes.push("text/uri-list".to_string());
+                    // A CRLF-terminated list is what GTK, Qt and Chromium
+                    // parse; a single bare entry is accepted as well.
+                    uri_list_payload = Some(Arc::from(format!("{uri}\r\n").into_bytes()));
+                }
+                Err(err) => {
+                    eprintln!("[shotori] clipboard file URI unavailable: {err:#}");
+                }
+            }
+        }
+
         let mut app = Daemon {
             payload: Arc::from(payload),
             mimes: mimes.clone(),
+            uri_list_payload,
             seat: None,
             manager: None,
             device: None,
@@ -573,12 +782,14 @@ mod imp {
             }
         }
     }
-
     struct Daemon {
         payload: Arc<[u8]>,
         /// Every MIME this daemon offers (a paste request matching any of them
         /// gets the data)
         mimes: Vec<String>,
+        /// Optional CRLF-terminated `file://` URI list (`text/uri-list`)
+        /// pointing at a private runtime PNG copy.
+        uri_list_payload: Option<Arc<[u8]>>,
         seat: Option<wl_seat::WlSeat>,
         manager: Option<ZwlrDataControlManagerV1>,
         device: Option<ZwlrDataControlDeviceV1>,
@@ -695,8 +906,14 @@ mod imp {
                 // Wayland event loop and `O_NONBLOCK` pipes write to EOF.
                 zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
                     state.writers.retain(|h| !h.is_finished());
-                    if state.mimes.contains(&mime_type) {
-                        let payload = Arc::clone(&state.payload);
+                    let payload = match mime_type.as_str() {
+                        "text/uri-list" => state.uri_list_payload.as_ref().map(Arc::clone),
+                        m if state.mimes.iter().any(|offered| offered == m) => {
+                            Some(Arc::clone(&state.payload))
+                        }
+                        _ => None,
+                    };
+                    if let Some(payload) = payload {
                         match std::thread::Builder::new()
                             .name("clipboard-send".into())
                             .spawn(move || {
@@ -819,6 +1036,94 @@ mod imp {
             let mut empty_out = Vec::new();
             empty_reader.read_to_end(&mut empty_out).expect("read");
             assert!(empty_out.is_empty());
+        }
+
+        #[test]
+        fn percent_encoded_path_handles_reserved_utf8_and_non_utf8_bytes() {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            assert_eq!(
+                percent_encoded_path(Path::new("/run/user/1000/shotori/a b#1?x%2.png")),
+                "/run/user/1000/shotori/a%20b%231%3Fx%252.png"
+            );
+            assert_eq!(
+                percent_encoded_path(Path::new("/tmp/截图_1-2.3~a.png")),
+                "/tmp/%E6%88%AA%E5%9B%BE_1-2.3~a.png"
+            );
+            // Raw non-UTF-8 Unix bytes must encode verbatim, never as U+FFFD.
+            let raw = Path::new(OsStr::from_bytes(b"/tmp/\xFF\xFE.png"));
+            assert_eq!(percent_encoded_path(raw), "/tmp/%FF%FE.png");
+        }
+
+        #[test]
+        fn publish_image_file_creates_private_unique_files_and_rejects_relative_dirs() {
+            let err = publish_image_file_in(Path::new("relative/dir"), b"png")
+                .expect_err("relative dir must fail");
+            assert!(err.to_string().contains("absolute"));
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let sub = dir.path().join("my clipboard #1");
+            ensure_private_dir(&sub).expect("create private dir");
+            assert_eq!(
+                std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+
+            let uri1 = publish_image_file_in(&sub, b"\x89PNG-one").expect("first publish");
+            let uri2 = publish_image_file_in(&sub, b"\x89PNG-two").expect("second publish");
+            assert!(uri1.starts_with("file:///"), "unexpected URI: {uri1}");
+            assert!(uri1.contains("my%20clipboard%20%231"));
+            assert_ne!(uri1, uri2, "rapid copies must produce distinct files");
+
+            let files: Vec<_> = std::fs::read_dir(&sub)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(files.len(), 2);
+            for path in &files {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+            let mut contents: Vec<Vec<u8>> =
+                files.iter().map(|p| std::fs::read(p).unwrap()).collect();
+            contents.sort();
+            assert_eq!(
+                contents,
+                vec![b"\x89PNG-one".to_vec(), b"\x89PNG-two".to_vec()]
+            );
+        }
+
+        #[test]
+        fn prune_old_copies_keeps_newest_and_preserves_unrelated_files() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let unrelated = dir.path().join("keep-me.png");
+            std::fs::write(&unrelated, b"keep").unwrap();
+
+            for stamp in 1u128..=5 {
+                let path = dir
+                    .path()
+                    .join(format!("{FILE_URI_PREFIX}{stamp:016}-1.png"));
+                std::fs::write(&path, stamp.to_le_bytes()).unwrap();
+            }
+
+            prune_old_copies_keeping(dir.path(), 2);
+
+            for stamp in 1u128..=3 {
+                let path = dir
+                    .path()
+                    .join(format!("{FILE_URI_PREFIX}{stamp:016}-1.png"));
+                assert!(!path.exists(), "older file {stamp} should be pruned");
+            }
+            for stamp in 4u128..=5 {
+                let path = dir
+                    .path()
+                    .join(format!("{FILE_URI_PREFIX}{stamp:016}-1.png"));
+                assert!(path.exists(), "newest file {stamp} must be kept");
+            }
+            assert!(unrelated.exists(), "unrelated file must never be deleted");
         }
     }
 }

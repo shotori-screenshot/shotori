@@ -390,6 +390,14 @@ impl SettingsWindow {
             cx,
             |s, v| s.export_mut().save_on_copy = v,
         );
+        let clipboard_file_uri = self.bool_export_switch(
+            "export-clipboard-file-uri",
+            exp.clipboard_file_uri,
+            "settings.export.clipboard_file_uri.title",
+            window,
+            cx,
+            |s, v| s.export_mut().clipboard_file_uri = v,
+        );
 
         let remember_desc = direct_save.then(|| {
             crate::i18n::t!("settings.export.remember_last_dir.disabled_note").to_string()
@@ -682,6 +690,13 @@ impl SettingsWindow {
                         Some("settings.export.save_on_copy.body"),
                         None,
                         save_on_copy,
+                    ),
+                    super::layout::compact_row(
+                        cx,
+                        crate::i18n::t!("settings.export.clipboard_file_uri.title").to_string(),
+                        Some("settings.export.clipboard_file_uri.body"),
+                        None,
+                        clipboard_file_uri,
                     ),
                 ],
             ))

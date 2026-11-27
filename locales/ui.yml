@@ -984,6 +984,13 @@ settings:
       body:
         en: Silently save a copy to the default folder whenever copying to the clipboard
         zh-CN: 每次复制到剪贴板时，同时在后台静默保存一份到默认目录
+    clipboard_file_uri:
+      title:
+        en: Include file URI when copying images
+        zh-CN: 复制图片时附加文件 URI（兼容旧版 X11 应用）
+      body:
+        en: Save copied images to a private temp file and offer text/uri-list so X11/Xwayland apps without INCR support can paste large screenshots
+        zh-CN: 将复制的截图写入私有临时文件并提供 text/uri-list，使不支持 INCR 增量传输的 X11/Xwayland 应用也能粘贴大图
     filename_template:
       title:
         en: Filename template
