@@ -331,29 +331,26 @@ mod imp {
         Ok((path, uri))
     }
 
-    /// Keep recent clipboard files, drop the ones older than an hour: past
-    /// that nothing is still expected to point at them, and a long session
-    /// would otherwise leave a screenshot every few seconds behind.
+    /// Keep only the newest copies, dropping the rest: a chat client still
+    /// pointing at a pruned path re-fetches the image from its own server, so
+    /// dropping one costs a single re-download and nothing else. The names are
+    /// fixed-width millisecond stamps, which makes a plain sort chronological.
     fn prune_old_copies(dir: &std::path::Path) {
-        const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+        const KEEP: usize = 20;
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with("shotori-clipboard-") || !name.ends_with(".png") {
-                continue;
-            }
-            let stale = entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .ok()
-                .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age > MAX_AGE);
-            if stale {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        let mut names: Vec<_> = entries
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("shotori-clipboard-") && name.ends_with(".png")
+            })
+            .collect();
+        names.sort();
+        for name in names.into_iter().rev().skip(KEEP) {
+            let _ = std::fs::remove_file(dir.join(name));
         }
     }
 
