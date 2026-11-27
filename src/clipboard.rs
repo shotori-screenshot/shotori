@@ -312,15 +312,49 @@ mod imp {
     }
 
     /// Save the PNG somewhere a paste target can open it and return the
-    /// `file://` URI. The name is stable so repeated copies overwrite one file
-    /// instead of littering the temp directory — and the file is deliberately
-    /// never deleted: a daemon retiring after a newer copy would otherwise
-    /// unlink the file the live one points at.
+    /// `file://` URI.
+    ///
+    /// Every copy gets its own file: a target that keeps the URI — a chat
+    /// client showing a sent message, for instance — must keep showing the
+    /// image it was given, not the next screenshot. Old copies are pruned on
+    /// each new one so the temp directory does not grow without bound.
     fn publish_image_file(png: &[u8]) -> anyhow::Result<(PathBuf, String)> {
-        let path = std::env::temp_dir().join("shotori-clipboard.png");
+        let dir = std::env::temp_dir();
+        prune_old_copies(&dir);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or_default();
+        let path = dir.join(format!("shotori-clipboard-{stamp}.png"));
         std::fs::write(&path, png).context("cannot write the clipboard image file")?;
         let uri = format!("file://{}", percent_encoded(&path));
         Ok((path, uri))
+    }
+
+    /// Keep recent clipboard files, drop the ones older than an hour: past
+    /// that nothing is still expected to point at them, and a long session
+    /// would otherwise leave a screenshot every few seconds behind.
+    fn prune_old_copies(dir: &std::path::Path) {
+        const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("shotori-clipboard-") || !name.ends_with(".png") {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > MAX_AGE);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// Percent-encode everything outside the URI-unreserved set (paths with
