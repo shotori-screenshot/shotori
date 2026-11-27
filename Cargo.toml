@@ -7,6 +7,10 @@ members = ["tools/vptr", "tools/scrollprobe"]
 # Developer-only E2E perf harness (`shotori --perf`): not part of
 # release builds; run with `cargo build --release --features perf`
 perf = []
+# Distro-provided ONNX Runtime via pkg-config instead of the prebuilt
+# download (pyke ships none for musl, so Alpine builds need this); run
+# with `cargo build --features system-onnxruntime`
+system-onnxruntime = ["dep:ort"]
 
 [package]
 name = "shotori"
@@ -152,6 +156,14 @@ notify-rust = "4"
 version = "0.3"
 default-features = false
 features = ["model-download", "download-binaries"]
+
+# Feature-gated: turns on ort-sys's pkg-config probe, which runs before
+# its download fallback; pinned to the same RC as rapidocr-core's ort
+[dependencies.ort]
+version = "=2.0.0-rc.15"
+default-features = false
+features = ["pkg-config"]
+optional = true
 
 # First-run model download with progress + cancel (same reqwest version as
 # rapidocr-core's, features unify)
