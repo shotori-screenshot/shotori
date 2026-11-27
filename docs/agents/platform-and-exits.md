@@ -67,6 +67,11 @@ All backends return `SnapRect` in **desktop-global logical coordinates**.
   (`text/plain;charset=utf-8`) spawn `shotori --clipboard-daemon <mime>`
   via `Command::new(current_exe())` (never `fork()` inside a
   multithreaded GPUI/Vulkan process) and pipe bytes over `stdin`.
+- `Event::Send` streams payloads on a dedicated worker thread using a
+  `poll(POLLOUT)` loop (`write_all_nonblock`), never synchronous
+  `File::write_all`: wlroots' Xwayland bridge passes an `O_NONBLOCK`
+  pipe fd, so bare `write_all` fails with `EAGAIN` after the first
+  64 KiB pipe buffer and truncates large PNG pastes.
 - `read_clipboard` reads `image/*` or UTF-8 `text/plain*` offers via
   `zwlr_data_control_device_v1` + `std::io::pipe` (capped at `128 MiB`) to
   power `shotori pin --clipboard` and `Ctrl+V` paste-as-pin.
