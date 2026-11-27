@@ -135,6 +135,12 @@ pub struct ExportSettings {
     /// Automatically write a backup copy into `save_dir` whenever copying to
     /// the clipboard.
     pub save_on_copy: bool,
+    /// Also save copied images to a private runtime file and offer
+    /// `text/uri-list` alongside `image/png`, so X11/Xwayland apps without
+    /// `INCR` selection support can paste large screenshots. Off by default
+    /// because offering `text/*` triggers text-history watchers such as
+    /// `wl-paste --type text --watch cliphist store`.
+    pub clipboard_file_uri: bool,
 }
 
 impl Default for ExportSettings {
@@ -149,6 +155,7 @@ impl Default for ExportSettings {
             jpeg_quality: 90,
             copy_on_save: false,
             save_on_copy: false,
+            clipboard_file_uri: false,
         }
     }
 }
@@ -232,6 +239,7 @@ pub(super) struct ExportFile {
     jpeg_quality: Option<i64>,
     copy_on_save: Option<bool>,
     save_on_copy: Option<bool>,
+    clipboard_file_uri: Option<bool>,
 }
 
 impl ExportFile {
@@ -313,6 +321,9 @@ impl ExportFile {
             jpeg_quality,
             copy_on_save: self.copy_on_save.unwrap_or(defaults.copy_on_save),
             save_on_copy: self.save_on_copy.unwrap_or(defaults.save_on_copy),
+            clipboard_file_uri: self
+                .clipboard_file_uri
+                .unwrap_or(defaults.clipboard_file_uri),
         }
     }
 }
@@ -360,6 +371,10 @@ impl ExportSettings {
         );
         export.insert("copy_on_save".into(), toml::Value::from(self.copy_on_save));
         export.insert("save_on_copy".into(), toml::Value::from(self.save_on_copy));
+        export.insert(
+            "clipboard_file_uri".into(),
+            toml::Value::from(self.clipboard_file_uri),
+        );
         Ok(())
     }
 }

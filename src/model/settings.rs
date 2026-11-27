@@ -1398,6 +1398,7 @@ mod tests {
         s.export_mut().jpeg_quality = 82;
         s.export_mut().copy_on_save = true;
         s.export_mut().save_on_copy = true;
+        s.export_mut().clipboard_file_uri = true;
 
         s.annotation_mut().default_color_index = 4;
         s.annotation_mut().highlighter_color_index = 1;

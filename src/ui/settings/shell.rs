@@ -70,7 +70,7 @@ pub(super) const SECTION_SEARCH_ITEMS: [(Section, &str, IconName, &str); 8] = [
         Section::Export,
         "settings.preferences.export",
         IconName::Save,
-        "save export folder directory path auto direct dialog filename template format png jpeg jpg webp quality compression clipboard backup 保存 导出 目录 文件夹 路径 直存 弹窗 文件名 模板 格式 质量 压缩 剪贴板 备份",
+        "save export folder directory path auto direct dialog filename template format png jpeg jpg webp quality compression clipboard backup x11 xwayland uri incr 保存 导出 目录 文件夹 路径 直存 弹窗 文件名 模板 格式 质量 压缩 剪贴板 备份 兼容",
     ),
     (
         Section::Desktop,
