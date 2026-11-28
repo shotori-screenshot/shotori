@@ -33,7 +33,7 @@
 //! the classic freehand region.
 
 #[cfg(target_os = "linux")]
-mod hyprland;
+pub(crate) mod hyprland;
 #[cfg(target_os = "linux")]
 mod niri;
 #[cfg(target_os = "linux")]

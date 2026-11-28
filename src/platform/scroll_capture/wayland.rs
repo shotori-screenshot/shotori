@@ -21,6 +21,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 use wl_shm::Format;
 
 use super::super::capture::convert_to_rgba;
+use super::compositor::EffectsGuard;
 use super::session::{FrameSource, Preview, SessionTimings, run_session};
 use super::{Cmd, ScrollEvent, ScrollSpec};
 use crate::model::scroll_sheet::{Axis as ScrollAxis, ScrollSheet, SheetLimits};
@@ -174,12 +175,29 @@ pub(super) fn run(
         return Err(StartupError::OutsideOutput);
     }
 
+    // Temporarily disable compositor transparency/blur BEFORE the seed frame
+    // so stationary wallpaper/backdrop pixels never confuse the stitcher.
+    // The RAII guard restores immediately when `run` returns on ANY path
+    // (Copy, Save, Pin, Cancel, failure, or early startup error).
+    let settle_start = Instant::now();
+    let _effects_guard = EffectsGuard::enter(&spec.output, initial_rect, &spec.effects);
+
     // Grace before the first capture: the overlays unmapped when this
     // engine started, and their destroy requests need a few loop passes
     // to reach the compositor (same flush lag the save flow's 150 ms
     // quit delay exists for). Capturing any earlier folds overlay chrome
-    // into the seed frame.
-    std::thread::sleep(Duration::from_millis(400));
+    // into the seed frame. When the effects guard ran, also leave at least
+    // 120 ms AFTER it finished so the compositor repaints opaque first.
+    let overlay_wait = Duration::from_millis(400).saturating_sub(settle_start.elapsed());
+    let effects_wait = if _effects_guard.is_active() {
+        Duration::from_millis(120)
+    } else {
+        Duration::ZERO
+    };
+    let grace = overlay_wait.max(effects_wait);
+    if !grace.is_zero() {
+        std::thread::sleep(grace);
+    }
     let mut capturer = WaylandCapturer {
         conn: &conn,
         queue: &mut queue,

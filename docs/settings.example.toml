@@ -177,6 +177,22 @@ default_axis = "vertical"
 # Maximum stitched length in logical pixels (2000..=100000).
 max_length = 20000
 
+# Temporarily disable window transparency and background blur while a long
+# screenshot is running so stationary wallpaper pixels do not disrupt
+# stitching: "auto" (built-in Hyprland IPC, niri IPC, KDE KWin D-Bus),
+# "custom" (run `enter_command` / `exit_command` below), or "off".
+transparency_mode = "auto"
+
+# Shell commands executed via `sh -c` when `transparency_mode = "custom"`.
+# Both receive SHOTORI_SCROLL_OUTPUT and SHOTORI_SCROLL_{X,Y,W,H}.
+# Examples:
+#   SwayFX:   enter_command = "swaymsg blur disable"
+#             exit_command  = "swaymsg blur enable"
+#   Kitty:    enter_command = "kitty @ set-background-opacity 1"
+#             exit_command  = "kitty @ set-background-opacity 0.85"
+# enter_command = ""
+# exit_command = ""
+
 [ocr]
 # Which bundled model set OCR uses. Missing models download on first
 # use into the cache directory ($XDG_DATA_HOME/shotori/ocr-models,

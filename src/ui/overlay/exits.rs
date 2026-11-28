@@ -114,14 +114,15 @@ impl Overlay {
         // height and output scale (unset = chrome-free: no panel, no
         // preview pixels rendered).
         let preview = crate::model::scroll_sheet::PreviewGeometry::new();
+        let scroll_settings = crate::model::settings::current().scroll().clone();
         let spec = crate::platform::scroll_capture::ScrollSpec {
             output: self.capture.output_name.clone(),
             rect: shared_rect,
             preview,
-            axis: crate::model::settings::current()
-                .scroll()
-                .default_axis
-                .to_axis(),
+            axis: scroll_settings.default_axis.to_axis(),
+            effects: crate::platform::scroll_capture::ScrollEffectsConfig::from_settings(
+                &scroll_settings,
+            ),
         };
         let chrome = crate::ui::scroll_bar::ScrollChrome {
             display_id,

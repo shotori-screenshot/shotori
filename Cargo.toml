@@ -151,6 +151,9 @@ wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 memmap2 = "0.9"
 niri-ipc = "26.4.0"
 notify-rust = "4"
+# Already in the dependency tree via ashpd/oo7; reused directly for
+# KDE KWin `/Effects` blur toggle during long screenshots.
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
 
 [dependencies.rapidocr-core]
 version = "0.3"

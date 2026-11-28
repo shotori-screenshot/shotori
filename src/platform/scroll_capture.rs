@@ -27,9 +27,42 @@ use async_channel::{Receiver, Sender};
 
 use crate::model::scroll_sheet::{Axis as ScrollAxis, Phase, PreviewGeometry, SheetLimits};
 use crate::model::session::ScrollRect;
+use crate::model::settings::{ScrollSettings, ScrollTransparencyMode};
 
+mod compositor;
 mod session;
 mod wayland;
+
+pub use compositor::detected_builtin_compositor;
+
+/// Configuration for temporarily disabling compositor transparency & blur
+/// while a long-screenshot session is active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScrollEffectsConfig {
+    pub mode: ScrollTransparencyMode,
+    pub enter_command: Option<String>,
+    pub exit_command: Option<String>,
+}
+
+impl Default for ScrollEffectsConfig {
+    fn default() -> Self {
+        Self {
+            mode: ScrollTransparencyMode::Auto,
+            enter_command: None,
+            exit_command: None,
+        }
+    }
+}
+
+impl ScrollEffectsConfig {
+    pub fn from_settings(scroll: &ScrollSettings) -> Self {
+        Self {
+            mode: scroll.transparency_mode,
+            enter_command: scroll.enter_command.clone(),
+            exit_command: scroll.exit_command.clone(),
+        }
+    }
+}
 
 /// Which screen to watch and where (output-local LOGICAL integer px —
 /// the `capture_output_region` contract).
@@ -46,6 +79,8 @@ pub struct ScrollSpec {
     /// width published by the preview panel; unset (`None`) marks a
     /// chrome-free session where no preview pixels are rendered.
     pub preview: PreviewGeometry,
+    /// Compositor transparency/blur guard configuration for this session.
+    pub effects: ScrollEffectsConfig,
 }
 
 /// What the engine reports to the UI. `Finished` carries the folded
