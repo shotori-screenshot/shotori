@@ -4,11 +4,15 @@
 use gpui_kit::base::IndexPath;
 use gpui_kit::base::Switch;
 use gpui_kit::base::slider::{SliderEvent, SliderState, SliderValue};
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::*;
 
-use crate::model::settings::{LoupeSize, ScrollAxisSetting, Settings, SizeLabelMode};
+use crate::model::settings::{
+    LoupeSize, ScrollAxisSetting, ScrollTransparencyMode, Settings, SizeLabelMode,
+};
 
 use super::{SettingsWindow, card_group, card_row, page_body, page_header};
 
@@ -57,12 +61,30 @@ impl SearchableListItem for ScrollAxisItem {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ScrollTransparencyModeItem(ScrollTransparencyMode);
+
+impl SearchableListItem for ScrollTransparencyModeItem {
+    type Value = ScrollTransparencyMode;
+
+    fn title(&self) -> SharedString {
+        self.0.label().into_owned().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+
 pub(super) struct CapturePageState {
     size_label_select: Entity<SelectState<SearchableVec<SizeLabelItem>>>,
     loupe_zoom_slider: Entity<SliderState>,
     loupe_size_select: Entity<SelectState<SearchableVec<LoupeSizeItem>>>,
     scroll_axis_select: Entity<SelectState<SearchableVec<ScrollAxisItem>>>,
     scroll_max_length_slider: Entity<SliderState>,
+    scroll_transparency_select: Entity<SelectState<SearchableVec<ScrollTransparencyModeItem>>>,
+    scroll_enter_cmd_input: Entity<InputState>,
+    scroll_exit_cmd_input: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,12 +198,92 @@ impl CapturePageState {
             }),
         );
 
+        let transparency_current = settings.scroll().transparency_mode;
+        let scroll_transparency_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(
+                    ScrollTransparencyMode::ALL
+                        .map(ScrollTransparencyModeItem)
+                        .to_vec(),
+                ),
+                ScrollTransparencyMode::ALL
+                    .iter()
+                    .position(|m| *m == transparency_current)
+                    .map(IndexPath::new),
+                window,
+                cx,
+            )
+        });
+        subs.push(
+            cx.subscribe(&scroll_transparency_select, |this, _, event, cx| {
+                if let SelectEvent::Confirm(Some(mode)) = event
+                    && this.settings.scroll().transparency_mode != *mode
+                {
+                    this.settings.scroll_mut().transparency_mode = *mode;
+                    this.persist(cx);
+                }
+            }),
+        );
+
+        let initial_enter = settings.scroll().enter_command.clone().unwrap_or_default();
+        let scroll_enter_cmd_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_enter)
+                .placeholder("swaymsg blur disable")
+        });
+        subs.push(cx.subscribe(&scroll_enter_cmd_input, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let raw = this
+                    .capture_page
+                    .scroll_enter_cmd_input
+                    .read(cx)
+                    .value()
+                    .to_string();
+                let next = {
+                    let trimmed = raw.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                };
+                if this.settings.scroll().enter_command != next {
+                    this.settings.scroll_mut().set_enter_command(next);
+                    this.persist(cx);
+                }
+            }
+        }));
+
+        let initial_exit = settings.scroll().exit_command.clone().unwrap_or_default();
+        let scroll_exit_cmd_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_exit)
+                .placeholder("swaymsg blur enable")
+        });
+        subs.push(cx.subscribe(&scroll_exit_cmd_input, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                let raw = this
+                    .capture_page
+                    .scroll_exit_cmd_input
+                    .read(cx)
+                    .value()
+                    .to_string();
+                let next = {
+                    let trimmed = raw.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+                };
+                if this.settings.scroll().exit_command != next {
+                    this.settings.scroll_mut().set_exit_command(next);
+                    this.persist(cx);
+                }
+            }
+        }));
+
         Self {
             size_label_select,
             loupe_zoom_slider,
             loupe_size_select,
             scroll_axis_select,
             scroll_max_length_slider,
+            scroll_transparency_select,
+            scroll_enter_cmd_input,
+            scroll_exit_cmd_input,
             _subscriptions: subs,
         }
     }
@@ -212,6 +314,19 @@ impl CapturePageState {
         self.scroll_max_length_slider.update(cx, |s, cx| {
             s.set_value(settings.scroll().max_length as f32, window, cx)
         });
+        let transparency_ix = ScrollTransparencyMode::ALL
+            .iter()
+            .position(|m| *m == settings.scroll().transparency_mode)
+            .map(IndexPath::new);
+        self.scroll_transparency_select.update(cx, |s, cx| {
+            s.set_selected_index(transparency_ix, window, cx)
+        });
+        let enter_val = settings.scroll().enter_command.clone().unwrap_or_default();
+        self.scroll_enter_cmd_input
+            .update(cx, |s, cx| s.set_value(enter_val, window, cx));
+        let exit_val = settings.scroll().exit_command.clone().unwrap_or_default();
+        self.scroll_exit_cmd_input
+            .update(cx, |s, cx| s.set_value(exit_val, window, cx));
     }
 }
 
@@ -460,28 +575,92 @@ impl SettingsWindow {
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.capture.group.scroll").as_ref()),
-                vec![
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.scroll.default_axis.title").to_string(),
-                        None,
-                        None,
-                        Select::new(&self.capture_page.scroll_axis_select).w_full(),
-                    ),
-                    card_row(
-                        cx,
-                        crate::i18n::t!("settings.scroll.max_length.title").to_string(),
-                        Some("settings.scroll.max_length.body"),
-                        None,
-                        super::layout::slider_control(
-                            &self.capture_page.scroll_max_length_slider,
-                            format!("{} px", self.settings.scroll().max_length),
-                            cx,
-                        ),
-                    ),
-                ],
+                self.scroll_settings_rows(cx),
             ));
 
         self.attach_toolbar_drag_handlers(page_body("page-toolbar").child(body), cx)
+    }
+
+    fn scroll_settings_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let scroll = self.settings.scroll();
+        let transparency_desc =
+            (scroll.transparency_mode == ScrollTransparencyMode::Auto).then(|| {
+                match crate::platform::scroll_capture::detected_builtin_compositor() {
+                    Some(compositor) => crate::i18n::t!(
+                        "settings.scroll.transparency.detected",
+                        compositor = compositor
+                    )
+                    .to_string(),
+                    None => crate::i18n::t!("settings.scroll.transparency.unsupported").to_string(),
+                }
+            });
+        let mut rows: Vec<AnyElement> = vec![
+            card_row(
+                cx,
+                crate::i18n::t!("settings.scroll.default_axis.title").to_string(),
+                None,
+                None,
+                Select::new(&self.capture_page.scroll_axis_select).w_full(),
+            )
+            .into_any_element(),
+            card_row(
+                cx,
+                crate::i18n::t!("settings.scroll.max_length.title").to_string(),
+                Some("settings.scroll.max_length.body"),
+                None,
+                super::layout::slider_control(
+                    &self.capture_page.scroll_max_length_slider,
+                    format!("{} px", scroll.max_length),
+                    cx,
+                ),
+            )
+            .into_any_element(),
+            card_row(
+                cx,
+                crate::i18n::t!("settings.scroll.transparency.title").to_string(),
+                Some("settings.scroll.transparency.body"),
+                transparency_desc,
+                Select::new(&self.capture_page.scroll_transparency_select).w_full(),
+            )
+            .into_any_element(),
+        ];
+
+        if scroll.transparency_mode == ScrollTransparencyMode::Custom {
+            let cmd_row =
+                |title_key: &'static str, hint_key: &'static str, input: &Entity<InputState>| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .py_3()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(cx.theme().foreground)
+                                .child(crate::i18n::t!(title_key).to_string())
+                                .child(super::help_tooltip(hint_key, cx)),
+                        )
+                        .child(Input::new(input).w_full())
+                        .into_any_element()
+                };
+            rows.push(cmd_row(
+                "settings.scroll.enter_command.title",
+                "settings.scroll.enter_command.body",
+                &self.capture_page.scroll_enter_cmd_input,
+            ));
+            rows.push(cmd_row(
+                "settings.scroll.exit_command.title",
+                "settings.scroll.exit_command.body",
+                &self.capture_page.scroll_exit_cmd_input,
+            ));
+        }
+
+        rows
     }
 }

@@ -22,27 +22,27 @@ use serde_json::Value;
 
 use super::{CompositorSnapshot, SnapRect};
 
-pub fn query() -> Option<CompositorSnapshot> {
+/// Send one raw command over Hyprland's request socket and return the reply.
+///
+/// Opens a fresh connection per call because the restructured IPC closes the
+/// socket after each reply (pipelining a second request fails).
+pub(crate) fn ipc_request(cmd: &str) -> Option<String> {
     let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    [
+        format!("{runtime}/hypr/{sig}/.socket.sock"),
+        format!("/tmp/hypr/{sig}/.socket.sock"),
+    ]
+    .iter()
+    .find_map(|p| {
+        let mut s = UnixStream::connect(p).ok()?;
+        request(&mut s, cmd).ok()
+    })
+}
 
-    // One connection per request: the restructured IPC closes the socket
-    // after each reply (measured live) — pipelining a second request on
-    // the same stream fails
-    let ask = |cmd: &str| -> Option<String> {
-        [
-            format!("{runtime}/hypr/{sig}/.socket.sock"),
-            format!("/tmp/hypr/{sig}/.socket.sock"),
-        ]
-        .iter()
-        .find_map(|p| {
-            let mut s = UnixStream::connect(p).ok()?;
-            request(&mut s, cmd).ok()
-        })
-    };
-
-    let clients: Value = serde_json::from_str(&ask("j/clients")?).ok()?;
-    let monitors: Value = serde_json::from_str(&ask("j/monitors")?).ok()?;
+pub fn query() -> Option<CompositorSnapshot> {
+    let clients: Value = serde_json::from_str(&ipc_request("j/clients")?).ok()?;
+    let monitors: Value = serde_json::from_str(&ipc_request("j/monitors")?).ok()?;
     Some(CompositorSnapshot {
         rects: collect(&clients, &monitors),
         focused_output: focused_monitor(&monitors),

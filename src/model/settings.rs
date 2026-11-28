@@ -43,8 +43,8 @@ pub(crate) use annotation::{
 };
 pub use capture::{
     CaptureSettings, LoupeSize, NotifySettings, PinDoubleClick, PinOpacityModifier, PinSettings,
-    PinWheelAction, PinZoomModifier, ScrollAxisSetting, ScrollSettings, SizeLabelMode,
-    resolve_pin_wheel_action,
+    PinWheelAction, PinZoomModifier, ScrollAxisSetting, ScrollSettings, ScrollTransparencyMode,
+    SizeLabelMode, resolve_pin_wheel_action,
 };
 pub use export::{
     DEFAULT_FILENAME_TEMPLATE, DEFAULT_SAVE_DIR_DISPLAY, ExportFormat, ExportSettings,
@@ -1444,6 +1444,15 @@ mod tests {
 
         s.scroll_mut().default_axis = ScrollAxisSetting::Horizontal;
         s.scroll_mut().max_length = 45_000;
+        s.scroll_mut().transparency_mode = ScrollTransparencyMode::Custom;
+        s.scroll_mut()
+            .set_enter_command(Some("  swaymsg blur disable  ".into()));
+        s.scroll_mut()
+            .set_exit_command(Some("swaymsg blur enable".into()));
+        assert_eq!(
+            s.scroll().enter_command.as_deref(),
+            Some("swaymsg blur disable")
+        );
         s.set_ocr_join_lines(true);
 
         s.save(&path).unwrap();
@@ -1451,11 +1460,31 @@ mod tests {
         assert!(errors.is_empty(), "round-trip errors: {errors:?}");
         assert_eq!(back, s);
 
-        // Clearing optional save_dir removes the key from [export]
+        // Clearing optional save_dir and scroll custom commands removes the keys
         let mut reset_dir = back.clone();
         reset_dir.export_mut().set_save_dir(None);
+        reset_dir.scroll_mut().set_enter_command(Some("   ".into()));
+        reset_dir.scroll_mut().set_exit_command(None);
         reset_dir.save(&path).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("save_dir"));
+        let saved_text = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved_text.contains("save_dir"));
+        assert!(!saved_text.contains("enter_command"));
+        assert!(!saved_text.contains("exit_command"));
+
+        // Blank custom commands in a hand-edited file normalize to None silently
+        std::fs::write(
+            &path,
+            "[scroll]\ntransparency_mode = \"off\"\nenter_command = \"  \"\nexit_command = \"\"\n",
+        )
+        .unwrap();
+        let (blank_cmds, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty(), "blank command warnings: {errors:?}");
+        assert_eq!(
+            blank_cmds.scroll().transparency_mode,
+            ScrollTransparencyMode::Off
+        );
+        assert!(blank_cmds.scroll().enter_command.is_none());
+        assert!(blank_cmds.scroll().exit_command.is_none());
 
         // Out-of-range and unknown enum values degrade per-field with warnings
         std::fs::write(
@@ -1465,12 +1494,12 @@ mod tests {
              [annotation]\nstroke_width = 99\ndefault_color_index = 20\ngeometry_radius = 99\n\
              [notify]\ntimeout_secs = 99\n\
              [pin]\nzoom_step = 1\nzoom_modifier = \"super\"\nopacity_modifier = \"hyper\"\nopacity = 5\ndouble_click = \"explode\"\nmax_history = 999\n\
-             [scroll]\nmax_length = 100\ndefault_axis = \"diagonal\"\n",
+             [scroll]\nmax_length = 100\ndefault_axis = \"diagonal\"\ntransparency_mode = \"magic\"\n",
         )
         .unwrap();
         let (degraded, errors) = Settings::load(Some(&path));
         assert_eq!(degraded, Settings::default());
-        assert_eq!(errors.len(), 17, "errors: {errors:?}");
+        assert_eq!(errors.len(), 18, "errors: {errors:?}");
     }
 
     #[test]
@@ -1481,6 +1510,9 @@ mod tests {
         s.capture_mut().double_click_copy = true;
         s.set_smart_region(false);
         s.scroll_mut().max_length = 50_000;
+        s.scroll_mut().transparency_mode = ScrollTransparencyMode::Custom;
+        s.scroll_mut().set_enter_command(Some("echo on".into()));
+        s.scroll_mut().set_exit_command(Some("echo off".into()));
         s.reset_capture_defaults();
         assert!(
             s.capture().reduce_motion,
@@ -1490,6 +1522,9 @@ mod tests {
         assert!(!s.capture().double_click_copy);
         assert!(s.smart_region());
         assert_eq!(s.scroll().max_length, 20_000);
+        assert_eq!(s.scroll().transparency_mode, ScrollTransparencyMode::Auto);
+        assert!(s.scroll().enter_command.is_none());
+        assert!(s.scroll().exit_command.is_none());
 
         s.set_key("copy", "ctrl-shift-c".into());
         s.set_key("save", "ctrl-shift-s".into());

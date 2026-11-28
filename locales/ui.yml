@@ -760,6 +760,43 @@ settings:
       body:
         en: Logical pixel cap before long capture stops automatically
         zh-CN: 达到该逻辑像素长度上限时自动停止长截图
+    transparency_mode:
+      auto:
+        en: Auto (built-in)
+        zh-CN: 自动（内置合成器）
+      custom:
+        en: Custom commands
+        zh-CN: 自定义命令
+      disabled:
+        en: "Off"
+        zh-CN: 关闭
+    transparency:
+      title:
+        en: Disable transparency & blur
+        zh-CN: 长截图时关闭透明与模糊
+      body:
+        en: Temporarily turn off translucent or blurred window backgrounds during scroll capture so stationary wallpaper pixels do not interfere with stitching. Built-in auto mode supports Hyprland, niri and KDE KWin.
+        zh-CN: 长截图期间临时关闭窗口透明与背景模糊，避免静止壁纸像素干扰拼接。自动模式内置支持 Hyprland、niri 与 KDE KWin。
+      detected:
+        en: "Detected %{compositor}"
+        zh-CN: "已检测到 %{compositor}"
+      unsupported:
+        en: No built-in compositor detected — switch to Custom commands if your WM uses blur or transparency
+        zh-CN: 未检测到内置支持的合成器，若窗口启用了透明或模糊可切换为「自定义命令」
+    enter_command:
+      title:
+        en: Start command
+        zh-CN: 开始命令
+      body:
+        en: Executed via sh -c before capturing the first frame. Receives SHOTORI_SCROLL_OUTPUT and SHOTORI_SCROLL_{X,Y,W,H}.
+        zh-CN: 在抓取首帧前通过 sh -c 执行，可读取 SHOTORI_SCROLL_OUTPUT 与 SHOTORI_SCROLL_{X,Y,W,H} 环境变量。
+    exit_command:
+      title:
+        en: Restore command
+        zh-CN: 恢复命令
+      body:
+        en: Executed via sh -c as soon as long capture finishes, cancels, or fails.
+        zh-CN: 长截图完成、取消或异常中断时立即通过 sh -c 执行以恢复状态。
   annotation:
     blurb:
       en: Initial tool colors, sizes and behaviors for each new capture

@@ -58,6 +58,13 @@ per-compositor IPC sockets (`first env var hit wins`):
 
 All backends return `SnapRect` in **desktop-global logical coordinates**.
 
+### Scroll-Capture Transparency & Blur Guard (`src/platform/scroll_capture/compositor.rs`)
+
+- Controlled by `[scroll] transparency_mode` (`auto` | `custom` | `off`, default `auto`) plus optional `enter_command` / `exit_command`.
+- Held as an RAII `EffectsGuard` inside `platform::scroll_capture::wayland::run` so state is restored as soon as the scroll session ends (Copy, Save, Pin, Cancel, idle timeout, or failure — before a pinned result keeps the process alive or a portal dialog opens).
+- Built-in `auto` mode only touches compositors whose prior state can be restored cleanly: **Hyprland** (`j/getoption` + `keyword` over the shared `windowsnap::hyprland::ipc_request` socket), **niri** (`ToggleWindowRuleOpacity` on matching active-workspace windows, toggled back symmetrically), and **KDE KWin** (session D-Bus `org.kde.KWin /Effects` `isEffectLoaded`/`unloadEffect`/`loadEffect("blur")`).
+- `custom` mode runs user hooks via `/bin/sh -c` with a 3 s timeout and `SHOTORI_SCROLL_OUTPUT` / `SHOTORI_SCROLL_{X,Y,W,H}` env vars.
+
 ## 4. Selection Exits & Resident Helpers
 
 ### Clipboard (`src/clipboard.rs`)

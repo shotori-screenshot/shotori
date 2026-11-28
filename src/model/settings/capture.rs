@@ -285,12 +285,60 @@ impl ScrollAxisSetting {
     }
 }
 
+/// How shotori handles compositor transparency and background blur while a
+/// long screenshot is running. Translucent/blurred backgrounds stay stationary
+/// behind scrolling foreground content and confuse the stitcher.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ScrollTransparencyMode {
+    /// Automatically disable and restore transparency/blur on supported
+    /// compositors (Hyprland IPC, niri IPC, KDE KWin D-Bus).
+    #[default]
+    Auto,
+    /// Execute user-configured shell commands on capture start and end.
+    Custom,
+    /// Leave compositor transparency and blur untouched.
+    Off,
+}
+
+impl ScrollTransparencyMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Custom, Self::Off];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Custom => "custom",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.id() == id.trim())
+    }
+
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Auto => crate::i18n::t!("settings.scroll.transparency_mode.auto"),
+            Self::Custom => crate::i18n::t!("settings.scroll.transparency_mode.custom"),
+            Self::Off => crate::i18n::t!("settings.scroll.transparency_mode.disabled"),
+        }
+    }
+}
+
 /// `[scroll]` configuration block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScrollSettings {
     pub default_axis: ScrollAxisSetting,
     /// Maximum stitched length in logical pixels (`2_000..=100_000`).
     pub max_length: u32,
+    /// How to handle background transparency & blur during scroll capture
+    /// (`auto` | `custom` | `off`, default `auto`).
+    pub transparency_mode: ScrollTransparencyMode,
+    /// Shell command (`sh -c`) run when a long screenshot begins
+    /// (`transparency_mode = "custom"`). Normalized to `None` when blank.
+    pub enter_command: Option<String>,
+    /// Shell command (`sh -c`) run when a long screenshot ends
+    /// (`transparency_mode = "custom"`). Normalized to `None` when blank.
+    pub exit_command: Option<String>,
 }
 
 impl Default for ScrollSettings {
@@ -298,7 +346,20 @@ impl Default for ScrollSettings {
         Self {
             default_axis: ScrollAxisSetting::Vertical,
             max_length: 20_000,
+            transparency_mode: ScrollTransparencyMode::Auto,
+            enter_command: None,
+            exit_command: None,
         }
+    }
+}
+
+impl ScrollSettings {
+    pub fn set_enter_command(&mut self, cmd: Option<String>) {
+        self.enter_command = cmd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    }
+
+    pub fn set_exit_command(&mut self, cmd: Option<String>) {
+        self.exit_command = cmd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     }
 }
 
@@ -307,6 +368,9 @@ impl Default for ScrollSettings {
 pub(super) struct ScrollFile {
     default_axis: Option<String>,
     max_length: Option<i64>,
+    transparency_mode: Option<String>,
+    enter_command: Option<String>,
+    exit_command: Option<String>,
 }
 
 impl ScrollFile {
@@ -334,9 +398,30 @@ impl ScrollFile {
                 d.max_length
             }
         };
+        let transparency_mode = match self.transparency_mode.as_deref() {
+            None => d.transparency_mode,
+            Some(id) => ScrollTransparencyMode::from_id(id).unwrap_or_else(|| {
+                errors.push(format!(
+                    "{}: unknown scroll.transparency_mode {id:?} (using auto)",
+                    path.display()
+                ));
+                d.transparency_mode
+            }),
+        };
+        let enter_command = self
+            .enter_command
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let exit_command = self
+            .exit_command
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         ScrollSettings {
             default_axis,
             max_length,
+            transparency_mode,
+            enter_command,
+            exit_command,
         }
     }
 }
@@ -364,6 +449,26 @@ impl ScrollSettings {
             "max_length".into(),
             toml::Value::from(i64::from(self.max_length)),
         );
+        t.insert(
+            "transparency_mode".into(),
+            toml::Value::from(self.transparency_mode.id()),
+        );
+        match &self.enter_command {
+            Some(cmd) => {
+                t.insert("enter_command".into(), toml::Value::from(cmd.as_str()));
+            }
+            None => {
+                t.remove("enter_command");
+            }
+        }
+        match &self.exit_command {
+            Some(cmd) => {
+                t.insert("exit_command".into(), toml::Value::from(cmd.as_str()));
+            }
+            None => {
+                t.remove("exit_command");
+            }
+        }
         Ok(())
     }
 }
