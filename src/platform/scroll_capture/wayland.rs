@@ -20,7 +20,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 use wl_shm::Format;
 
-use super::super::capture::convert_to_rgba;
+use super::super::capture::{convert_to_rgba, shm_bytes_per_pixel};
 use super::compositor::EffectsGuard;
 use super::session::{FrameSource, Preview, SessionTimings, run_session};
 use super::{Cmd, ScrollEvent, ScrollSpec};
@@ -314,17 +314,14 @@ impl FrameSource for WaylandCapturer<'_> {
             .buffer
             .as_ref()
             .ok_or_else(|| anyhow!("no shm buffer was created for the frame"))?;
-        if (w, h, stride) != (bcx.w, bcx.h, bcx.stride) {
-            bail!("region buffer geometry changed mid-session ({w}x{h} s{stride})");
+        if (fmt, w, h, stride) != (bcx.fmt, bcx.w, bcx.h, bcx.stride) {
+            bail!("region buffer geometry changed mid-session ({fmt:?} {w}x{h} s{stride})");
         }
-        Ok(convert_to_rgba(
-            &bcx.mmap[..],
-            fmt,
-            w,
-            h,
-            stride,
-            cur.y_invert,
-        ))
+        let rgba = convert_to_rgba(&bcx.mmap[..], fmt, w, h, stride, cur.y_invert);
+        if rgba.len() != (w as usize) * (h as usize) * 4 {
+            bail!("region capture produced malformed pixels ({fmt:?} {w}x{h} s{stride})");
+        }
+        Ok(rgba)
     }
 }
 
@@ -417,6 +414,7 @@ impl OutputInfo {
 struct FrameCapture {
     geometry: Option<(wl_shm::Format, i32, i32, i32)>,
     y_invert: bool,
+    copied: bool,
     ready: bool,
     failed: bool,
 }
@@ -428,6 +426,7 @@ struct BufferCtx {
     file: File,
     mmap: memmap2::MmapMut,
     buffer: wl_buffer::WlBuffer,
+    fmt: Format,
     w: i32,
     h: i32,
     stride: i32,
@@ -441,17 +440,39 @@ impl EngineState {
     /// drop the frame silently (measured on niri; v1/v2 managers never
     /// send `buffer_done`, and `copy_after_announce` handles that).
     fn handle_buffer(&mut self, qh: &QueueHandle<Self>, fmt: Format, w: i32, h: i32, stride: i32) {
+        if self
+            .cur
+            .as_ref()
+            .is_some_and(|c| c.geometry.is_some() || c.failed)
+        {
+            return;
+        }
+        let Some(bpp) = shm_bytes_per_pixel(fmt) else {
+            eprintln!(
+                "[shotori] scroll: unsupported buffer format {fmt:?} ({w}x{h} stride {stride})"
+            );
+            return;
+        };
         let reusable = self
             .buffer
             .as_ref()
-            .is_some_and(|b| (w, h, stride) == (b.w, b.h, b.stride));
-        let size = (stride as i64 * h as i64) as u64;
-        if !reusable && (w <= 0 || h <= 0 || stride < w * 4 || size > i32::MAX as u64) {
-            eprintln!("[shotori] scroll: impossible buffer geometry {w}x{h} stride {stride}");
-            self.fail_cur();
+            .is_some_and(|b| (fmt, w, h, stride) == (b.fmt, b.w, b.h, b.stride));
+        let min_stride = i64::from(w) * bpp as i64;
+        let size = i64::from(stride).saturating_mul(i64::from(h));
+        if !reusable
+            && (w <= 0
+                || h <= 0
+                || i64::from(stride) < min_stride
+                || size <= 0
+                || size > i64::from(i32::MAX))
+        {
+            eprintln!(
+                "[shotori] scroll: impossible buffer geometry {w}x{h} stride {stride} ({fmt:?})"
+            );
             return;
         }
         if !reusable {
+            let size = size as u64;
             let file = match tempfile::tempfile() {
                 Ok(f) => f,
                 Err(e) => {
@@ -484,6 +505,7 @@ impl EngineState {
                 file,
                 mmap,
                 buffer,
+                fmt,
                 w,
                 h,
                 stride,
@@ -495,8 +517,19 @@ impl EngineState {
     }
 
     fn copy_after_announce(&mut self, frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1) {
-        if let Some(bcx) = self.buffer.as_ref() {
+        let Some(c) = self.cur.as_mut() else {
+            return;
+        };
+        if c.copied || c.failed {
+            return;
+        }
+        if c.geometry.is_some()
+            && let Some(bcx) = self.buffer.as_ref()
+        {
+            c.copied = true;
             frame.copy(&bcx.buffer);
+        } else {
+            c.failed = true;
         }
     }
 
@@ -607,11 +640,26 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for EngineSta
                 height,
                 stride,
             } => {
-                let fmt = format.into_result().unwrap_or(Format::Xrgb8888);
-                state.handle_buffer(qh, fmt, width as i32, height as i32, stride as i32);
+                match format.into_result() {
+                    Ok(fmt) => {
+                        state.handle_buffer(qh, fmt, width as i32, height as i32, stride as i32)
+                    }
+                    Err(unknown) => {
+                        if !state
+                            .cur
+                            .as_ref()
+                            .is_some_and(|c| c.geometry.is_some() || c.failed)
+                        {
+                            eprintln!(
+                                "[shotori] scroll: unsupported buffer format {unknown:?} ({width}x{height} stride {stride})"
+                            );
+                        }
+                    }
+                }
                 if state.screencopy_version < 3 {
                     // v1/v2 managers never send buffer_done — the copy
-                    // is legal the moment a buffer was announced.
+                    // is legal the moment a buffer was announced (or fail
+                    // immediately if the sole offer was unsupported).
                     state.copy_after_announce(frame);
                 }
             }

@@ -8,12 +8,28 @@ use super::Transform;
 #[cfg(target_os = "linux")]
 use wayland_client::protocol::wl_shm;
 
-/// wl_shm format names describe the byte order of the 32-bit word
+/// Bytes per pixel for every `wl_shm::Format` that [`convert_to_rgba`]
+/// supports. Shared with the Wayland buffer-negotiation handlers so the
+/// format allow-list and minimum-stride checks never drift apart.
+#[cfg(target_os = "linux")]
+pub(crate) fn shm_bytes_per_pixel(format: wl_shm::Format) -> Option<usize> {
+    match format {
+        wl_shm::Format::Xrgb8888
+        | wl_shm::Format::Argb8888
+        | wl_shm::Format::Xbgr8888
+        | wl_shm::Format::Abgr8888 => Some(4),
+        wl_shm::Format::Bgr888 | wl_shm::Format::Rgb888 => Some(3),
+        _ => None,
+    }
+}
+
+/// wl_shm format names describe the byte order of the pixel word
 /// (MSB→LSB); little-endian memory byte order is exactly reversed:
 ///   Xrgb8888 (XR24) → memory B,G,R,X   Argb8888 → memory B,G,R,A
 ///   Xbgr8888 (XB24) → memory R,G,B,X   Abgr8888 → memory R,G,B,A
-/// Note: the core wl_shm protocol's format is an ordinal (xrgb8888=1),
-/// NOT a DRM fourcc!
+///   Bgr888   (BG24) → memory R,G,B     Rgb888   (RG24) → memory B,G,R
+/// Note: wl_shm uses ordinals for Argb8888 (0) and Xrgb8888 (1), and DRM
+/// fourccs for all other formats.
 #[cfg(target_os = "linux")]
 pub(crate) fn convert_to_rgba(
     bytes: &[u8],
@@ -23,31 +39,76 @@ pub(crate) fn convert_to_rgba(
     stride: i32,
     y_invert: bool,
 ) -> Vec<u8> {
-    // The buffer contract (stride >= w*4, len >= stride*h) is the
+    // Allow-list the 8-bit formats the swizzles below actually implement.
+    // Anything else (the 10-bit/HDR family KWin announces for HDR shm
+    // copies, RGB565, …) would land in the wrong branch and come out with
+    // scrambled channels — the worst failure mode for a screenshot tool —
+    // so fail soft instead: both callers (capture/mod.rs length check,
+    // scroll bail path) treat an empty buffer as a skipped frame.
+    let Some(bpp) = shm_bytes_per_pixel(format) else {
+        return Vec::new();
+    };
+    // The buffer contract (stride >= w*bpp, len >= stride*h) is the
     // compositor's; a buggy or malicious compositor can violate it, so
     // fail soft (empty result → caller skips the output) instead of
     // panicking on a slice in the event loop.
-    if w <= 0 || h <= 0 || stride < w * 4 || (stride as u64 * h as u64) as usize > bytes.len() {
+    let min_stride = i64::from(w) * bpp as i64;
+    let required = i64::from(stride).saturating_mul(i64::from(h));
+    if w <= 0
+        || h <= 0
+        || i64::from(stride) < min_stride
+        || required < 0
+        || (required as u64) > (bytes.len() as u64)
+    {
         return Vec::new();
     }
-    let mut rgba = vec![0u8; (w * h * 4) as usize];
-    // Allow-list the four 8-bit formats the swizzles below actually
-    // implement. Anything else (the 10-bit/HDR family KWin announces for
-    // HDR shm copies, RGB565, …) would land in the byte-order branch and
-    // come out with scrambled channels — the worst failure mode for a
-    // screenshot tool — so fail soft instead: both callers (capture/mod.rs
-    // length check, scroll bail path) treat an empty buffer as a skipped
-    // frame.
-    let is_xrgb = match format {
-        wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => true,
-        wl_shm::Format::Xbgr8888 | wl_shm::Format::Abgr8888 => false,
-        _ => return Vec::new(),
+    let Some(out_len) = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+    else {
+        return Vec::new();
     };
+    let mut rgba = vec![0u8; out_len];
 
+    if bpp == 3 {
+        // 24-bit packed formats (e.g. wlroots GLES2 on drivers whose
+        // GL_IMPLEMENTATION_COLOR_READ_FORMAT is GL_RGB → DRM_FORMAT_BGR888).
+        // Little-endian memory layout: Bgr888 → [R,G,B], Rgb888 → [B,G,R].
+        let swap_rb = matches!(format, wl_shm::Format::Rgb888);
+        let src_row_bytes = (w as usize) * 3;
+        let dst_row_bytes = (w as usize) * 4;
+        for y in 0..h as usize {
+            let src_row = &bytes[y * stride as usize..][..src_row_bytes];
+            let dst_y = if y_invert { h as usize - 1 - y } else { y };
+            let dst_row = &mut rgba[dst_y * dst_row_bytes..][..dst_row_bytes];
+            let (src_chunks, _) = src_row.as_chunks::<3>();
+            let (dst_chunks, _) = dst_row.as_chunks_mut::<4>();
+            for (px, chunk) in src_chunks.iter().zip(dst_chunks) {
+                if swap_rb {
+                    // B,G,R → R,G,B,A
+                    chunk[0] = px[2];
+                    chunk[1] = px[1];
+                    chunk[2] = px[0];
+                    chunk[3] = 255;
+                } else {
+                    // R,G,B → R,G,B,A
+                    chunk[0] = px[0];
+                    chunk[1] = px[1];
+                    chunk[2] = px[2];
+                    chunk[3] = 255;
+                }
+            }
+        }
+        return rgba;
+    }
+
+    let is_xrgb = matches!(format, wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888);
+
+    let row_bytes = (w as usize) * 4;
     for y in 0..h as usize {
-        let src_row = &bytes[y * stride as usize..][..(w * 4) as usize];
+        let src_row = &bytes[y * stride as usize..][..row_bytes];
         let dst_y = if y_invert { h as usize - 1 - y } else { y };
-        let dst_row = &mut rgba[dst_y * (w * 4) as usize..][..(w * 4) as usize];
+        let dst_row = &mut rgba[dst_y * row_bytes..][..row_bytes];
         // Fast path: whole-pixel u32 swizzle (little-endian: memory
         // B,G,R,X reads as B | G<<8 | R<<16 | X<<24). Two shifts + two
         // ORs per pixel instead of four byte stores; the compiler keeps
@@ -291,5 +352,52 @@ mod tests {
         // rows swapped: the second row becomes the first
         assert_eq!(&out[..4], &[31, 21, 11, 255]);
         assert_eq!(&out[4..8], &[30, 20, 10, 255]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn convert_bgr888_and_rgb888_with_padding_and_y_invert() {
+        assert_eq!(shm_bytes_per_pixel(wl_shm::Format::Bgr888), Some(3));
+        assert_eq!(shm_bytes_per_pixel(wl_shm::Format::Rgb888), Some(3));
+        assert_eq!(shm_bytes_per_pixel(wl_shm::Format::Xrgb8888), Some(4));
+        assert_eq!(shm_bytes_per_pixel(wl_shm::Format::Rgb565), None);
+
+        // 2×2 packed 24-bit with 2 padding bytes per row (stride = 8 > 2 * 3)
+        let bytes = [
+            10, 20, 30, 40, 50, 60, 0xAA, 0xBB, // row 0
+            70, 80, 90, 100, 110, 120, 0xCC, 0xDD, // row 1
+        ];
+        // Bgr888 on little-endian: memory [R,G,B] → RGBA [R,G,B,255]
+        let bgr = convert_to_rgba(&bytes, wl_shm::Format::Bgr888, 2, 2, 8, false);
+        assert_eq!(
+            bgr,
+            vec![
+                10, 20, 30, 255, 40, 50, 60, 255, // row 0
+                70, 80, 90, 255, 100, 110, 120, 255, // row 1
+            ]
+        );
+        // Rgb888 on little-endian: memory [B,G,R] → RGBA [R,G,B,255], plus y_invert
+        let rgb_inv = convert_to_rgba(&bytes, wl_shm::Format::Rgb888, 2, 2, 8, true);
+        assert_eq!(
+            rgb_inv,
+            vec![
+                90, 80, 70, 255, 120, 110, 100, 255, // original row 1
+                30, 20, 10, 255, 60, 50, 40, 255, // original row 0
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn convert_rejects_short_stride_and_unsupported_formats() {
+        // 2×1 Bgr888 needs stride >= 6; stride 5 must fail soft
+        assert!(convert_to_rgba(&[0u8; 16], wl_shm::Format::Bgr888, 2, 1, 5, false).is_empty());
+        // Truncated backing buffer must fail soft
+        assert!(convert_to_rgba(&[0u8; 5], wl_shm::Format::Bgr888, 2, 1, 6, false).is_empty());
+        // Unsupported formats (16-bit / 10-bit HDR) must fail soft
+        assert!(convert_to_rgba(&[0u8; 16], wl_shm::Format::Rgb565, 2, 1, 8, false).is_empty());
+        assert!(
+            convert_to_rgba(&[0u8; 16], wl_shm::Format::Xrgb2101010, 2, 1, 8, false).is_empty()
+        );
     }
 }

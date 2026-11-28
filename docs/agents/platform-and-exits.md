@@ -21,16 +21,21 @@ Read before modifying `src/platform/`, `src/clipboard.rs`,
   - Kept Wayland/GPUI-free so every pixel format and all 8
     `wl_output::Transform` orientations (`Normal`, `Rot90/180/270`,
     `Flipped*`, calibrated against `grim`) are pure unit tests.
-  - **`wl_shm::Format` byte-order trap**: format names describe 32-bit
+  - **`wl_shm::Format` byte-order trap**: format names describe pixel
     MSB→LSB words, so on little-endian hosts `Xrgb8888`/`Argb8888` sit in
-    memory as `B, G, R, X/A` (and `wl_shm::Format` values are protocol
-    ordinals like `1`, **not** DRM fourccs).
-  - **Fail soft on unsupported formats / bad strides**: only 8-bit
-    `Xrgb8888`, `Argb8888`, `Xbgr8888`, and `Abgr8888` are swizzled.
-    10-bit/HDR shm formats (e.g. KWin HDR) or malformed compositor
-    strides return `Vec::new()` so callers skip the frame/output cleanly
-    instead of scrambling channels or panicking inside the Wayland event
-    loop.
+    memory as `B, G, R, X/A`, `Bgr888` as `R, G, B` (3 bpp, announced by
+    wlroots GLES2 when `GL_IMPLEMENTATION_COLOR_READ_FORMAT == GL_RGB`),
+    and `Rgb888` as `B, G, R` (and `wl_shm::Format` uses ordinals `0`/`1`
+    for `Argb8888`/`Xrgb8888` and DRM fourccs for everything else).
+  - **Fail soft on unsupported formats / bad strides**: `shm_bytes_per_pixel`
+    is the single allow-list shared by `capture/pixels.rs`,
+    `capture/wayland.rs`, and `scroll_capture/wayland.rs` — supporting
+    32-bit (`Xrgb8888`, `Argb8888`, `Xbgr8888`, `Abgr8888`) and 24-bit
+    (`Bgr888`, `Rgb888`). Unsupported 10-bit/HDR shm formats (e.g. KWin
+    HDR) or malformed compositor strides are skipped during v3 buffer
+    negotiation (or return `Vec::new()` in `convert_to_rgba`) so callers
+    skip the frame/output cleanly instead of scrambling channels or
+    panicking inside the Wayland event loop.
 
 ## 2. Display Matching (`src/platform/display.rs`)
 
