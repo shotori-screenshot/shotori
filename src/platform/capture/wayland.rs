@@ -128,7 +128,7 @@ impl App {
         self.outputs.get_mut(idx)?.frame.as_mut()
     }
 
-    /// Full Buffer-event handling: record metadata → create shm
+    /// Full Buffer-event handling: validate format/geometry → create shm
     /// pool/buffer → attach resources back. The copy itself moved to
     /// copy_prepared — v3 compositors finish announcing with buffer_done,
     /// so the dispatcher decides when the copy is legal.
@@ -146,33 +146,45 @@ impl App {
         stride: i32,
     ) {
         // The compositor may advertise multiple supported buffer formats (e.g.
-        // ARGB8888 then XRGB8888). The wlr-screencopy protocol specifies that
-        // clients pick one and call copy once per frame; subsequent buffer events
-        // must be ignored once a buffer is prepared or if the frame already failed.
+        // ARGB8888 then XRGB8888, or a 10-bit HDR offer before an 8-bit one).
+        // The wlr-screencopy protocol specifies that clients pick one and call
+        // copy once per frame; ignore subsequent buffer events once a buffer is
+        // prepared or after a fatal allocation error.
         if self
             .frame_mut(idx)
             .is_some_and(|f| f.buffer.is_some() || f.failed)
         {
             return;
         }
-        if let Some(f) = self.frame_mut(idx) {
-            f.info = Some((fmt, w, h, stride));
+        let Some(bpp) = super::shm_bytes_per_pixel(fmt) else {
+            eprintln!(
+                "[shotori] capture: unsupported buffer format {fmt:?} ({w}x{h} stride {stride})"
+            );
+            return;
+        };
+        let min_stride = i64::from(w) * bpp as i64;
+        let size = i64::from(stride).saturating_mul(i64::from(h));
+        if w <= 0
+            || h <= 0
+            || i64::from(stride) < min_stride
+            || size <= 0
+            || size > i64::from(i32::MAX)
+        {
+            eprintln!(
+                "[shotori] capture: impossible buffer geometry {w}x{h} stride {stride} ({fmt:?})"
+            );
+            return;
         }
+        let size = size as u64;
+
         // Event handlers must not panic: any failure here (tempfile, mmap,
-        // missing wl_shm, or a compositor that announces an impossible
-        // buffer geometry) marks THIS frame failed — the collection loop
+        // missing wl_shm) marks THIS frame failed — the collection loop
         // skips it, one broken output never crashes the process.
         let mark_failed = |state: &mut Self, idx: usize| {
             if let Some(f) = state.frame_mut(idx) {
                 f.failed = true;
             }
         };
-        let size = (stride as i64 * h as i64) as u64;
-        if w <= 0 || h <= 0 || stride < w * 4 || size > i32::MAX as u64 {
-            eprintln!("[shotori] capture: impossible buffer geometry {w}x{h} stride {stride}");
-            mark_failed(self, idx);
-            return;
-        }
 
         let file = match tempfile::tempfile() {
             Ok(file) => file,
@@ -205,6 +217,7 @@ impl App {
         let buffer = pool.create_buffer(0, w, h, stride, fmt, qh, ());
 
         if let Some(f) = self.frame_mut(idx) {
+            f.info = Some((fmt, w, h, stride));
             f.file = Some(file);
             f.mmap = Some(mmap);
             f.buffer = Some(buffer);
@@ -213,15 +226,20 @@ impl App {
 
     /// Issue the copy once the buffer is prepared — but only once per
     /// frame, and only after the compositor finished announcing (v3).
+    /// If no supported buffer offer survived the announcement batch, mark
+    /// this frame failed immediately instead of hanging until the deadline.
     fn copy_prepared(&mut self, frame: &ZwlrScreencopyFrameV1, idx: usize) {
         let Some(f) = self.frame_mut(idx) else {
             return;
         };
-        if !f.copied
-            && let Some(buffer) = f.buffer.as_ref()
-        {
+        if f.copied || f.failed {
+            return;
+        }
+        if let Some(buffer) = f.buffer.as_ref() {
             f.copied = true;
             frame.copy(buffer);
+        } else {
+            f.failed = true;
         }
     }
 }
@@ -434,19 +452,31 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
                 height,
                 stride,
             } => {
-                let fmt = format.into_result().unwrap_or(wl_shm::Format::Xrgb8888);
-                state.handle_buffer(
-                    frame,
-                    *idx,
-                    qh,
-                    fmt,
-                    width as i32,
-                    height as i32,
-                    stride as i32,
-                );
+                match format.into_result() {
+                    Ok(fmt) => state.handle_buffer(
+                        frame,
+                        *idx,
+                        qh,
+                        fmt,
+                        width as i32,
+                        height as i32,
+                        stride as i32,
+                    ),
+                    Err(unknown) => {
+                        if !state
+                            .frame_mut(*idx)
+                            .is_some_and(|f| f.buffer.is_some() || f.failed)
+                        {
+                            eprintln!(
+                                "[shotori] capture: unsupported buffer format {unknown:?} ({width}x{height} stride {stride})"
+                            );
+                        }
+                    }
+                }
                 if state.screencopy_version < 3 {
                     // v1/v2 managers never send buffer_done — the copy
-                    // is legal the moment a buffer was prepared.
+                    // is legal the moment a buffer was prepared (or fail
+                    // immediately if the sole offer was unsupported).
                     state.copy_prepared(frame, *idx);
                 }
             }

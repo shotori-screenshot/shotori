@@ -14,6 +14,7 @@ mod pixels;
 // Re-exported at crate level for the microbenchmark harness (`--bench`)
 pub(crate) use pixels::convert_to_rgba;
 pub(crate) use pixels::rotate_rgba;
+pub(crate) use pixels::shm_bytes_per_pixel;
 
 mod wayland;
 
