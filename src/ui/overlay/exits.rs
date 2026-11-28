@@ -378,6 +378,172 @@ impl Overlay {
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
+
+    /// Toolbar button or shortcut for a user-defined custom action.
+    ///
+    /// When `action.close_overlay` is true (default), mirrors the OCR exit:
+    /// unmaps overlays immediately, shows a non-interactive top-center OSD pill
+    /// while the command runs on the background executor, delivers the output
+    /// (clipboard / notification / floating Pin), and quits after the Wayland
+    /// flush beat. When `false`, runs in the background while keeping the
+    /// overlay open for further edits or exports.
+    pub(super) fn run_custom_action(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.read(cx).blocked() {
+            return;
+        }
+        let Some(action) = crate::model::settings::current().custom_action(id).cloned() else {
+            eprintln!("[shotori] custom action {id:?} is not defined");
+            return;
+        };
+        self.session.update(cx, |s, cx| {
+            s.edit_annotations(|a| a.finish_polyline());
+            cx.notify();
+        });
+        let (bounds_logical, cropped, annotated) = {
+            let session = self.session.read(cx);
+            let Some(bounds) = session.selection().bounds() else {
+                println!("[shotori] empty selection, ignoring custom action {id:?}");
+                return;
+            };
+            match action.source {
+                crate::model::settings::CustomActionSource::Annotated => {
+                    (bounds, session.crop(&self.capture.output_name), true)
+                }
+                crate::model::settings::CustomActionSource::Raw => (
+                    bounds,
+                    session.crop_original(&self.capture.output_name),
+                    false,
+                ),
+            }
+        };
+        let Some((width, height, rgba)) = cropped else {
+            println!("[shotori] empty selection, ignoring custom action {id:?}");
+            return;
+        };
+        let payload = crate::custom_action::ActionPayload {
+            width,
+            height,
+            rgba,
+            bounds_logical,
+            output_name: self.capture.output_name.clone(),
+            annotated,
+        };
+
+        if action.close_overlay {
+            cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
+            let label = crate::i18n::t!("osd.custom_action_running", name = action.name.as_str())
+                .into_owned();
+            let osd = crate::platform::display::display_for_capture(&self.capture, cx)
+                .and_then(|did| crate::ui::ocr_osd::open_with_label(Some(did), label, cx));
+            crate::save_dialog::close_overlays(window, cx);
+
+            let work = cx
+                .background_executor()
+                .spawn(async move { crate::custom_action::execute(&action, payload) });
+            cx.spawn(async move |_, cx| {
+                let outcome = work.await;
+                match outcome {
+                    crate::custom_action::ActionOutcome::PinImage {
+                        width,
+                        height,
+                        rgba,
+                    } => {
+                        let spec =
+                            crate::ui::pin::PinSpec::new(width, height, rgba, bounds_logical);
+                        let prepared = cx
+                            .background_executor()
+                            .spawn(async move { crate::ui::pin::prepare(spec) })
+                            .await;
+                        cx.update(|cx| {
+                            if let Some(osd) = osd {
+                                let _ = osd.update(cx, |_, window, _| window.remove_window());
+                            }
+                            match prepared.and_then(|p| crate::ui::pin::open(p, cx)) {
+                                Ok(()) => {
+                                    cx.set_quit_mode(gpui_kit::QuitMode::LastWindowClosed);
+                                }
+                                Err(error) => {
+                                    eprintln!("[shotori] custom action pin failed: {error:#}");
+                                    crate::notify::send(
+                                        crate::i18n::t!("notify.pin.failed.title").as_ref(),
+                                        crate::i18n::t!("notify.pin.failed.body").as_ref(),
+                                    );
+                                    quit_after_osd_flush(cx);
+                                }
+                            }
+                        });
+                    }
+                    crate::custom_action::ActionOutcome::Failed { title, reason } => {
+                        crate::notify::send(&title, &reason);
+                        cx.update(|cx| {
+                            if let Some(osd) = osd {
+                                let _ = osd.update(cx, |_, window, _| window.remove_window());
+                            }
+                            quit_after_osd_flush(cx);
+                        });
+                    }
+                    crate::custom_action::ActionOutcome::Done => {
+                        cx.update(|cx| {
+                            if let Some(osd) = osd {
+                                let _ = osd.update(cx, |_, window, _| window.remove_window());
+                            }
+                            quit_after_osd_flush(cx);
+                        });
+                    }
+                }
+            })
+            .detach();
+        } else {
+            let work = cx
+                .background_executor()
+                .spawn(async move { crate::custom_action::execute(&action, payload) });
+            cx.spawn_in(window, async move |this, cx| match work.await {
+                crate::custom_action::ActionOutcome::PinImage {
+                    width,
+                    height,
+                    rgba,
+                } => {
+                    let spec = crate::ui::pin::PinSpec::new(width, height, rgba, bounds_logical);
+                    let prepared = cx
+                        .background_executor()
+                        .spawn(async move { crate::ui::pin::prepare(spec) })
+                        .await;
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        match prepared.and_then(|p| crate::ui::pin::open(p, cx)) {
+                            Ok(()) => crate::save_dialog::close_overlays(window, cx),
+                            Err(error) => {
+                                eprintln!("[shotori] custom action pin failed: {error:#}");
+                                crate::notify::send(
+                                    crate::i18n::t!("notify.pin.failed.title").as_ref(),
+                                    crate::i18n::t!("notify.pin.failed.body").as_ref(),
+                                );
+                            }
+                        }
+                    });
+                }
+                crate::custom_action::ActionOutcome::Failed { title, reason } => {
+                    crate::notify::send(&title, &reason);
+                }
+                crate::custom_action::ActionOutcome::Done => {}
+            })
+            .detach();
+        }
+    }
+}
+
+fn quit_after_osd_flush(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(150))
+            .await;
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
 }
 
 /// Enter/Ctrl+C exit path: PNG-encode (fast tier) + clipboard handoff run

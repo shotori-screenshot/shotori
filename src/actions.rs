@@ -205,6 +205,13 @@ pub(crate) struct Nudge {
     pub(crate) dy: i32,
 }
 
+/// Trigger a user-defined custom toolbar action by its stable slug id.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(no_json)]
+pub struct RunCustomAction {
+    pub id: String,
+}
+
 /// Keybindings, scoped to the `ShotoriOverlay` key context. Bound once
 /// during startup in `main`. `keys` carries the configurable commands
 /// resolved from the user's settings (`[keys]` overrides applied —
@@ -315,6 +322,32 @@ pub fn bind_keys(cx: &mut App, keys: &BTreeMap<String, String>) -> Vec<&'static 
         }
     }
     cx.bind_keys(configurable);
+    unbound
+}
+
+/// Bind user-defined custom action shortcuts in the `ShotoriOverlay` context.
+/// Returns the custom action ids whose chord could not be registered.
+pub fn bind_custom_keys(cx: &mut App, bindings: &[(&str, &str)]) -> Vec<String> {
+    let Ok(predicate) = KeyBindingContextPredicate::parse("ShotoriOverlay") else {
+        return bindings.iter().map(|(id, _)| (*id).to_owned()).collect();
+    };
+    let mut unbound = Vec::new();
+    let mut loaded = Vec::with_capacity(bindings.len());
+    for &(id, chord) in bindings {
+        let action: Box<dyn Action> = Box::new(RunCustomAction { id: id.to_owned() });
+        match KeyBinding::load(
+            chord,
+            action,
+            Some(predicate.clone().into()),
+            false,
+            None,
+            cx,
+        ) {
+            Ok(binding) => loaded.push(binding),
+            Err(_) => unbound.push(id.to_owned()),
+        }
+    }
+    cx.bind_keys(loaded);
     unbound
 }
 

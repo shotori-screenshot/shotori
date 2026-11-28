@@ -37,11 +37,11 @@
 //! │                          pencil / highlighter / mosaic+blur / magnifier /
 //! │                          spotlight / eraser / text
 //! ├─ render_image.rs         leaf RGBA8 → BGRA RenderImage conversion
-//! └─ clipboard / notify / ocr / qr / save_dialog / tray / i18n
+//! └─ clipboard / custom_action / notify / ocr / qr / save_dialog / tray / i18n
 //!      the post-selection exits & desktop surfaces: clipboard (resident
-//!      daemon), notifications (D-Bus), OCR engine, QR scanner, native save
-//!      dialog, StatusNotifierItem tray — plus the UI string tables
-//!      (rust-i18n, shared engine with gpui-component)
+//!      daemon), custom toolbar action runner, notifications (D-Bus), OCR
+//!      engine, QR scanner, native save dialog, StatusNotifierItem tray —
+//!      plus the UI string tables (rust-i18n, shared engine with gpui-component)
 //! ```
 //!
 //! Dependency direction: `ui → model`, `model → platform` (session holds
@@ -87,6 +87,7 @@ pub mod ui;
 mod annotation;
 
 pub mod clipboard;
+pub mod custom_action;
 pub mod i18n;
 pub mod notify;
 pub mod ocr;

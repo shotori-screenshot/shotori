@@ -129,6 +129,9 @@ text_outline = false
 #   pencil, highlighter, mosaic, magnifier, spotlight, eraser, text,
 #   clear, ocr, qr, pin, scroll, save, copy, settings, cancel
 #
+# Custom actions are referenced as "custom:<id>" (defined below under
+# `[[custom_actions]]` or discovered from `~/.config/shotori/actions/`).
+#
 # The value below is the factory layout (`select` and `spotlight` live
 # in the add-buttons palette by default).
 items = [
@@ -241,3 +244,49 @@ undo = "ctrl-z"
 redo = "ctrl-y"
 delete = "delete"
 clear = "ctrl-shift-delete"
+
+# ── Custom toolbar actions ────────────────────────────────────────────────────
+# User-defined actions with custom SVG icons and shell commands. Actions can be
+# listed inline here as `[[custom_actions]]` (editable in `shotori settings`)
+# or dropped into `~/.config/shotori/actions/<name>.toml` (or
+# `~/.config/shotori/actions/<dir>/action.toml` with a sibling `icon.svg`).
+# Place an action on the toolbar by adding `"custom:<id>"` to `[toolbar] items`.
+#
+# Runtime environment variables injected into every command:
+#   SHOTORI_ACTION_ID, SHOTORI_ACTION_NAME
+#   SHOTORI_IMAGE_PATH (when input = "file"; temp file cleaned up after exit)
+#   SHOTORI_TEXT_PATH  (when input = "ocr_text"; also piped to stdin)
+#   SHOTORI_WIDTH, SHOTORI_HEIGHT (physical cropped pixels)
+#   SHOTORI_X, SHOTORI_Y, SHOTORI_W, SHOTORI_H (desktop logical selection)
+#   SHOTORI_OUTPUT, SHOTORI_FORMAT, SHOTORI_ANNOTATED ("1" | "0")
+#
+# Valid fields:
+#   id            = "upload-r2"       # lowercase [a-z0-9_-], starts with a-z/0-9
+#   name          = "Upload to R2"    # display label / tooltip / OSD status
+#   icon          = "cloud-upload"    # built-in preset or .svg path (relative -> ~/.config/shotori/icons/)
+#   command       = "..."             # executed via `/bin/sh -c`
+#   working_dir   = ""                # optional working directory
+#   input         = "file"            # "file" | "stdin" | "ocr_text" | "none"
+#   source        = "annotated"       # "annotated" | "raw"
+#   output        = "copy_text"       # "copy_text" | "copy_image" | "pin" | "notify" | "json" | "ignore"
+#   close_overlay = true              # true: unmap overlay + show top OSD pill; false: stay open
+#   timeout_secs  = 30                # 1..=300
+#   shortcut      = "ctrl-u"          # optional overlay key chord
+#
+# Built-in icon presets:
+#   sparkles, cloud-upload, upload, terminal, code, bot, globe, send, share-2,
+#   link, webhook, zap, wand-sparkles, plug, rocket, wrench, image, folder,
+#   external-link, play
+#
+# Example (uncomment to enable):
+# [[custom_actions]]
+# id = "upload-picgo"
+# name = "Upload Image"
+# icon = "cloud-upload"
+# command = 'picgo upload "$SHOTORI_IMAGE_PATH" | tail -n 1'
+# input = "file"
+# source = "annotated"
+# output = "copy_text"
+# close_overlay = true
+# timeout_secs = 30
+# shortcut = "ctrl-u"

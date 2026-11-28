@@ -302,7 +302,7 @@ mod tests {
         DEFAULT_ROW
             .iter()
             .map(|item| match item {
-                ToolbarItem::Button(_) => (BTN_SIZE, false),
+                ToolbarItem::Button(_) | ToolbarItem::Custom(_) => (BTN_SIZE, false),
                 ToolbarItem::Separator => (11., true),
             })
             .collect()

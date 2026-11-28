@@ -58,7 +58,7 @@ pub(super) const SECTION_SEARCH_ITEMS: [(Section, &str, IconName, &str); 8] = [
         Section::Capture,
         "settings.preferences.capture",
         IconName::Scan,
-        "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long transparency blur compositor command custom qr double click right cancel 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 透明 模糊 合成器 命令 自定义 保留 二维码 双击 右键",
+        "capture toolbar selection window snap crosshair loupe zoom size label dim opacity scroll long transparency blur compositor command custom action script svg upload workflow qr double click right cancel 截图 工具栏 选区 窗口 吸附 十字 放大镜 尺寸 遮罩 长截图 透明 模糊 合成器 命令 自定义 动作 脚本 图标 图床 工作流 保留 二维码 双击 右键",
     ),
     (
         Section::Annotation,

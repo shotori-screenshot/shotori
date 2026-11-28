@@ -565,7 +565,6 @@ mod tests {
         s.set_row(
             DEFAULT_ROW
                 .iter()
-                .copied()
                 .filter(|item| {
                     !matches!(
                         item,
@@ -574,6 +573,7 @@ mod tests {
                         )
                     )
                 })
+                .cloned()
                 .collect(),
         );
         let (w, h) = toolbar_size(false, &s);
@@ -590,7 +590,7 @@ mod tests {
         s.set_row(
             DEFAULT_ROW
                 .iter()
-                .copied()
+                .cloned()
                 .chain([ToolbarItem::Separator])
                 .collect(),
         );

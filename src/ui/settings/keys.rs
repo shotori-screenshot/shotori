@@ -113,6 +113,15 @@ impl SettingsWindow {
             }
         }
 
+        let mut custom_rows = Vec::new();
+        for action in self.settings.custom_actions() {
+            let keystroke = action.shortcut.as_deref().unwrap_or("");
+            let custom_key_id = action.toolbar_id();
+            if row_matches_query(&custom_key_id, &action.name, keystroke, &query) {
+                custom_rows.push(self.custom_key_row(action, cx));
+            }
+        }
+
         let any_customized = crate::actions::CONFIGURABLE_KEYS
             .iter()
             .any(|&(id, factory)| {
@@ -147,7 +156,7 @@ impl SettingsWindow {
                 ),
         );
 
-        if capture_rows.is_empty() && annot_rows.is_empty() {
+        if capture_rows.is_empty() && annot_rows.is_empty() && custom_rows.is_empty() {
             body = body.child(card_group(
                 cx,
                 None,
@@ -172,6 +181,13 @@ impl SettingsWindow {
                     cx,
                     Some(crate::i18n::t!("settings.keys_page.group.annotation").as_ref()),
                     annot_rows,
+                ));
+            }
+            if !custom_rows.is_empty() {
+                body = body.child(card_group(
+                    cx,
+                    Some(crate::i18n::t!("settings.keys_page.group.custom").as_ref()),
+                    custom_rows,
                 ));
             }
         }
@@ -358,6 +374,129 @@ impl SettingsWindow {
         super::layout::compact_row(cx, key_label(id), None, description, control)
     }
 
+    fn custom_key_row(
+        &self,
+        action: &crate::model::settings::CustomAction,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let entity = cx.entity();
+        let rec_id = action.toolbar_id();
+        let recording = self.recording.as_deref() == Some(rec_id.as_str());
+        let is_drop_in = action.origin.is_drop_in();
+        let s = super::palette::surfaces(cx);
+        let pill_hover = s.pill_hover;
+
+        let cap_label = if recording {
+            match &self.record_error {
+                Some(error) => error.clone(),
+                None => crate::i18n::t!("settings.keys_page.record").to_string(),
+            }
+        } else {
+            match action.shortcut.as_deref() {
+                Some(chord) if !chord.is_empty() => crate::actions::pretty_keystroke(chord),
+                _ => crate::i18n::t!("settings.keys_page.unset").to_string(),
+            }
+        };
+
+        let description = is_drop_in
+            .then(|| crate::i18n::t!("settings.custom_actions.origin.drop_in").to_string());
+
+        let has_key = action.shortcut.as_deref().is_some_and(|k| !k.is_empty());
+        let mut cap = Button::new(SharedString::from(format!("key-cap-{rec_id}")))
+            .accessibility_label(action.name.clone())
+            .disabled(is_drop_in)
+            .flex()
+            .items_center()
+            .justify_center()
+            .min_w(rems(6.5))
+            .max_w_full()
+            .min_h_8()
+            .h_auto()
+            .py_1()
+            .when(recording, |cap| cap.min_w(rems(11.)))
+            .px_3()
+            .rounded(px(9.))
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .border_1()
+            .border_color(if recording {
+                cx.theme().primary
+            } else if has_key {
+                cx.theme().primary.opacity(0.65)
+            } else {
+                s.hairline
+            })
+            .bg(if recording {
+                s.selected_card_bg
+            } else {
+                s.well_bg
+            })
+            .shadow(if recording {
+                s.selected_shadow
+            } else {
+                vec![BoxShadow::new(px(0.), px(1.), s.hairline).blur_radius(px(0.))]
+            })
+            .text_color(if has_key || recording {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .focus_visible(|st| st.border_color(cx.theme().ring))
+            .hover(move |st| st.bg(pill_hover));
+        if recording {
+            cap = cap.track_focus(&self.record_focus);
+        }
+        let cap = cap
+            .on_click({
+                let entity = entity.clone();
+                let rec_id = rec_id.clone();
+                move |_, window, cx| {
+                    if !is_drop_in {
+                        entity.update(cx, |this, cx| this.toggle_recording(&rec_id, window, cx));
+                    }
+                }
+            })
+            .child(cap_label);
+
+        let clear_btn = (!is_drop_in && has_key && !recording).then(|| {
+            let entity = entity.clone();
+            let action_id = action.id.clone();
+            let fg = cx.theme().foreground;
+            let clear_tip = crate::i18n::t!("settings.keys_page.clear_custom").to_string();
+            Button::new(SharedString::from(format!(
+                "key-clear-custom-{}",
+                action.id
+            )))
+            .accessibility_label(format!("{clear_tip}: {}", action.name))
+            .size_7()
+            .flex_shrink_0()
+            .rounded_full()
+            .text_color(cx.theme().muted_foreground)
+            .hover(move |st| st.bg(pill_hover).text_color(fg))
+            .focus_visible(|st| st.border_1().border_color(cx.theme().ring))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip::new(clear_tip.clone())).into())
+            .child(Icon::new(IconName::X).size_3p5())
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.settings.set_custom_action_shortcut(&action_id, None);
+                    this.persist(cx);
+                });
+            })
+        });
+
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .children(clear_btn)
+            .child(
+                div()
+                    .capture_key_down(cx.listener(Self::capture_key))
+                    .child(cap),
+            );
+        super::layout::compact_row(cx, action.name.clone(), None, description, control)
+    }
+
     fn toggle_recording(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.recording.as_deref() == Some(id) {
             self.stop_recording(window, cx);
@@ -395,21 +534,34 @@ impl SettingsWindow {
             return;
         }
         let chord = canonical_chord(keystroke);
-        let taken = self
+        let custom_target = id.strip_prefix(crate::model::settings::CUSTOM_TOOLBAR_PREFIX);
+        let taken_builtin = self
             .settings
             .keys()
             .iter()
             .find(|(other, key)| other.as_str() != id && key.as_str() == chord)
-            .map(|(other, _)| other.clone());
-        if let Some(other) = taken {
-            self.record_error = Some(
-                crate::i18n::t!("settings.keys_page.conflict", action = key_label(&other))
-                    .to_string(),
-            );
+            .map(|(other, _)| key_label(other));
+        let taken_custom = self
+            .settings
+            .custom_actions()
+            .iter()
+            .find(|a| {
+                custom_target != Some(a.id.as_str())
+                    && a.shortcut.as_deref() == Some(chord.as_str())
+            })
+            .map(|a| a.name.clone());
+        if let Some(other) = taken_builtin.or(taken_custom) {
+            self.record_error =
+                Some(crate::i18n::t!("settings.keys_page.conflict", action = other).to_string());
         } else if crate::actions::RESERVED_KEYS.contains(&chord.as_str()) {
             self.record_error = Some(crate::i18n::t!("settings.keys_page.reserved").to_string());
         } else {
-            self.settings.set_key(&id, chord);
+            if let Some(custom_id) = custom_target {
+                self.settings
+                    .set_custom_action_shortcut(custom_id, Some(chord));
+            } else {
+                self.settings.set_key(&id, chord);
+            }
             self.persist(cx);
             self.stop_recording(window, cx);
             return;

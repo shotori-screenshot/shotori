@@ -59,6 +59,7 @@ use crate::ui::theme::{self, ColorKey};
 use self::advanced::AdvancedPageState;
 use self::annotation_page::AnnotationPageState;
 use self::capture_page::CapturePageState;
+use self::custom_actions::CustomActionsPageState;
 use self::desktop_page::DesktopPageState;
 use self::export_page::ExportPageState;
 use self::ocr::OcrPageState;
@@ -279,6 +280,7 @@ struct SettingsWindow {
     /// picker/slider entities its rows render).
     appearance: AppearanceState,
     capture_page: CapturePageState,
+    custom_actions_page: CustomActionsPageState,
     annotation_page: AnnotationPageState,
     export_page: ExportPageState,
     desktop_page: DesktopPageState,
@@ -466,6 +468,7 @@ impl SettingsWindow {
             drag: None,
             appearance,
             capture_page,
+            custom_actions_page: CustomActionsPageState::default(),
             annotation_page,
             export_page,
             desktop_page,
@@ -589,6 +592,7 @@ impl SettingsWindow {
         self.language_select
             .update(cx, |s, cx| s.set_selected_index(lang_ix, window, cx));
         self.capture_page.resync(&self.settings, window, cx);
+        self.custom_actions_page.editing = None;
         self.annotation_page.resync(&self.settings, window, cx);
         self.export_page.resync(&self.settings, window, cx);
         self.desktop_page.resync(&self.settings, window, cx);
@@ -676,6 +680,10 @@ impl Render for SettingsWindow {
                 if this.recording.take().is_some() {
                     this.record_error = None;
                     window.blur(cx);
+                    cx.notify();
+                    return;
+                }
+                if this.custom_actions_page.editing.take().is_some() {
                     cx.notify();
                     return;
                 }
@@ -812,6 +820,7 @@ mod advanced;
 mod annotation_page;
 mod appearance;
 mod capture_page;
+mod custom_actions;
 mod desktop_page;
 mod export_page;
 mod keys;
@@ -962,5 +971,63 @@ mod color_surface_tests {
             });
             window.draw(cx).clear(cx);
         });
+    }
+
+    #[gpui_kit::test]
+    fn custom_actions_render_on_capture_and_keys_pages_and_persist(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::base::init(cx);
+            gpui_kit::component::init(cx);
+        });
+        let config = tempfile::tempdir().expect("test config directory");
+        let path = config.path().join("settings.toml");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = SettingsWindow::new(window, cx);
+            view.settings = Settings::default();
+            view.sidebar_collapsed = false;
+            view.path = Some(path.clone());
+            view.error = None;
+            view
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.select_section(Section::Capture, cx);
+                this.begin_new_custom_action(window, cx);
+                if let Some(ed) = &this.custom_actions_page.editing {
+                    ed.name_input
+                        .update(cx, |i, cx| i.set_value("Upload R2", window, cx));
+                    ed.command_input.update(cx, |i, cx| {
+                        i.set_value("echo https://example.com/a.png", window, cx)
+                    });
+                    ed.shortcut_input
+                        .update(cx, |i, cx| i.set_value("ctrl-u", window, cx));
+                }
+            });
+            window.draw(cx).clear(cx);
+            view.update(cx, |this, cx| {
+                this.save_editing_custom_action(cx);
+                assert!(this.custom_actions_page.editing.is_none());
+                assert_eq!(this.settings.custom_actions().len(), 1);
+                assert_eq!(this.settings.custom_actions()[0].id, "upload-r2");
+                assert!(this.settings.row().contains(
+                    &crate::model::settings::ToolbarItem::Custom("upload-r2".into())
+                ));
+            });
+            window.draw(cx).clear(cx);
+            view.update(cx, |this, cx| {
+                this.select_section(Section::Keys, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+
+        let (loaded, warnings) = Settings::load(Some(&path));
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        assert_eq!(loaded.custom_actions().len(), 1);
+        assert_eq!(loaded.custom_actions()[0].name, "Upload R2");
+        assert_eq!(
+            loaded.custom_actions()[0].shortcut.as_deref(),
+            Some("ctrl-u")
+        );
     }
 }

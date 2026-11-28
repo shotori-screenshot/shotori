@@ -137,7 +137,7 @@ impl ToolbarButton {
 
 /// One slot of the configured toolbar row. A row is an ordered list of
 /// these — the order IS the customization.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ToolbarItem {
     Button(ToolbarButton),
     /// The thin vertical group break. Any number may appear — grouping
@@ -146,29 +146,39 @@ pub enum ToolbarItem {
     /// flexible gap can never flex — it was just a separator without
     /// the line).
     Separator,
+    /// A user-defined custom action slot, serialized as `"custom:<id>"`.
+    Custom(String),
 }
 
 impl ToolbarItem {
     /// Stable id for the settings file (same vocabulary as button ids).
-    pub const fn id(self) -> &'static str {
+    pub fn id(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Button(button) => button.id(),
-            Self::Separator => "separator",
+            Self::Button(button) => std::borrow::Cow::Borrowed(button.id()),
+            Self::Separator => std::borrow::Cow::Borrowed("separator"),
+            Self::Custom(id) => std::borrow::Cow::Owned(format!(
+                "{}{id}",
+                super::custom_action::CUSTOM_TOOLBAR_PREFIX
+            )),
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        match id {
-            "separator" => Some(Self::Separator),
-            _ => ToolbarButton::from_id(id).map(Self::Button),
+        if id == "separator" {
+            return Some(Self::Separator);
         }
+        if let Some(custom_id) = id.strip_prefix(super::custom_action::CUSTOM_TOOLBAR_PREFIX) {
+            return super::custom_action::is_valid_custom_action_id(custom_id)
+                .then(|| Self::Custom(custom_id.to_owned()));
+        }
+        ToolbarButton::from_id(id).map(Self::Button)
     }
 
     /// Human name for the drag ghost / palette chip of a layout item.
-    pub fn layout_name(self) -> Option<&'static str> {
+    pub fn layout_name(&self) -> Option<&'static str> {
         match self {
             Self::Separator => Some("Separator"),
-            Self::Button(_) => None,
+            Self::Button(_) | Self::Custom(_) => None,
         }
     }
 }
@@ -207,7 +217,7 @@ pub const DEFAULT_ROW: [ToolbarItem; 23] = [
 /// All valid ids, comma-joined for error messages.
 pub(super) fn known_ids() -> String {
     let mut ids: Vec<&str> = ToolbarButton::ALL.iter().map(|b| b.id()).collect();
-    ids.extend(["separator"]);
+    ids.extend(["separator", "custom:<id>"]);
     ids.join(", ")
 }
 

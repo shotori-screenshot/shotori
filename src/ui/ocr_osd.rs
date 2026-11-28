@@ -14,11 +14,13 @@ use gpui_kit::*;
 use crate::ui::theme;
 
 /// The chip's logical surface size; extra breathing room avoids clipping the
-/// floating drop shadow at the layer-surface edges.
-const OSD_W: f32 = 220.;
+/// floating drop shadow and lets longer custom action names fit comfortably.
+const OSD_W: f32 = 320.;
 const OSD_H: f32 = 80.;
 
-pub(crate) struct OcrOsd;
+pub(crate) struct OcrOsd {
+    label: SharedString,
+}
 
 impl Render for OcrOsd {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -29,6 +31,7 @@ impl Render for OcrOsd {
             .gap(px(9.))
             .px_4()
             .py(px(7.))
+            .max_w(px(OSD_W - 24.))
             .rounded_full()
             .bg(rgba(t.capsule_sheet_surface()))
             .border_1()
@@ -37,10 +40,12 @@ impl Render for OcrOsd {
             .child(spinner())
             .child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgba(t.toolbar_text))
-                    .child(crate::i18n::t!("osd.ocr_running").to_string()),
+                    .child(self.label.clone()),
             );
         div()
             .size_full()
@@ -138,12 +143,29 @@ fn window_options(display_id: Option<DisplayId>) -> WindowOptions {
 /// the compositor's choice (the mixed-DPI placement lottery, the same rule
 /// the overlay's window options follow). Best-effort by design: `None`
 /// only degrades feedback to the completion notification; it never fails
-/// the OCR itself.
+/// the background task itself.
 pub(crate) fn open(display_id: Option<DisplayId>, cx: &mut App) -> Option<AnyWindowHandle> {
-    match cx.open_window(window_options(display_id), |_, cx| cx.new(|_| OcrOsd)) {
+    open_with_label(
+        display_id,
+        crate::i18n::t!("osd.ocr_running").into_owned(),
+        cx,
+    )
+}
+
+/// Open the non-interactive progress chip with a custom status label (used by
+/// background custom toolbar actions as well as OCR).
+pub(crate) fn open_with_label(
+    display_id: Option<DisplayId>,
+    label: impl Into<SharedString>,
+    cx: &mut App,
+) -> Option<AnyWindowHandle> {
+    let label = label.into();
+    match cx.open_window(window_options(display_id), |_, cx| {
+        cx.new(|_| OcrOsd { label })
+    }) {
         Ok(handle) => Some(handle.into()),
         Err(e) => {
-            eprintln!("[shotori] could not open the OCR indicator: {e:#}");
+            eprintln!("[shotori] could not open the progress indicator: {e:#}");
             None
         }
     }

@@ -33,6 +33,7 @@ use serde::Deserialize;
 
 mod annotation;
 mod capture;
+mod custom_action;
 mod export;
 mod ocr;
 mod toolbar;
@@ -45,6 +46,12 @@ pub use capture::{
     CaptureSettings, LoupeSize, NotifySettings, PinDoubleClick, PinOpacityModifier, PinSettings,
     PinWheelAction, PinZoomModifier, ScrollAxisSetting, ScrollSettings, ScrollTransparencyMode,
     SizeLabelMode, resolve_pin_wheel_action,
+};
+pub use custom_action::{
+    ACTIONS_SUBDIR, BUILTIN_ICON_IDS, CUSTOM_TOOLBAR_PREFIX, CustomAction, CustomActionInput,
+    CustomActionOrigin, CustomActionOutput, CustomActionSource, DEFAULT_TIMEOUT_SECS, ICONS_SUBDIR,
+    MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS, actions_dir, icons_dir, is_valid_custom_action_id,
+    slugify_custom_action_id,
 };
 pub use export::{
     DEFAULT_FILENAME_TEMPLATE, DEFAULT_SAVE_DIR_DISPLAY, ExportFormat, ExportSettings,
@@ -156,6 +163,9 @@ pub struct Settings {
     /// defaults with the file's `[keys]` overrides applied (see
     /// `crate::actions::CONFIGURABLE_KEYS` for the id list).
     keys: std::collections::BTreeMap<String, String>,
+    /// User-defined custom toolbar actions (inline `[[custom_actions]]` in
+    /// `settings.toml` followed by drop-in manifests in `<config_dir>/actions/`).
+    custom_actions: Vec<CustomAction>,
 }
 
 impl Default for Settings {
@@ -178,6 +188,7 @@ impl Default for Settings {
             scroll: ScrollSettings::default(),
             annotation_colors: DEFAULT_ANNOTATION_COLORS,
             keys: crate::actions::default_keys(),
+            custom_actions: Vec::new(),
         }
     }
 }
@@ -198,6 +209,8 @@ struct File {
     /// Per-command keystroke overrides (`[keys]`, id → keystroke —
     /// see `crate::actions::CONFIGURABLE_KEYS`). Absent = all factory.
     keys: Option<std::collections::BTreeMap<String, String>>,
+    /// Inline user-defined custom toolbar actions (`[[custom_actions]]`).
+    custom_actions: Vec<custom_action::CustomActionFile>,
     /// Top-level `language = "auto" | "en" | "zh-CN"`.
     language: Option<String>,
     /// Settings-window sidebar collapsed (`sidebar_collapsed`,
@@ -481,6 +494,88 @@ impl Settings {
         self.keys = crate::actions::default_keys();
     }
 
+    /// All loaded custom toolbar actions (inline `settings.toml` actions
+    /// followed by drop-in actions from `<config_dir>/actions/`).
+    pub fn custom_actions(&self) -> &[CustomAction] {
+        &self.custom_actions
+    }
+
+    /// Look up one custom action by its stable slug id.
+    pub fn custom_action(&self, id: &str) -> Option<&CustomAction> {
+        self.custom_actions.iter().find(|a| a.id == id)
+    }
+
+    /// Insert or update an inline custom action (if `old_id` differs from
+    /// `action.id`, renames any matching `ToolbarItem::Custom` slot in `row`).
+    pub fn upsert_custom_action(&mut self, old_id: Option<&str>, action: CustomAction) {
+        if let Some(prev) = old_id
+            && prev != action.id
+        {
+            for item in &mut self.row {
+                if matches!(item, ToolbarItem::Custom(id) if id == prev) {
+                    *item = ToolbarItem::Custom(action.id.clone());
+                }
+            }
+            self.custom_actions.retain(|a| a.id != prev);
+        }
+        if let Some(slot) = self
+            .custom_actions
+            .iter_mut()
+            .find(|a| a.id == action.id && !a.origin.is_drop_in())
+        {
+            *slot = action;
+        } else {
+            // Keep inline actions ahead of drop-in actions so ordering stays stable.
+            let insert_at = self
+                .custom_actions
+                .iter()
+                .position(|a| a.origin.is_drop_in())
+                .unwrap_or(self.custom_actions.len());
+            self.custom_actions.insert(insert_at, action);
+        }
+    }
+
+    /// Delete an inline custom action and remove its slot from the toolbar row.
+    pub fn remove_custom_action(&mut self, id: &str) {
+        self.custom_actions
+            .retain(|a| !(a.id == id && !a.origin.is_drop_in()));
+        self.row
+            .retain(|item| !matches!(item, ToolbarItem::Custom(cid) if cid == id));
+    }
+
+    /// Set or clear a custom action's shortcut (inline actions only).
+    pub fn set_custom_action_shortcut(&mut self, id: &str, shortcut: Option<String>) {
+        if let Some(action) = self
+            .custom_actions
+            .iter_mut()
+            .find(|a| a.id == id && !a.origin.is_drop_in())
+        {
+            action.shortcut = shortcut
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+        }
+    }
+
+    /// Re-scan `<config_dir>/actions/` for drop-in manifests without touching
+    /// inline actions or the toolbar row.
+    pub fn reload_drop_in_actions(&mut self, config_dir: &Path) -> Vec<String> {
+        self.custom_actions.retain(|a| !a.origin.is_drop_in());
+        let inline_ids: std::collections::BTreeSet<String> =
+            self.custom_actions.iter().map(|a| a.id.clone()).collect();
+        let mut errors = Vec::new();
+        let dir = custom_action::actions_dir(config_dir);
+        let drop_ins = custom_action::discover_drop_in(&dir, &inline_ids, &mut errors);
+        self.custom_actions.extend(drop_ins);
+        let settings_path = config_dir.join(FILE_NAME);
+        custom_action::validate_shortcuts(
+            &mut self.custom_actions,
+            &self.keys,
+            &settings_path,
+            &mut errors,
+        );
+        errors
+    }
+
     /// A button shows iff it has a slot in the row; hidden buttons
     /// keep their keyboard shortcuts.
     pub fn toolbar_visible(&self, button: ToolbarButton) -> bool {
@@ -488,11 +583,16 @@ impl Settings {
     }
 
     /// Row composition stats for the placement width basis (see
-    /// `model::placement::row1_basis`).
+    /// `model::placement::row1_basis`). Missing/unresolved custom action slots
+    /// are skipped by the renderer, so they are excluded from the count too.
     pub fn row1_button_count(&self) -> usize {
         self.row
             .iter()
-            .filter(|item| matches!(item, ToolbarItem::Button(_)))
+            .filter(|item| match item {
+                ToolbarItem::Button(_) => true,
+                ToolbarItem::Custom(id) => self.custom_action(id).is_some(),
+                ToolbarItem::Separator => false,
+            })
             .count()
     }
 
@@ -510,10 +610,10 @@ impl Settings {
     pub fn pin_tool_row(&self) -> Vec<ToolbarItem> {
         let mut filtered: Vec<ToolbarItem> = Vec::new();
         let mut has_button = false;
-        for &item in &self.row {
+        for item in &self.row {
             match item {
                 ToolbarItem::Button(b) if b.cluster() == ToolbarCluster::Tools => {
-                    filtered.push(item);
+                    filtered.push(item.clone());
                     has_button = true;
                 }
                 ToolbarItem::Separator => {
@@ -523,7 +623,7 @@ impl Settings {
                         filtered.push(ToolbarItem::Separator);
                     }
                 }
-                ToolbarItem::Button(_) => {}
+                ToolbarItem::Button(_) | ToolbarItem::Custom(_) => {}
             }
         }
         if matches!(filtered.last(), Some(ToolbarItem::Separator)) {
@@ -543,19 +643,28 @@ impl Settings {
     /// dispatches one action, listing it twice is a hand-edit typo)
     /// and report each drop.
     fn sanitize(row: Vec<ToolbarItem>) -> (Vec<ToolbarItem>, Vec<String>) {
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen_buttons = std::collections::BTreeSet::new();
+        let mut seen_custom = std::collections::BTreeSet::new();
         let mut clean = Vec::with_capacity(row.len());
         let mut errors = Vec::new();
         for (position, item) in row.into_iter().enumerate() {
-            if let ToolbarItem::Button(button) = item
-                && !seen.insert(button)
-            {
-                errors.push(format!(
-                    "duplicate toolbar button {} at position {} (kept the first)",
-                    button.id(),
-                    position
-                ));
-                continue;
+            match &item {
+                ToolbarItem::Button(button) if !seen_buttons.insert(*button) => {
+                    errors.push(format!(
+                        "duplicate toolbar button {} at position {} (kept the first)",
+                        button.id(),
+                        position
+                    ));
+                    continue;
+                }
+                ToolbarItem::Custom(id) if !seen_custom.insert(id.clone()) => {
+                    errors.push(format!(
+                        "duplicate custom toolbar action {} at position {} (kept the first)",
+                        id, position
+                    ));
+                    continue;
+                }
+                _ => {}
             }
             clean.push(item);
         }
@@ -577,7 +686,26 @@ impl Settings {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return (Self::default(), Vec::new());
+                // Even without settings.toml, discover drop-in actions from
+                // `<config_dir>/actions/` so a clean install with dropped-in
+                // action bundles picks them up immediately.
+                let mut settings = Self::default();
+                let mut errors = Vec::new();
+                if let Some(dir) = path.parent() {
+                    let drop_ins = custom_action::discover_drop_in(
+                        &custom_action::actions_dir(dir),
+                        &std::collections::BTreeSet::new(),
+                        &mut errors,
+                    );
+                    settings.custom_actions = drop_ins;
+                    custom_action::validate_shortcuts(
+                        &mut settings.custom_actions,
+                        &settings.keys,
+                        path,
+                        &mut errors,
+                    );
+                }
+                return (settings, errors);
             }
             Err(e) => return (Self::default(), vec![format!("{}: {e}", path.display())]),
         };
@@ -690,6 +818,19 @@ impl Settings {
         let empty = std::collections::BTreeMap::new();
         let keys =
             crate::actions::resolve_keys(path, file.keys.as_ref().unwrap_or(&empty), &mut errors);
+        let mut custom_actions =
+            custom_action::resolve_inline(file.custom_actions, path, &mut errors);
+        if let Some(dir) = path.parent() {
+            let inline_ids: std::collections::BTreeSet<String> =
+                custom_actions.iter().map(|a| a.id.clone()).collect();
+            let drop_ins = custom_action::discover_drop_in(
+                &custom_action::actions_dir(dir),
+                &inline_ids,
+                &mut errors,
+            );
+            custom_actions.extend(drop_ins);
+        }
+        custom_action::validate_shortcuts(&mut custom_actions, &keys, path, &mut errors);
         (
             Self {
                 row,
@@ -709,6 +850,7 @@ impl Settings {
                 scroll,
                 annotation_colors,
                 keys,
+                custom_actions,
             },
             errors,
         )
@@ -731,7 +873,7 @@ impl Settings {
         let items = toml::Value::Array(
             self.row
                 .iter()
-                .map(|item| toml::Value::from(item.id()))
+                .map(|item| toml::Value::from(item.id().into_owned()))
                 .collect(),
         );
         let Some(table) = doc.as_table_mut() else {
@@ -821,6 +963,7 @@ impl Settings {
                 keys.insert(id.clone(), toml::Value::from(keystroke.as_str()));
             }
         }
+        custom_action::write_toml(&self.custom_actions, table);
         let body = toml::to_string(&doc).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = format!(
             "# Shotori settings — managed by `shotori settings`; unknown keys are preserved.\n{body}"
@@ -1558,5 +1701,68 @@ mod tests {
             "example file had load errors: {errors:?}"
         );
         assert_eq!(loaded, Settings::default());
+    }
+
+    #[test]
+    fn custom_actions_round_trip_with_toolbar_items_and_drop_in_separation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let drop_in_dir = actions_dir(dir.path()).join("r2");
+        std::fs::create_dir_all(&drop_in_dir).unwrap();
+        std::fs::write(
+            drop_in_dir.join("action.toml"),
+            "name = \"R2 Drop-In\"\nicon = \"icon.svg\"\ncommand = \"./upload.sh\"\nshortcut = \"alt-r\"\n",
+        )
+        .unwrap();
+
+        let mut s = Settings::default();
+        s.upsert_custom_action(
+            None,
+            CustomAction {
+                id: "picgo".into(),
+                name: "Upload PicGo".into(),
+                icon: "cloud-upload".into(),
+                command: "picgo upload \"$SHOTORI_IMAGE_PATH\"".into(),
+                working_dir: None,
+                input: CustomActionInput::File,
+                source: CustomActionSource::Annotated,
+                output: CustomActionOutput::CopyText,
+                close_overlay: true,
+                timeout_secs: 45,
+                shortcut: Some("ctrl-u".into()),
+                origin: CustomActionOrigin::Settings,
+            },
+        );
+        s.set_row(vec![
+            ToolbarItem::Button(ToolbarButton::Copy),
+            ToolbarItem::Custom("picgo".into()),
+            ToolbarItem::Custom("r2".into()),
+            ToolbarItem::Custom("missing".into()),
+        ]);
+        // Only resolved custom actions count toward row1_button_count (before reload, "r2" isn't loaded yet).
+        assert_eq!(s.row1_button_count(), 2);
+
+        s.save(&path).unwrap();
+        let raw_saved = std::fs::read_to_string(&path).unwrap();
+        assert!(raw_saved.contains("[[custom_actions]]"));
+        assert!(raw_saved.contains("\"custom:picgo\""));
+
+        let (mut loaded, errors) = Settings::load(Some(&path));
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert_eq!(loaded.custom_actions().len(), 2);
+        assert_eq!(loaded.custom_action("picgo").unwrap().timeout_secs, 45);
+        assert!(loaded.custom_action("r2").unwrap().origin.is_drop_in());
+        // Copy + picgo + r2 = 3 resolved buttons ("missing" excluded from width basis).
+        assert_eq!(loaded.row1_button_count(), 3);
+
+        // Saving again must NOT duplicate drop-in actions into settings.toml.
+        loaded.save(&path).unwrap();
+        let saved_again = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved_again.contains("R2 Drop-In"));
+
+        // Removing an inline custom action also cleans its slot out of the toolbar row.
+        loaded.remove_custom_action("picgo");
+        assert!(loaded.custom_action("picgo").is_none());
+        assert!(!loaded.row().contains(&ToolbarItem::Custom("picgo".into())));
     }
 }

@@ -151,6 +151,36 @@ pub fn qr_copied(text: &str, preview: &str) {
     );
 }
 
+/// Custom action text → clipboard notification: when `open_url` is present,
+/// clicking the notification opens that URL via `xdg-open`; otherwise it
+/// caches the text as a `.txt` file just like OCR/QR notifications.
+pub fn custom_text_copied(action_name: &str, text: &str, open_url: Option<&str>) {
+    let cfg = crate::model::settings::current().notify();
+    if !cfg.enabled {
+        return;
+    }
+    let preview = preview_snippet(text);
+    let title = crate::i18n::t!("notify.custom_action.copied.title", name = action_name);
+    if let Some(url) = open_url {
+        spawn_child(
+            title.as_ref(),
+            &preview,
+            None,
+            Some(std::path::Path::new(url)),
+        );
+    } else {
+        text_copied(true, "action-", title.as_ref(), text, &preview);
+    }
+}
+
+/// Custom action status/message notification with an optional clickable URL.
+pub fn custom_message(title: &str, body: &str, open_url: Option<&str>) {
+    if !crate::model::settings::current().notify().enabled {
+        return;
+    }
+    spawn_child(title, body, None, open_url.map(std::path::Path::new));
+}
+
 fn text_copied(enabled: bool, prefix: &str, title: &str, text: &str, preview: &str) {
     if !enabled {
         return;
@@ -341,7 +371,9 @@ fn show(
         // control we ship. An explicit button would duplicate exactly
         // what a click already does. The label follows the target: OCR
         // text opens in the default editor, screenshots in the viewer.
-        let label = if is_text_target(path) {
+        let label = if is_url_target(path) {
+            crate::i18n::t!("notify.open_link")
+        } else if is_text_target(path) {
             crate::i18n::t!("notify.open_text")
         } else {
             crate::i18n::t!("notify.view_image")
@@ -433,12 +465,18 @@ fn open_target(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// OCR results are cached as `.txt`; every other open target is an image
-/// (the copied PNG or the saved file).
+/// OCR results are cached as `.txt`; URL targets open in the browser; every
+/// other open target is an image (the copied PNG or the saved file).
 #[cfg(target_os = "linux")]
 fn is_text_target(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+}
+
+#[cfg(target_os = "linux")]
+fn is_url_target(path: &std::path::Path) -> bool {
+    path.to_str()
+        .is_some_and(|s| s.starts_with("https://") || s.starts_with("http://"))
 }
 
 /// Notification daemons may parse body markup, including OCR text and filenames.

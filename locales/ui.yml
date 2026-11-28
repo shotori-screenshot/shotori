@@ -6,6 +6,9 @@ osd:
   ocr_running:
     en: Recognizing…
     zh-CN: 识别中…
+  custom_action_running:
+    en: "Running %{name}…"
+    zh-CN: "正在执行 %{name}…"
 text_input:
   truncated:
     en: Some text was not inserted — the selection is full.
@@ -372,6 +375,15 @@ settings:
       annotation:
         en: Annotation tools & editing
         zh-CN: 标注工具与编辑
+      custom:
+        en: Custom actions
+        zh-CN: 自定义动作
+    unset:
+      en: Not set
+      zh-CN: 未设置
+    clear_custom:
+      en: Clear shortcut
+      zh-CN: 清除快捷键
     record:
       en: Press shortcut
       zh-CN: 按下新的快捷键
@@ -1082,6 +1094,193 @@ settings:
     reset:
       en: Reset to defaults
       zh-CN: 恢复默认
+  custom_actions:
+    title:
+      en: Custom actions
+      zh-CN: 自定义工具动作
+    hint:
+      en: Attach custom SVG icons and shell scripts to the selection toolbar. Actions can live in settings.toml or as drop-in manifests under ~/.config/shotori/actions/.
+      zh-CN: 在选区工具栏挂载自定义 SVG 图标与外部脚本。支持保存在 settings.toml 中，或以独立配置文件放入 ~/.config/shotori/actions/ 自动发现。
+    new:
+      en: New action
+      zh-CN: 新建动作
+    open_folder:
+      en: Actions folder
+      zh-CN: 打开动作目录
+    rescan:
+      en: Rescan
+      zh-CN: 重新扫描
+    reloaded:
+      en: Rescanned ✓
+      zh-CN: 已刷新 ✓
+    empty:
+      en: No custom actions yet. Create one to wire image hosts, AI tools, or shell workflows straight into the toolbar — or drop .toml manifests into ~/.config/shotori/actions/.
+      zh-CN: 还没有自定义动作。点击「新建动作」即可把图床上传、AI 工具或自定义脚本挂到工具栏，也可以直接把 .toml 配置放入 ~/.config/shotori/actions/。
+    on_bar:
+      en: On bar ✓
+      zh-CN: 已在工具栏 ✓
+    add_to_bar:
+      en: Add to bar
+      zh-CN: 加入工具栏
+    edit:
+      en: Edit
+      zh-CN: 编辑
+    delete:
+      en: Delete action
+      zh-CN: 删除动作
+    open_manifest:
+      en: Open file
+      zh-CN: 打开配置
+    origin:
+      inline:
+        en: settings.toml
+        zh-CN: settings.toml
+      drop_in:
+        en: Drop-in
+        zh-CN: 扩展目录
+    input:
+      file:
+        en: Temporary image file ($SHOTORI_IMAGE_PATH)
+        zh-CN: 临时图片文件 ($SHOTORI_IMAGE_PATH)
+      stdin:
+        en: Image bytes on stdin
+        zh-CN: 标准输入图片字节流 (stdin)
+      ocr_text:
+        en: OCR text (stdin + $SHOTORI_TEXT_PATH)
+        zh-CN: OCR 识别文本 (stdin + $SHOTORI_TEXT_PATH)
+      none:
+        en: Metadata env vars only
+        zh-CN: 仅传递选区元数据环境变量
+    source:
+      annotated:
+        en: With annotations
+        zh-CN: 包含标注（合成图）
+      raw:
+        en: Raw capture (unannotated)
+        zh-CN: 原始截图（不含标注）
+    output:
+      copy_text:
+        en: Copy stdout text to clipboard + notify
+        zh-CN: 复制标准输出文本到剪贴板并通知
+      copy_image:
+        en: Copy stdout image to clipboard
+        zh-CN: 将标准输出图片复制到剪贴板
+      pin:
+        en: Open stdout image as a floating pin
+        zh-CN: 将标准输出图片打开为悬浮贴图
+      notify:
+        en: Show stdout as notification
+        zh-CN: 将标准输出显示为桌面通知
+      json:
+        en: Structured JSON response
+        zh-CN: 结构化 JSON 协议回流
+      ignore:
+        en: Ignore stdout (notify on error only)
+        zh-CN: 忽略标准输出（仅失败时通知）
+    form:
+      new_title:
+        en: New custom action
+        zh-CN: 新建自定义动作
+      edit_title:
+        en: Edit custom action
+        zh-CN: 编辑自定义动作
+      name:
+        en: Display name
+        zh-CN: 显示名称
+      name_placeholder:
+        en: e.g. Upload to R2
+        zh-CN: 例如：上传图床
+      id:
+        en: Action ID
+        zh-CN: 动作 ID
+      id_hint:
+        en: Lowercase letters, digits, hyphens, and underscores (referenced as custom:<id> in toolbar items).
+        zh-CN: 仅限小写字母、数字、连字符和下划线（工具栏项中以 custom:<id> 引用）。
+      icon:
+        en: Icon (preset or SVG path)
+        zh-CN: 图标（内置图标名或 SVG 路径）
+      icon_hint:
+        en: Pick a built-in icon, enter a path to an .svg file, or import an SVG into ~/.config/shotori/icons/. Single-color SVGs tint automatically with the toolbar theme.
+        zh-CN: 可选择内置图标、填写 .svg 路径，或导入 SVG 到 ~/.config/shotori/icons/。单色 SVG 会自动跟随工具栏主题着色。
+      import_svg:
+        en: Import SVG…
+        zh-CN: 导入 SVG…
+      import_svg_title:
+        en: Choose an SVG icon
+        zh-CN: 选择 SVG 图标文件
+      svg_filter:
+        en: SVG vector image
+        zh-CN: SVG 矢量图标
+      command:
+        en: Shell command (/bin/sh -c)
+        zh-CN: Shell 命令 (/bin/sh -c)
+      command_hint:
+        en: "Receives SHOTORI_IMAGE_PATH (file input), SHOTORI_TEXT_PATH (OCR input), SHOTORI_WIDTH, SHOTORI_HEIGHT, SHOTORI_X/Y/W/H, SHOTORI_OUTPUT, SHOTORI_FORMAT, and SHOTORI_ANNOTATED."
+        zh-CN: "运行时自动注入环境变量：SHOTORI_IMAGE_PATH（文件输入）、SHOTORI_TEXT_PATH（OCR 输入）、SHOTORI_WIDTH/HEIGHT、SHOTORI_X/Y/W/H、SHOTORI_OUTPUT、SHOTORI_FORMAT、SHOTORI_ANNOTATED。"
+      command_placeholder:
+        en: 'e.g. picgo upload "$SHOTORI_IMAGE_PATH" | tail -n 1'
+        zh-CN: '例如：picgo upload "$SHOTORI_IMAGE_PATH" | tail -n 1'
+      input:
+        en: Input payload
+        zh-CN: 输入方式
+      input_hint:
+        en: How Shotori passes the selected screenshot to your script.
+        zh-CN: Shotori 将选区内容传递给脚本的方式。
+      source:
+        en: Image source
+        zh-CN: 图像来源
+      output:
+        en: Output handling
+        zh-CN: 输出回流
+      output_hint:
+        en: What Shotori does with stdout after exit code 0. For copy_text/notify, a single http(s) URL becomes clickable in the notification.
+        zh-CN: 脚本返回退出码 0 后 Shotori 对 stdout 的处理方式；若输出为单个 http(s) 链接，点击通知可直接打开。
+      close_overlay:
+        en: Close overlay while running
+        zh-CN: 执行时立即关闭截图遮罩
+      close_overlay_hint:
+        en: Unmap overlays immediately and show a non-blocking top status pill while the script runs in the background.
+        zh-CN: 立即退出冻结遮罩、归还桌面操作，并在屏幕顶部显示非阻塞运行状态胶囊。
+      timeout:
+        en: Timeout
+        zh-CN: 超时时间
+      add_to_bar:
+        en: Add to toolbar immediately
+        zh-CN: 保存后立即加入工具栏
+      shortcut:
+        en: Shortcut (optional)
+        zh-CN: 快捷键（可选）
+      shortcut_hint:
+        en: Optional overlay key chord such as ctrl-u or alt-1. Can also be recorded on the Shortcuts page.
+        zh-CN: 可选的截图界面快捷键（如 ctrl-u、alt-1），也可在「快捷键」页面直接录制。
+      working_dir:
+        en: Working directory (optional)
+        zh-CN: 工作目录（可选）
+      optional_placeholder:
+        en: Leave blank for default
+        zh-CN: 留空使用默认目录
+      save:
+        en: Save action
+        zh-CN: 保存动作
+      cancel:
+        en: Cancel
+        zh-CN: 取消
+    error:
+      invalid_id:
+        en: Action ID must start with a lowercase letter or digit and use only a-z, 0-9, -, or _.
+        zh-CN: 动作 ID 必须以小写字母或数字开头，且仅包含小写字母、数字、- 或 _。
+      empty_command:
+        en: Command cannot be empty.
+        zh-CN: 执行命令不能为空。
+      duplicate_id:
+        en: "An action with ID “%{id}” already exists."
+        zh-CN: "ID 为「%{id}」的动作已存在。"
+      invalid_shortcut:
+        en: "Shortcut is not a valid key chord (example: ctrl-u or alt-1)."
+        zh-CN: "快捷键格式无效（示例：ctrl-u 或 alt-1）。"
+      invalid_svg:
+        en: Selected file does not look like a valid SVG icon.
+        zh-CN: 所选文件不是有效的 SVG 图标。
   notify:
     group:
       en: Notifications
@@ -1986,6 +2185,9 @@ notify:
   open_text:
     en: Open text
     zh-CN: 打开文本
+  open_link:
+    en: Open link
+    zh-CN: 打开链接
   scroll:
     start_failed:
       title:
@@ -2079,3 +2281,18 @@ notify:
       body:
         en: "%{reason} Try again or select a clearer area."
         zh-CN: "%{reason} 请重试，或选择更清晰的区域。"
+  custom_action:
+    copied:
+      title:
+        en: "%{name} · Copied"
+        zh-CN: "%{name} · 已复制"
+    completed:
+      en: Action completed.
+      zh-CN: 动作执行完成。
+    empty_output:
+      en: Action completed with empty output.
+      zh-CN: 动作执行完成，但未返回内容。
+    failed:
+      title:
+        en: "%{name} failed"
+        zh-CN: "%{name} 执行失败"

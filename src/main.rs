@@ -247,6 +247,14 @@ fn main() {
             shotori::actions::bind_keys(cx, shotori::model::settings::current().keys())
                 .into_iter()
                 .for_each(|id| eprintln!("[shotori] keys: {id} could not be bound"));
+            let custom_bindings: Vec<(&str, &str)> = shotori::model::settings::current()
+                .custom_actions()
+                .iter()
+                .filter_map(|a| Some((a.id.as_str(), a.shortcut.as_deref()?)))
+                .collect();
+            shotori::actions::bind_custom_keys(cx, &custom_bindings)
+                .into_iter()
+                .for_each(|id| eprintln!("[shotori] keys: custom:{id} could not be bound"));
             // Backstop for explicit close when the overlay has no focused view.
             // Note: dispatch_action inside a window does NOT bubble up here
             // (actions stop at the focus path — measured); the overlay's own

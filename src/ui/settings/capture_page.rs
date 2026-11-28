@@ -463,6 +463,7 @@ impl SettingsWindow {
             // Keep the interactive toolbar layout editor above the fold so the
             // primary "Capture & toolbar" customization is immediately reachable.
             .child(self.toolbar_editor_card(cx))
+            .child(self.custom_actions_card(window, cx))
             .child(card_group(
                 cx,
                 Some(crate::i18n::t!("settings.capture.group.hud").as_ref()),

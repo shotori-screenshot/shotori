@@ -454,13 +454,13 @@ pub(super) fn format_bytes(bytes: u64) -> String {
 /// Bordered capsule action pill used across file/folder/cache rows.
 pub(super) fn action_button(
     cx: &App,
-    id: &'static str,
+    id: impl Into<SharedString>,
     label: String,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui_kit::base::Button {
     let theme = cx.theme();
     let s = super::palette::surfaces(cx);
-    gpui_kit::base::Button::new(SharedString::from(id))
+    gpui_kit::base::Button::new(id.into())
         .accessibility_label(label.clone())
         .styles(|st| st.disabled(|d| d.opacity(0.45)))
         .flex()

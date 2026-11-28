@@ -29,9 +29,9 @@ use crate::ui::{color_picker::ColorPicker, theme};
 
 use crate::actions::{
     ClearAnnotations, CopySelection, OcrSelection, PinSelection, QrSelection, QuitOverlay,
-    SaveSelection, ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter,
-    ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline,
-    ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText,
+    RunCustomAction, SaveSelection, ScrollSelection, ToggleArrow, ToggleEllipse, ToggleEraser,
+    ToggleHighlighter, ToggleLine, ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil,
+    TogglePolyline, ToggleRectangle, ToggleSelect, ToggleSpotlight, ToggleText,
 };
 
 // The default GPUI asset bundle does not include every toolbar icon.
@@ -113,9 +113,34 @@ gpui_kit::assets::icon_assets!(
         Images,
         Eye,
         EyeOff,
-        Ellipsis
+        Ellipsis,
+        // Curated built-in icons for user-defined custom actions
+        Bot,
+        CloudUpload,
+        Code,
+        Folder,
+        Globe,
+        Image,
+        Link,
+        Plug,
+        Rocket,
+        Send,
+        Share2,
+        Terminal,
+        Upload,
+        WandSparkles,
+        Webhook,
+        Wrench,
+        Zap
     ]
 );
+
+/// Asset-path prefix for user-supplied `.svg` files loaded dynamically by
+/// [`ToolbarSource`]. Query suffix `?v=<len>-<mtime>` busts GPUI's SVG cache
+/// when the user edits or replaces the file on disk.
+const CUSTOM_SVG_PREFIX: &str = "shotori-custom-svg://";
+/// Cap user SVG icon files to 256 KiB so a misconfigured path cannot stall GPUI.
+const MAX_CUSTOM_SVG_BYTES: u64 = 256 * 1024;
 
 /// The app's own icon set, embedded from `assets/icons` at build time.
 /// The Lucide catalog has no true mosaic/pixelate glyph (its grids read
@@ -136,6 +161,9 @@ pub struct ToolbarSource;
 
 impl AssetSource for ToolbarSource {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(rest) = path.strip_prefix(CUSTOM_SVG_PREFIX) {
+            return Ok(load_custom_svg_bytes(rest).map(std::borrow::Cow::Owned));
+        }
         if let Some(file) = OwnIcons::get(path) {
             return Ok(Some(file.data));
         }
@@ -149,6 +177,133 @@ impl AssetSource for ToolbarSource {
             .collect();
         names.extend(ToolbarAssets.list(path)?);
         Ok(names)
+    }
+}
+
+/// Strip the optional `?v=...` cache-busting query and read a validated `.svg`
+/// file from disk. Returns `None` on missing, oversized, or non-SVG files.
+fn load_custom_svg_bytes(raw: &str) -> Option<Vec<u8>> {
+    let file_part = raw.split_once('?').map(|(p, _)| p).unwrap_or(raw);
+    let path = std::path::Path::new(file_part);
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+    {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_CUSTOM_SVG_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if !looks_like_svg(&bytes) {
+        return None;
+    }
+    Some(bytes)
+}
+
+pub(crate) fn looks_like_svg(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<svg")
+}
+
+/// Map a curated built-in icon id (see `model::settings::BUILTIN_ICON_IDS`) to
+/// its bundled Lucide [`IconName`].
+pub(crate) fn custom_builtin_icon(id: &str) -> Option<IconName> {
+    Some(match id.trim() {
+        "sparkles" => IconName::Sparkles,
+        "cloud-upload" => IconName::CloudUpload,
+        "upload" => IconName::Upload,
+        "terminal" => IconName::Terminal,
+        "code" => IconName::Code,
+        "bot" => IconName::Bot,
+        "globe" => IconName::Globe,
+        "send" => IconName::Send,
+        "share-2" => IconName::Share2,
+        "link" => IconName::Link,
+        "webhook" => IconName::Webhook,
+        "zap" => IconName::Zap,
+        "wand-sparkles" => IconName::WandSparkles,
+        "plug" => IconName::Plug,
+        "rocket" => IconName::Rocket,
+        "wrench" => IconName::Wrench,
+        "image" => IconName::Image,
+        "folder" => IconName::Folder,
+        "external-link" => IconName::ExternalLink,
+        "play" => IconName::Play,
+        _ => return None,
+    })
+}
+
+/// Build the cache-busted `shotori-custom-svg://` asset path if `path` points
+/// to an existing, readable, valid SVG file.
+fn custom_svg_asset_key(path: &std::path::Path) -> Option<String> {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+    {
+        return None;
+    }
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_CUSTOM_SVG_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if !looks_like_svg(&bytes) {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    Some(format!(
+        "{CUSTOM_SVG_PREFIX}{}?v={}-{mtime}",
+        abs.to_string_lossy(),
+        meta.len()
+    ))
+}
+
+/// Render a custom action's icon (built-in Lucide preset, validated user SVG
+/// file, or `IconName::Sparkles` fallback) tinted to `color`.
+pub(crate) fn custom_action_svg(
+    action: &crate::model::settings::CustomAction,
+    config_dir: Option<&std::path::Path>,
+    color: u32,
+) -> Svg {
+    if let Some(icon) = custom_builtin_icon(&action.icon) {
+        return svg()
+            .path(icon.path())
+            .size(px(18.))
+            .text_color(rgba(color));
+    }
+    if let Some(path) = action.resolve_icon_path(config_dir)
+        && let Some(key) = custom_svg_asset_key(&path)
+    {
+        return svg().path(key).size(px(18.)).text_color(rgba(color));
+    }
+    svg()
+        .path(IconName::Sparkles.path())
+        .size(px(18.))
+        .text_color(rgba(color))
+}
+
+/// Tooltip string for a custom action ("Name · Shortcut" or "Name").
+pub(crate) fn custom_action_tooltip(action: &crate::model::settings::CustomAction) -> String {
+    match action.shortcut.as_deref() {
+        Some(chord) if !chord.is_empty() => {
+            format!(
+                "{} · {}",
+                action.name,
+                crate::actions::pretty_keystroke(chord)
+            )
+        }
+        _ => action.name.clone(),
     }
 }
 
@@ -582,6 +737,41 @@ fn row_items(
                 ))
             }
             ToolbarItem::Separator => Some(row::OverflowItem::separator()),
+            ToolbarItem::Custom(id) => {
+                let action = settings.custom_action(id)?.clone();
+                let tooltip = custom_action_tooltip(&action);
+                let debug_id = format!("tb-custom-{}", action.id);
+                let focus = focus.clone();
+                let cfg_dir = crate::model::settings::config_dir();
+                Some(row::OverflowItem::control(
+                    BTN_SIZE,
+                    false,
+                    move |popup, _, _| {
+                        let popup = popup.clone();
+                        let action_id = action.id.clone();
+                        let icon = custom_action_svg(&action, cfg_dir.as_deref(), icon_tint(false));
+                        control(
+                            debug_id.clone(),
+                            tooltip.clone(),
+                            false,
+                            focus.clone(),
+                            move |window, cx| {
+                                if let Some(popup) = &popup {
+                                    popup.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                                window.dispatch_action(
+                                    Box::new(RunCustomAction {
+                                        id: action_id.clone(),
+                                    }),
+                                    cx,
+                                );
+                            },
+                        )
+                        .child(icon)
+                        .into_any_element()
+                    },
+                ))
+            }
         })
         .collect()
 }
@@ -615,12 +805,12 @@ pub(crate) fn initial_pin_tool(
     row.iter()
         .find_map(|item| match item {
             ToolbarItem::Button(b) => to_kind(*b).filter(|k| *k != K::Select),
-            ToolbarItem::Separator => None,
+            ToolbarItem::Separator | ToolbarItem::Custom(_) => None,
         })
         .or_else(|| {
             row.iter().find_map(|item| match item {
                 ToolbarItem::Button(b) => to_kind(*b),
-                ToolbarItem::Separator => None,
+                ToolbarItem::Separator | ToolbarItem::Custom(_) => None,
             })
         })
         .unwrap_or(K::Rectangle)
@@ -962,6 +1152,28 @@ pub(crate) fn preview_control(
     .child(meta.icon.svg())
 }
 
+/// Non-dispatching preview control for a custom action in the settings toolbar
+/// editor (matches built-in button chrome while clicking removes it from the row).
+pub(crate) fn preview_custom_control(
+    action: &crate::model::settings::CustomAction,
+    config_dir: Option<&std::path::Path>,
+    focus: &FocusHandle,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> Button {
+    control(
+        format!("pv-custom-{}", action.id),
+        custom_action_tooltip(action),
+        false,
+        focus.clone(),
+        on_click,
+    )
+    .child(custom_action_svg(
+        action,
+        config_dir,
+        theme::c().toolbar_text,
+    ))
+}
+
 /// Corner radius of the outer floating bar.
 pub(crate) fn bar_radius() -> Pixels {
     px(14.)
@@ -1238,5 +1450,38 @@ mod tests {
                 Some(meta.button)
             );
         }
+    }
+
+    #[test]
+    fn custom_builtin_icons_and_user_svg_files_load_through_toolbar_source() {
+        use gpui_kit::AssetSource;
+        for &id in crate::model::settings::BUILTIN_ICON_IDS {
+            let icon = super::custom_builtin_icon(id)
+                .unwrap_or_else(|| panic!("missing mapping for built-in icon {id:?}"));
+            assert!(
+                super::ToolbarSource.load(&icon.path()).unwrap().is_some(),
+                "built-in custom icon {id:?} ({icon:?}) is missing from ToolbarAssets"
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let valid_svg = dir.path().join("upload.svg");
+        let svg_body = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 3v18"/></svg>"#;
+        std::fs::write(&valid_svg, svg_body).unwrap();
+        let key = super::custom_svg_asset_key(&valid_svg).expect("valid svg key");
+        let loaded = super::ToolbarSource
+            .load(&key)
+            .unwrap()
+            .expect("custom svg bytes loaded");
+        assert_eq!(loaded.as_ref(), svg_body.as_bytes());
+
+        // Non-SVG or wrong-extension files must be rejected cleanly.
+        let fake_svg = dir.path().join("fake.svg");
+        std::fs::write(&fake_svg, "not an xml icon").unwrap();
+        assert!(super::custom_svg_asset_key(&fake_svg).is_none());
+
+        let wrong_ext = dir.path().join("icon.png");
+        std::fs::write(&wrong_ext, svg_body).unwrap();
+        assert!(super::custom_svg_asset_key(&wrong_ext).is_none());
     }
 }

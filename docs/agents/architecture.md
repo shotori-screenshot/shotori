@@ -19,7 +19,7 @@ main.rs / commands.rs / args.rs
    platform/*
 
 actions.rs  (pure leaf: zero `crate::*` imports; referenced by main, ui, model)
-Desktop exits / services: clipboard.rs, notify.rs, ocr.rs, qr.rs, save_dialog.rs, tray.rs, i18n.rs
+Desktop exits / services: clipboard.rs, custom_action.rs, notify.rs, ocr.rs, qr.rs, save_dialog.rs, tray.rs, i18n.rs
 Dev harnesses: bench.rs (`--bench`), perf.rs (`--perf`, behind `--features perf`)
 ```
 

@@ -7,11 +7,11 @@ use super::Overlay;
 use crate::actions::{
     BringForward, BringToFront, ClearAnnotations, CopySelection, DeleteAnnotation,
     DuplicateAnnotation, EscapeOverlay, FinishPolyline, Nudge, OcrSelection, OpenSettings,
-    PinSelection, PopPolylineVertex, QrSelection, QuitOverlay, RedoAnnotation, SaveSelection,
-    ScrollSelection, SelectScreen, SendBackward, SendToBack, StepSizeDown, StepSizeUp, ToggleArrow,
-    ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine, ToggleMagnifier, ToggleMosaic,
-    ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle, ToggleSelect, ToggleSpotlight,
-    ToggleText, UndoAnnotation,
+    PinSelection, PopPolylineVertex, QrSelection, QuitOverlay, RedoAnnotation, RunCustomAction,
+    SaveSelection, ScrollSelection, SelectScreen, SendBackward, SendToBack, StepSizeDown,
+    StepSizeUp, ToggleArrow, ToggleEllipse, ToggleEraser, ToggleHighlighter, ToggleLine,
+    ToggleMagnifier, ToggleMosaic, ToggleNumber, TogglePencil, TogglePolyline, ToggleRectangle,
+    ToggleSelect, ToggleSpotlight, ToggleText, UndoAnnotation,
 };
 use crate::model::placement::round_px;
 use crate::ui::hud::{
@@ -252,6 +252,9 @@ impl Render for Overlay {
                 this.toggle_tool(crate::annotation::ShapeKind::Text, window, cx);
             }))
             .on_action(cx.listener(|this, _: &EscapeOverlay, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, action: &RunCustomAction, window, cx| {
+                this.run_custom_action(&action.id, window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &gpui_kit::base::input::Enter, _, cx| {
                     if this.text_editing.is_some() && !GlobalState::is_in_deferred_context(cx) {

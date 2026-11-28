@@ -10,7 +10,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::*;
 
-use crate::model::settings::{Settings, ToolbarCluster, ToolbarItem};
+use crate::model::settings::{CustomAction, Settings, ToolbarCluster, ToolbarItem};
 use crate::ui::theme;
 use crate::ui::toolbar;
 
@@ -21,10 +21,13 @@ use rail::{edge_scroll_delta, set_strip_scroll_pos, strip_scroll_pos};
 
 /// The drag-and-drop payload: what is being carried and where it came
 /// from (`None` = palette: a fresh insert; `Some(i)` = the preview
-/// bar: a reorder that removes slot i first).
+/// bar: a reorder that removes slot i first). Carries pre-resolved
+/// custom-action metadata so `ghost_constructor` stays a plain fn item.
 struct DraggedItem {
     item: ToolbarItem,
     from: Option<usize>,
+    custom: Option<CustomAction>,
+    config_dir: Option<std::path::PathBuf>,
 }
 
 /// Presentation mirror of the live drag: the carried item, its origin
@@ -44,6 +47,8 @@ pub(super) struct DragPreview {
 /// The chip that follows the pointer during a drag.
 struct DragGhost {
     item: ToolbarItem,
+    custom: Option<CustomAction>,
+    config_dir: Option<std::path::PathBuf>,
 }
 
 impl Render for DragGhost {
@@ -62,8 +67,12 @@ impl Render for DragGhost {
             .shadow_md()
             .text_sm()
             .text_color(rgba(t.toolbar_text))
-            .child(icon_visual(self.item))
-            .child(item_name(self.item))
+            .child(icon_visual(
+                &self.item,
+                self.custom.as_ref(),
+                self.config_dir.as_deref(),
+            ))
+            .child(item_name(&self.item, self.custom.as_ref()))
     }
 }
 
@@ -77,7 +86,7 @@ impl SettingsWindow {
     /// count; what the gap preview showed is what lands). The index
     /// math lives in the model, tested there.
     fn drop_at(&mut self, i: usize, dragged: &DraggedItem, cx: &mut Context<Self>) {
-        let row = Settings::apply_drop(dragged.item, self.settings.row(), i, dragged.from);
+        let row = Settings::apply_drop(dragged.item.clone(), self.settings.row(), i, dragged.from);
         self.edge_scroll.stop();
         self.commit(row, cx);
     }
@@ -126,7 +135,7 @@ impl SettingsWindow {
             .iter()
             .enumerate()
             .filter(|(i, _)| Some(*i) != hide)
-            .map(|(i, item)| (i, *item))
+            .map(|(i, item)| (i, item.clone()))
             .collect();
         let slot = drag.map(|d| d.slot.min(shown.len()));
         let pin_start = cx.listener(
@@ -188,14 +197,14 @@ impl SettingsWindow {
             if slot == Some(j)
                 && let Some(d) = drag
             {
-                bar = bar.child(insertion_slot(item_footprint(d.item)));
+                bar = bar.child(insertion_slot(item_footprint(&d.item)));
             }
-            bar = bar.child(self.preview_item(*i, j, *item, cx));
+            bar = bar.child(self.preview_item(*i, j, item.clone(), cx));
         }
         if slot == Some(shown.len())
             && let Some(d) = drag
         {
-            bar = bar.child(insertion_slot(item_footprint(d.item)));
+            bar = bar.child(insertion_slot(item_footprint(&d.item)));
         }
         bar.child(grip_end("pv-grip-right").on_drag_move(pin_end))
     }
@@ -235,9 +244,16 @@ impl SettingsWindow {
         item: ToolbarItem,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let custom = match &item {
+            ToolbarItem::Custom(id) => self.settings.custom_action(id).cloned(),
+            _ => None,
+        };
+        let config_dir = self.effective_config_dir();
         let payload = DraggedItem {
-            item,
+            item: item.clone(),
             from: Some(i),
+            custom: custom.clone(),
+            config_dir: config_dir.clone(),
         };
         // the whole item is the drop target: before me / after me by
         // the pointer against my own center (the event carries this
@@ -298,11 +314,41 @@ impl SettingsWindow {
                     .h(px(20.))
                     .bg(rgba(theme::c().capsule_border())),
             ),
+            ToolbarItem::Custom(id) => {
+                let remove = cx.entity();
+                let fallback = CustomAction {
+                    id: id.clone(),
+                    name: format!("custom:{id}"),
+                    icon: "sparkles".into(),
+                    command: String::new(),
+                    working_dir: None,
+                    input: Default::default(),
+                    source: Default::default(),
+                    output: Default::default(),
+                    close_overlay: true,
+                    timeout_secs: 30,
+                    shortcut: None,
+                    origin: Default::default(),
+                };
+                let action = custom.as_ref().unwrap_or(&fallback);
+                toolbar::preview_custom_control(
+                    action,
+                    config_dir.as_deref(),
+                    &self.focus,
+                    move |_, cx| {
+                        remove.update(cx, |this, cx| this.remove_at(i, cx));
+                    },
+                )
+                .on_drag(payload, ghost_constructor)
+                .on_drag_move(hover)
+                .on_drop(drop)
+                .into_any_element()
+            }
         }
     }
 
     /// The palette: every control not currently on the bar, plus the
-    /// two layout items (any number of those may live on the bar).
+    /// layout separator and any unplaced custom actions.
     /// Chips drag onto the bar or append on click. The palette area is
     /// also the remove target: dropping a bar item here takes it off.
     fn palette(&self, cx: &Context<Self>) -> Stateful<Div> {
@@ -320,6 +366,12 @@ impl SettingsWindow {
                         .contains(&ToolbarItem::Button(meta.button))
             }) {
                 chips = chips.child(self.palette_chip(ToolbarItem::Button(meta.button), cx));
+            }
+        }
+        for action in self.settings.custom_actions() {
+            let item = ToolbarItem::Custom(action.id.clone());
+            if !self.settings.row().contains(&item) {
+                chips = chips.child(self.palette_chip(item, cx));
             }
         }
         // layout items are always offered — separators stack
@@ -351,9 +403,21 @@ impl SettingsWindow {
         let entity = cx.entity();
         let s = super::palette::surfaces(cx);
         let pill_hover = s.pill_hover;
-        let payload = DraggedItem { item, from: None };
+        let custom = match &item {
+            ToolbarItem::Custom(id) => self.settings.custom_action(id).cloned(),
+            _ => None,
+        };
+        let config_dir = self.effective_config_dir();
+        let label = item_name(&item, custom.as_ref());
+        let icon = icon_visual(&item, custom.as_ref(), config_dir.as_deref());
+        let payload = DraggedItem {
+            item: item.clone(),
+            from: None,
+            custom,
+            config_dir,
+        };
         Button::new(SharedString::from(format!("pv-chip-{}", item.id())))
-            .accessibility_label(item_name(item))
+            .accessibility_label(label.clone())
             .flex()
             .items_center()
             .gap_2()
@@ -372,12 +436,13 @@ impl SettingsWindow {
             .focus_visible(|st| st.border_color(cx.theme().ring))
             .on_drag(payload, ghost_constructor)
             .on_click(move |_, _, cx| {
+                let item = item.clone();
                 entity.update(cx, |this, cx| {
                     this.append(item, cx);
                 });
             })
-            .child(icon_visual(item))
-            .child(div().flex_1().min_w_0().truncate().child(item_name(item)))
+            .child(icon)
+            .child(div().flex_1().min_w_0().truncate().child(label))
     }
 
     /// Attach the toolbar drag-and-drop page-level fallback and rail scrub
@@ -652,7 +717,11 @@ fn ghost_constructor(
     _: &mut Window,
     cx: &mut App,
 ) -> gpui_kit::Entity<DragGhost> {
-    cx.new(|_| DragGhost { item: item.item })
+    cx.new(|_| DragGhost {
+        item: item.item.clone(),
+        custom: item.custom.clone(),
+        config_dir: item.config_dir.clone(),
+    })
 }
 
 /// The live-insertion preview: a reserved gap the carried item's own
@@ -676,9 +745,9 @@ fn insertion_slot(footprint: Pixels) -> Div {
 /// reserves. Must track the real visuals' footprints (`control`'s
 /// button width, `layout_visual`'s 18px separator hit shell) or the
 /// bar visibly changes width when a drag lifts an item.
-fn item_footprint(item: ToolbarItem) -> Pixels {
+fn item_footprint(item: &ToolbarItem) -> Pixels {
     match item {
-        ToolbarItem::Button(_) => px(crate::model::placement::BTN_SIZE),
+        ToolbarItem::Button(_) | ToolbarItem::Custom(_) => px(crate::model::placement::BTN_SIZE),
         ToolbarItem::Separator => px(18.),
     }
 }
@@ -689,7 +758,7 @@ fn item_footprint(item: ToolbarItem) -> Pixels {
 /// caller needs mutably right after.
 fn drag_payload(event: &DragMoveEvent<DraggedItem>, cx: &App) -> (ToolbarItem, Option<usize>) {
     let drag = event.drag(cx);
-    (drag.item, drag.from)
+    (drag.item.clone(), drag.from)
 }
 
 /// Wrap a preview layout item (the separator) in the interaction
@@ -729,9 +798,13 @@ fn layout_visual(
 /// The icon an item shows outside the button chrome (ghost, palette
 /// chip): the toolbar's own glyphs for buttons, a small bar for the
 /// separator — the palette chip previews exactly what lands.
-fn icon_visual(item: ToolbarItem) -> AnyElement {
+fn icon_visual(
+    item: &ToolbarItem,
+    custom: Option<&CustomAction>,
+    config_dir: Option<&std::path::Path>,
+) -> AnyElement {
     match item {
-        ToolbarItem::Button(button) => match toolbar::meta_for(button) {
+        ToolbarItem::Button(button) => match toolbar::meta_for(*button) {
             Some(meta) => meta.icon.svg().into_any_element(),
             None => div().into_any_element(),
         },
@@ -740,16 +813,28 @@ fn icon_visual(item: ToolbarItem) -> AnyElement {
             .h(px(14.))
             .bg(rgba(theme::c().toolbar_border))
             .into_any_element(),
+        ToolbarItem::Custom(_) => match custom {
+            Some(action) => toolbar::custom_action_svg(action, config_dir, theme::c().toolbar_text)
+                .into_any_element(),
+            None => svg()
+                .path(IconName::Sparkles.path())
+                .size(px(18.))
+                .text_color(rgba(theme::c().toolbar_text))
+                .into_any_element(),
+        },
     }
 }
 
-fn item_name(item: ToolbarItem) -> String {
+fn item_name(item: &ToolbarItem, custom: Option<&CustomAction>) -> String {
     match item {
-        ToolbarItem::Button(button) => match toolbar::meta_for(button) {
+        ToolbarItem::Button(button) => match toolbar::meta_for(*button) {
             Some(meta) => meta.label().to_string(),
             None => button.id().to_string(),
         },
         ToolbarItem::Separator => crate::i18n::t!("settings.toolbar_page.separator").to_string(),
+        ToolbarItem::Custom(id) => custom
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| format!("custom:{id}")),
     }
 }
 
