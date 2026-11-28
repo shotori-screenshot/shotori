@@ -100,6 +100,7 @@ impl SettingsWindow {
         };
 
         let repository = env!("CARGO_PKG_REPOSITORY");
+        let (website_url, docs_url) = about_links(env!("CARGO_PKG_HOMEPAGE"), &rust_i18n::locale());
 
         let tech_item = |icon: IconName, text: String| {
             div()
@@ -192,6 +193,18 @@ impl SettingsWindow {
                     .gap_2()
                     .pt_1()
                     .child(link(
+                        crate::i18n::t!("settings.about.website").to_string(),
+                        IconName::Globe,
+                        website_url,
+                        &entity,
+                    ))
+                    .child(link(
+                        crate::i18n::t!("settings.about.docs").to_string(),
+                        IconName::BookOpen,
+                        docs_url,
+                        &entity,
+                    ))
+                    .child(link(
                         crate::i18n::t!("settings.about.repository").to_string(),
                         IconName::ExternalLink,
                         repository.to_string(),
@@ -249,5 +262,44 @@ impl SettingsWindow {
         page_body("page-about")
             .items_center()
             .child(body.my_auto().flex_shrink_0())
+    }
+}
+
+/// Resolve localized Website and Documentation URLs from the crate's
+/// `homepage` metadata (`zh-*` → `/zh-cn/...`, everything else → root).
+fn about_links(homepage: &str, locale: &str) -> (String, String) {
+    let base = homepage.trim_end_matches('/');
+    if locale.to_ascii_lowercase().starts_with("zh") {
+        (
+            format!("{base}/zh-cn/"),
+            format!("{base}/zh-cn/getting-started/installation/"),
+        )
+    } else {
+        (
+            base.to_string(),
+            format!("{base}/getting-started/installation/"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::about_links;
+
+    #[test]
+    fn about_links_localize_by_active_locale() {
+        let (web_en, docs_en) = about_links("https://shotori.mengh04.top/", "en");
+        assert_eq!(web_en, "https://shotori.mengh04.top");
+        assert_eq!(
+            docs_en,
+            "https://shotori.mengh04.top/getting-started/installation/"
+        );
+
+        let (web_zh, docs_zh) = about_links("https://shotori.mengh04.top", "zh-CN");
+        assert_eq!(web_zh, "https://shotori.mengh04.top/zh-cn/");
+        assert_eq!(
+            docs_zh,
+            "https://shotori.mengh04.top/zh-cn/getting-started/installation/"
+        );
     }
 }

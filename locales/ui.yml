@@ -168,6 +168,12 @@ settings:
     tagline:
       en: Wayland screenshots, annotations, pins, scrolling capture, QR codes and local OCR
       zh-CN: Wayland 原生截图、标注、悬浮贴图、长截图、二维码扫描与本地文字识别
+    website:
+      en: Website
+      zh-CN: 官方网站
+    docs:
+      en: Documentation
+      zh-CN: 使用文档
     repository:
       en: Source repository
       zh-CN: 源码仓库

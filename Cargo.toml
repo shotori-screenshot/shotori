@@ -18,6 +18,7 @@ version = "0.19.1"
 edition = "2024"
 description = "Shotori — Wayland-native screenshot tool: select, annotate, pin, long-capture scrolling pages, with on-device OCR (gpui-kit UI)"
 license = "MIT"
+homepage = "https://shotori.mengh04.top"
 repository = "https://github.com/shotori-screenshot/shotori"
 keywords = ["screenshot", "wayland", "gpui", "screencopy", "clipboard"]
 categories = ["graphics", "multimedia::images", "command-line-utilities"]
