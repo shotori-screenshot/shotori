@@ -232,6 +232,16 @@ fn run_process(action: &CustomAction, payload: &ActionPayload) -> anyhow::Result
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
+    // Run `/bin/sh` in its own process group so timeout termination kills
+    // forked grandchildren too (e.g. Ubuntu's `dash`, which forks `sleep`
+    // instead of exec-optimizing it, leaving pipe write ends open if only
+    // the shell PID is killed).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning `/bin/sh -c` for custom action {:?}", action.id))?;
@@ -261,17 +271,23 @@ fn run_process(action: &CustomAction, payload: &ActionPayload) -> anyhow::Result
         match child.try_wait().context("polling custom action child")? {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
+                #[cfg(target_os = "linux")]
+                if let Some(pgid) = rustix::process::Pid::from_raw(child.id() as i32)
+                    && let Err(err) =
+                        rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL)
+                    && err != rustix::io::Errno::SRCH
+                {
+                    eprintln!("[shotori] custom action: killpg failed: {err}");
+                }
                 drop(child.kill());
                 drop(child.wait());
-                if let Some(h) = stdin_handle {
-                    drop(h.join());
-                }
-                if let Some(h) = stdout_handle {
-                    drop(h.join());
-                }
-                if let Some(h) = stderr_handle {
-                    drop(h.join());
-                }
+                // Detach pipe-draining threads instead of blocking on them:
+                // the process-group SIGKILL closes normal child pipe ends
+                // immediately, and not joining ensures even a grandchild that
+                // called setsid can never wedge the timeout path.
+                drop(stdin_handle);
+                drop(stdout_handle);
+                drop(stderr_handle);
                 anyhow::bail!("timed out after {}s", action.timeout_secs);
             }
             None => std::thread::sleep(Duration::from_millis(20)),
@@ -594,19 +610,41 @@ mod tests {
 
     #[test]
     fn timeout_kills_hung_command() {
-        let mut action = test_action(
-            "sleep 10",
-            CustomActionInput::None,
-            CustomActionOutput::Ignore,
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild.pid");
+        // Compound command defeats bash's single-command exec optimization,
+        // forcing a forked grandchild just like Ubuntu's dash does.
+        let cmd = format!("sh -c 'echo $$ > {:?}; exec sleep 10'; echo done", pid_file);
+        let mut action = test_action(&cmd, CustomActionInput::None, CustomActionOutput::Ignore);
         action.timeout_secs = 1;
         let started = Instant::now();
         match execute(&action, synthetic_payload()) {
             ActionOutcome::Failed { reason, .. } => {
                 assert!(reason.contains("timed out"), "unexpected reason: {reason}");
-                assert!(started.elapsed() < Duration::from_secs(4));
+                assert!(
+                    started.elapsed() < Duration::from_secs(4),
+                    "timeout took too long: {:?}",
+                    started.elapsed()
+                );
             }
             other => panic!("expected timeout failure, got {other:?}"),
+        }
+        // Verify the forked grandchild was killed along with the process group.
+        #[cfg(target_os = "linux")]
+        {
+            let text = std::fs::read_to_string(&pid_file)
+                .expect("grandchild pid file written before 1s timeout");
+            let raw: i32 = text.trim().parse().expect("valid grandchild pid");
+            let pid = rustix::process::Pid::from_raw(raw).expect("non-zero pid");
+            let mut alive = true;
+            for _ in 0..20 {
+                if rustix::process::test_kill_process(pid).is_err() {
+                    alive = false;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(!alive, "grandchild pid {raw} survived timeout kill");
         }
     }
 

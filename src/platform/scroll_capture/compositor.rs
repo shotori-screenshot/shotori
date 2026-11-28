@@ -585,6 +585,11 @@ fn run_shell_command(phase: &str, script: &str, env: &CommandEnv, timeout: Durat
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     env.apply(&mut cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -622,6 +627,13 @@ fn run_shell_command(phase: &str, script: &str, env: &CommandEnv, timeout: Durat
                         "[shotori] scroll: {phase} command `{script}` timed out after {}ms — killing",
                         timeout.as_millis()
                     );
+                    if let Some(pgid) = rustix::process::Pid::from_raw(child.id() as i32)
+                        && let Err(err) =
+                            rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL)
+                        && err != rustix::io::Errno::SRCH
+                    {
+                        eprintln!("[shotori] scroll: killpg failed: {err}");
+                    }
                     drop(child.kill());
                     drop(child.wait());
                     return false;

@@ -144,9 +144,9 @@ sys-locale = "0.3"
 [target.'cfg(target_os = "linux")'.dependencies]
 async-channel = "2"
 wayland-client = "0.31"
-# Bounded poll() on the wayland socket in the capture wait loop; already
-# in the tree via wayland-backend, so this adds no extra compilation
-rustix = { version = "1.1", features = ["event"] }
+# Bounded poll() on the wayland socket in the capture wait loop, plus
+# process-group SIGKILL for timed-out custom actions and scroll hooks.
+rustix = { version = "1.1", features = ["event", "process"] }
 wayland-protocols-wlr = "0.3"
 wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 memmap2 = "0.9"
